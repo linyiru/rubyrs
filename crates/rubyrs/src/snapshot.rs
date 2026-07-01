@@ -54,6 +54,9 @@ pub(crate) struct CapturedGraph {
     /// All top-level constants as (name SymId, value image) — supersedes
     /// `const_classes` (a Class value images as `ValueImage::Class`).
     pub(crate) constants: Vec<(u32, ValueImage)>,
+    /// See [`VmImage::loaded_features`].
+    pub(crate) loaded_features: Vec<String>,
+    pub(crate) loaded_stdlib_stubs: Vec<String>,
 }
 
 /// Borrow twin used at encode time so serialize doesn't clone the proto
@@ -69,6 +72,8 @@ struct VmImageRef<'a> {
     toplevel_methods: &'a [(u32, MethodImage)],
     heap: &'a [HeapObjImage],
     constants: &'a [(u32, ValueImage)],
+    loaded_features: &'a [String],
+    loaded_stdlib_stubs: &'a [String],
 }
 
 /// Owned (decode) shape of the full image.
@@ -95,6 +100,15 @@ pub(crate) struct VmImage {
     pub(crate) heap: Vec<HeapObjImage>,
     /// All top-level constants as (name SymId, value image).
     pub(crate) constants: Vec<(u32, ValueImage)>,
+    /// `vm.loaded_features` (the require guard) as canonical path strings, plus
+    /// `vm.loaded_stdlib_stubs`. Without these, a post-restore `require` of
+    /// anything the image already loaded RE-EXECUTES the file (require is not
+    /// idempotent after restore) and re-runs its load-time side effects —
+    /// `require "rubocop"` re-defined every cop and re-fired
+    /// `Cop.inherited` / `exclude_from_registry`, crashing with
+    /// "Cop RuboCop::Cop::Cop could not be dismissed".
+    pub(crate) loaded_features: Vec<String>,
+    pub(crate) loaded_stdlib_stubs: Vec<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
@@ -208,9 +222,16 @@ pub(crate) enum ValueImage {
     Int(i64),
     Float(u64),
     Sym(u32),
-    Str { bytes: Vec<u8>, enc: EncImage, frozen: bool },
+    Str {
+        bytes: Vec<u8>,
+        enc: EncImage,
+        frozen: bool,
+    },
     Class(u32),
-    Regex { source: String, flags: u8 },
+    Regex {
+        source: String,
+        flags: u8,
+    },
     Obj(u32),
 }
 
@@ -220,8 +241,17 @@ pub(crate) enum ValueImage {
 #[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Debug, Clone)]
 pub(crate) enum HeapObjImage {
     Dead,
-    Instance { class: u32, ivars: Vec<(u32, ValueImage)>, frozen: bool },
-    Array { elems: Vec<ValueImage>, class_tag: Option<u32>, ivars: Vec<(u32, ValueImage)>, frozen: bool },
+    Instance {
+        class: u32,
+        ivars: Vec<(u32, ValueImage)>,
+        frozen: bool,
+    },
+    Array {
+        elems: Vec<ValueImage>,
+        class_tag: Option<u32>,
+        ivars: Vec<(u32, ValueImage)>,
+        frozen: bool,
+    },
     Hash {
         pairs: Vec<(ValueImage, ValueImage)>,
         class_tag: Option<u32>,
@@ -233,9 +263,16 @@ pub(crate) enum HeapObjImage {
         default_block: Option<u32>,
         default_value: Option<Box<ValueImage>>,
     },
-    Range { begin: ValueImage, end: ValueImage, exclusive: bool },
+    Range {
+        begin: ValueImage,
+        end: ValueImage,
+        exclusive: bool,
+    },
     BigInt(Vec<u8>),
-    Rational { num: Vec<u8>, den: Vec<u8> },
+    Rational {
+        num: Vec<u8>,
+        den: Vec<u8>,
+    },
     /// A `proc`/block closure. Captured env is imaged INLINE (sharing between
     /// a block and its enclosing method's closure is not preserved yet — fine
     /// for standalone blocks like Hash default blocks; define_method shared
@@ -270,11 +307,20 @@ fn image_value(v: &crate::value::Value, ids: &mut ClassIds) -> ValueImage {
             frozen: s.frozen.get(),
         },
         V::Class(c) => ValueImage::Class(ids.intern(c)),
-        V::Regex(r) => ValueImage::Regex { source: r.as_str().to_string(), flags: r.options() },
-        V::Object(o) | V::Array(o) | V::Hash(o) | V::Range(o) | V::Block(o) | V::BigInt(o)
-        | V::Rational(o) | V::BoundMethod(o) | V::UnboundMethod(o) | V::CurriedProc(o) => {
-            ValueImage::Obj(o.0)
-        }
+        V::Regex(r) => ValueImage::Regex {
+            source: r.as_str().to_string(),
+            flags: r.options(),
+        },
+        V::Object(o)
+        | V::Array(o)
+        | V::Hash(o)
+        | V::Range(o)
+        | V::Block(o)
+        | V::BigInt(o)
+        | V::Rational(o)
+        | V::BoundMethod(o)
+        | V::UnboundMethod(o)
+        | V::CurriedProc(o) => ValueImage::Obj(o.0),
     }
 }
 
@@ -321,7 +367,10 @@ fn capture_heap(vm: &crate::vm::Vm, ids: &mut ClassIds) -> Vec<HeapObjImage> {
                     frozen: h.frozen.get(),
                     by_identity: h.by_identity.get(),
                     default_block: h.default_block.map(|b| b.0),
-                    default_value: h.default_value.as_ref().map(|v| Box::new(image_value(v, ids))),
+                    default_value: h
+                        .default_value
+                        .as_ref()
+                        .map(|v| Box::new(image_value(v, ids))),
                 },
                 HeapObj::Range(r) => HeapObjImage::Range {
                     begin: image_value(&r.begin, ids),
@@ -330,7 +379,12 @@ fn capture_heap(vm: &crate::vm::Vm, ids: &mut ClassIds) -> Vec<HeapObjImage> {
                 },
                 HeapObj::Block(b) => HeapObjImage::Block {
                     proto_idx: b.proto_idx as u32,
-                    captured: b.captured.borrow().iter().map(|v| image_value(v, ids)).collect(),
+                    captured: b
+                        .captured
+                        .borrow()
+                        .iter()
+                        .map(|v| image_value(v, ids))
+                        .collect(),
                     self_val: image_value(&b.self_val, ids),
                     lexical_cvar_class: b.lexical_cvar_class.as_ref().map(|c| ids.intern(c)),
                     param_start: b.param_start,
@@ -363,7 +417,10 @@ struct ClassIds {
 
 impl ClassIds {
     fn new() -> Self {
-        Self { map: HashMap::new(), order: Vec::new() }
+        Self {
+            map: HashMap::new(),
+            order: Vec::new(),
+        }
     }
 
     /// Get-or-assign the id for `c`, enqueuing it for discovery on first
@@ -384,7 +441,10 @@ fn capture_method(m: &Rc<Method>, ids: &mut ClassIds) -> MethodImage {
     MethodImage {
         params: m.params.clone(),
         proto_idx: m.proto_idx as u32,
-        fixed_arity: m.fixed_arity.as_ref().map(|fa| (fa.required, fa.n_locals, fa.stack_eligible)),
+        fixed_arity: m
+            .fixed_arity
+            .as_ref()
+            .map(|fa| (fa.required, fa.n_locals, fa.stack_eligible)),
         visibility: vis_to_u8(m.visibility.get()),
         original_name: m.original_name.map(|s| s.0),
         defining_class: m
@@ -393,7 +453,12 @@ fn capture_method(m: &Rc<Method>, ids: &mut ClassIds) -> MethodImage {
             .and_then(|w| w.upgrade())
             .map(|c| ids.intern(&c)),
         closure: m.closure.as_ref().map(|cl| ClosureImage {
-            captured: cl.captured.borrow().iter().map(|v| image_value(v, ids)).collect(),
+            captured: cl
+                .captured
+                .borrow()
+                .iter()
+                .map(|v| image_value(v, ids))
+                .collect(),
             param_start: cl.param_start,
             n_params: cl.n_params,
             captured_yield_block: cl.captured_yield_block.map(|o| o.0),
@@ -426,9 +491,24 @@ fn capture_class(c: &Rc<Class>, ids: &mut ClassIds) -> ClassImage {
         prepends,
         methods,
         singleton_methods,
-        ivars: c.ivars.borrow().iter().map(|(s, v)| (s.0, image_value(v, ids))).collect(),
-        class_vars: c.class_vars.borrow().iter().map(|(s, v)| (s.0, image_value(v, ids))).collect(),
-        consts: c.consts.borrow().iter().map(|(s, v)| (s.0, image_value(v, ids))).collect(),
+        ivars: c
+            .ivars
+            .borrow()
+            .iter()
+            .map(|(s, v)| (s.0, image_value(v, ids)))
+            .collect(),
+        class_vars: c
+            .class_vars
+            .borrow()
+            .iter()
+            .map(|(s, v)| (s.0, image_value(v, ids)))
+            .collect(),
+        consts: c
+            .consts
+            .borrow()
+            .iter()
+            .map(|(s, v)| (s.0, image_value(v, ids)))
+            .collect(),
         singleton_view: c.singleton_view.borrow().as_ref().map(|v| ids.intern(v)),
         singleton_target: c
             .singleton_target
@@ -436,8 +516,18 @@ fn capture_class(c: &Rc<Class>, ids: &mut ClassIds) -> ClassImage {
             .as_ref()
             .and_then(|w| w.upgrade())
             .map(|t| ids.intern(&t)),
-        singleton_includes: c.singleton_includes.borrow().iter().map(|m| ids.intern(m)).collect(),
-        singleton_prepends: c.singleton_prepends.borrow().iter().map(|m| ids.intern(m)).collect(),
+        singleton_includes: c
+            .singleton_includes
+            .borrow()
+            .iter()
+            .map(|m| ids.intern(m))
+            .collect(),
+        singleton_prepends: c
+            .singleton_prepends
+            .borrow()
+            .iter()
+            .map(|m| ids.intern(m))
+            .collect(),
     }
 }
 
@@ -491,6 +581,12 @@ pub(crate) fn capture(vm: &crate::vm::Vm) -> CapturedGraph {
     // fixpoint over classes reachable from the class/const roots. (Heap-only
     // classes are an edge case handled by restore's unregistered-shell path.)
     let heap = capture_heap(vm, &mut ids);
+    let loaded_features = vm
+        .loaded_features
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    let loaded_stdlib_stubs = vm.loaded_stdlib_stubs.iter().cloned().collect();
     CapturedGraph {
         cache_counter: vm.cache_counter,
         classes,
@@ -499,6 +595,8 @@ pub(crate) fn capture(vm: &crate::vm::Vm) -> CapturedGraph {
         toplevel_methods,
         heap,
         constants,
+        loaded_features,
+        loaded_stdlib_stubs,
     }
 }
 
@@ -521,6 +619,8 @@ pub(crate) fn to_bytes(
         toplevel_methods: &graph.toplevel_methods,
         heap: &graph.heap,
         constants: &graph.constants,
+        loaded_features: &graph.loaded_features,
+        loaded_stdlib_stubs: &graph.loaded_stdlib_stubs,
     };
     postcard::to_allocvec(&img)
 }
@@ -531,7 +631,8 @@ pub(crate) fn from_bytes(bytes: &[u8]) -> Result<VmImage, postcard::Error> {
 }
 
 const MAGIC: &[u8; 4] = b"RRS1";
-const FORMAT_VERSION: u32 = 1;
+// v2: added loaded_features + loaded_stdlib_stubs (require-guard) to the image.
+const FORMAT_VERSION: u32 = 2;
 
 /// Outcome of a validated load: either the image was restored, or it was
 /// rejected (with a reason) and the VM is UNTOUCHED so the caller can fall
@@ -546,8 +647,8 @@ pub(crate) enum LoadOutcome {
 /// never observed as a valid cache.
 pub(crate) fn save_image(vm: &crate::vm::Vm, path: &std::path::Path) -> std::io::Result<()> {
     let graph = capture(vm);
-    let body = to_bytes(vm, &graph)
-        .map_err(|e| std::io::Error::other(format!("snapshot encode: {e}")))?;
+    let body =
+        to_bytes(vm, &graph).map_err(|e| std::io::Error::other(format!("snapshot encode: {e}")))?;
     let ver = env!("CARGO_PKG_VERSION").as_bytes();
     let mut out = Vec::with_capacity(body.len() + 16 + ver.len());
     out.extend_from_slice(MAGIC);
@@ -637,7 +738,12 @@ fn new_class_shell(name: String, is_module: bool) -> Rc<Class> {
     })
 }
 
-fn build_method(mi: &MethodImage, defining: &Rc<Class>, id_to_class: &[Rc<Class>], kinds: &[u8]) -> Rc<Method> {
+fn build_method(
+    mi: &MethodImage,
+    defining: &Rc<Class>,
+    id_to_class: &[Rc<Class>],
+    kinds: &[u8],
+) -> Rc<Method> {
     let defining_class = mi
         .defining_class
         .and_then(|id| id_to_class.get(id as usize))
@@ -645,7 +751,10 @@ fn build_method(mi: &MethodImage, defining: &Rc<Class>, id_to_class: &[Rc<Class>
         .or_else(|| Some(Rc::downgrade(defining)));
     let closure = mi.closure.as_ref().map(|cl| crate::value::MethodClosure {
         captured: std::rc::Rc::new(std::cell::RefCell::new(
-            cl.captured.iter().map(|vi| value_from_image(vi, id_to_class, kinds)).collect(),
+            cl.captured
+                .iter()
+                .map(|vi| value_from_image(vi, id_to_class, kinds))
+                .collect(),
         )),
         param_start: cl.param_start,
         n_params: cl.n_params,
@@ -655,7 +764,11 @@ fn build_method(mi: &MethodImage, defining: &Rc<Class>, id_to_class: &[Rc<Class>
         params: mi.params.clone(),
         proto_idx: mi.proto_idx as usize,
         fixed_arity: mi.fixed_arity.map(|(required, n_locals, stack_eligible)| {
-            crate::value::FixedArity { required, n_locals, stack_eligible }
+            crate::value::FixedArity {
+                required,
+                n_locals,
+                stack_eligible,
+            }
         }),
         defining_class,
         visibility: std::cell::Cell::new(u8_to_vis(mi.visibility)),
@@ -744,23 +857,39 @@ fn fx_ivars_from_image(
 ) -> crate::intern::FxHashMap<crate::intern::SymId, crate::value::Value> {
     pairs
         .iter()
-        .map(|(s, vi)| (crate::intern::SymId(*s), value_from_image(vi, classes, kinds)))
+        .map(|(s, vi)| {
+            (
+                crate::intern::SymId(*s),
+                value_from_image(vi, classes, kinds),
+            )
+        })
         .collect()
 }
 
 /// Rebuild the heap `Vec<Slot>` from the image. Single pass: `Obj` variants
 /// resolve via the precomputed `kinds`, so forward refs are fine.
-fn build_heap(img_heap: &[HeapObjImage], classes: &[Rc<Class>], kinds: &[u8]) -> Vec<crate::heap::Slot> {
-    use crate::heap::{HeapObj, HashObj, Slot};
+fn build_heap(
+    img_heap: &[HeapObjImage],
+    classes: &[Rc<Class>],
+    kinds: &[u8],
+) -> Vec<crate::heap::Slot> {
+    use crate::heap::{HashObj, HeapObj, Slot};
     use crate::value::{Instance, IvarTable};
     img_heap
         .iter()
         .map(|hi| match hi {
             HeapObjImage::Dead | HeapObjImage::Unsupported => Slot::Dead,
-            HeapObjImage::Instance { class, ivars, frozen } => {
+            HeapObjImage::Instance {
+                class,
+                ivars,
+                frozen,
+            } => {
                 let mut it = IvarTable::default();
                 for (s, vi) in ivars {
-                    it.insert(crate::intern::SymId(*s), value_from_image(vi, classes, kinds));
+                    it.insert(
+                        crate::intern::SymId(*s),
+                        value_from_image(vi, classes, kinds),
+                    );
                 }
                 Slot::Live(HeapObj::Instance(Instance {
                     class: classes[*class as usize].clone(),
@@ -769,20 +898,37 @@ fn build_heap(img_heap: &[HeapObjImage], classes: &[Rc<Class>], kinds: &[u8]) ->
                     frozen: std::cell::Cell::new(*frozen),
                 }))
             }
-            HeapObjImage::Array { elems, class_tag, ivars, frozen } => {
-                Slot::Live(HeapObj::Array(crate::heap::ArrayObj {
-                    elems: elems.iter().map(|vi| value_from_image(vi, classes, kinds)).collect(),
-                    class_tag: class_tag.map(|id| classes[id as usize].clone()),
-                    ivars: fx_ivars_from_image(ivars, classes, kinds),
-                    frozen: std::cell::Cell::new(*frozen),
-                }))
-            }
-            HeapObjImage::Hash { pairs, class_tag, ivars, frozen, by_identity, default_block, default_value } => {
+            HeapObjImage::Array {
+                elems,
+                class_tag,
+                ivars,
+                frozen,
+            } => Slot::Live(HeapObj::Array(crate::heap::ArrayObj {
+                elems: elems
+                    .iter()
+                    .map(|vi| value_from_image(vi, classes, kinds))
+                    .collect(),
+                class_tag: class_tag.map(|id| classes[id as usize].clone()),
+                ivars: fx_ivars_from_image(ivars, classes, kinds),
+                frozen: std::cell::Cell::new(*frozen),
+            })),
+            HeapObjImage::Hash {
+                pairs,
+                class_tag,
+                ivars,
+                frozen,
+                by_identity,
+                default_block,
+                default_value,
+            } => {
                 let mut h = HashObj::with_pairs(
                     pairs
                         .iter()
                         .map(|(k, v)| {
-                            (value_from_image(k, classes, kinds), value_from_image(v, classes, kinds))
+                            (
+                                value_from_image(k, classes, kinds),
+                                value_from_image(v, classes, kinds),
+                            )
                         })
                         .collect(),
                 );
@@ -791,17 +937,20 @@ fn build_heap(img_heap: &[HeapObjImage], classes: &[Rc<Class>], kinds: &[u8]) ->
                 h.frozen = std::cell::Cell::new(*frozen);
                 h.by_identity = std::cell::Cell::new(*by_identity);
                 h.default_block = default_block.map(crate::value::ObjId);
-                h.default_value =
-                    default_value.as_ref().map(|v| value_from_image(v, classes, kinds));
+                h.default_value = default_value
+                    .as_ref()
+                    .map(|v| value_from_image(v, classes, kinds));
                 Slot::Live(HeapObj::Hash(h))
             }
-            HeapObjImage::Range { begin, end, exclusive } => {
-                Slot::Live(HeapObj::Range(crate::heap::RangeObj {
-                    begin: value_from_image(begin, classes, kinds),
-                    end: value_from_image(end, classes, kinds),
-                    exclusive: *exclusive,
-                }))
-            }
+            HeapObjImage::Range {
+                begin,
+                end,
+                exclusive,
+            } => Slot::Live(HeapObj::Range(crate::heap::RangeObj {
+                begin: value_from_image(begin, classes, kinds),
+                end: value_from_image(end, classes, kinds),
+                exclusive: *exclusive,
+            })),
             HeapObjImage::Block {
                 proto_idx,
                 captured,
@@ -815,8 +964,10 @@ fn build_heap(img_heap: &[HeapObjImage], classes: &[Rc<Class>], kinds: &[u8]) ->
                 captured_yield_block,
                 is_lambda,
             } => {
-                let env: Vec<Value> =
-                    captured.iter().map(|vi| value_from_image(vi, classes, kinds)).collect();
+                let env: Vec<Value> = captured
+                    .iter()
+                    .map(|vi| value_from_image(vi, classes, kinds))
+                    .collect();
                 Slot::Live(HeapObj::Block(crate::value::BlockHandle {
                     proto_idx: *proto_idx as usize,
                     captured: std::rc::Rc::new(std::cell::RefCell::new(env)),
@@ -832,9 +983,9 @@ fn build_heap(img_heap: &[HeapObjImage], classes: &[Rc<Class>], kinds: &[u8]) ->
                 }))
             }
             #[cfg(feature = "bignum")]
-            HeapObjImage::BigInt(bytes) => {
-                Slot::Live(HeapObj::BigInt(num_bigint::BigInt::from_signed_bytes_le(bytes)))
-            }
+            HeapObjImage::BigInt(bytes) => Slot::Live(HeapObj::BigInt(
+                num_bigint::BigInt::from_signed_bytes_le(bytes),
+            )),
             #[cfg(feature = "bignum")]
             HeapObjImage::Rational { num, den } => {
                 Slot::Live(HeapObj::Rational(crate::heap::RationalRepr {
@@ -870,6 +1021,17 @@ pub(crate) fn restore(vm: &mut crate::vm::Vm, img: VmImage) {
     vm.protos = img.protos;
     vm.cache_counter = img.cache_counter;
     vm.ensure_call_caches(img.cache_counter as usize);
+
+    // 2b. Require guard: repopulate `loaded_features` + `loaded_stdlib_stubs` so
+    //     a post-restore `require` of anything the image already loaded is a
+    //     no-op instead of re-executing the file (and re-running its load-time
+    //     side effects — see VmImage::loaded_features).
+    vm.loaded_features = img
+        .loaded_features
+        .iter()
+        .map(|s| std::path::PathBuf::from(s.as_str()))
+        .collect();
+    vm.loaded_stdlib_stubs = img.loaded_stdlib_stubs.iter().cloned().collect();
 
     // 3. Resolve every image class-id to an Rc<Class>: reuse an existing
     //    (builtin) class by its registered name, else create a shell. Also
@@ -944,12 +1106,20 @@ pub(crate) fn restore(vm: &mut crate::vm::Vm, img: VmImage) {
             if let Some(sid) = ci.superclass {
                 *cls.superclass.borrow_mut() = Some(resolved[sid as usize].clone());
             }
-            *cls.includes.borrow_mut() =
-                ci.includes.iter().map(|&id| resolved[id as usize].clone()).collect();
-            *cls.prepends.borrow_mut() =
-                ci.prepends.iter().map(|&id| resolved[id as usize].clone()).collect();
+            *cls.includes.borrow_mut() = ci
+                .includes
+                .iter()
+                .map(|&id| resolved[id as usize].clone())
+                .collect();
+            *cls.prepends.borrow_mut() = ci
+                .prepends
+                .iter()
+                .map(|&id| resolved[id as usize].clone())
+                .collect();
             for (name_sym, mi) in &ci.methods {
-                cls.methods.borrow_mut().insert(SymId(*name_sym), build_method(mi, cls, &resolved, &kinds));
+                cls.methods
+                    .borrow_mut()
+                    .insert(SymId(*name_sym), build_method(mi, cls, &resolved, &kinds));
             }
             for (name_sym, mi) in &ci.singleton_methods {
                 cls.singleton_methods
@@ -964,10 +1134,16 @@ pub(crate) fn restore(vm: &mut crate::vm::Vm, img: VmImage) {
             if let Some(tid) = ci.singleton_target {
                 *cls.singleton_target.borrow_mut() = Some(Rc::downgrade(&resolved[tid as usize]));
             }
-            *cls.singleton_includes.borrow_mut() =
-                ci.singleton_includes.iter().map(|&id| resolved[id as usize].clone()).collect();
-            *cls.singleton_prepends.borrow_mut() =
-                ci.singleton_prepends.iter().map(|&id| resolved[id as usize].clone()).collect();
+            *cls.singleton_includes.borrow_mut() = ci
+                .singleton_includes
+                .iter()
+                .map(|&id| resolved[id as usize].clone())
+                .collect();
+            *cls.singleton_prepends.borrow_mut() = ci
+                .singleton_prepends
+                .iter()
+                .map(|&id| resolved[id as usize].clone())
+                .collect();
         } else {
             // Reused builtin / stdlib stub: merge USER-defined methods (a
             // native method has `has_builtin`; a closure needs P3c). `or_insert`
@@ -998,33 +1174,47 @@ pub(crate) fn restore(vm: &mut crate::vm::Vm, img: VmImage) {
             // preserves the fresh builtin's own chain.
             for &id in &ci.prepends {
                 if is_new[id as usize] {
-                    cls.prepends.borrow_mut().push(resolved[id as usize].clone());
+                    cls.prepends
+                        .borrow_mut()
+                        .push(resolved[id as usize].clone());
                 }
             }
             for &id in &ci.includes {
                 if is_new[id as usize] {
-                    cls.includes.borrow_mut().push(resolved[id as usize].clone());
+                    cls.includes
+                        .borrow_mut()
+                        .push(resolved[id as usize].clone());
                 }
             }
             for &id in &ci.singleton_prepends {
                 if is_new[id as usize] {
-                    cls.singleton_prepends.borrow_mut().push(resolved[id as usize].clone());
+                    cls.singleton_prepends
+                        .borrow_mut()
+                        .push(resolved[id as usize].clone());
                 }
             }
             for &id in &ci.singleton_includes {
                 if is_new[id as usize] {
-                    cls.singleton_includes.borrow_mut().push(resolved[id as usize].clone());
+                    cls.singleton_includes
+                        .borrow_mut()
+                        .push(resolved[id as usize].clone());
                 }
             }
         }
         for (s, vi) in &ci.ivars {
-            cls.ivars.borrow_mut().insert(SymId(*s), value_from_image(vi, &resolved, &kinds));
+            cls.ivars
+                .borrow_mut()
+                .insert(SymId(*s), value_from_image(vi, &resolved, &kinds));
         }
         for (s, vi) in &ci.class_vars {
-            cls.class_vars.borrow_mut().insert(SymId(*s), value_from_image(vi, &resolved, &kinds));
+            cls.class_vars
+                .borrow_mut()
+                .insert(SymId(*s), value_from_image(vi, &resolved, &kinds));
         }
         for (s, vi) in &ci.consts {
-            cls.consts.borrow_mut().insert(SymId(*s), value_from_image(vi, &resolved, &kinds));
+            cls.consts
+                .borrow_mut()
+                .insert(SymId(*s), value_from_image(vi, &resolved, &kinds));
         }
     }
 
@@ -1043,7 +1233,8 @@ pub(crate) fn restore(vm: &mut crate::vm::Vm, img: VmImage) {
         if matches!(&**vm.interner.resolve(sym), "ARGV" | "ARGF" | "ENV") {
             continue;
         }
-        vm.constants.insert(sym, value_from_image(vi, &resolved, &kinds));
+        vm.constants
+            .insert(sym, value_from_image(vi, &resolved, &kinds));
     }
 
     // 5. Toplevel methods.
@@ -1056,7 +1247,11 @@ pub(crate) fn restore(vm: &mut crate::vm::Vm, img: VmImage) {
             params: mi.params.clone(),
             proto_idx: mi.proto_idx as usize,
             fixed_arity: mi.fixed_arity.map(|(required, n_locals, stack_eligible)| {
-                crate::value::FixedArity { required, n_locals, stack_eligible }
+                crate::value::FixedArity {
+                    required,
+                    n_locals,
+                    stack_eligible,
+                }
             }),
             defining_class: mi
                 .defining_class
@@ -1113,7 +1308,11 @@ mod tests {
         // Lossless on the big tables + graph size.
         assert_eq!(back.protos.len(), n_protos, "proto table lost entries");
         assert_eq!(back.classes.len(), n_classes, "class graph lost entries");
-        assert_eq!(back.interner.len(), rt.vm.interner.len(), "interner truncated");
+        assert_eq!(
+            back.interner.len(),
+            rt.vm.interner.len(),
+            "interner truncated"
+        );
 
         // And it actually captured the graph we built.
         let find = |name: &str| back.classes.iter().find(|c| c.name == name);
@@ -1124,13 +1323,13 @@ mod tests {
             .position(|c| c.name == "Animal")
             .expect("Animal missing") as u32;
         assert_eq!(dog.superclass, Some(animal_id), "Dog<Animal edge lost");
-        assert!(
-            !dog.includes.is_empty(),
-            "Dog include Greeting edge lost"
-        );
+        assert!(!dog.includes.is_empty(), "Dog include Greeting edge lost");
         // method names present (resolve via the round-tripped interner)
         let sym = |name: &str| {
-            back.interner.iter().position(|s| s == name).map(|i| i as u32)
+            back.interner
+                .iter()
+                .position(|s| s == name)
+                .map(|i| i as u32)
         };
         let speak = sym("speak").expect("speak not interned");
         assert!(
@@ -1168,8 +1367,7 @@ mod tests {
               def speak; "woof"; end
             end
         "#;
-        let probe =
-            r#"Dog.new("rex").name + "|" + Dog.new("z").speak + "|" + Dog.new("y").hello + "|" + Dog.species"#;
+        let probe = r#"Dog.new("rex").name + "|" + Dog.new("z").speak + "|" + Dog.new("y").hello + "|" + Dog.species"#;
 
         // loader → capture → bytes → image
         let mut loader = crate::Runtime::new();
@@ -1224,7 +1422,10 @@ mod tests {
 
         // Whole heap + constants round-trip losslessly.
         assert_eq!(back.heap, graph.heap, "heap did not round-trip");
-        assert_eq!(back.constants, graph.constants, "constants did not round-trip");
+        assert_eq!(
+            back.constants, graph.constants,
+            "constants did not round-trip"
+        );
 
         // Spot-check: FROZEN_ARR → an Obj ref → a frozen Array of the right
         // elements (proves nested-Value + frozen + variety survived).
@@ -1238,7 +1439,9 @@ mod tests {
             .iter()
             .find(|(s, _)| *s == arr_sym)
             .expect("FROZEN_ARR constant missing");
-        let ValueImage::Obj(oid) = arr_val else { panic!("FROZEN_ARR not an Obj: {arr_val:?}") };
+        let ValueImage::Obj(oid) = arr_val else {
+            panic!("FROZEN_ARR not an Obj: {arr_val:?}")
+        };
         match &back.heap[*oid as usize] {
             HeapObjImage::Array { elems, frozen, .. } => {
                 assert!(*frozen, "FROZEN_ARR lost its frozen bit");
@@ -1254,7 +1457,9 @@ mod tests {
         // And a subclass instance carries its ivars.
         let inst_sym = back.interner.iter().position(|s| s == "INST").unwrap() as u32;
         let (_, inst_val) = back.constants.iter().find(|(s, _)| *s == inst_sym).unwrap();
-        let ValueImage::Obj(ioid) = inst_val else { panic!("INST not Obj") };
+        let ValueImage::Obj(ioid) = inst_val else {
+            panic!("INST not Obj")
+        };
         assert!(
             matches!(&back.heap[*ioid as usize], HeapObjImage::Instance { ivars, .. } if ivars.len() == 2),
             "INST instance ivars lost"
@@ -1304,6 +1509,10 @@ mod tests {
             other => format!("{other:?}"),
         };
         assert_eq!(as_s(&vr), as_s(&vc), "restored heap constants != cold");
-        assert_eq!(as_s(&vr), "1,two,three|1|30|24|[1, 2, 3]|true", "unexpected");
+        assert_eq!(
+            as_s(&vr),
+            "1,two,three|1|30|24|[1, 2, 3]|true",
+            "unexpected"
+        );
     }
 }
