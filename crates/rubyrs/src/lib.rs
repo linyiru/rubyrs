@@ -52,6 +52,11 @@ mod json_native;
 // ADR 0036 Slice 1: Prism serialize-parse host fns (prism C lib is always linked via
 // `ruby-prism`), so RuboCop's `parser_prism` engine runs without the C extension.
 mod prism_native;
+// VM snapshot/image (thin slice) — capture the class graph to serde bytes so a
+// future restore can skip `require`'s parse+compile+execute. Gated on the serde
+// derives from `preamble-cache`.
+#[cfg(feature = "preamble-cache")]
+mod snapshot;
 #[cfg(feature = "stdlib")]
 mod zlib_native;
 #[cfg(feature = "_rouge_native")]
