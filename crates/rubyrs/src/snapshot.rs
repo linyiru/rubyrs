@@ -35,7 +35,7 @@
 #![allow(dead_code)]
 
 use crate::bytecode::Proto;
-use crate::value::{Class, Method, Visibility};
+use crate::value::{Class, Method, Value, Visibility};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -111,10 +111,12 @@ pub(crate) struct ClassImage {
     pub(crate) methods: Vec<(u32, MethodImage)>,
     /// Singleton (`def self.x`) methods: (name SymId, method).
     pub(crate) singleton_methods: Vec<(u32, MethodImage)>,
-    /// Count of class-instance ivars (payload deferred — a Value serde that
-    /// preserves heap ObjIds lands in a later slice; recorded so a
-    /// round-trip can assert no ivar-bearing class was silently dropped).
-    pub(crate) ivar_count: u32,
+    /// Class-instance ivars (`@foo` on the Class object): (SymId, value).
+    /// RuboCop keeps critical state here (e.g. the cop registry on
+    /// `Registry.@global`), so restoring these is required for a real run.
+    pub(crate) ivars: Vec<(u32, ValueImage)>,
+    /// Class variables (`@@foo`): (SymId, value).
+    pub(crate) class_vars: Vec<(u32, ValueImage)>,
 }
 
 /// Serializable image of a `Method`. `closure`/`builtin` payloads are
@@ -348,7 +350,8 @@ fn capture_class(c: &Rc<Class>, ids: &mut ClassIds) -> ClassImage {
         prepends,
         methods,
         singleton_methods,
-        ivar_count: c.ivars.borrow().len() as u32,
+        ivars: c.ivars.borrow().iter().map(|(s, v)| (s.0, image_value(v, ids))).collect(),
+        class_vars: c.class_vars.borrow().iter().map(|(s, v)| (s.0, image_value(v, ids))).collect(),
     }
 }
 
@@ -497,6 +500,155 @@ fn build_method(mi: &MethodImage, defining: &Rc<Class>, id_to_class: &[Rc<Class>
     })
 }
 
+/// Per-slot variant tag, precomputed from the image so `value_from_image`
+/// can recover an `Obj(oid)`'s concrete Value variant without reading the
+/// (being-built) heap.
+fn heap_kind(hi: &HeapObjImage) -> u8 {
+    match hi {
+        HeapObjImage::Dead | HeapObjImage::Unsupported => 0,
+        HeapObjImage::Instance { .. } => 1,
+        HeapObjImage::Array { .. } => 2,
+        HeapObjImage::Hash { .. } => 3,
+        HeapObjImage::Range { .. } => 4,
+        HeapObjImage::BigInt(_) => 5,
+        HeapObjImage::Rational { .. } => 6,
+    }
+}
+
+fn build_str(bytes: Vec<u8>, enc: &EncImage, frozen: bool) -> Value {
+    use crate::value::EncodingTag as E;
+    let v = Value::new_str_bytes(bytes);
+    if let Value::Str(s) = &v {
+        s.encoding.set(match enc {
+            EncImage::Utf8 => E::Utf8,
+            EncImage::UsAscii => E::UsAscii,
+            EncImage::Binary => E::Binary,
+            EncImage::Other(n) => E::Other(*n),
+        });
+        if frozen {
+            s.frozen.set(true);
+        }
+    }
+    v
+}
+
+fn rebuild_regex(source: &str) -> Value {
+    // Best-effort recompile from the bare source. Full fidelity (the `\G`/
+    // named-group preprocess in vm::step, which is private here, + flags) is a
+    // P3c refinement; no regex-in-constant is exercised until then.
+    match crate::regex_engine::compile(source) {
+        Ok(c) => Value::Regex(std::rc::Rc::new(c)),
+        Err(_) => Value::Nil,
+    }
+}
+
+/// Reconstruct a `Value` from its image. `kinds[oid]` gives an `Obj` ref's
+/// concrete variant (Value-heap-variant ↔ HeapObj-variant is 1:1).
+fn value_from_image(vi: &ValueImage, classes: &[Rc<Class>], kinds: &[u8]) -> crate::value::Value {
+    use crate::value::{ObjId, Value};
+    match vi {
+        ValueImage::Nil => Value::Nil,
+        ValueImage::Bool(b) => Value::Bool(*b),
+        ValueImage::Int(n) => Value::Int(*n),
+        ValueImage::Float(bits) => Value::Float(f64::from_bits(*bits)),
+        ValueImage::Sym(s) => Value::Sym(crate::intern::SymId(*s)),
+        ValueImage::Str { bytes, enc, frozen } => build_str(bytes.clone(), enc, *frozen),
+        ValueImage::Class(id) => Value::Class(classes[*id as usize].clone()),
+        ValueImage::Regex { source, .. } => rebuild_regex(source),
+        ValueImage::Obj(oid) => {
+            let id = ObjId(*oid);
+            match kinds.get(*oid as usize).copied().unwrap_or(0) {
+                1 => Value::Object(id),
+                2 => Value::Array(id),
+                3 => Value::Hash(id),
+                4 => Value::Range(id),
+                5 => Value::BigInt(id),
+                6 => Value::Rational(id),
+                _ => Value::Nil,
+            }
+        }
+    }
+}
+
+fn fx_ivars_from_image(
+    pairs: &[(u32, ValueImage)],
+    classes: &[Rc<Class>],
+    kinds: &[u8],
+) -> crate::intern::FxHashMap<crate::intern::SymId, crate::value::Value> {
+    pairs
+        .iter()
+        .map(|(s, vi)| (crate::intern::SymId(*s), value_from_image(vi, classes, kinds)))
+        .collect()
+}
+
+/// Rebuild the heap `Vec<Slot>` from the image. Single pass: `Obj` variants
+/// resolve via the precomputed `kinds`, so forward refs are fine.
+fn build_heap(img_heap: &[HeapObjImage], classes: &[Rc<Class>], kinds: &[u8]) -> Vec<crate::heap::Slot> {
+    use crate::heap::{HeapObj, HashObj, Slot};
+    use crate::value::{Instance, IvarTable};
+    img_heap
+        .iter()
+        .map(|hi| match hi {
+            HeapObjImage::Dead | HeapObjImage::Unsupported => Slot::Dead,
+            HeapObjImage::Instance { class, ivars, frozen } => {
+                let mut it = IvarTable::default();
+                for (s, vi) in ivars {
+                    it.insert(crate::intern::SymId(*s), value_from_image(vi, classes, kinds));
+                }
+                Slot::Live(HeapObj::Instance(Instance {
+                    class: classes[*class as usize].clone(),
+                    ivars: it,
+                    singleton_class: None,
+                    frozen: std::cell::Cell::new(*frozen),
+                }))
+            }
+            HeapObjImage::Array { elems, class_tag, ivars, frozen } => {
+                Slot::Live(HeapObj::Array(crate::heap::ArrayObj {
+                    elems: elems.iter().map(|vi| value_from_image(vi, classes, kinds)).collect(),
+                    class_tag: class_tag.map(|id| classes[id as usize].clone()),
+                    ivars: fx_ivars_from_image(ivars, classes, kinds),
+                    frozen: std::cell::Cell::new(*frozen),
+                }))
+            }
+            HeapObjImage::Hash { pairs, class_tag, ivars, frozen, by_identity } => {
+                let mut h = HashObj::with_pairs(
+                    pairs
+                        .iter()
+                        .map(|(k, v)| {
+                            (value_from_image(k, classes, kinds), value_from_image(v, classes, kinds))
+                        })
+                        .collect(),
+                );
+                h.class_tag = class_tag.map(|id| classes[id as usize].clone());
+                h.ivars = fx_ivars_from_image(ivars, classes, kinds);
+                h.frozen = std::cell::Cell::new(*frozen);
+                h.by_identity = std::cell::Cell::new(*by_identity);
+                Slot::Live(HeapObj::Hash(h))
+            }
+            HeapObjImage::Range { begin, end, exclusive } => {
+                Slot::Live(HeapObj::Range(crate::heap::RangeObj {
+                    begin: value_from_image(begin, classes, kinds),
+                    end: value_from_image(end, classes, kinds),
+                    exclusive: *exclusive,
+                }))
+            }
+            #[cfg(feature = "bignum")]
+            HeapObjImage::BigInt(bytes) => {
+                Slot::Live(HeapObj::BigInt(num_bigint::BigInt::from_signed_bytes_le(bytes)))
+            }
+            #[cfg(feature = "bignum")]
+            HeapObjImage::Rational { num, den } => {
+                Slot::Live(HeapObj::Rational(crate::heap::RationalRepr {
+                    num: num_bigint::BigInt::from_signed_bytes_le(num),
+                    den: num_bigint::BigInt::from_signed_bytes_le(den),
+                }))
+            }
+            #[cfg(not(feature = "bignum"))]
+            _ => Slot::Dead,
+        })
+        .collect()
+}
+
 /// Restore `img` into a FRESH `vm` (one that has just run its preamble, so
 /// builtins/Object/String exist). Class-graph slice only (P2 milestone): no
 /// heap objects, constants, or closures — a program whose captured state is
@@ -548,35 +700,83 @@ pub(crate) fn restore(vm: &mut crate::vm::Vm, img: VmImage) {
     }
     let resolved: Vec<Rc<Class>> = id_to_class.into_iter().map(|c| c.unwrap()).collect();
 
-    // 4. Wire edges + install methods for NEWLY-created classes only (reused
-    //    builtins already carry correct state in the fresh VM).
+    // 3b. Rebuild the heap from the image (index = ObjId, so every stored
+    //     ObjId reference stays valid). The whole heap is replaced — the fresh
+    //     VM's preamble heap is discarded and every heap-referencing bit of
+    //     state (constants + class ivars, wired below) is re-pointed at the
+    //     image heap, so there's no dangling into the old heap. GC parallel
+    //     vecs are rebuilt from scratch (all slots treated as old survivors).
+    let kinds: Vec<u8> = img.heap.iter().map(heap_kind).collect();
+    let slots = build_heap(&img.heap, &resolved, &kinds);
+    let n = slots.len();
+    vm.heap.slots = slots;
+    vm.heap.marks = vec![false; n];
+    vm.heap.old = vec![true; n];
+    vm.heap.young_slots = Vec::new();
+    vm.heap.remembered = Vec::new();
+    vm.heap.minors_since_major = 0;
+    vm.heap.free = (0..n as u32)
+        .filter(|&i| matches!(vm.heap.slots[i as usize], crate::heap::Slot::Dead))
+        .collect();
+    vm.heap.live_count = n - vm.heap.free.len();
+    #[cfg(feature = "jit-native")]
+    {
+        // Keep the ObjId-indexed JIT class-ptr cache length-consistent with the
+        // new heap; entries invalidate to 0 (recomputed on demand).
+        // (jit-native + snapshot is not a tested combination yet.)
+        vm.heap.class_ptrs = vec![0; n];
+    }
+
+    // 4. Wire edges + install methods. NEW classes get everything; REUSED
+    //    builtins keep their native methods but gain any USER-added ones
+    //    (rubocop monkeypatches core classes). Class ivars/class_vars are
+    //    restored for ALL classes (reused builtins' ivars must re-point at the
+    //    image heap too — e.g. rubocop's registry on a class ivar).
     for i in 0..img.classes.len() {
-        if !is_new[i] {
-            continue;
-        }
         let ci = &img.classes[i];
         let cls = &resolved[i];
-        if let Some(sid) = ci.superclass {
-            *cls.superclass.borrow_mut() = Some(resolved[sid as usize].clone());
+        if is_new[i] {
+            if let Some(sid) = ci.superclass {
+                *cls.superclass.borrow_mut() = Some(resolved[sid as usize].clone());
+            }
+            *cls.includes.borrow_mut() =
+                ci.includes.iter().map(|&id| resolved[id as usize].clone()).collect();
+            *cls.prepends.borrow_mut() =
+                ci.prepends.iter().map(|&id| resolved[id as usize].clone()).collect();
+            for (name_sym, mi) in &ci.methods {
+                cls.methods.borrow_mut().insert(SymId(*name_sym), build_method(mi, cls, &resolved));
+            }
+            for (name_sym, mi) in &ci.singleton_methods {
+                cls.singleton_methods
+                    .borrow_mut()
+                    .insert(SymId(*name_sym), build_method(mi, cls, &resolved));
+            }
+        } else {
+            // Reused builtin: merge only USER-defined methods (a native method
+            // has `has_builtin`; a closure method needs P3c). `or_insert` so a
+            // native already present isn't clobbered.
+            for (name_sym, mi) in &ci.methods {
+                if !mi.has_builtin && !mi.has_closure {
+                    cls.methods
+                        .borrow_mut()
+                        .entry(SymId(*name_sym))
+                        .or_insert_with(|| build_method(mi, cls, &resolved));
+                }
+            }
         }
-        *cls.includes.borrow_mut() = ci.includes.iter().map(|&id| resolved[id as usize].clone()).collect();
-        *cls.prepends.borrow_mut() = ci.prepends.iter().map(|&id| resolved[id as usize].clone()).collect();
-        for (name_sym, mi) in &ci.methods {
-            let m = build_method(mi, cls, &resolved);
-            cls.methods.borrow_mut().insert(SymId(*name_sym), m);
+        for (s, vi) in &ci.ivars {
+            cls.ivars.borrow_mut().insert(SymId(*s), value_from_image(vi, &resolved, &kinds));
         }
-        for (name_sym, mi) in &ci.singleton_methods {
-            let m = build_method(mi, cls, &resolved);
-            cls.singleton_methods.borrow_mut().insert(SymId(*name_sym), m);
+        for (s, vi) in &ci.class_vars {
+            cls.class_vars.borrow_mut().insert(SymId(*s), value_from_image(vi, &resolved, &kinds));
         }
     }
 
-    // 4b. Class-name constants so a bare `Foo` const-ref resolves.
-    for &(name_sym, class_id) in &img.const_classes {
-        vm.constants.insert(
-            SymId(name_sym),
-            crate::value::Value::Class(resolved[class_id as usize].clone()),
-        );
+    // 4b. All top-level constants — heap-valued ones point into the restored
+    //     heap, class-valued ones resolve to the class map. Overwrites the
+    //     fresh VM's builtin constants with the image's (consistent heap).
+    for (name_sym, vi) in &img.constants {
+        vm.constants.insert(SymId(*name_sym), value_from_image(vi, &resolved, &kinds));
     }
 
     // 5. Toplevel methods.
@@ -792,5 +992,51 @@ mod tests {
             matches!(&back.heap[*ioid as usize], HeapObjImage::Instance { ivars, .. } if ivars.len() == 2),
             "INST instance ivars lost"
         );
+    }
+
+    /// P3b end-to-end: restore HEAP constants (a frozen mixed array, a nested
+    /// hash, an instance whose ivar holds an array, a range) into a fresh VM
+    /// and read them back — output must match cold. Proves the heap RESTORE
+    /// (rebuild + re-point) works, not just serialization.
+    #[test]
+    fn restore_heap_constants_end_to_end() {
+        let defs = r#"
+            FROZEN = [1, "two", :three].freeze
+            CONFIG = { "a" => 1, b: [10, 20] }
+            class Box
+              def initialize(v); @v = v; end
+              def v; @v; end
+            end
+            BOX = Box.new([7, 8, 9])
+            RNG = (1...4)
+        "#;
+        let probe = r#"
+            [ FROZEN.join(","),
+              CONFIG["a"].to_s, CONFIG[:b].sum.to_s,
+              BOX.v.sum.to_s,
+              RNG.to_a.inspect,
+              FROZEN.frozen?.to_s ].join("|")
+        "#;
+
+        let mut loader = crate::Runtime::new();
+        loader.eval(defs, "defs").expect("defs");
+        let graph = capture(&loader.vm);
+        let bytes = to_bytes(&loader.vm, &graph).expect("serialize");
+        let img = from_bytes(&bytes).expect("deserialize");
+
+        let mut restored = crate::Runtime::new();
+        restore(&mut restored.vm, img);
+        let vr = restored.eval(probe, "probe").expect("restored probe");
+
+        let mut cold = crate::Runtime::new();
+        cold.eval(defs, "defs").expect("cold defs");
+        let vc = cold.eval(probe, "probe").expect("cold probe");
+
+        let as_s = |v: &crate::value::Value| match v {
+            crate::value::Value::Str(s) => s.to_string_lossy(),
+            other => format!("{other:?}"),
+        };
+        assert_eq!(as_s(&vr), as_s(&vc), "restored heap constants != cold");
+        assert_eq!(as_s(&vr), "1,two,three|1|30|24|[1, 2, 3]|true", "unexpected");
     }
 }
