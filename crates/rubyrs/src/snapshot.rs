@@ -117,6 +117,12 @@ pub(crate) struct ClassImage {
     pub(crate) ivars: Vec<(u32, ValueImage)>,
     /// Class variables (`@@foo`): (SymId, value).
     pub(crate) class_vars: Vec<(u32, ValueImage)>,
+    /// Eigenclass id (`class << self`). Its own ClassImage holds the
+    /// class-level methods defined that way (e.g. `YAML.safe_load` — stdlib
+    /// modules define their surface here, NOT in `singleton_methods`).
+    pub(crate) singleton_view: Option<u32>,
+    /// The eigenclass's back-ref to its owning class (Weak), as a class id.
+    pub(crate) singleton_target: Option<u32>,
 }
 
 /// Serializable image of a `Method`. `closure`/`builtin` payloads are
@@ -352,6 +358,13 @@ fn capture_class(c: &Rc<Class>, ids: &mut ClassIds) -> ClassImage {
         singleton_methods,
         ivars: c.ivars.borrow().iter().map(|(s, v)| (s.0, image_value(v, ids))).collect(),
         class_vars: c.class_vars.borrow().iter().map(|(s, v)| (s.0, image_value(v, ids))).collect(),
+        singleton_view: c.singleton_view.borrow().as_ref().map(|v| ids.intern(v)),
+        singleton_target: c
+            .singleton_target
+            .borrow()
+            .as_ref()
+            .and_then(|w| w.upgrade())
+            .map(|t| ids.intern(&t)),
     }
 }
 
@@ -681,6 +694,12 @@ pub(crate) fn restore(vm: &mut crate::vm::Vm, img: VmImage) {
         let idx = class_id as usize;
         if let Some(existing) = vm.classes.get(&SymId(name_sym)) {
             id_to_class[idx] = Some(existing.clone());
+        } else if let Some(already) = id_to_class[idx].clone() {
+            // Same class-id already has a shell — it's an ALIAS (`YAML = Psych`
+            // share one Rc). Register that SAME shell under this name too, so
+            // state is installed once and both names resolve to it (a second
+            // shell would split methods/ivars and leave one name empty).
+            vm.classes.insert(SymId(name_sym), already);
         } else {
             let ci = &img.classes[idx];
             let shell = new_class_shell(ci.name.clone(), ci.is_module);
@@ -751,13 +770,32 @@ pub(crate) fn restore(vm: &mut crate::vm::Vm, img: VmImage) {
                     .borrow_mut()
                     .insert(SymId(*name_sym), build_method(mi, cls, &resolved));
             }
+            // Eigenclass (`class << self`) — its ClassImage (also restored)
+            // carries the class-level methods; wire the view + back-ref.
+            if let Some(vid) = ci.singleton_view {
+                *cls.singleton_view.borrow_mut() = Some(resolved[vid as usize].clone());
+            }
+            if let Some(tid) = ci.singleton_target {
+                *cls.singleton_target.borrow_mut() = Some(Rc::downgrade(&resolved[tid as usize]));
+            }
         } else {
-            // Reused builtin: merge only USER-defined methods (a native method
-            // has `has_builtin`; a closure method needs P3c). `or_insert` so a
-            // native already present isn't clobbered.
+            // Reused builtin / stdlib stub: merge USER-defined methods (a
+            // native method has `has_builtin`; a closure needs P3c). `or_insert`
+            // so a native already present isn't clobbered. BOTH instance and
+            // singleton tables — stdlib modules loaded via `require` (YAML,
+            // JSON, …) define their surface as SINGLETON methods (`YAML.
+            // safe_load`), and those must land on the reused module too.
             for (name_sym, mi) in &ci.methods {
                 if !mi.has_builtin && !mi.has_closure {
                     cls.methods
+                        .borrow_mut()
+                        .entry(SymId(*name_sym))
+                        .or_insert_with(|| build_method(mi, cls, &resolved));
+                }
+            }
+            for (name_sym, mi) in &ci.singleton_methods {
+                if !mi.has_builtin && !mi.has_closure {
+                    cls.singleton_methods
                         .borrow_mut()
                         .entry(SymId(*name_sym))
                         .or_insert_with(|| build_method(mi, cls, &resolved));

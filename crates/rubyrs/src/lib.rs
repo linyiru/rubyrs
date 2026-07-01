@@ -3702,6 +3702,41 @@ self.eval_inner(
         self.eval(&source, &filename)
     }
 
+    /// Serialize the current VM state to a snapshot image on disk (see
+    /// `snapshot`). Intended to be called after a load-heavy `require`
+    /// (e.g. `require "rubocop"`) so a later process can `snapshot_load`
+    /// and skip re-running it. Experimental (P3): the image covers the
+    /// class graph + heap + constants; closures/regex fidelity are WIP.
+    #[cfg(feature = "preamble-cache")]
+    pub fn snapshot_save(&self, path: &Path) -> std::io::Result<()> {
+        let graph = crate::snapshot::capture(&self.vm);
+        if std::env::var_os("RUBYRS_SNAPSHOT_DEBUG").is_some() {
+            for ci in &graph.classes {
+                if ci.name.contains("YAML") || ci.name.contains("Psych") {
+                    eprintln!(
+                        "snap-dbg: class {:?} methods={} singleton_methods={} singleton_view={:?} is_module={}",
+                        ci.name, ci.methods.len(), ci.singleton_methods.len(), ci.singleton_view, ci.is_module
+                    );
+                }
+            }
+            eprintln!("snap-dbg: total classes={}", graph.classes.len());
+        }
+        let bytes = crate::snapshot::to_bytes(&self.vm, &graph)
+            .map_err(|e| std::io::Error::other(format!("snapshot encode: {e}")))?;
+        std::fs::write(path, bytes)
+    }
+
+    /// Restore a VM-state image from disk into THIS Runtime (which must be
+    /// freshly constructed — same binary/preamble as the one that saved it).
+    #[cfg(feature = "preamble-cache")]
+    pub fn snapshot_load(&mut self, path: &Path) -> std::io::Result<()> {
+        let bytes = std::fs::read(path)?;
+        let img = crate::snapshot::from_bytes(&bytes)
+            .map_err(|e| std::io::Error::other(format!("snapshot decode: {e}")))?;
+        crate::snapshot::restore(&mut self.vm, img);
+        Ok(())
+    }
+
     /// If `trap` is an uncaught `SystemExit` (i.e. the script called
     /// `Kernel#exit`/`abort`), return the requested process exit status —
     /// `Some(0)` for `exit`/`exit(0)`/`exit(true)`, `Some(1)` for

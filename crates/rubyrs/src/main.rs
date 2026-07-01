@@ -450,7 +450,25 @@ fn main() {
     // scripts (e.g. concurrent-ruby's lock_local_var probe).
     #[cfg(feature = "_fiber")]
     rubyrs::register_fiber_host_fns(&mut rt);
+    // Experimental VM-image snapshot (P3): RUBYRS_SNAPSHOT_LOAD restores a
+    // saved image into this fresh Runtime BEFORE the script runs (skipping the
+    // `require` the image already captured); RUBYRS_SNAPSHOT_SAVE writes the
+    // image AFTER the script runs (typically a script that just did the heavy
+    // `require`). Only one is usually set per invocation.
+    #[cfg(feature = "preamble-cache")]
+    if let Some(p) = std::env::var_os("RUBYRS_SNAPSHOT_LOAD") {
+        if let Err(e) = rt.snapshot_load(std::path::Path::new(&p)) {
+            eprintln!("rubyrs: snapshot load failed: {e}");
+            process::exit(1);
+        }
+    }
     let result = rt.eval_file(path);
+    #[cfg(feature = "preamble-cache")]
+    if let Some(p) = std::env::var_os("RUBYRS_SNAPSHOT_SAVE") {
+        if let Err(e) = rt.snapshot_save(std::path::Path::new(&p)) {
+            eprintln!("rubyrs: snapshot save failed: {e}");
+        }
+    }
     trace.at("eval_done");
     match result {
         Ok(_) => {}
