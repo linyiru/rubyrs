@@ -193,7 +193,10 @@ pub(crate) fn compile_with_flags(
     ruby_flags: u8,
     bare_source: &str,
 ) -> Result<CompiledRegex, String> {
-    let prepared = prepare_pattern(engine_pattern);
+    // Ambiguous `\k<name>` backrefs to duplicated group names (which both
+    // engines reject) → numeric `\N`, before any other preparation.
+    let engine_pattern = rewrite_dup_named_backrefs(engine_pattern, ruby_flags & RB_EXTENDED != 0);
+    let prepared = prepare_pattern(&engine_pattern);
     // Validation-only parse: same syntax surface as
     // `regex::Regex::new` (AST parse + HIR translation) but the
     // HIR is dropped immediately — no NFA/DFA is built. A pattern
@@ -575,6 +578,228 @@ fn rewrite_ascii_shorthand_classes(pat: &str) -> std::borrow::Cow<'_, str> {
 /// never see this prefix. Discovery: P3 Jekyll spike — jekyll's
 /// `YAML_FRONT_MATTER_REGEXP` (`\A(...)^((---|\.\.\.)\s*$...)/m`)
 /// relies on `^`/`$` matching the front-matter delimiter lines.
+/// Rewrite `\k<name>` / `\k'name'` PATTERN backreferences to a numeric
+/// `\N` backref WHEN `name` is a DUPLICATED capture-group name.
+///
+/// Ruby/Onigmo allow the same group name on both sides of an alternation
+/// (`(?<x>A)|(?<x>B)`) and let `\k<name>` refer to whichever branch
+/// matched. fancy-regex accepts the duplicate group *definitions* and
+/// numeric backrefs, but rejects a `\k<name>` backref to the ambiguous
+/// name ("Invalid group name in back reference"); the linear `regex`
+/// engine has no backrefs at all. So each ambiguous `\k<name>` is
+/// rewritten to the index of the nearest same-named group opened
+/// textually before it — the one in scope within that alternation branch.
+///
+/// Non-duplicated names are left as `\k<name>` (they compile fine and
+/// keep the pattern readable); a pattern with no duplicated names is
+/// returned borrowed (zero-copy — the overwhelmingly common case).
+/// Name-based capture access (`md[:name]`, `named_captures`) is
+/// unaffected: it resolves through the SOURCE parse, which keeps the
+/// duplicate names, via `named_capture_index_map` — not the engine view.
+///
+/// Surfaced by RuboCop's Lint/DuplicateMethods, whose `humanize_scope`
+/// uses exactly `/(?:(?<name>.*)::)#<Class:\k<name>>|#<Class:(?<name>.*)>.../`.
+fn rewrite_dup_named_backrefs(pat: &str, base_extended: bool) -> std::borrow::Cow<'_, str> {
+    // Pass 1: which names are duplicated?
+    let (_, names) = parse_capture_groups(pat, base_extended);
+    let mut dup: Vec<&str> = Vec::new();
+    for (n, _) in &names {
+        if names.iter().filter(|(m, _)| m == n).count() >= 2 && !dup.contains(&n.as_str()) {
+            dup.push(n);
+        }
+    }
+    if dup.is_empty() {
+        return std::borrow::Cow::Borrowed(pat);
+    }
+
+    // Pass 2: walk (same group-open rules as `parse_capture_groups`),
+    // splicing each `\k<dupname>` backref to `\N`. Copy everything else
+    // verbatim into a byte buffer (input is UTF-8; only ASCII is inserted).
+    let b = pat.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(pat.len());
+    let mut i = 0usize;
+    let mut group = 0usize;
+    // Capturing groups seen so far, as (index, name?) — used to resolve a
+    // backref to the nearest same-named group already opened.
+    let mut seen: Vec<(usize, Option<String>)> = Vec::new();
+    let mut in_class = false;
+    let mut class_start = false;
+    let mut ext: Vec<bool> = vec![base_extended];
+    let extended = |ext: &[bool]| *ext.last().unwrap_or(&base_extended);
+    let read_until = |start: usize, term: u8| -> Option<(String, usize)> {
+        let mut j = start;
+        while j < b.len() && b[j] != term {
+            j += 1;
+        }
+        if j >= b.len() {
+            return None;
+        }
+        std::str::from_utf8(&b[start..j]).ok().map(|s| (s.to_string(), j))
+    };
+    while i < b.len() {
+        let c = b[i];
+        if c == b'\\' {
+            // A `\k<name>`/`\k'name'` named backref outside a class is the
+            // only rewrite target; inside `[...]` a backref is literal.
+            if !in_class && b.get(i + 1) == Some(&b'k') {
+                let close = match b.get(i + 2) {
+                    Some(&b'<') => Some(b'>'),
+                    Some(&b'\'') => Some(b'\''),
+                    _ => None,
+                };
+                if let Some(term) = close {
+                    if let Some((name, j)) = read_until(i + 3, term) {
+                        if dup.contains(&name.as_str()) {
+                            if let Some(&(idx, _)) =
+                                seen.iter().rev().find(|(_, n)| n.as_deref() == Some(&name))
+                            {
+                                out.push(b'\\');
+                                out.extend_from_slice(idx.to_string().as_bytes());
+                                i = j + 1;
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+            // Verbatim escape: copy `\` + its next byte (backrefs/escapes
+            // never open a group). A trailing lone `\` copies just itself.
+            out.push(b'\\');
+            if let Some(&n) = b.get(i + 1) {
+                out.push(n);
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if in_class {
+            if c == b']' && !class_start {
+                in_class = false;
+            }
+            class_start = c == b'^' && class_start;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if c == b'#' && extended(&ext) {
+            while i < b.len() && b[i] != b'\n' {
+                out.push(b[i]);
+                i += 1;
+            }
+            continue;
+        }
+        match c {
+            b'[' => {
+                in_class = true;
+                class_start = true;
+                out.push(c);
+                i += 1;
+            }
+            b')' => {
+                if ext.len() > 1 {
+                    ext.pop();
+                }
+                out.push(c);
+                i += 1;
+            }
+            b'(' if b.get(i + 1) == Some(&b'?') => {
+                let after = b.get(i + 2).copied();
+                let is_lookbehind = after == Some(b'<')
+                    && matches!(b.get(i + 3), Some(&x) if x == b'=' || x == b'!');
+                if (after == Some(b'<') && !is_lookbehind) || after == Some(b'\'') {
+                    let (name_start, term) =
+                        if after == Some(b'<') { (i + 3, b'>') } else { (i + 3, b'\'') };
+                    group += 1;
+                    ext.push(extended(&ext));
+                    match read_until(name_start, term) {
+                        Some((name, j)) => {
+                            seen.push((group, Some(name)));
+                            out.extend_from_slice(&b[i..=j]);
+                            i = j + 1;
+                        }
+                        None => {
+                            out.extend_from_slice(&b[i..]);
+                            return std::borrow::Cow::Owned(String::from_utf8(out).unwrap());
+                        }
+                    }
+                } else if after == Some(b'P') && b.get(i + 3) == Some(&b'<') {
+                    group += 1;
+                    ext.push(extended(&ext));
+                    match read_until(i + 4, b'>') {
+                        Some((name, j)) => {
+                            seen.push((group, Some(name)));
+                            out.extend_from_slice(&b[i..=j]);
+                            i = j + 1;
+                        }
+                        None => {
+                            out.extend_from_slice(&b[i..]);
+                            return std::borrow::Cow::Owned(String::from_utf8(out).unwrap());
+                        }
+                    }
+                } else if after == Some(b'#') {
+                    let mut j = i + 3;
+                    while j < b.len() && b[j] != b')' {
+                        if b[j] == b'\\' {
+                            j += 1;
+                        }
+                        j += 1;
+                    }
+                    let end = (j + 1).min(b.len());
+                    out.extend_from_slice(&b[i..end]);
+                    i = end;
+                } else if matches!(after, Some(b'=') | Some(b'!') | Some(b'>')) || is_lookbehind {
+                    ext.push(extended(&ext));
+                    out.extend_from_slice(&b[i..i + 2]);
+                    i += 2;
+                } else {
+                    // Flag group/directive `(?flags:` or `(?flags)` — copy
+                    // through the spec, tracking the `x` (extended) flag.
+                    let mut j = i + 2;
+                    let mut new_ext = extended(&ext);
+                    let mut sign = true;
+                    while j < b.len() {
+                        match b[j] {
+                            b'x' => new_ext = sign,
+                            b'-' => sign = false,
+                            b'i' | b'm' | b's' | b'a' | b'd' | b'u' | b'n' => {}
+                            b':' => {
+                                ext.push(new_ext);
+                                j += 1;
+                                break;
+                            }
+                            b')' => {
+                                if let Some(top) = ext.last_mut() {
+                                    *top = new_ext;
+                                }
+                                j += 1;
+                                break;
+                            }
+                            _ => break,
+                        }
+                        j += 1;
+                    }
+                    let end = j.min(b.len());
+                    out.extend_from_slice(&b[i..end]);
+                    i = end;
+                }
+            }
+            b'(' => {
+                group += 1;
+                ext.push(extended(&ext));
+                seen.push((group, None));
+                out.push(c);
+                i += 1;
+            }
+            _ => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    std::borrow::Cow::Owned(String::from_utf8(out).unwrap_or_else(|_| pat.to_string()))
+}
+
 fn prepare_pattern(pattern: &str) -> String {
     let pattern = rewrite_charclass_octal_escapes(pattern);
     let pattern = rewrite_ascii_shorthand_classes(&pattern);

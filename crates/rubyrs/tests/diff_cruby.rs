@@ -354,6 +354,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // (?<a>…) names), source order (mustermann splat collection).
 #[cfg(feature = "regex")]
 #[test] fn regexp_named_captures_dup() { run_diff("regexp_named_captures_dup"); }
+// `\k<name>` backref to a DUPLICATED group name (both sides of an
+// alternation) → numeric backref rewrite (RuboCop Lint/DuplicateMethods).
+#[cfg(feature = "regex")]
+#[test] fn regex_dup_named_backref() { run_diff("regex_dup_named_backref"); }
 // String#succ!/next! (Tilt compiled-method-name generation).
 #[test] fn string_succ_bang() { run_diff("string_succ_bang"); }
 // File.rename(old, new) — atomic rename.
