@@ -1021,6 +1021,18 @@ impl Vm {
                     _ => Value::Nil,
                 }
             }
+            // `File.empty?(path)` / `File.zero?(path)` — true iff the
+            // path exists and is a zero-length file. A missing path is
+            // false (CRuby does NOT raise here, unlike `File.size`).
+            // `empty?` is CRuby's alias for `zero?`. RuboCop's
+            // TargetFinder#ruby_executable? calls `File.empty?` while
+            // scanning a directory for extensionless scripts.
+            ("empty?" | "zero?", [p]) => {
+                self.check_filesystem_io_allowed("File.empty?", None)?;
+                let path = path_arg(p)?;
+                self.check_filesystem_io_allowed("File.empty?", Some(Path::new(&path)))?;
+                Value::Bool(matches!(std::fs::metadata(&path), Ok(m) if m.len() == 0))
+            }
             // `File.__mtime_f(path)` — native epoch seconds (Float,
             // incl. sub-second) backing the preamble's `File.mtime`,
             // which wraps it via `Time.at`. Time is a Ruby-level class
