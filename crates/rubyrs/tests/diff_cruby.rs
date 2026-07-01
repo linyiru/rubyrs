@@ -37,20 +37,16 @@ fn ruby_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Fixtures that pass under the interpreter (and are validated by the default
-/// `Run tests` job) but produce WRONG output under the native JIT. They are
-/// quarantined so the `jit-native` diff job (which sets `RUBYRS_JIT_NATIVE=1`)
-/// lands GREEN and can guard against NEW JIT regressions. Each is a real,
-/// pre-existing JIT correctness bug to fix — remove from this list once fixed:
-///   - `comparison_failed_message` — a raising `<=>` (returns nil) is elided → "NO-RAISE"
-///   - `method_to_proc`            — `&method(:even?)` predicate not applied (all/none)
-///   - `time_components`, `time_strftime` — Time `yday` off by one under JIT
-const JIT_KNOWN_DIVERGENCES: &[&str] = &[
-    "comparison_failed_message",
-    "method_to_proc",
-    "time_components",
-    "time_strftime",
-];
+/// Fixtures that pass under the interpreter but produce WRONG output under the
+/// native JIT — quarantined so the `jit-native` diff job (which sets
+/// `RUBYRS_JIT_NATIVE=1`) lands GREEN while guarding against NEW regressions.
+/// Add a name here only with a tracking note; delete once the JIT bug is fixed.
+///
+/// Currently EMPTY: the original four (`comparison_failed_message`,
+/// `method_to_proc`, `time_components`, `time_strftime`) were all one bug —
+/// Bool/nil-returning native methods boxed their i64 result as `Integer`
+/// (Ruby `0` is truthy, so predicates flipped) — fixed by `NativeProto::box_ret`.
+const JIT_KNOWN_DIVERGENCES: &[&str] = &[];
 
 fn run_diff(name: &str) {
     if !ruby_available() {

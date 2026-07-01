@@ -15343,18 +15343,11 @@ impl Vm {
                 if let Some(Some(np)) = self.jit_native.get(&pidx) {
                     let gc = np.guard_class.get();
                     let class_ok = gc == 0 || gc == std::rc::Rc::as_ptr(&cls) as usize;
-                    let is_array = np.returns_array.get();
-                    let is_float = np.returns_float.get();
                     if class_ok {
                         if let Some(x) = crate::jit_native::as_int(&self.stack[recv_idx + 1]) {
                             if let Some(r) = np.call(vm_ptr, &self.stack[recv_idx], x) {
-                                self.stack[recv_idx] = if is_array {
-                                    Value::Array(crate::value::ObjId(r as u32))
-                                } else if is_float {
-                                    Value::Float(f64::from_bits(r as u64))
-                                } else {
-                                    Value::Int(r)
-                                };
+                                let boxed = np.box_ret(r);
+                                self.stack[recv_idx] = boxed;
                                 self.stack.truncate(recv_idx + 1);
                                 return Ok(true);
                             }
@@ -15369,17 +15362,10 @@ impl Vm {
                         self.jit_native_fparam.insert(pidx, compiled);
                     }
                     if let Some(Some(np)) = self.jit_native_fparam.get(&pidx) {
-                        let is_array = np.returns_array.get();
-                        let is_float = np.returns_float.get();
                         let vm_ptr = self as *const crate::vm::Vm;
                         if let Some(r) = np.call(vm_ptr, &self.stack[recv_idx], f.to_bits() as i64) {
-                            self.stack[recv_idx] = if is_array {
-                                Value::Array(crate::value::ObjId(r as u32))
-                            } else if is_float {
-                                Value::Float(f64::from_bits(r as u64))
-                            } else {
-                                Value::Int(r)
-                            };
+                            let boxed = np.box_ret(r);
+                            self.stack[recv_idx] = boxed;
                             self.stack.truncate(recv_idx + 1);
                             return Ok(true);
                         }
@@ -15821,18 +15807,11 @@ impl Vm {
                         _ => None,
                     })
                 {
-                    let is_array = np.returns_array.get();
-                    let is_float = np.returns_float.get();
                     let vm_ptr = self as *const crate::vm::Vm;
                     if let Some(r) = np.call(vm_ptr, &self_val, x) {
                         let top = self.stack.len() - 1;
-                        self.stack[top] = if is_array {
-                            Value::Array(crate::value::ObjId(r as u32))
-                        } else if is_float {
-                            Value::Float(f64::from_bits(r as u64))
-                        } else {
-                            Value::Int(r)
-                        };
+                        let boxed = np.box_ret(r);
+                        self.stack[top] = boxed;
                         return Ok(true);
                     }
                 }
@@ -15844,18 +15823,11 @@ impl Vm {
                     self.jit_native_fparam.insert(proto_idx, compiled);
                 }
                 if let Some(Some(np)) = self.jit_native_fparam.get(&proto_idx) {
-                    let is_array = np.returns_array.get();
-                    let is_float = np.returns_float.get();
                     let vm_ptr = self as *const crate::vm::Vm;
                     if let Some(r) = np.call(vm_ptr, &self_val, f.to_bits() as i64) {
                         let top = self.stack.len() - 1;
-                        self.stack[top] = if is_array {
-                            Value::Array(crate::value::ObjId(r as u32))
-                        } else if is_float {
-                            Value::Float(f64::from_bits(r as u64))
-                        } else {
-                            Value::Int(r)
-                        };
+                        let boxed = np.box_ret(r);
+                        self.stack[top] = boxed;
                         return Ok(true);
                     }
                 }
@@ -15872,19 +15844,12 @@ impl Vm {
                     self.jit_native_objparam.insert(proto_idx, compiled);
                 }
                 if let Some(Some(np)) = self.jit_native_objparam.get(&proto_idx) {
-                    let is_array = np.returns_array.get();
-                    let is_float = np.returns_float.get();
                     let vm_ptr = self as *const crate::vm::Vm;
                     let top = self.stack.len() - 1;
                     let arg_ptr = &self.stack[top] as *const Value as i64;
                     if let Some(r) = np.call(vm_ptr, &self_val, arg_ptr) {
-                        self.stack[top] = if is_array {
-                            Value::Array(crate::value::ObjId(r as u32))
-                        } else if is_float {
-                            Value::Float(f64::from_bits(r as u64))
-                        } else {
-                            Value::Int(r)
-                        };
+                        let boxed = np.box_ret(r);
+                        self.stack[top] = boxed;
                         return Ok(true);
                     }
                 }
@@ -15951,9 +15916,6 @@ impl Vm {
                         None
                     };
                     let np = self.jit_native_objparam2[&proto_idx].as_ref().unwrap();
-                    let is_array = np.returns_array.get();
-                    let is_float = np.returns_float.get();
-                    let is_nil = np.returns_nil.get();
                     let vm_ptr = self as *const crate::vm::Vm;
                     let a1 = match (&scratch, &self.stack[sl - 1]) {
                         (Some((_, s)), _) => s.0 as i64,
@@ -15963,6 +15925,9 @@ impl Vm {
                     let a0_ptr = &self.stack[sl - 2] as *const Value as i64;
                     let res = np.call2(vm_ptr, &self_val, a0_ptr, a1);
                     if let Some(r) = res {
+                        // Box while `np` is still borrowable — the scratch commit below
+                        // takes a `&mut self.heap`, which ends `np`'s borrow.
+                        let boxed = np.box_ret(r);
                         // Commit the scratch back into the real Hash by MOVING its pairs
                         // (no clone): take the scratch's filled pairs, install them in the
                         // real Hash. The scratch (now empty) becomes garbage.
@@ -15973,15 +15938,7 @@ impl Vm {
                             ho.index = None;
                         }
                         self.stack.truncate(sl - 2);
-                        self.stack.push(if is_nil {
-                            Value::Nil
-                        } else if is_array {
-                            Value::Array(crate::value::ObjId(r as u32))
-                        } else if is_float {
-                            Value::Float(f64::from_bits(r as u64))
-                        } else {
-                            Value::Int(r)
-                        });
+                        self.stack.push(boxed);
                         return Ok(true);
                     }
                     // Deopt: the scratch is discarded (never exposed), the real Hash is
@@ -18979,17 +18936,11 @@ impl Vm {
                 }
             };
             if let Some(Some(r)) = native {
-                let (is_array, is_float) = match self.jit_native.get(&proto_idx) {
-                    Some(Some(np)) => (np.returns_array.get(), np.returns_float.get()),
-                    _ => (false, false),
+                let boxed = match self.jit_native.get(&proto_idx) {
+                    Some(Some(np)) => np.box_ret(r),
+                    _ => Value::Int(r),
                 };
-                self.stack.push(if is_array {
-                    Value::Array(crate::value::ObjId(r as u32))
-                } else if is_float {
-                    Value::Float(f64::from_bits(r as u64))
-                } else {
-                    Value::Int(r)
-                });
+                self.stack.push(boxed);
                 return Ok(());
             }
             // Float arg -> the float-param specialization (leaf methods only).
@@ -18999,17 +18950,10 @@ impl Vm {
                     self.jit_native_fparam.insert(proto_idx, compiled);
                 }
                 if let Some(Some(np)) = self.jit_native_fparam.get(&proto_idx) {
-                    let is_array = np.returns_array.get();
-                    let is_float = np.returns_float.get();
                     let vm_ptr = self as *const crate::vm::Vm;
                     if let Some(r) = np.call(vm_ptr, &self_val, f.to_bits() as i64) {
-                        self.stack.push(if is_array {
-                            Value::Array(crate::value::ObjId(r as u32))
-                        } else if is_float {
-                            Value::Float(f64::from_bits(r as u64))
-                        } else {
-                            Value::Int(r)
-                        });
+                        let boxed = np.box_ret(r);
+                        self.stack.push(boxed);
                         return Ok(());
                     }
                 }

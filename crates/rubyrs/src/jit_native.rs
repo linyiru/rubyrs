@@ -105,6 +105,29 @@ pub(crate) struct NativeProto {
 }
 
 impl NativeProto {
+    /// Box a native i64 result into the correct `Value` per the recorded return
+    /// kind. Honoring `returns_bool` / `returns_nil` is NOT optional: a Bool
+    /// method returns the `icmp` 0/1 (i.e. `false`/`true`) and a nil method a 0
+    /// sentinel — boxing either as `Integer` silently corrupts results. (Ruby `0`
+    /// is truthy, so a Bool `false` mis-boxed as `Integer(0)` flips every
+    /// `predicate ? a : b`; that is exactly the `Time#yday` off-by-one:
+    /// `__strftime_leap?(2023)` returned `Integer(0)` — truthy — instead of
+    /// `false`.) Every native-method call site must box through here.
+    #[inline]
+    pub(crate) fn box_ret(&self, r: i64) -> Value {
+        if self.returns_array.get() {
+            Value::Array(crate::value::ObjId(r as u32))
+        } else if self.returns_float.get() {
+            Value::Float(f64::from_bits(r as u64))
+        } else if self.returns_bool.get() {
+            Value::Bool(r != 0)
+        } else if self.returns_nil.get() {
+            Value::Nil
+        } else {
+            Value::Int(r)
+        }
+    }
+
     /// Run native code. `recv` is the receiver (read by ivar primitives; ignored
     /// by pure-integer methods). `None` = deopt (overflow, or a non-Int ivar):
     /// the caller falls back to the interpreter.
