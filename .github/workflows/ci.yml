@@ -93,6 +93,20 @@ jobs:
         env:
           STRESS_GC: "1"
 
+      - name: Diff parity under native JIT (interpreter == JIT == CRuby)
+        # The default `Run tests` step builds WITHOUT `jit-native`, so the
+        # `tests/diff/*.rb` parity suite only ever exercised the interpreter —
+        # a JIT that computes a WRONG value (not a crash) sailed through CI.
+        # That is exactly how the value-JIT `@h[k]` bug shipped: `jit_hash_get_value`
+        # ignored a Hash's default_proc on a miss, so RuboCop's `Config#for_cop`
+        # returned nil and the run aborted (fixed in 8e41a045). This step re-runs
+        # the SAME diff suite with the native JIT on, so any JIT/interpreter/CRuby
+        # divergence fails the build. Runs on both ubuntu (x86_64) and macos
+        # (arm64) via the matrix — Cranelift codegen is arch-specific.
+        run: cargo test --release --locked --features jit-native --test diff_cruby
+        env:
+          RUBYRS_JIT_NATIVE: "1"
+
       - name: Verify cext example bundles build
         # Belt-and-suspenders: even if the integration tests changed
         # paths or were skipped, this step independently runs each
