@@ -530,6 +530,77 @@ pub(crate) fn from_bytes(bytes: &[u8]) -> Result<VmImage, postcard::Error> {
     postcard::from_bytes(bytes)
 }
 
+const MAGIC: &[u8; 4] = b"RRS1";
+const FORMAT_VERSION: u32 = 1;
+
+/// Outcome of a validated load: either the image was restored, or it was
+/// rejected (with a reason) and the VM is UNTOUCHED so the caller can fall
+/// back to a normal `require`.
+pub(crate) enum LoadOutcome {
+    Restored,
+    Rejected(String),
+}
+
+/// Write a validated image file: `MAGIC | format-version | rubyrs-version |
+/// postcard(image)`, via a temp file + rename so a crashed/partial write is
+/// never observed as a valid cache.
+pub(crate) fn save_image(vm: &crate::vm::Vm, path: &std::path::Path) -> std::io::Result<()> {
+    let graph = capture(vm);
+    let body = to_bytes(vm, &graph)
+        .map_err(|e| std::io::Error::other(format!("snapshot encode: {e}")))?;
+    let ver = env!("CARGO_PKG_VERSION").as_bytes();
+    let mut out = Vec::with_capacity(body.len() + 16 + ver.len());
+    out.extend_from_slice(MAGIC);
+    out.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+    out.extend_from_slice(&(ver.len() as u32).to_le_bytes());
+    out.extend_from_slice(ver);
+    out.extend_from_slice(&body);
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, &out)?;
+    std::fs::rename(&tmp, path)
+}
+
+/// Read + VALIDATE an image and, only if compatible, restore it into `vm`.
+/// Rejects (leaving `vm` untouched) on: missing/short file, bad magic, format
+/// or rubyrs-version mismatch, decode error, or — the load-bearing check — an
+/// interner PREFIX that doesn't match this fresh VM's preamble (a mismatch
+/// would mis-bind every symbol the image's bytecode references). A rejected
+/// load is safe: the caller runs the normal `require` path.
+pub(crate) fn load_image(vm: &mut crate::vm::Vm, path: &std::path::Path) -> LoadOutcome {
+    use crate::intern::SymId;
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => return LoadOutcome::Rejected(format!("read: {e}")),
+    };
+    if bytes.len() < 12 || &bytes[0..4] != MAGIC {
+        return LoadOutcome::Rejected("bad magic".into());
+    }
+    if u32::from_le_bytes(bytes[4..8].try_into().unwrap()) != FORMAT_VERSION {
+        return LoadOutcome::Rejected("format version".into());
+    }
+    let vlen = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+    if bytes.len() < 12 + vlen {
+        return LoadOutcome::Rejected("truncated header".into());
+    }
+    if &bytes[12..12 + vlen] != env!("CARGO_PKG_VERSION").as_bytes() {
+        return LoadOutcome::Rejected("rubyrs version mismatch".into());
+    }
+    let img = match from_bytes(&bytes[12 + vlen..]) {
+        Ok(i) => i,
+        Err(e) => return LoadOutcome::Rejected(format!("decode: {e}")),
+    };
+    if img.interner.len() < vm.interner.len() {
+        return LoadOutcome::Rejected("interner shorter than fresh prefix".into());
+    }
+    for i in 0..vm.interner.len() {
+        if &**vm.interner.resolve(SymId(i as u32)) != img.interner[i].as_str() {
+            return LoadOutcome::Rejected(format!("interner prefix mismatch at {i}"));
+        }
+    }
+    restore(vm, img);
+    LoadOutcome::Restored
+}
+
 fn u8_to_vis(v: u8) -> Visibility {
     match v {
         1 => Visibility::Protected,
@@ -960,8 +1031,19 @@ pub(crate) fn restore(vm: &mut crate::vm::Vm, img: VmImage) {
     // 4b. All top-level constants — heap-valued ones point into the restored
     //     heap, class-valued ones resolve to the class map. Overwrites the
     //     fresh VM's builtin constants with the image's (consistent heap).
+    //
+    //     EXCEPT process-specific constants: ARGV/ARGF/ENV belong to the LIVE
+    //     process, not the image. The fresh process already installed the real
+    //     ARGV from *its* command line (via `set_argv`, before load); ENV is
+    //     the live environment. Restoring the builder's (typically empty) ARGV
+    //     here would make the restored run silently ignore its own arguments —
+    //     e.g. `rubocop --only Foo file.rb` would scan the cwd with no config.
     for (name_sym, vi) in &img.constants {
-        vm.constants.insert(SymId(*name_sym), value_from_image(vi, &resolved, &kinds));
+        let sym = SymId(*name_sym);
+        if matches!(&**vm.interner.resolve(sym), "ARGV" | "ARGF" | "ENV") {
+            continue;
+        }
+        vm.constants.insert(sym, value_from_image(vi, &resolved, &kinds));
     }
 
     // 5. Toplevel methods.

@@ -3709,32 +3709,25 @@ self.eval_inner(
     /// class graph + heap + constants; closures/regex fidelity are WIP.
     #[cfg(feature = "preamble-cache")]
     pub fn snapshot_save(&self, path: &Path) -> std::io::Result<()> {
-        let graph = crate::snapshot::capture(&self.vm);
-        if std::env::var_os("RUBYRS_SNAPSHOT_DEBUG").is_some() {
-            for ci in &graph.classes {
-                if ci.name.contains("YAML") || ci.name.contains("Psych") {
-                    eprintln!(
-                        "snap-dbg: class {:?} methods={} singleton_methods={} singleton_view={:?} is_module={}",
-                        ci.name, ci.methods.len(), ci.singleton_methods.len(), ci.singleton_view, ci.is_module
-                    );
-                }
-            }
-            eprintln!("snap-dbg: total classes={}", graph.classes.len());
-        }
-        let bytes = crate::snapshot::to_bytes(&self.vm, &graph)
-            .map_err(|e| std::io::Error::other(format!("snapshot encode: {e}")))?;
-        std::fs::write(path, bytes)
+        crate::snapshot::save_image(&self.vm, path)
     }
 
-    /// Restore a VM-state image from disk into THIS Runtime (which must be
-    /// freshly constructed — same binary/preamble as the one that saved it).
+    /// Try to restore a validated VM-state image into THIS Runtime (which must
+    /// be freshly constructed). Returns `Ok(true)` if restored, `Ok(false)` if
+    /// the image was missing/stale/incompatible (VM left untouched — the
+    /// caller falls back to a normal `require`). Never restores an image that
+    /// doesn't match this binary's preamble.
     #[cfg(feature = "preamble-cache")]
-    pub fn snapshot_load(&mut self, path: &Path) -> std::io::Result<()> {
-        let bytes = std::fs::read(path)?;
-        let img = crate::snapshot::from_bytes(&bytes)
-            .map_err(|e| std::io::Error::other(format!("snapshot decode: {e}")))?;
-        crate::snapshot::restore(&mut self.vm, img);
-        Ok(())
+    pub fn snapshot_load(&mut self, path: &Path) -> std::io::Result<bool> {
+        match crate::snapshot::load_image(&mut self.vm, path) {
+            crate::snapshot::LoadOutcome::Restored => Ok(true),
+            crate::snapshot::LoadOutcome::Rejected(reason) => {
+                if std::env::var_os("RUBYRS_SNAPSHOT_DEBUG").is_some() {
+                    eprintln!("rubyrs: snapshot rejected ({reason}) — falling back");
+                }
+                Ok(false)
+            }
+        }
     }
 
     /// If `trap` is an uncaught `SystemExit` (i.e. the script called

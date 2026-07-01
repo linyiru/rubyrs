@@ -457,9 +457,22 @@ fn main() {
     // `require`). Only one is usually set per invocation.
     #[cfg(feature = "preamble-cache")]
     if let Some(p) = std::env::var_os("RUBYRS_SNAPSHOT_LOAD") {
-        if let Err(e) = rt.snapshot_load(std::path::Path::new(&p)) {
-            eprintln!("rubyrs: snapshot load failed: {e}");
-            process::exit(1);
+        // Graceful: a missing/stale/incompatible image returns Ok(false) and
+        // leaves the VM untouched, so the script's own `require` runs (correct,
+        // just not accelerated). Only a hard IO error is fatal.
+        match rt.snapshot_load(std::path::Path::new(&p)) {
+            // Restore replaces the whole heap with the image's, discarding the
+            // ARGV array allocated by `set_argv` above (its constant would dangle
+            // into the old heap). Re-install ARGV from THIS process's command
+            // line so the restored run sees its own arguments — otherwise e.g.
+            // `rubocop --only Foo file.rb` restored from an image built with an
+            // empty ARGV would scan the cwd with no config.
+            Ok(true) => rt.set_argv(&args[2..]),
+            Ok(false) => {}
+            Err(e) => {
+                eprintln!("rubyrs: snapshot load failed: {e}");
+                process::exit(1);
+            }
         }
     }
     let result = rt.eval_file(path);
