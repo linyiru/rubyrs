@@ -47,6 +47,7 @@ pub(crate) struct CapturedGraph {
     pub(crate) cache_counter: u32,
     pub(crate) classes: Vec<ClassImage>,
     pub(crate) registry: Vec<(u32, u32)>,
+    pub(crate) const_classes: Vec<(u32, u32)>,
     pub(crate) toplevel_methods: Vec<(u32, MethodImage)>,
 }
 
@@ -59,6 +60,7 @@ struct VmImageRef<'a> {
     cache_counter: u32,
     classes: &'a [ClassImage],
     registry: &'a [(u32, u32)],
+    const_classes: &'a [(u32, u32)],
     toplevel_methods: &'a [(u32, MethodImage)],
 }
 
@@ -75,6 +77,11 @@ pub(crate) struct VmImage {
     pub(crate) classes: Vec<ClassImage>,
     /// The `vm.classes` registry: (name SymId, class id).
     pub(crate) registry: Vec<(u32, u32)>,
+    /// Top-level constants that bind to a class (`class Foo` binds the `Foo`
+    /// constant): (name SymId, class id). Restored into `vm.constants` so a
+    /// bare `Foo` const-ref resolves. Non-class constants (heap-valued) are
+    /// deferred to the heap slice (P3).
+    pub(crate) const_classes: Vec<(u32, u32)>,
     /// Toplevel (`<main>`) methods: (name SymId, method).
     pub(crate) toplevel_methods: Vec<(u32, MethodImage)>,
 }
@@ -209,6 +216,16 @@ pub(crate) fn capture(vm: &crate::vm::Vm) -> CapturedGraph {
         .iter()
         .map(|(sym, c)| (sym.0, ids.intern(c)))
         .collect();
+    // Seed from class-valued top-level constants too (BEFORE the fixpoint,
+    // so any class reachable only via a constant is still captured).
+    let const_classes: Vec<(u32, u32)> = vm
+        .constants
+        .iter()
+        .filter_map(|(sym, v)| match v {
+            crate::value::Value::Class(c) => Some((sym.0, ids.intern(c))),
+            _ => None,
+        })
+        .collect();
     // Discover transitively: capture_class enqueues superclass/includes/
     // prepends via `ids.intern`, growing `ids.order`. Walk by index so
     // newly-discovered classes are captured too (fixpoint).
@@ -225,7 +242,7 @@ pub(crate) fn capture(vm: &crate::vm::Vm) -> CapturedGraph {
         .iter()
         .map(|(sym, m)| (sym.0, capture_method(m, &mut ids)))
         .collect();
-    CapturedGraph { cache_counter: vm.cache_counter, classes, registry, toplevel_methods }
+    CapturedGraph { cache_counter: vm.cache_counter, classes, registry, const_classes, toplevel_methods }
 }
 
 /// Serialize the VM's proto/interner tables + a [`CapturedGraph`] to postcard
@@ -243,6 +260,7 @@ pub(crate) fn to_bytes(
         cache_counter: graph.cache_counter,
         classes: &graph.classes,
         registry: &graph.registry,
+        const_classes: &graph.const_classes,
         toplevel_methods: &graph.toplevel_methods,
     };
     postcard::to_allocvec(&img)
@@ -251,6 +269,172 @@ pub(crate) fn to_bytes(
 /// Deserialize an image from postcard bytes.
 pub(crate) fn from_bytes(bytes: &[u8]) -> Result<VmImage, postcard::Error> {
     postcard::from_bytes(bytes)
+}
+
+fn u8_to_vis(v: u8) -> Visibility {
+    match v {
+        1 => Visibility::Protected,
+        2 => Visibility::Private,
+        _ => Visibility::Public,
+    }
+}
+
+/// Build a fresh, empty `Class` shell with the given name/module flag. All
+/// edge/method tables start empty; the caller wires them in pass 2.
+fn new_class_shell(name: String, is_module: bool) -> Rc<Class> {
+    use std::cell::{Cell, RefCell};
+    Rc::new(Class {
+        name,
+        is_module,
+        undefed: RefCell::new(crate::intern::FxHashSet::default()),
+        anon_serial: Cell::new(0),
+        ivars: RefCell::new(crate::intern::FxHashMap::default()),
+        methods: RefCell::new(crate::intern::FxHashMap::default()),
+        singleton_methods: RefCell::new(crate::intern::FxHashMap::default()),
+        superclass: RefCell::new(None),
+        includes: RefCell::new(Vec::new()),
+        prepends: RefCell::new(Vec::new()),
+        singleton_prepends: RefCell::new(Vec::new()),
+        singleton_includes: RefCell::new(Vec::new()),
+        singleton_view: RefCell::new(None),
+        singleton_target: RefCell::new(None),
+        class_vars: RefCell::new(crate::intern::FxHashMap::default()),
+        consts: RefCell::new(crate::intern::FxHashMap::default()),
+        assigned_name: RefCell::new(None),
+        class_tag: None,
+        #[cfg(feature = "cext")]
+        cext_alloc_func: Cell::new(None),
+    })
+}
+
+fn build_method(mi: &MethodImage, defining: &Rc<Class>, id_to_class: &[Rc<Class>]) -> Rc<Method> {
+    let defining_class = mi
+        .defining_class
+        .and_then(|id| id_to_class.get(id as usize))
+        .map(Rc::downgrade)
+        .or_else(|| Some(Rc::downgrade(defining)));
+    Rc::new(Method {
+        params: mi.params.clone(),
+        proto_idx: mi.proto_idx as usize,
+        fixed_arity: mi.fixed_arity.map(|(required, n_locals, stack_eligible)| {
+            crate::value::FixedArity { required, n_locals, stack_eligible }
+        }),
+        defining_class,
+        visibility: std::cell::Cell::new(u8_to_vis(mi.visibility)),
+        closure: None,
+        builtin: None,
+        original_name: mi.original_name.map(crate::intern::SymId),
+    })
+}
+
+/// Restore `img` into a FRESH `vm` (one that has just run its preamble, so
+/// builtins/Object/String exist). Class-graph slice only (P2 milestone): no
+/// heap objects, constants, or closures — a program whose captured state is
+/// pure classes+methods restores + dispatches correctly, because instances
+/// are created fresh when the restored code runs. Builtins are REUSED by name
+/// (never duplicated); user classes are created + their edges/methods wired.
+///
+/// Preconditions (hold when `vm` is a same-version fresh Runtime): the image's
+/// interner + protos share `vm`'s current prefix (same preamble), so the
+/// user tail is appended / the proto table replaced wholesale — the exact
+/// discipline `preamble_cache::try_load` uses.
+pub(crate) fn restore(vm: &mut crate::vm::Vm, img: VmImage) {
+    use crate::intern::SymId;
+    // 1. Interner: fresh prefix matches; append the user tail.
+    debug_assert!(img.interner.len() >= vm.interner.len());
+    for s in &img.interner[vm.interner.len()..] {
+        vm.interner.intern(s);
+    }
+    // 2. Protos + call-cache sizing (image ⊇ preamble at identical indices).
+    vm.protos = img.protos;
+    vm.cache_counter = img.cache_counter;
+    vm.ensure_call_caches(img.cache_counter as usize);
+
+    // 3. Resolve every image class-id to an Rc<Class>: reuse an existing
+    //    (builtin) class by its registered name, else create a shell. Also
+    //    register the newly-created ones.
+    let mut id_to_class: Vec<Option<Rc<Class>>> = vec![None; img.classes.len()];
+    let mut is_new = vec![false; img.classes.len()];
+    for &(name_sym, class_id) in &img.registry {
+        let idx = class_id as usize;
+        if let Some(existing) = vm.classes.get(&SymId(name_sym)) {
+            id_to_class[idx] = Some(existing.clone());
+        } else {
+            let ci = &img.classes[idx];
+            let shell = new_class_shell(ci.name.clone(), ci.is_module);
+            vm.classes.insert(SymId(name_sym), shell.clone());
+            id_to_class[idx] = Some(shell);
+            is_new[idx] = true;
+        }
+    }
+    // Any class reached only via an edge (unregistered — anonymous / a module
+    // referenced by include) gets a shell too, so edge resolution never nulls.
+    for i in 0..img.classes.len() {
+        if id_to_class[i].is_none() {
+            let ci = &img.classes[i];
+            id_to_class[i] = Some(new_class_shell(ci.name.clone(), ci.is_module));
+            is_new[i] = true;
+        }
+    }
+    let resolved: Vec<Rc<Class>> = id_to_class.into_iter().map(|c| c.unwrap()).collect();
+
+    // 4. Wire edges + install methods for NEWLY-created classes only (reused
+    //    builtins already carry correct state in the fresh VM).
+    for i in 0..img.classes.len() {
+        if !is_new[i] {
+            continue;
+        }
+        let ci = &img.classes[i];
+        let cls = &resolved[i];
+        if let Some(sid) = ci.superclass {
+            *cls.superclass.borrow_mut() = Some(resolved[sid as usize].clone());
+        }
+        *cls.includes.borrow_mut() = ci.includes.iter().map(|&id| resolved[id as usize].clone()).collect();
+        *cls.prepends.borrow_mut() = ci.prepends.iter().map(|&id| resolved[id as usize].clone()).collect();
+        for (name_sym, mi) in &ci.methods {
+            let m = build_method(mi, cls, &resolved);
+            cls.methods.borrow_mut().insert(SymId(*name_sym), m);
+        }
+        for (name_sym, mi) in &ci.singleton_methods {
+            let m = build_method(mi, cls, &resolved);
+            cls.singleton_methods.borrow_mut().insert(SymId(*name_sym), m);
+        }
+    }
+
+    // 4b. Class-name constants so a bare `Foo` const-ref resolves.
+    for &(name_sym, class_id) in &img.const_classes {
+        vm.constants.insert(
+            SymId(name_sym),
+            crate::value::Value::Class(resolved[class_id as usize].clone()),
+        );
+    }
+
+    // 5. Toplevel methods.
+    for (name_sym, mi) in &img.toplevel_methods {
+        // Toplevel methods have no defining class; build_method falls back to
+        // a downgrade of `defining` only when the image had one — pass a
+        // throwaway that the None-arity path ignores. Use the first resolved
+        // class as the fallback anchor is wrong; instead skip defining.
+        let m = Rc::new(Method {
+            params: mi.params.clone(),
+            proto_idx: mi.proto_idx as usize,
+            fixed_arity: mi.fixed_arity.map(|(required, n_locals, stack_eligible)| {
+                crate::value::FixedArity { required, n_locals, stack_eligible }
+            }),
+            defining_class: mi
+                .defining_class
+                .and_then(|id| resolved.get(id as usize))
+                .map(Rc::downgrade),
+            visibility: std::cell::Cell::new(u8_to_vis(mi.visibility)),
+            closure: None,
+            builtin: None,
+            original_name: mi.original_name.map(SymId),
+        });
+        vm.toplevel_methods.insert(SymId(*name_sym), m);
+    }
+
+    // 6. Invalidate any inline caches minted before the graph changed.
+    vm.method_gen = vm.method_gen.wrapping_add(1);
 }
 
 #[cfg(test)]
@@ -323,5 +507,55 @@ mod tests {
         );
 
         assert!(!bytes.is_empty());
+    }
+
+    /// P2 end-to-end: capture a class graph, restore it into a FRESH VM that
+    /// never ran the class defs, and dispatch against the restored classes —
+    /// exercising an instance method, an INHERITED method, an INCLUDED-module
+    /// method, a SINGLETON method, and `initialize`. Output must match a cold
+    /// run (defs + probe in one VM). This proves the restore wiring (the half
+    /// the fork PoC couldn't, since fork shares live Rc pointers).
+    #[test]
+    fn restore_runs_dispatch_end_to_end() {
+        let defs = r#"
+            module Greeting
+              def hello; "hi #{name}"; end
+            end
+            class Animal
+              def initialize(n); @n = n; end
+              def name; @n; end
+            end
+            class Dog < Animal
+              include Greeting
+              def self.species; "canis"; end
+              def speak; "woof"; end
+            end
+        "#;
+        let probe =
+            r#"Dog.new("rex").name + "|" + Dog.new("z").speak + "|" + Dog.new("y").hello + "|" + Dog.species"#;
+
+        // loader → capture → bytes → image
+        let mut loader = crate::Runtime::new();
+        loader.eval(defs, "defs").expect("defs eval");
+        let graph = capture(&loader.vm);
+        let bytes = to_bytes(&loader.vm, &graph).expect("serialize");
+        let img = from_bytes(&bytes).expect("deserialize");
+
+        // restore into a FRESH vm (never saw the defs), then run the probe
+        let mut restored = crate::Runtime::new();
+        restore(&mut restored.vm, img);
+        let vr = restored.eval(probe, "probe").expect("restored probe eval");
+
+        // cold reference
+        let mut cold = crate::Runtime::new();
+        cold.eval(defs, "defs").expect("cold defs");
+        let vc = cold.eval(probe, "probe").expect("cold probe");
+
+        let as_s = |v: &crate::value::Value| match v {
+            crate::value::Value::Str(s) => s.to_string_lossy(),
+            other => format!("{other:?}"),
+        };
+        assert_eq!(as_s(&vr), as_s(&vc), "restored dispatch != cold");
+        assert_eq!(as_s(&vr), "rex|woof|hi y|canis", "unexpected result");
     }
 }
