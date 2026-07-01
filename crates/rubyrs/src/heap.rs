@@ -386,6 +386,19 @@ pub(crate) struct HashObj {
     /// already returns a well-mixed 64-bit value — re-hashing it
     /// through SipHash would just burn cycles.
     pub(crate) index: Option<HashIndex>,
+    /// O(1) index for keys that override Ruby-level `hash`/`eql?` (e.g.
+    /// `Parser::Source::Range`, AST nodes). The native `index` above can't
+    /// hold them — its `ruby_hash` is identity-based, so value-equal-but-
+    /// distinct objects land in different buckets and never dedup. This maps
+    /// the key's RUBY `#hash` (an i64; non-Integer results fold to 0) → the
+    /// `pairs` positions that hash there, so `vm_hash_find`/`insert` only
+    /// `eql?`-compare within one bucket instead of scanning all pairs. Built
+    /// + maintained at the VM level (`ensure_user_index`) since computing the
+    /// hash needs method dispatch. `None` = not built / invalidated (a delete
+    /// shifts positions). Only u32 offsets, so the GC never marks it. Without
+    /// it, RuboCop's `add_offense` dedup (`Set#add?` over Range keys) was
+    /// O(offenses²) — ~30s on a 7617-offense file.
+    pub(crate) user_index: Option<crate::intern::FxHashMap<i64, Vec<u32>>>,
     /// Per-instance eigenclass — `def h.method_missing` /
     /// `h.define_singleton_method` (the openstruct-over-Hash
     /// pattern; minitest's ValueMonad tests). `None` for the
@@ -446,6 +459,7 @@ impl HashObj {
             class_tag: None,
             ivars: crate::intern::FxHashMap::default(),
             index: None,
+            user_index: None,
             singleton_class: None,
             frozen: std::cell::Cell::new(false),
             by_identity: std::cell::Cell::new(false),
@@ -870,6 +884,7 @@ impl Heap {
         // live (so building a Hash stays O(1) per key, not O(n²)).
         if let HeapObj::Hash(h) = self.get_mut(id) {
             h.index = None;
+            h.user_index = None;
             &mut h.pairs
         } else {
             panic!("ICE: heap slot is not a Hash")
@@ -981,6 +996,7 @@ impl Heap {
         let h = self.hash_obj_mut(id);
         let (_, v) = h.pairs.remove(i);
         h.index = None;
+        h.user_index = None; // positions shifted — user-key index invalidated too
         Some(v)
     }
     /// The user Hash-subclass this Hash is an instance of, if any

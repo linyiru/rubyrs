@@ -104,30 +104,108 @@ impl Vm {
         Ok(a.ruby_eql(b, &self.heap))
     }
 
-    /// Find the index of `key` in Hash `id`, honoring a user-defined `eql?` on
-    /// the QUERY key (linear `eql?` scan). Falls back to the fast identity-based
-    /// heap index for ordinary keys (zero overhead). Used by `[]` / `fetch` /
-    /// `key?` / `delete` / `assoc` so a Hash with hash/eql-overriding keys
-    /// matches CRuby.
+    /// Call a key's user `hash` override and reduce it to an i64 bucket key.
+    /// A non-Integer result folds to 0 (still correct: `eql?` disambiguates
+    /// within a bucket — just less selective for those rare keys). Also serves
+    /// CRuby's arity-raise on a bad `hash` override. Caller guarantees `key`
+    /// has a user `hash` method (checked via `key_needs_ruby_hash`).
+    fn key_ruby_hash(&mut self, key: &Value, hash_sym: crate::intern::SymId) -> Result<i64, Trap> {
+        if let Some(m) = self.key_user_method(key, hash_sym) {
+            let r = self.call_resolved_method(m, key.clone(), vec![])?;
+            return Ok(match r { Value::Int(n) => n, _ => 0 });
+        }
+        Ok(0)
+    }
+
+    /// Build Hash `id`'s user-key index if absent: bucket every user-`hash`/
+    /// `eql?` key by its Ruby `#hash`. Native keys interleaved in a mixed Hash
+    /// are skipped (they use the identity-based heap `index`). O(n) dispatches,
+    /// done once and reused until a delete/`hash_mut` invalidates it.
+    fn ensure_user_index(
+        &mut self,
+        id: ObjId,
+        hash_sym: crate::intern::SymId,
+        eql_sym: crate::intern::SymId,
+    ) -> Result<(), Trap> {
+        if matches!(self.heap.get(id), HeapObj::Hash(h) if h.user_index.is_some()) {
+            return Ok(());
+        }
+        let n = self.heap.hash(id).len();
+        let mut idx: crate::intern::FxHashMap<i64, Vec<u32>> = crate::intern::FxHashMap::default();
+        let pg = PinGuard::new(self);
+        for i in 0..n {
+            let k = match pg.vm.heap.get(id) {
+                HeapObj::Hash(h) if i < h.pairs.len() => h.pairs[i].0.clone(),
+                _ => break,
+            };
+            if pg.vm.key_needs_ruby_hash(&k, hash_sym, eql_sym) {
+                let hv = pg.vm.key_ruby_hash(&k, hash_sym)?;
+                idx.entry(hv).or_default().push(i as u32);
+            }
+        }
+        pg.vm.heap.hash_obj_mut(id).user_index = Some(idx);
+        Ok(())
+    }
+
+    /// `eql?`-scan the positions in `id`'s user-index bucket for `hv`, returning
+    /// the pair index of the first key equal to `key` (or None). O(bucket-size)
+    /// — usually 1. Assumes `ensure_user_index` has run.
+    fn vm_hash_find_bucketed(
+        &mut self,
+        id: ObjId,
+        key: &Value,
+        hv: i64,
+        eql_sym: crate::intern::SymId,
+    ) -> Result<Option<usize>, Trap> {
+        let bucket: Vec<u32> = match self.heap.get(id) {
+            HeapObj::Hash(h) => h
+                .user_index
+                .as_ref()
+                .and_then(|ui| ui.get(&hv))
+                .cloned()
+                .unwrap_or_default(),
+            _ => return Ok(None),
+        };
+        if bucket.is_empty() {
+            return Ok(None);
+        }
+        let mut pg = PinGuard::new(self);
+        pg.pin(key.clone());
+        for &pos in &bucket {
+            let existing = match pg.vm.heap.get(id) {
+                HeapObj::Hash(h) if (pos as usize) < h.pairs.len() => h.pairs[pos as usize].0.clone(),
+                _ => continue,
+            };
+            if pg.vm.keys_ruby_eql(key, &existing, eql_sym)? {
+                return Ok(Some(pos as usize));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Find the index of `key` in Hash `id`, honoring a user-defined `hash`/
+    /// `eql?` on the key. Ordinary keys use the fast identity-based heap index
+    /// (zero overhead). User-hash keys use the bucketed `user_index` (Ruby
+    /// `#hash` → positions), so this is O(1)-amortized instead of an O(n)
+    /// `eql?` scan — RuboCop's `add_offense` dedup (`Set#add?` over Range keys)
+    /// was O(offenses²) without it. Used by `[]` / `fetch` / `key?` / `delete`
+    /// / `assoc` so a Hash with hash/eql-overriding keys matches CRuby.
     pub(crate) fn vm_hash_find(&mut self, id: ObjId, key: &Value) -> Result<Option<usize>, Trap> {
         let hash_sym = self.interner.intern("hash");
         let eql_sym = self.interner.intern("eql?");
         if self.hash_is_by_identity(id) || !self.key_needs_ruby_hash(key, hash_sym, eql_sym) {
             return Ok(self.heap.hash_index_lookup(id, key));
         }
-        let n = self.heap.hash(id).len();
+        // Pin the query key: `ensure_user_index`/`key_ruby_hash` dispatch user
+        // `hash` methods that allocate → can GC, and the query key (freshly
+        // built, e.g. `h[Key.new(...)]`) may be reachable only through this
+        // borrow. Without the pin, a rebuild (after a delete cleared the index)
+        // sweeps it → `class_of` on a dead slot.
         let mut pg = PinGuard::new(self);
         pg.pin(key.clone());
-        for i in 0..n {
-            let existing = match pg.vm.heap.get(id) {
-                HeapObj::Hash(h) if i < h.pairs.len() => h.pairs[i].0.clone(),
-                _ => break,
-            };
-            if pg.vm.keys_ruby_eql(key, &existing, eql_sym)? {
-                return Ok(Some(i));
-            }
-        }
-        Ok(None)
+        pg.vm.ensure_user_index(id, hash_sym, eql_sym)?;
+        let hv = pg.vm.key_ruby_hash(key, hash_sym)?;
+        pg.vm.vm_hash_find_bucketed(id, key, hv, eql_sym)
     }
 
     /// Insert `key`→`val`, honoring user-defined `hash`/`eql?`: calls `key.hash`
@@ -146,17 +224,30 @@ impl Vm {
         if self.hash_is_by_identity(id) || !self.key_needs_ruby_hash(&key, hash_sym, eql_sym) {
             return Ok(self.heap.hash_insert(id, key, val));
         }
-        if let Some(m) = self.key_user_method(&key, hash_sym) {
-            self.call_resolved_method(m, key.clone(), vec![])?;
-        }
-        match self.vm_hash_find(id, &key)? {
+        // Compute `key.hash` ONCE (also does CRuby's arity-raise), then find +
+        // insert within that bucket — O(1)-amortized, not an O(n) eql? scan.
+        // Pin key + val: the index build / hash dispatch can GC, and the owned
+        // `key`/`val` locals aren't GC roots until pushed into the (rooted)
+        // pairs (see the vm_hash_find note).
+        let mut pg = PinGuard::new(self);
+        pg.pin(key.clone());
+        pg.pin(val.clone());
+        pg.vm.ensure_user_index(id, hash_sym, eql_sym)?;
+        let hv = pg.vm.key_ruby_hash(&key, hash_sym)?;
+        match pg.vm.vm_hash_find_bucketed(id, &key, hv, eql_sym)? {
             Some(i) => {
-                let h = self.heap.hash_obj_mut(id);
+                let h = pg.vm.heap.hash_obj_mut(id);
                 Ok(Some(std::mem::replace(&mut h.pairs[i].1, val)))
             }
             None => {
-                let h = self.heap.hash_obj_mut(id);
+                let h = pg.vm.heap.hash_obj_mut(id);
+                let pos = h.pairs.len() as u32;
                 h.pairs.push((key, val));
+                // Maintain the bucket incrementally (append never shifts
+                // existing positions, so the index stays valid).
+                if let Some(ui) = h.user_index.as_mut() {
+                    ui.entry(hv).or_default().push(pos);
+                }
                 Ok(None)
             }
         }
@@ -186,7 +277,9 @@ impl Vm {
             Some(i) => {
                 let h = self.heap.hash_obj_mut(id);
                 let (_, v) = h.pairs.remove(i);
-                h.index = None; // positions shifted — drop the index, rebuilt lazily
+                // positions shifted — drop both indexes, rebuilt lazily
+                h.index = None;
+                h.user_index = None;
                 Ok(Some(v))
             }
             None => Ok(None),
@@ -1309,6 +1402,7 @@ impl Vm {
                             class_tag,
                             ivars,
                             index: None,
+                            user_index: None,
                             singleton_class,
                             frozen: std::cell::Cell::new(keep_frozen),
                             by_identity: std::cell::Cell::new(by_identity),

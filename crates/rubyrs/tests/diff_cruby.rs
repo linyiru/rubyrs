@@ -1215,6 +1215,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[cfg(feature = "stdlib")]
 #[test] fn set_ops_and_string_conv() { run_diff("set_ops_and_string_conv"); }
 #[test] fn instance_eval_def_singleton() { run_diff("instance_eval_def_singleton"); }
+#[cfg(feature = "stdlib")]
+#[test] fn hash_user_key_index() { run_diff("hash_user_key_index"); }
 #[test] fn range_bsearch() { run_diff("range_bsearch"); }
 #[test] fn const_qualified_nested_scope() { run_diff("const_qualified_nested_scope"); }
 #[test] fn struct_subclass_super() { run_diff("struct_subclass_super"); }
