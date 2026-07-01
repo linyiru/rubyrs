@@ -1042,6 +1042,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn jit_obj_tree_walk() { run_diff("jit_obj_tree_walk"); }
 #[test] fn jit_each_obj_walk() { run_diff("jit_each_obj_walk"); }
 #[test] fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
+#[test] fn jit_hash_ivar_default_proc() { run_diff("jit_hash_ivar_default_proc"); }
 #[test] fn jit_inline_objcall_guard() { run_diff("jit_inline_objcall_guard"); }
 #[test] fn jit_inline_ivar_read() { run_diff("jit_inline_ivar_read"); }
 #[test] fn jit_obj_arg2_walk() { run_diff("jit_obj_arg2_walk"); }

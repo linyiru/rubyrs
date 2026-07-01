@@ -6583,6 +6583,12 @@ enum ValuePat {
     /// (target=arg0).
     IvarGet { sym: crate::intern::SymId, read_arg0: bool },
     /// `jit_hash_get_value(recv, sym, arg0)` — `@h[key]` returning any Value.
+    /// Currently NEVER constructed: the `@h[k]` shape is declined in the pattern
+    /// match above because `jit_hash_get_value` ignores the Hash's default /
+    /// default_proc on a miss and the value-JIT has no deopt channel. Retained
+    /// (with the emit arm + host fn) so a future deopt-capable value-JIT can
+    /// re-enable it for non-defaulted hashes. See the decline comment above.
+    #[allow(dead_code)]
     HashAttr { sym: crate::intern::SymId },
 }
 
@@ -6611,11 +6617,20 @@ pub(crate) fn compile_value(
         {
             ValuePat::IvarGet { sym: *s, read_arg0: true }
         }
-        // `def attr(k); @attributes[k]; end` → @ivar[arg0] returning any Value.
-        [Op::LoadIvar(s), Op::LoadLocal(0), Op::Call(name, 1, _), Op::Return]
+        // `def attr(k); @h[k]; end` — DECLINED (correctness). The value-JIT has no
+        // deopt channel (`ValueProto::call` always yields a Value), and
+        // `jit_hash_get_value` scans only the stored pairs — on a miss it writes
+        // `nil` and does NOT honor the Hash's `default` / `default_proc`. For a
+        // defaulted Hash this is wrong: e.g. RuboCop's `Config#for_cop`
+        // (`@for_cop[cop]`, whose default_proc computes-and-caches the cop config)
+        // returned nil → `cop_config` nil → `Naming/InclusiveLanguage` crashed and
+        // the whole run aborted. Run these interpreted until the value-JIT can deopt
+        // on a defaulted-Hash miss. (Plain non-defaulted `@h[k]` readers lose this
+        // micro-opt; the hot rubocop shapes — the AST walk — don't use it.)
+        [Op::LoadIvar(_), Op::LoadLocal(0), Op::Call(name, 1, _), Op::Return]
             if *name == bracket_sym =>
         {
-            ValuePat::HashAttr { sym: *s }
+            return None;
         }
         _ => return None,
     };
