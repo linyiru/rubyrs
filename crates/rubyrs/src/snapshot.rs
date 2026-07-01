@@ -199,10 +199,37 @@ pub(crate) enum HeapObjImage {
     Dead,
     Instance { class: u32, ivars: Vec<(u32, ValueImage)>, frozen: bool },
     Array { elems: Vec<ValueImage>, class_tag: Option<u32>, ivars: Vec<(u32, ValueImage)>, frozen: bool },
-    Hash { pairs: Vec<(ValueImage, ValueImage)>, class_tag: Option<u32>, ivars: Vec<(u32, ValueImage)>, frozen: bool, by_identity: bool },
+    Hash {
+        pairs: Vec<(ValueImage, ValueImage)>,
+        class_tag: Option<u32>,
+        ivars: Vec<(u32, ValueImage)>,
+        frozen: bool,
+        by_identity: bool,
+        /// `Hash.new { |h,k| … }` default block (ObjId of a Block) — pervasive
+        /// in rubocop config (`relative_paths_cache`).
+        default_block: Option<u32>,
+        default_value: Option<Box<ValueImage>>,
+    },
     Range { begin: ValueImage, end: ValueImage, exclusive: bool },
     BigInt(Vec<u8>),
     Rational { num: Vec<u8>, den: Vec<u8> },
+    /// A `proc`/block closure. Captured env is imaged INLINE (sharing between
+    /// a block and its enclosing method's closure is not preserved yet — fine
+    /// for standalone blocks like Hash default blocks; define_method shared
+    /// closures are a later refinement).
+    Block {
+        proto_idx: u32,
+        captured: Vec<ValueImage>,
+        self_val: ValueImage,
+        lexical_cvar_class: Option<u32>,
+        param_start: u16,
+        n_params: u16,
+        rest_slot: Option<u16>,
+        kw_rest_slot: Option<u16>,
+        captured_is_method_scope: bool,
+        captured_yield_block: Option<u32>,
+        is_lambda: bool,
+    },
     Unsupported,
 }
 
@@ -270,11 +297,26 @@ fn capture_heap(vm: &crate::vm::Vm, ids: &mut ClassIds) -> Vec<HeapObjImage> {
                     ivars: image_fx_ivars(&h.ivars, ids),
                     frozen: h.frozen.get(),
                     by_identity: h.by_identity.get(),
+                    default_block: h.default_block.map(|b| b.0),
+                    default_value: h.default_value.as_ref().map(|v| Box::new(image_value(v, ids))),
                 },
                 HeapObj::Range(r) => HeapObjImage::Range {
                     begin: image_value(&r.begin, ids),
                     end: image_value(&r.end, ids),
                     exclusive: r.exclusive,
+                },
+                HeapObj::Block(b) => HeapObjImage::Block {
+                    proto_idx: b.proto_idx as u32,
+                    captured: b.captured.borrow().iter().map(|v| image_value(v, ids)).collect(),
+                    self_val: image_value(&b.self_val, ids),
+                    lexical_cvar_class: b.lexical_cvar_class.as_ref().map(|c| ids.intern(c)),
+                    param_start: b.param_start,
+                    n_params: b.n_params,
+                    rest_slot: b.rest_slot,
+                    kw_rest_slot: b.kw_rest_slot,
+                    captured_is_method_scope: b.captured_is_method_scope,
+                    captured_yield_block: b.captured_yield_block.map(|o| o.0),
+                    is_lambda: b.is_lambda,
                 },
                 #[cfg(feature = "bignum")]
                 HeapObj::BigInt(b) => HeapObjImage::BigInt(b.to_signed_bytes_le()),
@@ -525,6 +567,7 @@ fn heap_kind(hi: &HeapObjImage) -> u8 {
         HeapObjImage::Range { .. } => 4,
         HeapObjImage::BigInt(_) => 5,
         HeapObjImage::Rational { .. } => 6,
+        HeapObjImage::Block { .. } => 7,
     }
 }
 
@@ -577,6 +620,7 @@ fn value_from_image(vi: &ValueImage, classes: &[Rc<Class>], kinds: &[u8]) -> cra
                 4 => Value::Range(id),
                 5 => Value::BigInt(id),
                 6 => Value::Rational(id),
+                7 => Value::Block(id),
                 _ => Value::Nil,
             }
         }
@@ -623,7 +667,7 @@ fn build_heap(img_heap: &[HeapObjImage], classes: &[Rc<Class>], kinds: &[u8]) ->
                     frozen: std::cell::Cell::new(*frozen),
                 }))
             }
-            HeapObjImage::Hash { pairs, class_tag, ivars, frozen, by_identity } => {
+            HeapObjImage::Hash { pairs, class_tag, ivars, frozen, by_identity, default_block, default_value } => {
                 let mut h = HashObj::with_pairs(
                     pairs
                         .iter()
@@ -636,6 +680,9 @@ fn build_heap(img_heap: &[HeapObjImage], classes: &[Rc<Class>], kinds: &[u8]) ->
                 h.ivars = fx_ivars_from_image(ivars, classes, kinds);
                 h.frozen = std::cell::Cell::new(*frozen);
                 h.by_identity = std::cell::Cell::new(*by_identity);
+                h.default_block = default_block.map(crate::value::ObjId);
+                h.default_value =
+                    default_value.as_ref().map(|v| value_from_image(v, classes, kinds));
                 Slot::Live(HeapObj::Hash(h))
             }
             HeapObjImage::Range { begin, end, exclusive } => {
@@ -643,6 +690,35 @@ fn build_heap(img_heap: &[HeapObjImage], classes: &[Rc<Class>], kinds: &[u8]) ->
                     begin: value_from_image(begin, classes, kinds),
                     end: value_from_image(end, classes, kinds),
                     exclusive: *exclusive,
+                }))
+            }
+            HeapObjImage::Block {
+                proto_idx,
+                captured,
+                self_val,
+                lexical_cvar_class,
+                param_start,
+                n_params,
+                rest_slot,
+                kw_rest_slot,
+                captured_is_method_scope,
+                captured_yield_block,
+                is_lambda,
+            } => {
+                let env: Vec<Value> =
+                    captured.iter().map(|vi| value_from_image(vi, classes, kinds)).collect();
+                Slot::Live(HeapObj::Block(crate::value::BlockHandle {
+                    proto_idx: *proto_idx as usize,
+                    captured: std::rc::Rc::new(std::cell::RefCell::new(env)),
+                    self_val: value_from_image(self_val, classes, kinds),
+                    lexical_cvar_class: lexical_cvar_class.map(|id| classes[id as usize].clone()),
+                    param_start: *param_start,
+                    n_params: *n_params,
+                    rest_slot: *rest_slot,
+                    kw_rest_slot: *kw_rest_slot,
+                    captured_is_method_scope: *captured_is_method_scope,
+                    captured_yield_block: captured_yield_block.map(crate::value::ObjId),
+                    is_lambda: *is_lambda,
                 }))
             }
             #[cfg(feature = "bignum")]
