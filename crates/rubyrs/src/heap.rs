@@ -553,10 +553,17 @@ impl Heap {
             // Tunable via RUBYRS_GC_MIN_THRESHOLD (read inside
             // `sweep` for steady-state; init reads it too so a
             // tight-RSS embedder sees the lower bound immediately).
+            // 32768 (was 4096): a monotonic-load phase — `require "rubocop"`
+            // pulls in ~600 cop classes + rubocop-ast/parser, almost all
+            // long-lived — otherwise triggers collections at 4k/8k/16k that
+            // each re-mark a growing, mostly-live set for nothing. Raising the
+            // floor skips those (require 2.08s→1.51s, ~28%); it only bites
+            // while live < 32768, so large steady-state heaps (jekyll/AR use
+            // `live*2`) are unaffected. RSS cost ~+0.5MB.
             next_gc: std::env::var("RUBYRS_GC_MIN_THRESHOLD")
                 .ok()
                 .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(4096),
+                .unwrap_or(32768),
             max_live: None,
             #[cfg(feature = "_fiber")]
             fiber_alloc_count: 0,
@@ -1591,7 +1598,9 @@ impl Heap {
         // Meanwhile growth=4 lets garbage pile to 4× the live set
         // between sweeps: on the jekyll liquid-1k build that's
         // +4.7MB peak RSS (90.1 → 85.4MB at growth=2) for zero
-        // wall benefit. So the default is now `live * 2 max 4096`.
+        // wall benefit. So the default is now `live * 2 max 32768` (the 32768
+        // floor kills the `require "rubocop"` collection storm — see the
+        // init-site note; only bites while live < 32768).
         // growth=1 is NOT viable — every post-sweep allocation
         // immediately re-crosses the threshold and the build
         // degenerates to O(n²) sweeping (41 s vs 0.84 s).
@@ -1608,7 +1617,7 @@ impl Heap {
         let min_threshold = std::env::var("RUBYRS_GC_MIN_THRESHOLD")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(4096);
+            .unwrap_or(32768);
         self.next_gc = (live * growth).max(min_threshold);
         pending_frees
     }
