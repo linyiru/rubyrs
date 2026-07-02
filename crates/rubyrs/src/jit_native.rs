@@ -102,9 +102,101 @@ pub(crate) struct NativeProto {
     /// `(const_sym, const_ptr, tag_memo, result_memo)` — memoizes the answer for a
     /// non-Object value by its type tag.
     _value_is_a_caches: Vec<Box<std::cell::Cell<(usize, usize, usize, usize)>>>,
+    /// Deopt circuit-breaker (set by `Vm::jit_note_deopt`): once a proto has
+    /// deopted `JIT_DEOPT_KILL` times at dispatch, serving it is pure waste
+    /// (the native attempt runs, bails, and the interpreter re-runs the body
+    /// every call — RuboCop's `line`/`matched` shapes deopt on 100% of calls).
+    /// Dispatch sites skip a dead proto; the proto itself must stay ALIVE (not
+    /// be dropped from its cache map) because its machine address may be baked
+    /// into other compiled code's PIC caches.
+    pub(crate) dispatch_dead: std::cell::Cell<bool>,
+}
+
+/// A **by-value snapshot** of everything a dispatch site needs to RUN a
+/// `NativeProto` (code address, return-box kind, guards). Serving sites must
+/// copy this out of the cache map **before** calling the native code: the
+/// running code can re-enter the VM (a cold `jit_obj_call` PIC site compiles
+/// its callee via `jit_compile_obj_callee`) and INSERT into the very map the
+/// serving site borrowed its `&NativeProto` from — a rehash then moves the
+/// `NativeProto` and the borrow dangles (post-call `box_ret` reads freed
+/// memory). The machine code itself is stable (it lives in the `JITModule`'s
+/// mmap, which never moves), so a copied entry stays valid; only the STRUCT
+/// address is unstable. (`_module` keeps the mmap alive: entries are only used
+/// within the dispatch that copied them, while the map still owns the proto.)
+#[cfg(feature = "jit-native")]
+#[derive(Clone, Copy)]
+pub(crate) struct NpEntry {
+    ptr: extern "C" fn(*const crate::vm::Vm, *const Value, i64) -> NRet,
+    ptr2: Option<extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet>,
+    pub(crate) guard_class: usize,
+    ret_array: bool,
+    ret_float: bool,
+    ret_bool: bool,
+    ret_nil: bool,
+    pub(crate) param2_hash: bool,
+    /// Deopt circuit-breaker tripped — skip dispatch serving (see
+    /// `NativeProto::dispatch_dead`).
+    pub(crate) dead: bool,
+}
+
+#[cfg(feature = "jit-native")]
+impl NpEntry {
+    /// See [`NativeProto::call`].
+    #[inline]
+    pub(crate) fn call(&self, vm: *const crate::vm::Vm, recv: &Value, x: i64) -> Option<i64> {
+        let r = (self.ptr)(vm, recv as *const Value, x);
+        if r.ovf == 0 { Some(r.res) } else { None }
+    }
+
+    /// See [`NativeProto::call2`].
+    #[inline]
+    pub(crate) fn call2(
+        &self,
+        vm: *const crate::vm::Vm,
+        recv: &Value,
+        arg0: i64,
+        arg1: i64,
+    ) -> Option<i64> {
+        let f = self.ptr2.expect("ICE: call2 on a non-2-arg NpEntry");
+        let r = f(vm, recv as *const Value, arg0, arg1);
+        if r.ovf == 0 { Some(r.res) } else { None }
+    }
+
+    /// See [`NativeProto::box_ret`].
+    #[inline]
+    pub(crate) fn box_ret(&self, r: i64) -> Value {
+        if self.ret_array {
+            Value::Array(crate::value::ObjId(r as u32))
+        } else if self.ret_float {
+            Value::Float(f64::from_bits(r as u64))
+        } else if self.ret_bool {
+            Value::Bool(r != 0)
+        } else if self.ret_nil {
+            Value::Nil
+        } else {
+            Value::Int(r)
+        }
+    }
 }
 
 impl NativeProto {
+    /// Snapshot this proto's dispatch entry (see [`NpEntry`] for why serving
+    /// sites must copy before calling).
+    #[inline]
+    pub(crate) fn entry(&self) -> NpEntry {
+        NpEntry {
+            ptr: self.ptr,
+            ptr2: self.ptr2,
+            guard_class: self.guard_class.get(),
+            ret_array: self.returns_array.get(),
+            ret_float: self.returns_float.get(),
+            ret_bool: self.returns_bool.get(),
+            ret_nil: self.returns_nil.get(),
+            param2_hash: self.param2_hash.get(),
+            dead: self.dispatch_dead.get(),
+        }
+    }
+
     /// Box a native i64 result into the correct `Value` per the recorded return
     /// kind. Honoring `returns_bool` / `returns_nil` is NOT optional: a Bool
     /// method returns the `icmp` 0/1 (i.e. `false`/`true`) and a nil method a 0
@@ -648,6 +740,78 @@ fn emit_inline_guard_call(
     fb.seal_block(merge_b);
     let p = fb.block_params(merge_b);
     (p[0], p[1])
+}
+
+/// Cheap compile PRE-GATE (the "compile-attempt tax" killer, ADR 0034 serving
+/// follow-up): decide from the proto's SHAPE + a single op scan whether
+/// `compile()` could possibly succeed, WITHOUT paying for callee resolution,
+/// recursive callee compiles (`compile_native_for_class_rec` compiles fparam +
+/// objparam variants of every 1-arg callee BEFORE the top proto's own op gate
+/// runs), or Cranelift setup. On a real workload (RuboCop's cop walk) thousands
+/// of methods are dispatched once, attempt a compile, and decline on an
+/// unmodelled op (CreateBlock / LoadConstChain / Super / Yield / EnterBegin…) —
+/// this scan answers those in O(ops) with no allocation.
+///
+/// SOUNDNESS: `true` must never be wrong-to-compile (the real pipeline re-gates
+/// everything), and `false` must only be returned when `compile()` would
+/// CERTAINLY decline. Every arm below therefore admits a SUPERSET of what
+/// `compile()`'s op gate admits (unknown callees/getters are admitted here and
+/// resolved — or declined — by the real pipeline).
+///
+/// `allow_each_rewrite`: the objparam/objparam2 variants first rewrite one
+/// `CreateBlock + CallBlock(:each, 0)` pair into a while loop
+/// (`rewrite_each_block`), so those two ops are admissible for them; the block
+/// BODY lives in another proto and is re-gated by `compile()` after splicing.
+pub(crate) fn pregate(
+    proto: &Proto,
+    allow_zero_arg: bool,
+    obj_param2: bool,
+    allow_each_rewrite: bool,
+) -> bool {
+    // Shape gate — mirrors `compile()` exactly.
+    let n = proto.n_required_positional as usize;
+    let arity_ok = (n == 1 || (n == 0 && allow_zero_arg) || (n == 2 && obj_param2))
+        && proto.params.len() == n;
+    if !arity_ok || proto.rest_param.is_some() || !proto.kw_param_defaults.is_empty() {
+        return false;
+    }
+    for op in &proto.code {
+        match op {
+            Op::LoadConstInt(_)
+            | Op::LoadConstFloat(_)
+            | Op::LoadLocal(_)
+            | Op::StoreLocal(_)
+            | Op::IncLocal(_)
+            | Op::IncLocalNoPush(_)
+            | Op::Jump(_)
+            | Op::JumpIfFalse(_)
+            | Op::Return
+            | Op::Pop
+            | Op::Dup
+            | Op::EnterLoop
+            | Op::ExitLoop
+            | Op::LoadIvar(_)
+            | Op::LoadSymbol(_)
+            | Op::LoadConst(_)
+            | Op::LoadNil => {}
+            Op::BinOp(_) | Op::BinOpLocalLocal(_, _, _) | Op::BinOpInt(_, _) => {}
+            // Superset of the self-call / cross-call / getter arms: the maps
+            // aren't known yet, so admit any 0/1-arg bare call (and 2-arg for
+            // the obj_param2 variant); `compile()` declines the unresolvable.
+            Op::CallNoRecv(_, 0 | 1, _) => {}
+            Op::CallNoRecv(_, 2, _) if obj_param2 => {}
+            Op::Call(_, 0 | 1, _) => {}
+            Op::LoadLocalCall(_, _, _) => {}
+            Op::NewArray(0) => {}
+            Op::CallAset(_, 2, _) => {}
+            // The one CreateBlock+CallBlock(:each) pair `rewrite_each_block`
+            // can lower (objparam/objparam2 only).
+            Op::CreateBlock(_, _, 1, u16::MAX, u16::MAX) if allow_each_rewrite => {}
+            Op::CallBlock(_, 0, _) if allow_each_rewrite => {}
+            _ => return false,
+        }
+    }
+    true
 }
 
 pub(crate) fn compile(
@@ -1462,7 +1626,17 @@ pub(crate) fn compile(
         // methods that read a self-ivar — `fib` etc. pay nothing); the body's `@v`/`@l`/`@r`
         // reads become inline scans over it (`emit_ivar_scan`) with no per-read primitive
         // call. `len == 0` (self not an Object) → every scan finds nothing → deopt.
-        let reads_self_ivar = code.iter().any(|op| matches!(op, Op::LoadIvar(_)));
+        //
+        // A bare 0-arg getter call (`amount`, resolved via `getters` — B4) ALSO reads the
+        // array (its arm calls `emit_ivar_int_read` on `self_ivars_base`): a body with a
+        // getter call but NO `LoadIvar` of its own previously left base = 0, and the scan's
+        // not-found dummy load (`base + 8`, "safe to load" by design) dereferenced NULL —
+        // a latent crash that never fired while such methods compiled but were never
+        // SERVED (the pre-serving-fix state); the RuboCop predicates hit it immediately.
+        let reads_self_ivar = code.iter().any(|op| {
+            matches!(op, Op::LoadIvar(_))
+                || matches!(op, Op::CallNoRecv(name, 0, _) if getters.contains_key(name))
+        });
         let self_ivars_base = fb.declare_var(types::I64);
         let self_ivars_len = fb.declare_var(types::I64);
         if reads_self_ivar {
@@ -2704,6 +2878,7 @@ pub(crate) fn compile(
         _obj_call_caches: obj_call_caches,
         _bool_caches: bool_caches,
         _value_is_a_caches: value_is_a_caches,
+        dispatch_dead: std::cell::Cell::new(false),
     })
 }
 
@@ -5456,7 +5631,14 @@ pub(crate) unsafe extern "C" fn jit_obj_call_bool(
             Some(m) => m,
             None => return deopt,
         };
-        if m.closure.is_none() && m.builtin.is_none() {
+        // Visibility gate (same rule as `jit_compile_obj_callee`): a native
+        // obj-call site has no caller-`self` family, so only PUBLIC methods
+        // may be served — protected/private deopt to the interpreter, which
+        // applies the real rules.
+        if m.closure.is_none()
+            && m.builtin.is_none()
+            && m.visibility.get() == crate::value::Visibility::Public
+        {
             if let Some((iv, s)) = predicate_ivar_eq_sym(&vmm.protos[m.proto_idx].code) {
                 let packed = ((iv as usize) << 32) | (s as usize);
                 cache.set((cls_ptr, 0, packed));
@@ -5554,6 +5736,11 @@ pub(crate) unsafe extern "C" fn jit_obj_getter_array(
             Some(m) => m,
             None => return deopt,
         };
+        // Only PUBLIC getters may be served at a native obj-call site (no
+        // caller-`self` family here — see `jit_compile_obj_callee`).
+        if m.visibility.get() != crate::value::Visibility::Public {
+            return deopt;
+        }
         let iv = match vm.protos[m.proto_idx].getter_ivar {
             Some(iv) => iv,
             None => return deopt, // not a simple reader → interpreter
@@ -5613,6 +5800,10 @@ pub(crate) unsafe extern "C" fn jit_obj_getter_sym(
             Some(m) => m,
             None => return deopt,
         };
+        // Only PUBLIC getters — see the sibling fill above.
+        if m.visibility.get() != crate::value::Visibility::Public {
+            return deopt;
+        }
         let iv = match vm.protos[m.proto_idx].getter_ivar {
             Some(iv) => iv,
             None => return deopt,
@@ -6452,6 +6643,10 @@ pub(crate) unsafe extern "C" fn jit_arr_elem_attr_int(
             Some(m) => m,
             None => return deopt,
         };
+        // Only PUBLIC getters — see `jit_compile_obj_callee`'s visibility note.
+        if m.visibility.get() != crate::value::Visibility::Public {
+            return deopt;
+        }
         let iv = match vm.protos[m.proto_idx].getter_ivar {
             Some(iv) => iv,
             None => return deopt, // not a simple reader → interpreter

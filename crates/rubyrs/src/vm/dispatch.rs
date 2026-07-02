@@ -7683,34 +7683,54 @@ impl Vm {
             if !self.jit_native_on {
                 return false;
             }
+            // Only a 1-arg dispatch can ever be SERVED or COMPILED at the
+            // hook (its arms are `args.len() == 1`-gated; the 2-arg objparam2
+            // arm compiles in place at the fast paths), so any other argc
+            // returns immediately — a 0-arg (getter-shaped) or 2-arg self-recv
+            // dispatch previously paid two map probes here on every call.
+            // Routing a wrong-arity call was also never useful: the hook can't
+            // serve it, and the ArgumentError is raised identically either way.
+            if argc != 1 {
+                return false;
+            }
+            // Settled-dead negative cache: every 1-arg verdict exists and is
+            // dead → one dense read replaces the map probes below, forever.
+            if self.jit_flags_get(proto_idx) & crate::vm::JFLAG_NO_ONEARG != 0 {
+                return false;
+            }
             // Already compiled (integer or value) → route to use the native code.
             if matches!(self.jit_native.get(&proto_idx), Some(Some(_)))
                 || matches!(self.jit_value.get(&proto_idx), Some(Some(_)))
             {
                 return true;
             }
-            // Eligible shape not yet ruled out → route to the hook, which tries
-            // the integer JIT then the value JIT, caching each (Some = native,
-            // None = ineligible). Keep routing a 1-arg method until BOTH are
-            // ruled out, then it stays on the fast path forever.
+            // A compiled OBJ-PARAM variant is served IN PLACE (explicit-recv
+            // D Layer 4 + `try_invoke_fixed_method_from_stack`) — do NOT route
+            // it into the cascade. (Routing it was the "compiled but
+            // unreachable" defect: the routed call landed in
+            // `invoke_method_with_block_inner`, whose hook had no objparam arm,
+            // so the 34 compiled RuboCop predicates never executed.) A deopt
+            // now falls through to the in-place interpreted frame push, which
+            // is also cheaper than a cascade trip.
             //
             // Getters are NOT routed here (argc == 0): the interpreter's
             // `getter_ivar` fast path serves `obj.foo` frame-free, beating a
             // native call for a 1-op body. The value JIT's win is the 1-arg
             // `instance_variable_get(:lit)` shape — NOT fast-pathed, so native
             // dispatch-elimination pays off.
-            // A compiled OBJECT-param variant (`walk(node)`, ADR 0034) → route to use it.
-            if matches!(self.jit_native_objparam.get(&proto_idx), Some(Some(_))) {
-                return true;
-            }
-            let int_dead = matches!(self.jit_native.get(&proto_idx), Some(None));
-            let val_dead = matches!(self.jit_value.get(&proto_idx), Some(None));
-            // The obj-param variant compiles INSIDE B1, so keep routing until it too has
-            // been ruled out — else an Int/value-declined but obj-param-VIABLE method (the
-            // rubocop `.each` AST-walk shape) stopped routing before its obj-param variant
-            // ever compiled, and never fired.
-            let objp_dead = matches!(self.jit_native_objparam.get(&proto_idx), Some(None));
-            argc == 1 && !(int_dead && val_dead && objp_dead)
+            //
+            // Route ONLY while some 1-arg verdict is still missing: ONE trip
+            // to the hook compiles int+value+objparam together (each cached,
+            // Some or None), after which this predicate answers from the maps
+            // forever (and the hook settles `JFLAG_NO_ONEARG`, collapsing the
+            // answer to the one flag read above). The old predicate kept
+            // routing while `objparam` had no entry, but nothing on the
+            // cascade ever inserted one — every int/value-declined 1-arg
+            // method paid the full slow cascade on EVERY call, forever (a big
+            // slice of the JIT-on tax on the RuboCop walk).
+            !(self.jit_native.contains_key(&proto_idx)
+                && self.jit_value.contains_key(&proto_idx)
+                && self.jit_native_objparam.contains_key(&proto_idx))
         }
         #[cfg(not(feature = "jit-native"))]
         #[inline]
@@ -16118,7 +16138,13 @@ impl Vm {
         {
             let pidx = m.proto_idx;
             let vm_ptr = self as *const crate::vm::Vm;
-            if argc == 1 {
+            // Settled-dead negative cache (one dense byte read): skips every
+            // map probe below for the walk-dominant "all variants declined"
+            // methods. The Float sub-arm stays reachable (it is lazy per
+            // Float arg and not part of the 1-arg settle bit) — it is behind a
+            // stack-value `matches!`, not a map probe, so it costs nothing.
+            let jflags = self.jit_flags_get(pidx);
+            if argc == 1 && jflags & crate::vm::JFLAG_NO_ONEARG == 0 {
                 // Value method (e.g. the instance_variable_get wrapper). Pass
                 // the receiver + arg stack slots by reference (no clone) — both
                 // are immutable borrows of distinct fields, released before the
@@ -16127,6 +16153,7 @@ impl Vm {
                     let out = vp.call(vm_ptr, &self.stack[recv_idx], &self.stack[recv_idx + 1]);
                     self.stack[recv_idx] = out;
                     self.stack.truncate(recv_idx + 1);
+                    self.jstat_exec(pidx, 5, false);
                     return Ok(true);
                 }
                 // Integer method: deopt (non-Int arg or overflow) falls through.
@@ -16134,13 +16161,18 @@ impl Vm {
                 // != 0) only runs on the class its callees were resolved on — a
                 // subclass that overrides a callee falls through to the
                 // interpreter.
+                // (`entry()` snapshot: see `NpEntry` — the running native code
+                // can re-entrantly insert into this same map via a PIC fill.)
                 if let Some(Some(np)) = self.jit_native.get(&pidx) {
-                    let gc = np.guard_class.get();
-                    let class_ok = gc == 0 || gc == std::rc::Rc::as_ptr(&cls) as usize;
-                    if class_ok {
+                    let e = np.entry();
+                    let class_ok =
+                        e.guard_class == 0 || e.guard_class == std::rc::Rc::as_ptr(&cls) as usize;
+                    if !e.dead && class_ok {
                         if let Some(x) = crate::jit_native::as_int(&self.stack[recv_idx + 1]) {
-                            if let Some(r) = np.call(vm_ptr, &self.stack[recv_idx], x) {
-                                let boxed = np.box_ret(r);
+                            let res = e.call(vm_ptr, &self.stack[recv_idx], x);
+                            let boxed = res.map(|r| e.box_ret(r));
+                            self.jstat_serve(pidx, 0, boxed.is_none());
+                            if let Some(boxed) = boxed {
                                 self.stack[recv_idx] = boxed;
                                 self.stack.truncate(recv_idx + 1);
                                 return Ok(true);
@@ -16148,17 +16180,25 @@ impl Vm {
                         }
                     }
                 }
-                // Float arg -> the float-param specialization (leaf methods only).
-                if let Value::Float(f) = &self.stack[recv_idx + 1] {
-                    let f = *f;
-                    if !self.jit_native_fparam.contains_key(&pidx) {
-                        let compiled = self.compile_native_fparam(pidx);
-                        self.jit_native_fparam.insert(pidx, compiled);
-                    }
-                    if let Some(Some(np)) = self.jit_native_fparam.get(&pidx) {
-                        let vm_ptr = self as *const crate::vm::Vm;
-                        if let Some(r) = np.call(vm_ptr, &self.stack[recv_idx], f.to_bits() as i64) {
-                            let boxed = np.box_ret(r);
+                // OBJECT arg -> serve the compiled obj-param specialization IN
+                // PLACE (ADR 0034 serving fix). Compilation happens at the
+                // slow-cascade hook (one routed trip while the verdict is
+                // missing — see `jit_should_route`) or in
+                // `try_invoke_fixed_method_from_stack`; here we only SERVE, so
+                // the per-call fast path stays compile-free. The arg pointer is
+                // valid for the native call's duration (the compiled method is
+                // GC-free and doesn't touch the interpreter stack). A deopt
+                // falls through to the in-place interpreted frame push below.
+                if matches!(&self.stack[recv_idx + 1], Value::Object(_))
+                    && let Some(Some(np)) = self.jit_native_objparam.get(&pidx)
+                {
+                    let e = np.entry();
+                    if !e.dead {
+                        let arg_ptr = &self.stack[recv_idx + 1] as *const Value as i64;
+                        let res = e.call(vm_ptr, &self.stack[recv_idx], arg_ptr);
+                        let boxed = res.map(|r| e.box_ret(r));
+                        self.jstat_serve(pidx, 3, boxed.is_none());
+                        if let Some(boxed) = boxed {
                             self.stack[recv_idx] = boxed;
                             self.stack.truncate(recv_idx + 1);
                             return Ok(true);
@@ -16166,8 +16206,61 @@ impl Vm {
                     }
                 }
             }
+            // Float arg -> the float-param specialization (leaf methods only).
+            // OUTSIDE the settle bit: the fparam verdict is lazy (compiled on
+            // the first Float arg seen), and the gate is a stack-value
+            // `matches!`, so the walk-dominant non-Float calls pay nothing.
+            if argc == 1
+                && let Value::Float(f) = &self.stack[recv_idx + 1]
+            {
+                let f = *f;
+                if !self.jit_native_fparam.contains_key(&pidx) {
+                    let compiled = self.compile_native_fparam(pidx);
+                    self.jit_native_fparam.insert(pidx, compiled);
+                }
+                if let Some(Some(np)) = self.jit_native_fparam.get(&pidx) {
+                    let e = np.entry();
+                    if !e.dead {
+                        let res = e.call(vm_ptr, &self.stack[recv_idx], f.to_bits() as i64);
+                        let boxed = res.map(|r| e.box_ret(r));
+                        self.jstat_serve(pidx, 2, boxed.is_none());
+                        if let Some(boxed) = boxed {
+                            self.stack[recv_idx] = boxed;
+                            self.stack.truncate(recv_idx + 1);
+                            return Ok(true);
+                        }
+                    }
+                }
+            }
+            // 2-ARG method with (Object, Int|Hash) args -> the objparam2
+            // specialization, compile+serve in place (mirrors
+            // `try_invoke_fixed_method_from_stack`; the Hash-scratch deopt
+            // discipline lives in `jit_run_objparam2`). Gated on the settled
+            // negative cache: a declined proto costs one flag read per call.
+            if argc == 2 && jflags & crate::vm::JFLAG_NO_OBJP2 == 0 {
+                let sl = self.stack.len();
+                let a1 = match &self.stack[sl - 1] {
+                    Value::Int(n) => Some(crate::vm::ObjP2Arg::Int(*n)),
+                    Value::Hash(h) => Some(crate::vm::ObjP2Arg::Hash(*h)),
+                    _ => None,
+                };
+                if let (Some(a1), Value::Object(_)) = (a1, &self.stack[sl - 2]) {
+                    let recv_ptr = &self.stack[recv_idx] as *const Value;
+                    let a0_ptr = &self.stack[sl - 2] as *const Value;
+                    if let Some(boxed) = self.jit_run_objparam2(pidx, recv_ptr, a0_ptr, a1) {
+                        self.stack[recv_idx] = boxed;
+                        self.stack.truncate(recv_idx + 1);
+                        return Ok(true);
+                    }
+                }
+            }
             // Not yet compiled but eligible → route to the hook to compile it.
-            if self.jit_should_route(pidx, argc) {
+            // Skipped entirely when the 1-arg settle bit is set (the route
+            // answer is a known `false`; avoids re-reading the flag inside).
+            if argc == 1
+                && jflags & crate::vm::JFLAG_NO_ONEARG == 0
+                && self.jit_should_route(pidx, argc)
+            {
                 return Ok(false);
             }
         }
@@ -16193,6 +16286,49 @@ impl Vm {
             // with the result (pop recv + push value in one move).
             self.stack[recv_idx] = v;
             return Ok(true);
+        }
+        // ZERO-arg predicate/computed method (`node.send_type?`,
+        // `def val; @a + @b; end`): serve the zero-arg NativeProto in place
+        // (ADR 0034 serving fix). This variant was previously reachable ONLY
+        // as a callee of the native obj-call PIC (`jit_obj_call`), never from
+        // interpreted dispatch. Placed AFTER the getter fast path so trivial
+        // attr_readers (which the frame-free getter path serves for ALL value
+        // types) never pay a probe here, and non-getters don't double-load
+        // `getter_ivar`. Arity safety: gated on `fixed_arity.required == 0`,
+        // so a 0-arg proto can only serve an argc==0 call — the
+        // wrong-arity-swallow hazard that keeps `jit_native_zeroarg` out of
+        // the 1-arg maps doesn't apply here.
+        #[cfg(feature = "jit-native")]
+        if argc == 0
+            && self.jit_native_on
+            && self.jit_flags_get(m.proto_idx) & crate::vm::JFLAG_NO_ZEROARG == 0
+            && m.fixed_arity.is_some_and(|f| f.required == 0)
+        {
+            let pidx = m.proto_idx;
+            if !self.jit_native_zeroarg.contains_key(&pidx) {
+                let compiled = self.compile_native_for_class_zeroarg(pidx, Some(&cls));
+                if compiled.is_none() {
+                    // Settle the negative cache: this proto will never serve
+                    // at argc==0 — skip the map probe forever.
+                    self.jit_flags_set(pidx, crate::vm::JFLAG_NO_ZEROARG);
+                }
+                self.jit_native_zeroarg.insert(pidx, compiled);
+            }
+            if let Some(Some(np)) = self.jit_native_zeroarg.get(&pidx) {
+                let e = np.entry();
+                if !e.dead
+                    && (e.guard_class == 0 || e.guard_class == std::rc::Rc::as_ptr(&cls) as usize)
+                {
+                    let vm_ptr = self as *const crate::vm::Vm;
+                    let res = e.call(vm_ptr, &self.stack[recv_idx], 0);
+                    let boxed = res.map(|r| e.box_ret(r));
+                    self.jstat_serve(pidx, 6, boxed.is_none());
+                    if let Some(boxed) = boxed {
+                        self.stack[recv_idx] = boxed;
+                        return Ok(true);
+                    }
+                }
+            }
         }
         let fixed = match m.fixed_arity {
             // Fixed-arity method, WRONG argc → decline; the cascade
@@ -16602,26 +16738,32 @@ impl Vm {
                 let compiled = self.compile_native_for_class(proto_idx, recv_cls.as_ref());
                 self.jit_native.insert(proto_idx, compiled);
             }
+            // (`entry()` snapshots throughout: see `NpEntry` — the running
+            // native code can re-entrantly insert into these same maps via a
+            // PIC fill, rehashing them under a held borrow.)
             if let Some(Some(np)) = self.jit_native.get(&proto_idx) {
-                let gc = np.guard_class.get();
-                let class_ok = gc == 0
+                let e = np.entry();
+                let class_ok = e.guard_class == 0
                     || match &self_val {
                         Value::Object(oid) => self
                             .heap
                             .try_class_of(*oid)
-                            .is_some_and(|c| std::rc::Rc::as_ptr(&c) as usize == gc),
+                            .is_some_and(|c| std::rc::Rc::as_ptr(&c) as usize == e.guard_class),
                         _ => false,
                     };
-                if class_ok
+                if !e.dead
+                    && class_ok
                     && let Some(&x) = self.stack.last().and_then(|v| match v {
                         Value::Int(n) => Some(n),
                         _ => None,
                     })
                 {
                     let vm_ptr = self as *const crate::vm::Vm;
-                    if let Some(r) = np.call(vm_ptr, &self_val, x) {
+                    let res = e.call(vm_ptr, &self_val, x);
+                    let boxed = res.map(|r| e.box_ret(r));
+                    self.jstat_serve(proto_idx, 0, boxed.is_none());
+                    if let Some(boxed) = boxed {
                         let top = self.stack.len() - 1;
-                        let boxed = np.box_ret(r);
                         self.stack[top] = boxed;
                         return Ok(true);
                     }
@@ -16634,12 +16776,17 @@ impl Vm {
                     self.jit_native_fparam.insert(proto_idx, compiled);
                 }
                 if let Some(Some(np)) = self.jit_native_fparam.get(&proto_idx) {
-                    let vm_ptr = self as *const crate::vm::Vm;
-                    if let Some(r) = np.call(vm_ptr, &self_val, f.to_bits() as i64) {
-                        let top = self.stack.len() - 1;
-                        let boxed = np.box_ret(r);
-                        self.stack[top] = boxed;
-                        return Ok(true);
+                    let e = np.entry();
+                    if !e.dead {
+                        let vm_ptr = self as *const crate::vm::Vm;
+                        let res = e.call(vm_ptr, &self_val, f.to_bits() as i64);
+                        let boxed = res.map(|r| e.box_ret(r));
+                        self.jstat_serve(proto_idx, 2, boxed.is_none());
+                        if let Some(boxed) = boxed {
+                            let top = self.stack.len() - 1;
+                            self.stack[top] = boxed;
+                            return Ok(true);
+                        }
                     }
                 }
             }
@@ -16655,13 +16802,18 @@ impl Vm {
                     self.jit_native_objparam.insert(proto_idx, compiled);
                 }
                 if let Some(Some(np)) = self.jit_native_objparam.get(&proto_idx) {
-                    let vm_ptr = self as *const crate::vm::Vm;
-                    let top = self.stack.len() - 1;
-                    let arg_ptr = &self.stack[top] as *const Value as i64;
-                    if let Some(r) = np.call(vm_ptr, &self_val, arg_ptr) {
-                        let boxed = np.box_ret(r);
-                        self.stack[top] = boxed;
-                        return Ok(true);
+                    let e = np.entry();
+                    if !e.dead {
+                        let vm_ptr = self as *const crate::vm::Vm;
+                        let top = self.stack.len() - 1;
+                        let arg_ptr = &self.stack[top] as *const Value as i64;
+                        let res = e.call(vm_ptr, &self_val, arg_ptr);
+                        let boxed = res.map(|r| e.box_ret(r));
+                        self.jstat_serve(proto_idx, 3, boxed.is_none());
+                        if let Some(boxed) = boxed {
+                            self.stack[top] = boxed;
+                            return Ok(true);
+                        }
                     }
                 }
             }
@@ -16678,82 +16830,65 @@ impl Vm {
         if self.jit_native_on && block.is_none() && argc == 2 && m.builtin.is_none() {
             let sl = self.stack.len();
             let a0_obj = matches!(self.stack.get(sl - 2), Some(Value::Object(_)));
-            let a1_int = matches!(self.stack.get(sl - 1), Some(Value::Int(_)));
-            let a1_hash = matches!(self.stack.get(sl - 1), Some(Value::Hash(_)));
-            if a0_obj && (a1_int || a1_hash) {
-                let proto_idx = m.proto_idx;
-                if !self.jit_native_objparam2.contains_key(&proto_idx) {
-                    let compiled = self.compile_native_objparam2(proto_idx);
-                    self.jit_native_objparam2.insert(proto_idx, compiled);
+            let a1 = match self.stack.get(sl - 1) {
+                Some(Value::Int(n)) => Some(crate::vm::ObjP2Arg::Int(*n)),
+                Some(Value::Hash(h)) => Some(crate::vm::ObjP2Arg::Hash(*h)),
+                _ => None,
+            };
+            if let (true, Some(a1)) = (a0_obj, a1) {
+                // Compile+run via the shared helper (owns the Hash-scratch
+                // deopt discipline — see `jit_run_objparam2`'s soundness note).
+                let recv_ptr = &self_val as *const Value;
+                let a0_ptr = &self.stack[sl - 2] as *const Value;
+                if let Some(boxed) = self.jit_run_objparam2(m.proto_idx, recv_ptr, a0_ptr, a1) {
+                    self.stack.truncate(sl - 2);
+                    self.stack.push(boxed);
+                    return Ok(true);
                 }
-                let kind_ok = self
-                    .jit_native_objparam2
-                    .get(&proto_idx)
-                    .and_then(|o| o.as_ref())
-                    .map(|np| np.param2_hash.get() == a1_hash)
-                    .unwrap_or(false);
-                if kind_ok {
-                    // SOUNDNESS (Hash param): the compiled method MUTATES its Hash param
-                    // (`counts[t] = …`, a side effect), and on a deopt the whole walk
-                    // re-runs interpreted — so the native run's writes must NOT touch the
-                    // real Hash, or a deopt-after-write would double-count. Run against a
-                    // SCRATCH clone; commit it back only on full native success, discard on
-                    // deopt (the interpreter then re-runs on the untouched original). The
-                    // Int param (rung A) is pure (no side effect) → no scratch needed.
-                    let scratch = if a1_hash {
-                        let counts_oid = match self.stack[sl - 1] {
-                            Value::Hash(o) => o,
-                            _ => unreachable!(),
-                        };
-                        // Reuse the pooled scratch Hash (alloc once, ever); re-seed it with
-                        // a clone of `counts`'s current pairs (empty for the common fresh
-                        // `{}`, so no allocation). No per-call heap slot alloc → no GC churn.
-                        let s = match self.jit_hash_scratch {
-                            Some(s) => s,
-                            None => {
-                                let s = self.heap.alloc(crate::heap::HeapObj::Hash(
-                                    crate::heap::HashObj::with_pairs(Vec::new()),
-                                ));
-                                self.jit_hash_scratch = Some(s);
-                                s
-                            }
-                        };
-                        let seed = self.heap.hash(counts_oid).clone();
-                        let ho = self.heap.hash_obj_mut(s);
-                        ho.pairs = seed;
-                        ho.index = None;
-                        Some((counts_oid, s))
-                    } else {
-                        None
-                    };
-                    let np = self.jit_native_objparam2[&proto_idx].as_ref().unwrap();
-                    let vm_ptr = self as *const crate::vm::Vm;
-                    let a1 = match (&scratch, &self.stack[sl - 1]) {
-                        (Some((_, s)), _) => s.0 as i64,
-                        (None, Value::Int(n)) => *n,
-                        _ => unreachable!(),
-                    };
-                    let a0_ptr = &self.stack[sl - 2] as *const Value as i64;
-                    let res = np.call2(vm_ptr, &self_val, a0_ptr, a1);
-                    if let Some(r) = res {
-                        // Box while `np` is still borrowable — the scratch commit below
-                        // takes a `&mut self.heap`, which ends `np`'s borrow.
-                        let boxed = np.box_ret(r);
-                        // Commit the scratch back into the real Hash by MOVING its pairs
-                        // (no clone): take the scratch's filled pairs, install them in the
-                        // real Hash. The scratch (now empty) becomes garbage.
-                        if let Some((counts_oid, s)) = scratch {
-                            let pairs = std::mem::take(&mut self.heap.hash_obj_mut(s).pairs);
-                            let ho = self.heap.hash_obj_mut(counts_oid);
-                            ho.pairs = pairs;
-                            ho.index = None;
-                        }
-                        self.stack.truncate(sl - 2);
-                        self.stack.push(boxed);
-                        return Ok(true);
+                // Deopt/decline: nothing observable happened (scratch discarded)
+                // → fall through to the interpreter, which re-runs cleanly.
+            }
+        }
+        // ZERO-arg serving (ADR 0034 serving fix): the implicit-self /
+        // toplevel sibling of the explicit-recv zeroarg block — this path
+        // previously had NO 0-arg serving (a self-recv `pred?` / computed
+        // reader always paid an interpreted frame). Arity safety: the `fixed`
+        // match above guarantees `required == argc == 0`. A trivial getter
+        // proto is admitted here (unlike explicit-recv, this path has no
+        // frame-free getter fast path to defer to): an Int-ivar reader serves
+        // natively, a non-Int one deopts and the breaker settles it.
+        #[cfg(feature = "jit-native")]
+        if self.jit_native_on
+            && block.is_none()
+            && argc == 0
+            && m.builtin.is_none()
+            && self.jit_flags_get(m.proto_idx) & crate::vm::JFLAG_NO_ZEROARG == 0
+            && let Value::Object(self_oid) = &self_val
+        {
+            let pidx = m.proto_idx;
+            if let Some(cls) = self.heap.try_class_of(*self_oid) {
+                if !self.jit_native_zeroarg.contains_key(&pidx) {
+                    let compiled = self.compile_native_for_class_zeroarg(pidx, Some(&cls));
+                    if compiled.is_none() {
+                        self.jit_flags_set(pidx, crate::vm::JFLAG_NO_ZEROARG);
                     }
-                    // Deopt: the scratch is discarded (never exposed), the real Hash is
-                    // untouched → fall through to the interpreter, which re-runs cleanly.
+                    self.jit_native_zeroarg.insert(pidx, compiled);
+                }
+                if let Some(Some(np)) = self.jit_native_zeroarg.get(&pidx) {
+                    let e = np.entry();
+                    if !e.dead
+                        && (e.guard_class == 0
+                            || e.guard_class == std::rc::Rc::as_ptr(&cls) as usize)
+                    {
+                        let vm_ptr = self as *const crate::vm::Vm;
+                        let res = e.call(vm_ptr, &self_val, 0);
+                        let boxed = res.map(|r| e.box_ret(r));
+                        self.jstat_serve(pidx, 6, boxed.is_none());
+                        if let Some(boxed) = boxed {
+                            self.stack.push(boxed);
+                            return Ok(true);
+                        }
+                    }
                 }
             }
         }
@@ -16933,6 +17068,92 @@ impl Vm {
         Ok(())
     }
 
+    /// Run the 2-ARG (`objparam2`) native specialization of `proto_idx`:
+    /// compile-if-absent, check the compiled param1 kind against the runtime
+    /// arg shape, run, and box. `recv`/`a0` are raw pointers to `Value`s that
+    /// MUST stay valid for the call (operand-stack slots or a caller local —
+    /// sound because the native code is GC-free and never touches the
+    /// interpreter stack, and nothing here grows the stack Vec). Returns the
+    /// boxed result on full native success; `None` = decline or deopt (the
+    /// caller falls through to the interpreter with every arg untouched).
+    ///
+    /// SOUNDNESS (Hash param): the compiled method MUTATES its Hash param
+    /// (`counts[t] = …`, a side effect), and on a deopt the whole body re-runs
+    /// interpreted — so the native run's writes must NOT touch the real Hash,
+    /// or a deopt-after-write would double-count. Run against the pooled
+    /// SCRATCH Hash (re-seeded with a clone of the current pairs — empty for
+    /// the common fresh `{}`); commit it back (a pairs MOVE, no clone) only on
+    /// full native success, discard on deopt. The Int param is pure → no
+    /// scratch needed.
+    #[cfg(feature = "jit-native")]
+    fn jit_run_objparam2(
+        &mut self,
+        proto_idx: usize,
+        recv: *const Value,
+        a0: *const Value,
+        a1: crate::vm::ObjP2Arg,
+    ) -> Option<Value> {
+        if !self.jit_native_objparam2.contains_key(&proto_idx) {
+            let compiled = self.compile_native_objparam2(proto_idx);
+            if compiled.is_none() {
+                // Settle the negative cache (see `JFLAG_NO_OBJP2`).
+                self.jit_flags_set(proto_idx, crate::vm::JFLAG_NO_OBJP2);
+            }
+            self.jit_native_objparam2.insert(proto_idx, compiled);
+        }
+        let a1_hash = matches!(a1, crate::vm::ObjP2Arg::Hash(_));
+        // `entry()` snapshot: see `NpEntry` — the running native code can
+        // re-entrantly insert into the proto maps via a PIC fill.
+        let e = match self
+            .jit_native_objparam2
+            .get(&proto_idx)
+            .and_then(|o| o.as_ref())
+            .map(|np| np.entry())
+        {
+            Some(e) if !e.dead && e.param2_hash == a1_hash => e,
+            _ => return None,
+        };
+        let scratch = if let crate::vm::ObjP2Arg::Hash(counts_oid) = a1 {
+            // Reuse the pooled scratch Hash (alloc once, ever). `Heap::alloc`
+            // never collects, so the raw `recv`/`a0` pointers stay valid.
+            let s = match self.jit_hash_scratch {
+                Some(s) => s,
+                None => {
+                    let s = self.heap.alloc(crate::heap::HeapObj::Hash(
+                        crate::heap::HashObj::with_pairs(Vec::new()),
+                    ));
+                    self.jit_hash_scratch = Some(s);
+                    s
+                }
+            };
+            let seed = self.heap.hash(counts_oid).clone();
+            let ho = self.heap.hash_obj_mut(s);
+            ho.pairs = seed;
+            ho.index = None;
+            Some((counts_oid, s))
+        } else {
+            None
+        };
+        let vm_ptr = self as *const crate::vm::Vm;
+        let a1v = match (&scratch, a1) {
+            (Some((_, s)), _) => s.0 as i64,
+            (None, crate::vm::ObjP2Arg::Int(n)) => n,
+            _ => unreachable!(),
+        };
+        let res = e.call2(vm_ptr, unsafe { &*recv }, a0 as i64, a1v);
+        let boxed = res.map(|r| e.box_ret(r));
+        self.jstat_serve(proto_idx, 4, boxed.is_none());
+        let boxed = boxed?;
+        // Commit the scratch back into the real Hash by MOVING its pairs.
+        if let Some((counts_oid, s)) = scratch {
+            let pairs = std::mem::take(&mut self.heap.hash_obj_mut(s).pairs);
+            let ho = self.heap.hash_obj_mut(counts_oid);
+            ho.pairs = pairs;
+            ho.index = None;
+        }
+        Some(boxed)
+    }
+
     /// Compile a 1-arg integer-method proto to native, resolving its baked
     /// cross-calls on `recv_cls` and guarding the result to that class. Returns
     /// the compiled `NativeProto` (caller decides where to cache it — the
@@ -16963,6 +17184,18 @@ impl Vm {
         if m.closure.is_some() || m.builtin.is_some() {
             return None;
         }
+        // Visibility: a native obj-call site has NO notion of the caller's
+        // `self` family, so it can only ever serve PUBLIC callees. A
+        // protected/private callee must decline (→ the call site deopts, the
+        // interpreter re-runs the caller and applies the real visibility
+        // rules: allowed for a same-family caller, NoMethodError otherwise).
+        // Without this, a compiled `peek_at(account)` calling the protected
+        // `account.balance` from an UNRELATED class ran it natively —
+        // diff_cruby `protected_method` caught it the moment objparam bodies
+        // became servable.
+        if m.visibility.get() != Visibility::Public {
+            return None;
+        }
         match m.fixed_arity {
             Some(f) if f.required as usize == expect_arity => {}
             _ => return None,
@@ -16976,6 +17209,11 @@ impl Vm {
         let cache = if expect_arity == 0 {
             if !self.jit_native_zeroarg.contains_key(&cp) {
                 let compiled = self.compile_native_for_class_zeroarg(cp, Some(cls));
+                if compiled.is_none() {
+                    // Settle the argc==0 negative cache for the dispatch
+                    // serving block too (same verdict, same map).
+                    self.jit_flags_set(cp, crate::vm::JFLAG_NO_ZEROARG);
+                }
                 self.jit_native_zeroarg.insert(cp, compiled);
             }
             self.jit_native_zeroarg.get(&cp)
@@ -17055,6 +17293,16 @@ impl Vm {
         // `false` — they are reached via 1-arg `CallNoRecv` cross-calls.
         allow_zero_arg: bool,
     ) -> Option<crate::jit_native::NativeProto> {
+        // Compile-tax pre-gate: an undecidable body (unmodelled op / wrong
+        // shape) declines HERE, before the callee analysis below compiles
+        // fparam+objparam variants of every 1-arg callee and recurses — on a
+        // real workload (RuboCop) that callee cascade, run for thousands of
+        // methods that then decline anyway, was the bulk of the JIT-on tax.
+        let fam = if allow_zero_arg { 6u8 } else { 0u8 };
+        if !crate::jit_native::pregate(&self.protos[proto_idx], allow_zero_arg, false, false) {
+            self.jstat_compile(fam, false, true);
+            return None;
+        }
         let self_name = self.protos[proto_idx].name.clone();
         let self_name_id = self.interner.intern(&self_name);
         let call_names: Vec<crate::intern::SymId> = self.protos[proto_idx]
@@ -17183,6 +17431,7 @@ impl Vm {
                 np.guard_class.set(std::rc::Rc::as_ptr(cls) as usize);
             }
         }
+        self.jstat_compile(fam, compiled.is_some(), false);
         compiled
     }
 
@@ -17191,12 +17440,16 @@ impl Vm {
     /// (i64 arg carries f64 bits); the result boxes per `returns_float` at the call.
     #[cfg(feature = "jit-native")]
     fn compile_native_fparam(&mut self, proto_idx: usize) -> Option<crate::jit_native::NativeProto> {
+        if !crate::jit_native::pregate(&self.protos[proto_idx], false, false, false) {
+            self.jstat_compile(2, false, true);
+            return None;
+        }
         let self_name = self.protos[proto_idx].name.clone();
         let self_name_id = self.interner.intern(&self_name);
         let callees = crate::intern::FxHashMap::default();
         let getters = crate::intern::FxHashMap::default();
         let syms = self.jit_syms();
-        crate::jit_native::compile(
+        let compiled = crate::jit_native::compile(
             &self.protos[proto_idx],
             self_name_id,
             &callees,
@@ -17211,7 +17464,9 @@ impl Vm {
             false, // fparam, not obj-param
             false, // not a 2-arg method
             None, None,
-        )
+        );
+        self.jstat_compile(2, compiled.is_some(), false);
+        compiled
     }
 
     /// Compile the OBJECT-param specialization of a 1-arg method (`def weigh(node);
@@ -17222,6 +17477,12 @@ impl Vm {
     /// that also self-recurses with an Object arg needs the cross-call ABI — deferred).
     #[cfg(feature = "jit-native")]
     fn compile_native_objparam(&mut self, proto_idx: usize) -> Option<crate::jit_native::NativeProto> {
+        // Pre-gate with the each-rewrite pair admitted (`rewrite_each_block`
+        // below may lower one `CreateBlock+CallBlock(:each)` into a while loop).
+        if !crate::jit_native::pregate(&self.protos[proto_idx], false, false, true) {
+            self.jstat_compile(3, false, true);
+            return None;
+        }
         let self_name = self.protos[proto_idx].name.clone();
         let self_name_id = self.interner.intern(&self_name);
         let callees = crate::intern::FxHashMap::default();
@@ -17235,7 +17496,7 @@ impl Vm {
             Some((c, n)) => (Some(c.as_slice()), Some(*n)),
             None => (None, None),
         };
-        crate::jit_native::compile(
+        let compiled = crate::jit_native::compile(
             &self.protos[proto_idx],
             self_name_id,
             &callees,
@@ -17250,7 +17511,9 @@ impl Vm {
             true,  // obj-param: the param is an Object receiver pointer
             false, // not a 2-arg method
             code_ovr, nloc_ovr,
-        )
+        );
+        self.jstat_compile(3, compiled.is_some(), false);
+        compiled
     }
 
     /// ADR 0034 gap A — rewrite `recv.each { |x| body }` (a method's `CreateBlock` +
@@ -17391,6 +17654,10 @@ impl Vm {
     /// (the per-site PICs handle each receiver class), so no `guard_class` is set.
     #[cfg(feature = "jit-native")]
     fn compile_native_objparam2(&mut self, proto_idx: usize) -> Option<crate::jit_native::NativeProto> {
+        if !crate::jit_native::pregate(&self.protos[proto_idx], false, true, true) {
+            self.jstat_compile(4, false, true);
+            return None;
+        }
         let self_name = self.protos[proto_idx].name.clone();
         let self_name_id = self.interner.intern(&self_name);
         let callees = crate::intern::FxHashMap::default();
@@ -17421,6 +17688,7 @@ impl Vm {
             true,  // 2-arg method: param0=Object ptr, param1=Int
             code_ovr, nloc_ovr,
         );
+        self.jstat_compile(4, r.is_some(), false);
         r
     }
 
@@ -19674,7 +19942,15 @@ impl Vm {
         // overflow (or a recompile-ineligible op) deopts back to the
         // interpreter, so the result can never change — only the speed.
         #[cfg(feature = "jit-native")]
-        if self.jit_native_on && m.closure.is_none() && args.len() == 1 {
+        if self.jit_native_on
+            && m.closure.is_none()
+            && args.len() == 1
+            // Settled-dead skip: dispatches that bypass the fast paths
+            // (send-family, visibility-gated, …) reach this hook directly and
+            // were paying its full probe chain per call for methods whose
+            // every 1-arg verdict is already dead.
+            && self.jit_flags_get(m.proto_idx) & crate::vm::JFLAG_NO_ONEARG == 0
+        {
             let proto_idx = m.proto_idx;
             if !self.jit_native.contains_key(&proto_idx) {
                 let recv_cls = match &self_val {
@@ -19703,11 +19979,18 @@ impl Vm {
                 Miss(usize),
                 No,
             }
-            let prim = match (self.jit_native.get(&proto_idx).unwrap(), arg_int) {
-                (Some(np), Some(x)) => {
-                    let gc = np.guard_class.get();
-                    if gc == 0 || Some(gc) == recv_class_ptr {
-                        Prim::Ran(np.call(vm_ptr, &self_val, x))
+            // (`entry()` snapshots throughout the hook: see `NpEntry` — the
+            // running native code can re-entrantly insert into these maps via
+            // a PIC fill, rehashing them under a held borrow.)
+            let prim = match (
+                self.jit_native.get(&proto_idx).unwrap().as_ref().map(|np| np.entry()),
+                arg_int,
+            ) {
+                (Some(e), Some(x)) => {
+                    if e.dead {
+                        Prim::No
+                    } else if e.guard_class == 0 || Some(e.guard_class) == recv_class_ptr {
+                        Prim::Ran(e.call(vm_ptr, &self_val, x))
                     } else if let Some(c) = recv_class_ptr {
                         Prim::Miss(c)
                     } else {
@@ -19716,6 +19999,9 @@ impl Vm {
                 }
                 _ => Prim::No,
             };
+            if let Prim::Ran(r) = &prim {
+                self.jstat_serve(proto_idx, 0, r.is_none());
+            }
             let native: Option<Option<i64>> = match prim {
                 Prim::Ran(r) => Some(r),
                 Prim::No => None,
@@ -19733,17 +20019,26 @@ impl Vm {
                         let variant = self.compile_native_for_class(proto_idx, recv_cls.as_ref());
                         self.jit_native_poly.insert(key, variant);
                     }
-                    match (self.jit_native_poly.get(&key), arg_int) {
-                        (Some(Some(np)), Some(x)) => {
-                            let gc = np.guard_class.get();
-                            if gc == 0 || gc == rcp {
-                                Some(np.call(vm_ptr, &self_val, x))
+                    let r = match (
+                        self.jit_native_poly
+                            .get(&key)
+                            .and_then(|o| o.as_ref())
+                            .map(|np| np.entry()),
+                        arg_int,
+                    ) {
+                        (Some(e), Some(x)) => {
+                            if e.guard_class == 0 || e.guard_class == rcp {
+                                Some(e.call(vm_ptr, &self_val, x))
                             } else {
                                 None
                             }
                         }
                         _ => None,
+                    };
+                    if let Some(res) = &r {
+                        self.jstat_exec(proto_idx, 1, res.is_none());
                     }
+                    r
                 }
             };
             if let Some(Some(r)) = native {
@@ -19761,9 +20056,46 @@ impl Vm {
                     self.jit_native_fparam.insert(proto_idx, compiled);
                 }
                 if let Some(Some(np)) = self.jit_native_fparam.get(&proto_idx) {
-                    let vm_ptr = self as *const crate::vm::Vm;
-                    if let Some(r) = np.call(vm_ptr, &self_val, f.to_bits() as i64) {
-                        let boxed = np.box_ret(r);
+                    let e = np.entry();
+                    if !e.dead {
+                        let vm_ptr = self as *const crate::vm::Vm;
+                        let res = e.call(vm_ptr, &self_val, f.to_bits() as i64);
+                        let boxed = res.map(|r| e.box_ret(r));
+                        self.jstat_serve(proto_idx, 2, boxed.is_none());
+                        if let Some(boxed) = boxed {
+                            self.stack.push(boxed);
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            // OBJECT-arg obj-param arm (ADR 0034 serving fix): the variant used
+            // to be compiled only as a cross-call callee / via B1, and NO arm
+            // here could serve it — a routed call landed in this hook and ran
+            // interpreted forever. The verdict is filled UNCONDITIONALLY (not
+            // gated on the arg being an Object): `jit_should_route` keeps
+            // routing a 1-arg method into this hook until ALL THREE 1-arg
+            // verdicts (int / value / objparam) exist, so this insert is what
+            // stops the per-call cascade trips for methods that decline
+            // everything (the compile itself is cheap for those — the pregate
+            // answers from one op scan). A deopt falls through to the
+            // interpreted frame below (native objparam code is effect-free
+            // until it returns: no ivar writes, Hash writes only via the
+            // objparam2 scratch, array pushes only to method-local arrays).
+            if !self.jit_native_objparam.contains_key(&proto_idx) {
+                let compiled = self.compile_native_objparam(proto_idx);
+                self.jit_native_objparam.insert(proto_idx, compiled);
+            }
+            if matches!(args.first(), Some(Value::Object(_)))
+                && let Some(Some(np)) = self.jit_native_objparam.get(&proto_idx)
+            {
+                let e = np.entry();
+                if !e.dead {
+                    let arg_ptr = &args[0] as *const Value as i64;
+                    let res = e.call(vm_ptr, &self_val, arg_ptr);
+                    let boxed = res.map(|r| e.box_ret(r));
+                    self.jstat_serve(proto_idx, 3, boxed.is_none());
+                    if let Some(boxed) = boxed {
                         self.stack.push(boxed);
                         return Ok(());
                     }
@@ -19782,6 +20114,7 @@ impl Vm {
                     ivg_sym,
                     bracket_sym,
                 );
+                self.jstat_compile(5, compiled.is_some(), false);
                 self.jit_value.insert(proto_idx, compiled);
             }
             let vm_ptr = self as *const crate::vm::Vm;
@@ -19790,8 +20123,39 @@ impl Vm {
                 _ => None,
             };
             if let Some(out) = vresult {
+                self.jstat_exec(proto_idx, 5, false);
                 self.stack.push(out);
                 return Ok(());
+            }
+            // Nothing served and all three 1-arg verdicts are now filled —
+            // settle the negative cache so the fast paths stop probing and
+            // `jit_should_route` stops routing this proto here.
+            self.jit_maybe_mark_no_onearg(proto_idx);
+        }
+        // 2-ARG (Object, Int|Hash) sibling of the 1-arg hook above — the
+        // objparam2 specialization, served at the cascade hook too (the
+        // send/public_send/`&blk`-coerced shapes reach the cascade without
+        // passing the fast paths). Shares `jit_run_objparam2` with
+        // `try_invoke_fixed_method_from_stack` and the explicit-recv fast
+        // path, including the Hash-scratch deopt discipline.
+        #[cfg(feature = "jit-native")]
+        if self.jit_native_on
+            && m.closure.is_none()
+            && args.len() == 2
+            && self.jit_flags_get(m.proto_idx) & crate::vm::JFLAG_NO_OBJP2 == 0
+        {
+            let a1 = match &args[1] {
+                Value::Int(n) => Some(crate::vm::ObjP2Arg::Int(*n)),
+                Value::Hash(h) => Some(crate::vm::ObjP2Arg::Hash(*h)),
+                _ => None,
+            };
+            if let (Value::Object(_), Some(a1)) = (&args[0], a1) {
+                let recv_ptr = &self_val as *const Value;
+                let a0_ptr = &args[0] as *const Value;
+                if let Some(boxed) = self.jit_run_objparam2(m.proto_idx, recv_ptr, a0_ptr, a1) {
+                    self.stack.push(boxed);
+                    return Ok(());
+                }
             }
         }
         // `define_method`-installed methods carry a captured Rc and

@@ -809,8 +809,72 @@ pub(crate) struct BinaryCaps {
 /// recorded by `refine`; see `Vm::module_refinements`.
 pub(crate) type RefinementList = Vec<(std::rc::Rc<Class>, std::rc::Rc<Class>)>;
 
+/// Env-gated (`RUBYRS_JIT_STATS`) counters for the native-JIT method paths:
+/// compile attempts / successes / pre-gate declines per variant family, and
+/// per-(proto, family) native EXECUTION counts + deopts. Zero-cost when off
+/// (every update is behind the `jit_stats_on` bool). Dumped to stderr on
+/// `Runtime` drop by `Vm::dump_jit_stats`.
+#[cfg(feature = "jit-native")]
+#[derive(Default)]
+pub(crate) struct JitStats {
+    /// Indexed by family: 0=int 1=poly 2=fparam 3=objparam 4=objparam2
+    /// 5=value 6=zeroarg. `[attempts, ok, pregate_declines]`.
+    pub(crate) compile: [[u64; 3]; 7],
+    /// (proto_idx, family) → (native calls, deopts).
+    pub(crate) exec: crate::intern::FxHashMap<(usize, u8), (u64, u64)>,
+}
+
+#[cfg(feature = "jit-native")]
+pub(crate) const JIT_FAM_NAMES: [&str; 7] =
+    ["int", "poly", "fparam", "objparam", "objparam2", "value", "zeroarg"];
+
+/// Second-arg descriptor for the 2-arg (`objparam2`) native dispatch helper
+/// (`Vm::jit_run_objparam2`): the compiled param1 is either an Int value or a
+/// Hash `ObjId` (`walk(node, counts)`), per `NativeProto::param2_hash`.
+#[cfg(feature = "jit-native")]
+#[derive(Clone, Copy)]
+pub(crate) enum ObjP2Arg {
+    Int(i64),
+    Hash(crate::value::ObjId),
+}
+
+/// `Vm::jit_flags` bit: the proto's ZERO-arg verdict is settled and dead
+/// (declined, or breaker-killed) — the explicit-recv argc==0 serving block
+/// skips its map probe entirely on one dense `Vec<u8>` read.
+#[cfg(feature = "jit-native")]
+pub(crate) const JFLAG_NO_ZEROARG: u8 = 1;
+/// `Vm::jit_flags` bit: ALL THREE 1-arg verdicts (int / value / objparam) are
+/// settled and dead — serving probes AND hook routing are skipped on one read.
+/// (The lazy Float specialization is intentionally NOT part of this bit: the
+/// Float sub-arm stays reachable behind a stack-value `matches!`, no map probe.)
+#[cfg(feature = "jit-native")]
+pub(crate) const JFLAG_NO_ONEARG: u8 = 2;
+/// `Vm::jit_flags` bit: the 2-arg (`objparam2`) verdict is settled and dead.
+#[cfg(feature = "jit-native")]
+pub(crate) const JFLAG_NO_OBJP2: u8 = 4;
+
 pub(crate) struct Vm {
     pub(crate) protos: Vec<Proto>,
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_stats_on: bool,
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_stats: JitStats,
+    /// Per-(proto, family) DISPATCH-deopt counts, feeding the circuit-breaker
+    /// (`jit_note_deopt`): only bumped on the deopt path (the expensive path —
+    /// the interpreter re-runs the body right after), so native successes pay
+    /// nothing for it.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_deopt_count: crate::intern::FxHashMap<(usize, u8), u32>,
+    /// Dense per-proto NEGATIVE cache for JIT dispatch serving (`JFLAG_*`):
+    /// the walk-shaped workload dispatches thousands of methods whose every
+    /// variant declined, and the serving blocks were paying several
+    /// FxHashMap probes per CALL to re-discover that. One `Vec<u8>` read
+    /// answers the settled-dead common case. Bits only ever turn ON (a dead
+    /// verdict never revives; a method redefinition allocates a NEW proto,
+    /// which starts with a zeroed flag byte). Indexed by `proto_idx`, grown on
+    /// demand (`jit_flags_set`).
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_flags: Vec<u8>,
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeProto>>,
     /// ZERO-arg method NativeProtos compiled for the `jit_obj_call` PIC path (ADR 0034
@@ -2332,6 +2396,14 @@ impl Vm {
             jit_native_floatfind_loop: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_on: std::env::var_os("RUBYRS_JIT_NATIVE").is_some(),
+            #[cfg(feature = "jit-native")]
+            jit_stats_on: std::env::var_os("RUBYRS_JIT_STATS").is_some(),
+            #[cfg(feature = "jit-native")]
+            jit_stats: JitStats::default(),
+            #[cfg(feature = "jit-native")]
+            jit_deopt_count: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_flags: Vec::new(),
             protos,
             interner,
             classes: FxHashMap::default(),
@@ -2603,6 +2675,173 @@ impl Vm {
             a.loop_stack_depths.clear();
             a.begin_rescue_depths.clear();
             self.frame_aux_pool.push(a);
+        }
+    }
+
+    /// Record a native-JIT method EXECUTION attempt (family per
+    /// `JIT_FAM_NAMES`); `deopt` = the native code bailed and the interpreter
+    /// re-ran the body. No-op unless `RUBYRS_JIT_STATS` is set.
+    #[cfg(feature = "jit-native")]
+    #[inline]
+    pub(crate) fn jstat_exec(&mut self, proto_idx: usize, fam: u8, deopt: bool) {
+        if !self.jit_stats_on {
+            return;
+        }
+        let e = self.jit_stats.exec.entry((proto_idx, fam)).or_insert((0, 0));
+        e.0 += 1;
+        if deopt {
+            e.1 += 1;
+        }
+    }
+
+    /// Read the proto's JIT dispatch flags (`JFLAG_*`); 0 = nothing settled.
+    #[cfg(feature = "jit-native")]
+    #[inline]
+    pub(crate) fn jit_flags_get(&self, proto_idx: usize) -> u8 {
+        self.jit_flags.get(proto_idx).copied().unwrap_or(0)
+    }
+
+    /// OR a `JFLAG_*` bit into the proto's flag byte (grows the table).
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn jit_flags_set(&mut self, proto_idx: usize, bit: u8) {
+        if self.jit_flags.len() <= proto_idx {
+            self.jit_flags.resize(proto_idx + 1, 0);
+        }
+        self.jit_flags[proto_idx] |= bit;
+    }
+
+    /// Settle-check for `JFLAG_NO_ONEARG`: set the bit iff all three 1-arg
+    /// verdicts exist and none is alive. Called from the hook once per routed
+    /// visit (after it filled all three) and from the deopt breaker after a
+    /// kill. Any verdict still missing, or any variant alive → no bit (the
+    /// serving/routing logic keeps consulting the maps).
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn jit_maybe_mark_no_onearg(&mut self, proto_idx: usize) {
+        let int_dead = match self.jit_native.get(&proto_idx) {
+            Some(None) => true,
+            Some(Some(np)) => np.dispatch_dead.get(),
+            None => return,
+        };
+        let val_dead = match self.jit_value.get(&proto_idx) {
+            Some(None) => true,
+            Some(Some(_)) => false, // the value JIT has no deopt channel — never dies
+            None => return,
+        };
+        let objp_dead = match self.jit_native_objparam.get(&proto_idx) {
+            Some(None) => true,
+            Some(Some(np)) => np.dispatch_dead.get(),
+            None => return,
+        };
+        if int_dead && val_dead && objp_dead {
+            self.jit_flags_set(proto_idx, JFLAG_NO_ONEARG);
+        }
+    }
+
+    /// Deopt circuit-breaker: called by a dispatch serving site when a native
+    /// run bailed (the interpreter re-runs the body right after, so this map
+    /// bump is noise there). Once a (proto, family) has deopted
+    /// `JIT_DEOPT_KILL` times, mark the proto dispatch-dead — serving it was
+    /// pure per-call waste (a native attempt + a full interpreted re-run; the
+    /// RuboCop walk's `line`/`matched` shapes deopt on 100% of calls). Deopt
+    /// causes are overwhelmingly systematic (an unmodelled input type/shape),
+    /// so a proto over the threshold essentially never wins later. The proto
+    /// stays ALIVE in its map (its machine address may be baked into other
+    /// compiled code's PIC caches — dropping it would free running code);
+    /// `contains_key` stays true, so `jit_should_route`'s verdict logic is
+    /// unchanged.
+    #[cfg(feature = "jit-native")]
+    fn jit_note_deopt(&mut self, proto_idx: usize, fam: u8) {
+        const JIT_DEOPT_KILL: u32 = 32;
+        let c = self.jit_deopt_count.entry((proto_idx, fam)).or_insert(0);
+        *c += 1;
+        if *c < JIT_DEOPT_KILL {
+            return;
+        }
+        let np = match fam {
+            0 => self.jit_native.get(&proto_idx),
+            2 => self.jit_native_fparam.get(&proto_idx),
+            3 => self.jit_native_objparam.get(&proto_idx),
+            4 => self.jit_native_objparam2.get(&proto_idx),
+            6 => self.jit_native_zeroarg.get(&proto_idx),
+            _ => None,
+        };
+        if let Some(Some(np)) = np {
+            np.dispatch_dead.set(true);
+        }
+        // A kill may settle the negative-cache bits.
+        match fam {
+            0 | 3 => self.jit_maybe_mark_no_onearg(proto_idx),
+            4 => self.jit_flags_set(proto_idx, JFLAG_NO_OBJP2),
+            6 => self.jit_flags_set(proto_idx, JFLAG_NO_ZEROARG),
+            _ => {}
+        }
+    }
+
+    /// Combined per-serve bookkeeping: stats (env-gated) + the deopt breaker
+    /// (always on, deopt-path only).
+    #[cfg(feature = "jit-native")]
+    #[inline]
+    pub(crate) fn jstat_serve(&mut self, proto_idx: usize, fam: u8, deopt: bool) {
+        self.jstat_exec(proto_idx, fam, deopt);
+        if deopt {
+            self.jit_note_deopt(proto_idx, fam);
+        }
+    }
+
+    /// Record a compile attempt outcome for a variant family. `pregated` =
+    /// declined by the cheap pre-gate without running the full compiler.
+    #[cfg(feature = "jit-native")]
+    #[inline]
+    pub(crate) fn jstat_compile(&mut self, fam: u8, ok: bool, pregated: bool) {
+        if !self.jit_stats_on {
+            return;
+        }
+        let c = &mut self.jit_stats.compile[fam as usize];
+        c[0] += 1;
+        if ok {
+            c[1] += 1;
+        }
+        if pregated {
+            c[2] += 1;
+        }
+    }
+
+    /// Dump the `RUBYRS_JIT_STATS` counters to stderr (called from
+    /// `Runtime::drop`). Silent unless the env var is set.
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn dump_jit_stats(&self) {
+        if !self.jit_stats_on {
+            return;
+        }
+        eprintln!("== RUBYRS_JIT_STATS ==");
+        for (i, name) in JIT_FAM_NAMES.iter().enumerate() {
+            let [att, ok, pre] = self.jit_stats.compile[i];
+            if att > 0 {
+                eprintln!(
+                    "compile {name:<9} attempts={att} ok={ok} pregate_declines={pre}"
+                );
+            }
+        }
+        let mut rows: Vec<(&(usize, u8), &(u64, u64))> = self.jit_stats.exec.iter().collect();
+        rows.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+        let total_calls: u64 = rows.iter().map(|r| r.1 .0).sum();
+        let total_deopts: u64 = rows.iter().map(|r| r.1 .1).sum();
+        eprintln!(
+            "native-exec methods={} calls={} deopts={}",
+            rows.len(),
+            total_calls,
+            total_deopts
+        );
+        for ((pidx, fam), (calls, deopts)) in rows.into_iter().take(60) {
+            let name = self
+                .protos
+                .get(*pidx)
+                .map(|p| p.name.as_str())
+                .unwrap_or("?");
+            eprintln!(
+                "  exec {:<28} proto={:<6} fam={:<9} calls={} deopts={}",
+                name, pidx, JIT_FAM_NAMES[*fam as usize], calls, deopts
+            );
         }
     }
 

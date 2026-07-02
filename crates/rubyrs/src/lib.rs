@@ -3914,6 +3914,9 @@ impl Drop for Runtime {
     /// cext fns without an active Runtime is a host-side bug
     /// anyway, but this keeps the failure mode predictable).
     fn drop(&mut self) {
+        // Env-gated JIT counters (`RUBYRS_JIT_STATS`) — silent no-op unless set.
+        #[cfg(feature = "jit-native")]
+        self.vm.dump_jit_stats();
         #[cfg(all(feature = "cext", not(target_os = "wasi")))]
         rubyrs_cext::reset_state();
     }
