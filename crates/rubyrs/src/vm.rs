@@ -927,10 +927,23 @@ pub(crate) const JFLAG_NO_TIER2: u8 = 8;
 #[cfg(feature = "jit-native")]
 pub(crate) const JFLAG_TIER2_HAS: u8 = 16;
 
-/// Tier-2 hotness threshold: a proto's frame must be entered this many times
-/// before it is compiled (keeps one-shot startup code interpretation-only).
+/// Tier-2 hotness threshold (ADR 0037 wave 2, compile-cost control): a
+/// proto's frame must be entered `BASE + PER_OP × body_ops` times before it
+/// is compiled. Wave 1's flat threshold of 8 made a single `f1.rb` RuboCop
+/// run pay ~270ms compiling 848 protos (a +16% e2e regression) and a big1
+/// run ~640ms/2446 protos — compile cost is ~linear in body size (~8µs/op)
+/// while per-entry native savings are tens-to-hundreds of ns, so payback
+/// needs O(1000) entries. Scaling the threshold with body size makes short
+/// CLI runs compile almost nothing while daemon/batch/hot-loop workloads
+/// still compile everything that matters (a proto hot enough to pay back
+/// reaches the threshold quickly). Env overrides for experiments and for
+/// exercising the tier in tests: `RUBYRS_JIT_TIER2_THRESHOLD` (absolute:
+/// sets BASE and zeroes PER_OP), `RUBYRS_JIT_TIER2_BASE`,
+/// `RUBYRS_JIT_TIER2_PEROP`.
 #[cfg(feature = "jit-native")]
-const T2_COMPILE_THRESHOLD: u32 = 8;
+const T2_THRESHOLD_BASE_DEFAULT: u32 = 1024;
+#[cfg(feature = "jit-native")]
+const T2_THRESHOLD_PER_OP_DEFAULT: u32 = 16;
 /// Tier-2 native-nesting cap: each nested native body adds a Rust stack
 /// segment (native fn + helper + dispatch_until + step); deeper Ruby
 /// recursion falls back to the flat interpreter loop, which has no Rust-stack
@@ -1017,6 +1030,21 @@ pub(crate) struct Vm {
     /// Total tier-2 Cranelift compile time (stats-gated; ns).
     #[cfg(feature = "jit-native")]
     pub(crate) t2_compile_ns: u64,
+    /// Wave-2 (`RUBYRS_JIT_TIER2_NOCALL`): compile call ops + `Return`
+    /// through the generic helper (the wave-1 tier) for controlled A/B.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_tier2_nocall: bool,
+    /// Adaptive compile-threshold knobs (see `T2_THRESHOLD_BASE_DEFAULT`).
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_threshold_base: u32,
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_threshold_per_op: u32,
+    /// Wave-2 `t2_call` counters (stats-gated): `[0]` IC-fast serves (the
+    /// dedicated helper served without the do_call cascade), `[1]` fallbacks
+    /// to the full cascade, `[2]` native→native entries (a tier-2 body run
+    /// while already inside tier-2 native code, i.e. `t2_depth > 0`).
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_call_stats: [u64; 3],
     /// FLOAT-param specialization of a 1-arg method (`def scale(n); n*1.5; end`
     /// called with a Float arg): the param binds as Float, the i64 arg carries f64
     /// bits. Leaf methods only (no cross-calls — those decline). Keyed by proto,
@@ -2449,6 +2477,27 @@ impl Vm {
             #[cfg(feature = "jit-native")]
             t2_compile_ns: 0,
             #[cfg(feature = "jit-native")]
+            jit_tier2_nocall: std::env::var_os("RUBYRS_JIT_TIER2_NOCALL").is_some(),
+            #[cfg(feature = "jit-native")]
+            t2_threshold_base: {
+                let env_u32 = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<u32>().ok());
+                env_u32("RUBYRS_JIT_TIER2_THRESHOLD")
+                    .or_else(|| env_u32("RUBYRS_JIT_TIER2_BASE"))
+                    .unwrap_or(T2_THRESHOLD_BASE_DEFAULT)
+            },
+            #[cfg(feature = "jit-native")]
+            t2_threshold_per_op: {
+                let env_u32 = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<u32>().ok());
+                if env_u32("RUBYRS_JIT_TIER2_THRESHOLD").is_some() {
+                    // Absolute override: the threshold IS the base.
+                    0
+                } else {
+                    env_u32("RUBYRS_JIT_TIER2_PEROP").unwrap_or(T2_THRESHOLD_PER_OP_DEFAULT)
+                }
+            },
+            #[cfg(feature = "jit-native")]
+            t2_call_stats: [0; 3],
+            #[cfg(feature = "jit-native")]
             jit_native_fparam: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_poly: crate::intern::FxHashMap::default(),
@@ -2898,7 +2947,17 @@ impl Vm {
         if flags & JFLAG_TIER2_HAS == 0 {
             let c = self.t2_hot.entry(pidx).or_insert(0);
             *c += 1;
-            if *c < T2_COMPILE_THRESHOLD {
+            // Adaptive threshold (wave 2, compile-cost control): scale the
+            // required entries with body size — compile cost is ~linear in
+            // ops while per-entry savings are ~flat, so bigger bodies must
+            // prove more heat before paying the Cranelift bill.
+            let threshold = self
+                .t2_threshold_base
+                .saturating_add(
+                    self.t2_threshold_per_op
+                        .saturating_mul(self.protos[pidx].code.len() as u32),
+                );
+            if *c < threshold {
                 return Ok(());
             }
             if let Some(only) = &self.jit_tier2_only
@@ -2913,7 +2972,8 @@ impl Vm {
             let compile_t0 = self
                 .jit_stats_on
                 .then(std::time::Instant::now);
-            match crate::jit_tier2::compile_tier2(&self.protos[pidx], pidx) {
+            match crate::jit_tier2::compile_tier2(&self.protos[pidx], pidx, self.jit_tier2_nocall)
+            {
                 Some(p) => {
                     let entry = p.ptr;
                     self.t2_protos.insert(pidx, p);
@@ -2943,6 +3003,12 @@ impl Vm {
             Some(f) => f,
             None => return Ok(()),
         };
+        // native→native accounting: entering a tier-2 body while already
+        // inside tier-2 native code (`t2_depth > 0`) is the wave-2 direct
+        // native call chain (t2_call → frame push → this entry).
+        if self.jit_stats_on && self.t2_depth > 0 {
+            self.t2_call_stats[2] += 1;
+        }
         self.t2_depth += 1;
         let status = f(self as *mut Vm);
         self.t2_depth -= 1;
@@ -3070,6 +3136,12 @@ impl Vm {
         }
         if self.t2_compile_ns > 0 {
             eprintln!("tier2 compile time total={:.1}ms", self.t2_compile_ns as f64 / 1e6);
+        }
+        if self.t2_call_stats != [0; 3] {
+            eprintln!(
+                "tier2 t2_call ic_fast={} fallback={} native_native={}",
+                self.t2_call_stats[0], self.t2_call_stats[1], self.t2_call_stats[2]
+            );
         }
         for (i, name) in JIT_FAM_NAMES.iter().enumerate() {
             let [att, ok, pre] = self.jit_stats.compile[i];

@@ -2822,7 +2822,7 @@ impl Vm {
         }
     }
 
-    fn try_fast_primitive(&mut self, name_id: SymId, argc: usize, no_recv: bool) -> bool {
+    pub(crate) fn try_fast_primitive(&mut self, name_id: SymId, argc: usize, no_recv: bool) -> bool {
         if no_recv || argc != 0 {
             return false;
         }
@@ -2933,7 +2933,7 @@ impl Vm {
     /// `hash_insert` the canonical arm calls; both sets evaluate to
     /// the assigned value. No GC-heap allocation on any of these
     /// paths, so no `maybe_gc` (same as the arms they mirror).
-    fn try_fast_index(&mut self, name_id: SymId, argc: usize, no_recv: bool) -> bool {
+    pub(crate) fn try_fast_index(&mut self, name_id: SymId, argc: usize, no_recv: bool) -> bool {
         if no_recv {
             return false;
         }
@@ -16369,7 +16369,10 @@ impl Vm {
     /// stack-direct here, and everything else returns `Ok(false)` to fall
     /// through. A public method always passes `check_method_visibility`, so
     /// skipping it for the fast path is safe.
-    fn try_invoke_explicit_recv_cached(
+    /// `pub(crate)`: also the IC-fast serve target of the tier-2 `t2_call`
+    /// helper (ADR 0037 wave 2, `jit_tier2.rs`), which front-loads exactly
+    /// this path for call ops inside compiled bodies.
+    pub(crate) fn try_invoke_explicit_recv_cached(
         &mut self,
         name_id: SymId,
         argc: usize,
@@ -16704,7 +16707,11 @@ impl Vm {
     /// actively MISLEADING for dispatch/memory-pattern changes; wall +
     /// cycles are the arbiters. (Increment 1 was nearly discarded on the
     /// instruction count alone.)
-    fn try_invoke_self_recv_cached(
+    /// `pub(crate)`: also the IC-fast serve target of the tier-2 `t2_call`
+    /// helper (ADR 0037 wave 2, `jit_tier2.rs`) for the implicit-self call
+    /// ops inside compiled bodies (the `host_fns` gate is applied there,
+    /// mirroring `do_call`'s call-site condition).
+    pub(crate) fn try_invoke_self_recv_cached(
         &mut self,
         name_id: SymId,
         argc: usize,
@@ -16912,7 +16919,7 @@ impl Vm {
     ///   invoke stack-direct; everything else falls through unchanged
     ///   (private class methods keep their NoMethodError shape,
     ///   `define_singleton_method` closures keep captured locals).
-    fn try_invoke_class_singleton_cached(
+    pub(crate) fn try_invoke_class_singleton_cached(
         &mut self,
         name_id: SymId,
         argc: usize,
@@ -17016,7 +17023,7 @@ impl Vm {
         Ok(true)
     }
 
-    fn try_invoke_fixed_method_from_stack(
+    pub(crate) fn try_invoke_fixed_method_from_stack(
         &mut self,
         m: Rc<Method>,
         self_val: Value,

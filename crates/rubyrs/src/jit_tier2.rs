@@ -93,17 +93,25 @@ unsafe extern "C" fn t2_op(vm: *mut crate::vm::Vm, op: *const Op, pidx: i64, ip:
         vm.t2_trap = Some(t);
         return T2_TRAP;
     }
+    t2_finish(vm, depth)
+}
+
+/// Shared post-op tail (`t2_op` and the wave-2 call helpers): drive any
+/// pushed callee frame to completion with `dispatch_until`, then report the
+/// exit statuses. (a) This frame is gone — a `Return` popped it, or an
+/// in-scope non-local walk consumed it: DONE, the result is placed. (b) A
+/// control signal is pending (non-local return / block break — the master
+/// loop owns that walk), or (c) a fiber yield suspended us: BAIL with
+/// `frame.ip` at the resume point, so interpretation continues seamlessly.
+/// `depth` = `frames.len()` BEFORE the op ran.
+#[inline]
+fn t2_finish(vm: &mut crate::vm::Vm, depth: usize) -> i64 {
     if vm.frames.len() > depth {
         if let Err(t) = vm.dispatch_until(depth) {
             vm.t2_trap = Some(t);
             return T2_TRAP;
         }
     }
-    // Exit statuses. (a) This frame is gone — a `Return` popped it, or an
-    // in-scope non-local walk consumed it: DONE, the result is placed. (b) A
-    // control signal is pending (non-local return / block break — the master
-    // loop owns that walk), or (c) a fiber yield suspended us: BAIL with
-    // `frame.ip` at the resume point, so interpretation continues seamlessly.
     if vm.frames.len() < depth {
         return T2_DONE;
     }
@@ -115,6 +123,284 @@ unsafe extern "C" fn t2_op(vm: *mut crate::vm::Vm, op: *const Op, pidx: i64, ip:
         return T2_BAIL;
     }
     T2_CONTINUE
+}
+
+// ---------------------------------------------------------------------------
+// Wave-2 call helpers (ADR 0037 wave 2): the IC-fast `t2_call` family + the
+// `t2_return` frame-pop shortcut.
+// ---------------------------------------------------------------------------
+
+/// IC-fast call executor for the plain fixed-argc call ops inside a tier-2
+/// body (`Op::Call` / `Op::CallNoRecv` / the `Op::LoadLocalCall` fusion).
+/// Instead of re-entering the interpreter (`step` → `do_call`'s full arm
+/// cascade), this front-loads the exact monomorphic fast path the cascade
+/// would reach for the dominant receiver shape:
+///
+///   - explicit recv → `try_invoke_explicit_recv_cached` (IC-resolved public
+///     fixed/NFA-plan method; serves the frameless NativeProto families —
+///     int/value/objparam/objparam2/fparam/zeroarg — the frame-free getter
+///     and rest-predicate serves, or pushes the frame and runs a compiled
+///     callee via its trailing `t2_enter`: the native→native path),
+///   - implicit self → `try_invoke_self_recv_cached` (same helper family, no
+///     visibility gate — implicit-self calls legally reach private/protected
+///     — with `host_fns` precedence preserved by the gate below).
+///
+/// SOUNDNESS (why skipping the cascade prefix is exact): both helpers serve
+/// only `Value::Object` receivers, and every `do_call` arm that runs BEFORE
+/// them is receiver-typed away from Object (the Str/Array/Block/Hash
+/// singleton gates, `proc.call`, `try_fast_primitive`, `try_fast_index`) —
+/// except the three dispatch-boundary states gated here
+/// (`bypass_visibility_once`, `force_primitive_dispatch`, an active
+/// refinement on this name), which fall back to the full path that consumes
+/// them. ANY decline (`Ok(false)`) falls back to the interpreter's own op
+/// arm — `trailing_hash_positional` set around a full `do_call`, byte for
+/// byte `Op::Call`'s semantics — so misses re-resolve identically
+/// (method_gen bumps after redefinition, megamorphic sites, non-Object
+/// receivers, method_missing, visibility NoMethodErrors, arity errors).
+#[inline]
+fn t2_call_impl(
+    vm: &mut crate::vm::Vm,
+    name_id: SymId,
+    argc: usize,
+    cache_id: u32,
+    no_recv: bool,
+) -> i64 {
+    let depth = vm.frames.len();
+    let fast = !vm.bypass_visibility_once
+        && !vm.force_primitive_dispatch
+        && (vm.refined_method_names.is_empty() || !vm.refined_method_names.contains(&name_id));
+    if fast {
+        // The explicit-brace trailing-Hash-is-positional flag is live for
+        // the whole dispatch under `Op::Call` (the class-singleton
+        // closure branch reaches `invoke_method`'s binder, which consumes
+        // it); set/cleared around the serve exactly like the interpreter
+        // arm does around `do_call`.
+        vm.trailing_hash_positional = true;
+        // The `host_fns` probe mirrors `do_call`'s gate on BOTH no_recv fast
+        // paths (a host-registered fn keeps precedence over a same-named
+        // reachable method).
+        let served = if no_recv {
+            if vm.host_fns.contains_key(&name_id) {
+                Ok(false)
+            } else {
+                let self_val = vm
+                    .frames
+                    .last()
+                    .expect("ICE: t2_call(no_recv) with empty frames")
+                    .self_val
+                    .clone();
+                if matches!(self_val, Value::Nil) || vm.is_main_self(&self_val) {
+                    // Toplevel bare call (`fib(n-1)` at main) — do_call's
+                    // FIRST block: the toplevel-method IC + stack-direct
+                    // fixed invoke, mirrored condition for condition.
+                    match vm.lookup_toplevel_method_cache_hit(cache_id) {
+                        Some(m) => {
+                            vm.try_invoke_fixed_method_from_stack(m, self_val, argc, None)
+                        }
+                        None => Ok(false),
+                    }
+                } else {
+                    vm.try_invoke_self_recv_cached(name_id, argc, cache_id)
+                }
+            }
+        } else {
+            // Receiver-typed fast serves, in `do_call`'s exact order. The
+            // Str/Array/Block/Hash per-instance singleton gates and the
+            // `proc.call` arm sit BETWEEN the boundary gates and these
+            // helpers in the cascade; both are inert here by the guards
+            // below (no singletons of those kinds exist / the name isn't
+            // `call`), so skipping straight to the helpers is exact — and
+            // every helper is a no-op on miss.
+            let singleton_free = !vm.any_str_singletons
+                && !vm.any_heap_singletons
+                && !vm.any_hash_singletons
+                && name_id != vm.sym_call;
+            if singleton_free
+                && (vm.try_fast_primitive(name_id, argc, false)
+                    || vm.try_fast_index(name_id, argc, false))
+            {
+                Ok(true)
+            } else {
+                // Object receiver → the explicit-recv monomorphic path;
+                // Class/Module receiver → the class-singleton sibling
+                // (each self-declines on receiver type, mirroring the
+                // cascade's ordering).
+                match vm.try_invoke_explicit_recv_cached(name_id, argc, cache_id) {
+                    Ok(false) => vm.try_invoke_class_singleton_cached(name_id, argc, cache_id),
+                    r => r,
+                }
+            }
+        };
+        vm.trailing_hash_positional = false;
+        match served {
+            Ok(true) => {
+                if vm.jit_stats_on {
+                    vm.t2_call_stats[0] += 1;
+                }
+                return t2_finish(vm, depth);
+            }
+            Ok(false) => {}
+            Err(t) => {
+                vm.t2_trap = Some(t);
+                return T2_TRAP;
+            }
+        }
+    }
+    // Fallback: the interpreter's own arm (the full `do_call` cascade),
+    // including the explicit-brace trailing-Hash-is-positional flag.
+    if vm.jit_stats_on {
+        vm.t2_call_stats[1] += 1;
+    }
+    vm.trailing_hash_positional = true;
+    let r = vm.do_call(name_id, argc, no_recv, cache_id);
+    vm.trailing_hash_positional = false;
+    if let Err(t) = r {
+        vm.t2_trap = Some(t);
+        return T2_TRAP;
+    }
+    t2_finish(vm, depth)
+}
+
+/// Per-call-op prologue shared by the t2_call family: advance `ip` past the
+/// op (backtraces/resume key off it) and charge the fuel tick `step()` would
+/// have charged — BEFORE any stack effect, matching the interpreter's
+/// fuel-then-arm order.
+#[inline]
+fn t2_call_prologue(vm: &mut crate::vm::Vm, ip: i64) -> Result<(), ()> {
+    vm.frames
+        .last_mut()
+        .expect("ICE: t2_call with empty frame stack")
+        .ip = ip as usize + 1;
+    if let Err(t) = vm.check_fuel() {
+        vm.t2_trap = Some(t);
+        return Err(());
+    }
+    Ok(())
+}
+
+/// `Op::Call(name, argc, cid)` — explicit receiver.
+unsafe extern "C" fn t2_call(
+    vm: *mut crate::vm::Vm,
+    name: i64,
+    argc: i64,
+    cid: i64,
+    ip: i64,
+) -> i64 {
+    let vm = unsafe { &mut *vm };
+    if t2_call_prologue(vm, ip).is_err() {
+        return T2_TRAP;
+    }
+    t2_call_impl(vm, SymId(name as u32), argc as usize, cid as u32, false)
+}
+
+/// `Op::CallNoRecv(name, argc, cid)` — implicit self.
+unsafe extern "C" fn t2_call_norecv(
+    vm: *mut crate::vm::Vm,
+    name: i64,
+    argc: i64,
+    cid: i64,
+    ip: i64,
+) -> i64 {
+    let vm = unsafe { &mut *vm };
+    if t2_call_prologue(vm, ip).is_err() {
+        return T2_TRAP;
+    }
+    t2_call_impl(vm, SymId(name as u32), argc as usize, cid as u32, true)
+}
+
+/// `Op::LoadLocalCall(slot, name, cid)` — the fused superinstruction: push
+/// the local receiver (mirrors `Op::LoadLocal`), then the same zero-arg
+/// explicit-recv dispatch. The pushed local lives on `vm.stack` (a GC root)
+/// for the whole dispatch.
+unsafe extern "C" fn t2_call_local(
+    vm: *mut crate::vm::Vm,
+    slot: i64,
+    name: i64,
+    cid: i64,
+    ip: i64,
+) -> i64 {
+    let vm = unsafe { &mut *vm };
+    if t2_call_prologue(vm, ip).is_err() {
+        return T2_TRAP;
+    }
+    let f = vm.frames.last().expect("ICE: t2_call_local no frame");
+    let v = match &f.locals {
+        crate::vm::Locals::Stack(base) => {
+            vm.locals_arena[*base as usize + slot as usize].clone()
+        }
+        crate::vm::Locals::Shared(rc) => rc.borrow()[slot as usize].clone(),
+    };
+    vm.stack.push(v);
+    t2_call_impl(vm, SymId(name as u32), 0, cid as u32, false)
+}
+
+/// `Op::Return` — the frame-pop shortcut (wave 2): mirrors `step()`'s
+/// `Op::Return` arm without the fetch/decode/match round-trip, so a
+/// native→native callee returns straight to its caller's native code. The
+/// two cold shapes — a pending `is_ensure` handler (unreachable for an
+/// admitted body: admission declines `PushEnsure`; kept for exactness) and a
+/// class-body frame (tier-2 frames are method frames by construction) —
+/// route through the interpreter's own arm via `step`. The hot path is the
+/// arm's plain direct-pop, byte for byte: `$~` restore, `$!` restore, pop +
+/// truncate-to-`base_sp` + push return (honoring `swap_return`), then the
+/// `release_frame_locals` / `recycle_frame_aux` recycling discipline
+/// (3397804a).
+unsafe extern "C" fn t2_return(vm: *mut crate::vm::Vm, pidx: i64, ip: i64) -> i64 {
+    let vm = unsafe { &mut *vm };
+    let depth = vm.frames.len();
+    {
+        let f = vm
+            .frames
+            .last_mut()
+            .expect("ICE: t2_return with empty frame stack");
+        f.ip = ip as usize + 1;
+    }
+    let top = vm.frames.last().expect("ICE: t2_return no frame");
+    let cold = top.is_class_body
+        || top
+            .aux
+            .as_ref()
+            .is_some_and(|a| a.rescues.iter().any(|h| h.is_ensure));
+    if cold {
+        // Full interpreter semantics (ensure-walk / class-body return);
+        // `step` charges its own fuel tick.
+        if let Err(t) = vm.step(Op::Return, pidx as usize) {
+            vm.t2_trap = Some(t);
+            return T2_TRAP;
+        }
+        return t2_finish(vm, depth);
+    }
+    if let Err(t) = vm.check_fuel() {
+        vm.t2_trap = Some(t);
+        return T2_TRAP;
+    }
+    let f = vm.frames.pop().expect("ICE: t2_return no frame");
+    // Frame-local `$~` restore (see the step arm's comment).
+    #[cfg(feature = "regex")]
+    if let Some(saved) = f.saved_last_match {
+        vm.last_match = saved.map(|b| *b);
+    }
+    // `$!` restore to the outermost still-open begin's snapshot (dynamically
+    // scoped errinfo — see the step arm). Always empty for admitted bodies
+    // (`EnterBegin` declines); mirrored for exactness.
+    if let Some(saved) = f
+        .aux
+        .as_ref()
+        .and_then(|a| a.begin_rescue_depths.first())
+        .map(|b| b.saved_dollar_bang.clone())
+    {
+        vm.globals.insert(vm.sym_bang, saved);
+    }
+    let ret = vm.stack.pop().unwrap_or(Value::Nil);
+    vm.stack.truncate(f.base_sp);
+    if let Some(replacement) = f.swap_return {
+        vm.stack.push(replacement);
+    } else {
+        vm.stack.push(ret);
+    }
+    vm.release_frame_locals(f.locals);
+    vm.recycle_frame_aux(f.aux);
+    T2_DONE
 }
 
 /// `Op::JumpIfFalse` condition: pop + truthiness. Returns 1 when truthy
@@ -300,8 +586,11 @@ pub(crate) fn t2_admit(proto: &Proto) -> Result<(), String> {
 
 /// Compile `proto`'s body to a tier-2 native function. Returns `None` when
 /// the body is not admitted (or codegen fails) — the caller records the
-/// verdict and keeps interpreting.
-pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize) -> Option<T2Proto> {
+/// verdict and keeps interpreting. `nocall` (env `RUBYRS_JIT_TIER2_NOCALL`)
+/// disables the wave-2 IC-fast call/return helpers — every call op and
+/// `Return` compiles through the generic `t2_op` helper, reproducing the
+/// wave-1 tier for controlled A/B runs.
+pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize, nocall: bool) -> Option<T2Proto> {
     let dbg = std::env::var_os("RUBYRS_JIT_TIER2_DEBUG").is_some();
     if let Err(why) = t2_admit(proto) {
         if dbg {
@@ -355,6 +644,10 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize) -> Option<T2Proto> 
     builder.symbol("t2_dup", t2_dup as *const u8);
     builder.symbol("t2_pop", t2_pop as *const u8);
     builder.symbol("t2_swap", t2_swap as *const u8);
+    builder.symbol("t2_call", t2_call as *const u8);
+    builder.symbol("t2_call_norecv", t2_call_norecv as *const u8);
+    builder.symbol("t2_call_local", t2_call_local as *const u8);
+    builder.symbol("t2_return", t2_return as *const u8);
     let mut module = JITModule::new(builder);
     let ptr_ty = module.target_config().pointer_type();
 
@@ -399,6 +692,26 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize) -> Option<T2Proto> 
         s.params.push(AbiParam::new(types::I64));
         s
     };
+    // (vm, a, b, c, d) -> status — the t2_call family.
+    let sig_vm_4i64_ret = {
+        let mut s = module.make_signature();
+        s.params.push(AbiParam::new(ptr_ty));
+        for _ in 0..4 {
+            s.params.push(AbiParam::new(types::I64));
+        }
+        s.returns.push(AbiParam::new(types::I64));
+        s
+    };
+    // (vm, pidx, ip) -> status — t2_return.
+    let sig_vm_2i64_ret = {
+        let mut s = module.make_signature();
+        s.params.push(AbiParam::new(ptr_ty));
+        for _ in 0..2 {
+            s.params.push(AbiParam::new(types::I64));
+        }
+        s.returns.push(AbiParam::new(types::I64));
+        s
+    };
 
     let f_op = module.declare_function("t2_op", Linkage::Import, &sig_vm_i64_i64_ret).ok()?;
     let f_pop_truthy = module.declare_function("t2_pop_truthy", Linkage::Import, &sig_vm_ret).ok()?;
@@ -415,6 +728,12 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize) -> Option<T2Proto> 
     let f_dup = module.declare_function("t2_dup", Linkage::Import, &sig_vm).ok()?;
     let f_pop = module.declare_function("t2_pop", Linkage::Import, &sig_vm).ok()?;
     let f_swap = module.declare_function("t2_swap", Linkage::Import, &sig_vm).ok()?;
+    let f_call = module.declare_function("t2_call", Linkage::Import, &sig_vm_4i64_ret).ok()?;
+    let f_call_norecv =
+        module.declare_function("t2_call_norecv", Linkage::Import, &sig_vm_4i64_ret).ok()?;
+    let f_call_local =
+        module.declare_function("t2_call_local", Linkage::Import, &sig_vm_4i64_ret).ok()?;
+    let f_return = module.declare_function("t2_return", Linkage::Import, &sig_vm_2i64_ret).ok()?;
 
     let mut fbctx = FunctionBuilderContext::new();
     {
@@ -434,6 +753,10 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize) -> Option<T2Proto> 
         let r_dup = module.declare_func_in_func(f_dup, fb.func);
         let r_pop = module.declare_func_in_func(f_pop, fb.func);
         let r_swap = module.declare_func_in_func(f_swap, fb.func);
+        let r_call = module.declare_func_in_func(f_call, fb.func);
+        let r_call_norecv = module.declare_func_in_func(f_call_norecv, fb.func);
+        let r_call_local = module.declare_func_in_func(f_call_local, fb.func);
+        let r_return = module.declare_func_in_func(f_return, fb.func);
 
         let entry = fb.create_block();
         fb.append_block_params_for_function_params(entry);
@@ -517,15 +840,49 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize) -> Option<T2Proto> 
                     terminated = true;
                 }
                 Op::Return => {
-                    // The step arm pops the frame + pushes the return value;
-                    // whatever status comes back (CONTINUE from a nested
-                    // driver's perspective never applies — the frame is gone,
-                    // so t2_op reports BAIL) is the function's result. TRAP
-                    // propagates as-is.
-                    let call = fb.ins().call(r_op, &[vm, opp, pidxc, ipc]);
-                    let st = fb.inst_results(call)[0];
+                    // Wave 2: the dedicated frame-pop shortcut (mirrors the
+                    // step arm; cold ensure/class-body shapes route through
+                    // `step` inside the helper). Whatever status comes back
+                    // (DONE on the pop; TRAP propagates) is the function's
+                    // result — a native→native callee returns straight to
+                    // its caller's native code here.
+                    let st = if nocall {
+                        let call = fb.ins().call(r_op, &[vm, opp, pidxc, ipc]);
+                        fb.inst_results(call)[0]
+                    } else {
+                        let call = fb.ins().call(r_return, &[vm, pidxc, ipc]);
+                        fb.inst_results(call)[0]
+                    };
                     fb.ins().return_(&[st]);
                     terminated = true;
+                }
+                // --- wave-2 IC-fast call family (plain fixed-argc forms;
+                // the walk census: explicit-recv + self-recv argc 0-2 are
+                // 84% of frames). Kw / block / splat / send forms stay on
+                // the generic helper below. ---
+                Op::Call(name, argc, cid) if !nocall && *argc <= 2 => {
+                    let n = fb.ins().iconst(types::I64, name.0 as i64);
+                    let a = fb.ins().iconst(types::I64, *argc as i64);
+                    let c = fb.ins().iconst(types::I64, *cid as i64);
+                    let call = fb.ins().call(r_call, &[vm, n, a, c, ipc]);
+                    let st = fb.inst_results(call)[0];
+                    check_status!(fb, st);
+                }
+                Op::CallNoRecv(name, argc, cid) if !nocall && *argc <= 2 => {
+                    let n = fb.ins().iconst(types::I64, name.0 as i64);
+                    let a = fb.ins().iconst(types::I64, *argc as i64);
+                    let c = fb.ins().iconst(types::I64, *cid as i64);
+                    let call = fb.ins().call(r_call_norecv, &[vm, n, a, c, ipc]);
+                    let st = fb.inst_results(call)[0];
+                    check_status!(fb, st);
+                }
+                Op::LoadLocalCall(slot, name, cid) if !nocall => {
+                    let s = fb.ins().iconst(types::I64, *slot as i64);
+                    let n = fb.ins().iconst(types::I64, name.0 as i64);
+                    let c = fb.ins().iconst(types::I64, *cid as i64);
+                    let call = fb.ins().call(r_call_local, &[vm, s, n, c, ipc]);
+                    let st = fb.inst_results(call)[0];
+                    check_status!(fb, st);
                 }
                 Op::BreakLoop(off) | Op::NextLoop(off) => {
                     // Run the step arm (loop bookkeeping + its own ip
