@@ -32,7 +32,7 @@ mod raise;
 mod range;
 mod sort;
 mod sprintf;
-mod step;
+pub(crate) mod step;
 mod string;
 mod util;
 #[cfg(feature = "bignum")]

@@ -54,6 +54,9 @@ mod json_native;
 mod prism_materialize;
 mod prism_native;
 mod prism_node_specs;
+// Native whitequark translation: `Prism::Translation::Parser#tokenize` in Rust
+// (compiler + builder + lexer ports), for RuboCop's prism engine.
+mod prism_wq;
 // VM snapshot/image (thin slice) — capture the class graph to serde bytes so a
 // future restore can skip `require`'s parse+compile+execute. Gated on the serde
 // derives from `preamble-cache`.
@@ -136,6 +139,10 @@ pub use json_native::register_host_fns as register_json_native_host_fns;
 /// Register the Prism serialize-parse host fns so RuboCop's `parser_prism` engine can build
 /// its AST natively on rubyrs (ADR 0036 Slice 1). See [`prism_native::register_host_fns`].
 pub use prism_native::register_host_fns as register_prism_native_host_fns;
+/// Register the native whitequark-translation host fn
+/// (`__rubyrs_wqtrans_tokenize`) that runs `Prism::Translation::Parser#tokenize`
+/// in Rust for RuboCop's prism engine. See [`prism_wq::register_host_fns`].
+pub use prism_wq::register_host_fns as register_prism_wq_host_fns;
 /// Register `_rouge_native` host fns (`__rubyrs_rouge_native_table`,
 /// `__rubyrs_rouge_native_lex_html`) onto a `Runtime`. The shim that
 /// rubyrs injects after `require "rouge"` detects the registration via

@@ -3312,6 +3312,32 @@ impl Vm {
                             }
                             return Some(Ok(Value::Bool(true)));
                         }
+                        // prism_wq: after the gem's translation/parser.rb loads
+                        // (usually via the Translation::Parser33/34 autoload),
+                        // layer the native-tokenize hook over it — the
+                        // native-first-with-per-file-fallback seam for
+                        // RuboCop's prism engine. Inject-once.
+                        #[cfg(not(target_os = "wasi"))]
+                        if &*p == "prism/translation/parser"
+                            && !self.loaded_stdlib_stubs.contains("<rubyrs:wqtrans-hook>")
+                            && self.allow_filesystem_io
+                            && self.find_ruby_source_candidate(&p)
+                        {
+                            return Some(match self.require_ruby(&p) {
+                                Ok(v) => {
+                                    self.loaded_stdlib_stubs
+                                        .insert("<rubyrs:wqtrans-hook>".to_string());
+                                    match self.compile_and_run_source(
+                                        std::path::PathBuf::from("<rubyrs:wqtrans>"),
+                                        crate::prism_wq::HOOK_RB.to_string(),
+                                    ) {
+                                        Ok(_) => Ok(v),
+                                        Err(t) => Err(t),
+                                    }
+                                }
+                                Err(t) => Err(t),
+                            });
+                        }
                     }
                     #[cfg(not(target_os = "wasi"))]
                     {

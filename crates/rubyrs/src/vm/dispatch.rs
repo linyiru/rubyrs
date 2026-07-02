@@ -25467,7 +25467,7 @@ pub(crate) fn object_id_for(v: &crate::value::Value) -> i64 {
 ///   1 Int, 2 Float, 3 Str, 4 Sym, 5 Bool, 6 Nil,
 ///   7 heap-identity (default fallback), 8 Range,
 ///   9 Array (order-sensitive), 10 Hash (order-insensitive).
-fn object_hash(v: &Value, heap: &crate::heap::Heap) -> i64 {
+pub(crate) fn object_hash(v: &Value, heap: &crate::heap::Heap) -> i64 {
     let mut visited = std::collections::HashSet::new();
     object_hash_inner(v, heap, &mut visited)
 }

@@ -84,6 +84,12 @@ fn serialize(src: &[u8], opts: Option<&[u8]>, mode: SerializeMode) -> Vec<u8> {
     }
 }
 
+/// Parse+lex `src` to the serialize wire blob — the input side of the native
+/// whitequark translation (prism_wq), which decodes it into Rust structs.
+pub(crate) fn serialize_parse_lex(src: &[u8], opts: Option<&[u8]>) -> Vec<u8> {
+    serialize(src, opts, SerializeMode::ParseLex)
+}
+
 /// `(source)` or `(source, options_blob)` — the optional second arg is the serialized
 /// `pm_options` blob (or `nil` for defaults).
 fn arg_src(args: &[Value], sig: &str) -> Result<(Vec<u8>, Option<Vec<u8>>), Trap> {

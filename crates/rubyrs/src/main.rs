@@ -401,6 +401,9 @@ fn main() {
     // is unconditionally linked. Lets RuboCop's `parser_prism` engine build its AST natively,
     // bypassing the slow interpreted whitequark lexer. Inert unless the prism shim calls them.
     rubyrs::register_prism_native_host_fns(&mut rt);
+    // Native whitequark translation (prism_wq): the Translation::Parser#tokenize
+    // pipeline in Rust. Inert unless the prism translation hook calls it.
+    rubyrs::register_prism_wq_host_fns(&mut rt);
     // `_rouge_native` accelerator: expose the carmine engine host fns;
     // the require("rouge") hook injects the shim that detects + uses
     // them. Without this registration the shim stays inert.
