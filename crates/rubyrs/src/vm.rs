@@ -391,6 +391,55 @@ pub(crate) struct MethodBreak {
     pub(crate) suspended: bool,
 }
 
+/// ADR 0031 increment 2 — precomputed argument-binding plan for a
+/// NON-fixed-arity method proto (optional positionals / `*rest` /
+/// post-required / `&blk`; kwargs and kw-rest are INELIGIBLE — see
+/// `Vm::nfa_plan_for`). The variadic sibling of `FixedArity`: every
+/// field the general binder re-derives from the Proto per call
+/// (`invoke_method_with_block_inner`'s tail-layout arithmetic) is
+/// captured once here, so the dispatch fast paths can bind a
+/// resolved call stack-direct without touching the ~320-byte-stride
+/// `protos[idx]` row. Optional-param DEFAULTS need no plan entry:
+/// they are compiled as a body-entry prologue (`JumpIfArgGiven` +
+/// default expr + `StoreLocal`, keyed on the frame's
+/// `n_given_positional`), so the binder's only default job is
+/// leaving unfilled slots Nil and stamping the given-count —
+/// evaluation order/scope/once-per-call semantics ride on the same
+/// bytecode the general binder relies on.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct NfaPlan {
+    /// `proto.params.len()` — cross-checked against `m.params.len()`
+    /// at the invoke site so an exotic Method whose params diverge
+    /// from its proto (none exist today outside closures/builtins,
+    /// which the callers already decline) falls back to the cascade.
+    pub(crate) params_len: u16,
+    /// Leading required positionals (`proto.n_required_positional`).
+    pub(crate) required_pre: u16,
+    /// Trailing required positionals (`proto.n_required_post`) —
+    /// bound from the arg tail BEFORE optionals/rest gather.
+    pub(crate) required_post: u16,
+    /// pre + optionals + post — the positional slot region
+    /// `[0, positional_max)`; the rest slot (when `has_rest`) is AT
+    /// `positional_max`, mirroring the general binder's layout.
+    pub(crate) positional_max: u16,
+    pub(crate) has_rest: bool,
+    /// `&blk` param present: its slot is `positional_max + has_rest`
+    /// (kw slots can't intervene — kwargs are ineligible).
+    pub(crate) has_block_param: bool,
+    pub(crate) n_locals: u16,
+    /// Cached `!proto.creates_block` — same contract as
+    /// `FixedArity::stack_eligible`.
+    pub(crate) stack_eligible: bool,
+}
+
+/// Lazy tri-state slot for `Vm::nfa_plans` (index = `proto_idx`).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum NfaPlanSlot {
+    Unknown,
+    Ineligible,
+    Plan(NfaPlan),
+}
+
 /// RAII guard for `Vm.pinned`. Native-side code that needs heap
 /// values to survive an intervening `maybe_gc` / `?` early-return
 /// constructs one of these, calls `.pin(v)` for every value it
@@ -1733,6 +1782,14 @@ pub(crate) struct Vm {
     /// closure:1 | non_public:1. Dumped as `nfa-stats` rows by the
     /// CLI at exit alongside `cascade-stats`.
     pub(crate) nfa_stats: Option<Box<FxHashMap<(SymId, u16, u32, bool), u64>>>,
+    /// ADR 0031 increment 2 (plan-based): per-proto precomputed
+    /// binding plans for NON-fixed-arity methods (optionals / splat
+    /// / post-required / `&blk` — NOT kwargs), lazily populated by
+    /// `nfa_plan_for` on the first fast-path attempt and immutable
+    /// thereafter (a Proto's param shape never changes after
+    /// compile). Indexed by `proto_idx`; grown on demand — protos
+    /// added later (eval / require) start `Unknown`.
+    pub(crate) nfa_plans: Vec<NfaPlanSlot>,
     /// Reopen-precedence early gate (same `method_gen`-revalidated
     /// pass): bit per primitive class whose OWN method table holds
     /// at least one name a `primitive_call`-family arm claims
@@ -2441,6 +2498,7 @@ impl Vm {
             } else {
                 None
             },
+            nfa_plans: Vec::new(),
             any_undefs: false,
             prim_reopen_mask: 0,
             inspect_stack: Vec::new(),

@@ -947,6 +947,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn undef_inherited_singleton() { run_diff("undef_inherited_singleton"); }
 #[test] fn frame_locals_pool() { run_diff("frame_locals_pool"); }
 #[test] fn locals_stack_arena() { run_diff("locals_stack_arena"); }
+#[test] fn nfa_dispatch_binding() { run_diff("nfa_dispatch_binding"); }
 #[test] fn class_singleton_fast_path() { run_diff("class_singleton_fast_path"); }
 #[test] fn block_locals_share() { run_diff("block_locals_share"); }
 #[test] fn str_hash_cache() { run_diff("str_hash_cache"); }

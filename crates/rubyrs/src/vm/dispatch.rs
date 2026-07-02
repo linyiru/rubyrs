@@ -15830,6 +15830,229 @@ impl Vm {
         }
     }
 
+    /// Fetch (computing + caching on first touch) the ADR-0031
+    /// increment-2 binding plan for `proto_idx`. `None` = ineligible:
+    /// any keyword param or `**kwrest` in the signature (the trailing-
+    /// Hash peel + per-name kw binding + kw_given_mask bookkeeping
+    /// stay on the general binder), or a shape that doesn't fit the
+    /// packed u16 fields. Optionals / `*rest` / post-required / `&blk`
+    /// are all plan-eligible. The cache is sound forever: a Proto's
+    /// param shape is immutable after compile, and the plan carries
+    /// no per-class or per-method state (method redefinition swaps
+    /// the METHOD the IC resolves, which brings its own proto_idx).
+    fn nfa_plan_for(&mut self, proto_idx: usize) -> Option<crate::vm::NfaPlan> {
+        use crate::vm::{NfaPlan, NfaPlanSlot};
+        if proto_idx >= self.nfa_plans.len() {
+            self.nfa_plans.resize(proto_idx + 1, NfaPlanSlot::Unknown);
+        }
+        match self.nfa_plans[proto_idx] {
+            NfaPlanSlot::Plan(p) => return Some(p),
+            NfaPlanSlot::Ineligible => return None,
+            NfaPlanSlot::Unknown => {}
+        }
+        let proto = &self.protos[proto_idx];
+        let has_rest = proto.rest_param.is_some();
+        let has_blk = proto.block_param.is_some();
+        let positional_max = proto
+            .params
+            .len()
+            .saturating_sub(has_rest as usize + has_blk as usize);
+        let eligible = proto.kw_param_defaults.is_empty()
+            && proto.kw_rest_param.is_none()
+            && proto.params.len() <= u16::MAX as usize
+            && proto.n_locals as usize >= proto.params.len()
+            && positional_max
+                >= proto.n_required_positional as usize + proto.n_required_post as usize;
+        if !eligible {
+            self.nfa_plans[proto_idx] = NfaPlanSlot::Ineligible;
+            return None;
+        }
+        let plan = NfaPlan {
+            params_len: proto.params.len() as u16,
+            required_pre: proto.n_required_positional,
+            required_post: proto.n_required_post,
+            positional_max: positional_max as u16,
+            has_rest,
+            has_block_param: has_blk,
+            n_locals: proto.n_locals,
+            stack_eligible: !proto.creates_block,
+        };
+        self.nfa_plans[proto_idx] = NfaPlanSlot::Plan(plan);
+        Some(plan)
+    }
+
+    /// ADR 0031 increment 2 — stack-direct invoke of an IC-resolved
+    /// NON-fixed-arity user Ruby method (the "explicit-non-fixed-
+    /// arity 46.7%" bucket), binding via the precomputed `NfaPlan`
+    /// instead of falling into the slow cascade + general binder.
+    /// This is the plan-based retry of the REJECTED 2026-06-24
+    /// increment 2 (which routed to `invoke_method`'s general binder
+    /// — a Vec-args + re-derive-per-call path, +9.7% wall): here the
+    /// invoke stays cheap (args move stack→arena directly, locals
+    /// arena/pooled cell, no args Vec, no proto re-derivation).
+    ///
+    /// Caller contract (both callers guarantee): `m` came from the
+    /// same `lookup_method_cached` the slow path would use, and is
+    /// non-closure + non-builtin; explicit-recv callers additionally
+    /// enforce Public. `self_val_norecv`: `None` = explicit form, the
+    /// receiver sits on the stack BELOW the `argc` args and is popped
+    /// into the frame; `Some(v)` = implicit-self form (nothing below
+    /// the args).
+    ///
+    /// Semantics mirrored from the general binder
+    /// (`invoke_method_with_block_inner`), specialised to the
+    /// kw-free shapes the plan admits:
+    ///   - arity MISS declines (`Ok(false)`) — the cascade re-resolves
+    ///     and raises the canonical ArgumentError (same contract as
+    ///     the fixed-arity fast path's argc gate);
+    ///   - trailing-Hash peel: skipped — the binder only peels when
+    ///     the callee declares kwparams/kwrest, which the plan gate
+    ///     excludes, so a trailing Hash stays positional either way;
+    ///   - post-required bind from the arg TAIL, then leading args,
+    ///     then the middle gathers into a FRESH rest Array per call
+    ///     (splat identity), `[]` when empty;
+    ///   - unfilled optional slots stay Nil and
+    ///     `n_given_positional = pre_take` drives the body's
+    ///     `JumpIfArgGiven` default prologue — default expressions
+    ///     (literal or computed) evaluate in the same scope, order,
+    ///     and exactly-once-per-call as every other path;
+    ///   - `&blk` slot binds Nil (this is the no-block `do_call`
+    ///     form; a block call takes `do_call_block`'s paths).
+    ///
+    /// GC rooting: the rest-Array alloc happens while every arg is
+    /// still ON the operand stack (a root), the receiver is either
+    /// below them on the stack (explicit) or held by the caller's
+    /// frame (`self_val` clone), and no further alloc happens between
+    /// the rest alloc and the frame push — so no pinning is needed.
+    fn try_invoke_nfa_method_from_stack(
+        &mut self,
+        m: &Rc<Method>,
+        self_val_norecv: Option<Value>,
+        argc: usize,
+    ) -> Result<bool, Trap> {
+        debug_assert!(m.closure.is_none() && m.builtin.is_none());
+        let Some(plan) = self.nfa_plan_for(m.proto_idx) else {
+            return Ok(false);
+        };
+        // Exotic-Method guard: a Method whose params diverge from its
+        // proto would break the tail-layout math. None exist today
+        // outside closures/builtins (already declined), but decline
+        // loudly-by-falling-through rather than mis-bind.
+        if m.params.len() != plan.params_len as usize {
+            return Ok(false);
+        }
+        let positional_max = plan.positional_max as usize;
+        let post_n = plan.required_post as usize;
+        let required = plan.required_pre as usize + post_n;
+        if argc < required || (!plan.has_rest && argc > positional_max) {
+            return Ok(false);
+        }
+        let split = match self.stack.len().checked_sub(argc) {
+            Some(s) => s,
+            None => return Ok(false),
+        };
+        if self_val_norecv.is_none() && split == 0 {
+            return Ok(false);
+        }
+        self.check_frames()?;
+        let pre_take = (argc - post_n).min(positional_max - post_n);
+        let rest_n = argc - post_n - pre_take;
+        let rest_id = if plan.has_rest {
+            let rest_vec: Vec<Value> =
+                self.stack[split + pre_take..split + pre_take + rest_n].to_vec();
+            self.maybe_gc(); // allow: gc-rooting — every value in rest_vec is a clone of a slot still live on self.stack (a root) until the binds below; recv is on the stack (explicit) or rooted by the caller's frame (self form).
+            self.check_alloc()?;
+            Some(self.heap.alloc(HeapObj::Array(rest_vec.into())))
+        } else {
+            None
+        };
+        let n_locals = plan.n_locals as usize;
+        let locals = if plan.stack_eligible {
+            let base = self.locals_arena.len();
+            self.locals_arena.reserve(n_locals);
+            // Slots [0, pre_take): leading caller-supplied positionals.
+            for i in 0..pre_take {
+                let v = std::mem::replace(&mut self.stack[split + i], Value::Nil);
+                self.locals_arena.push(v);
+            }
+            // Slots [pre_take, positional_max - post_n): unfilled
+            // optionals — Nil; the body prologue fills them.
+            for _ in pre_take..positional_max - post_n {
+                self.locals_arena.push(Value::Nil);
+            }
+            // Slots [positional_max - post_n, positional_max): the
+            // trailing required group, from the arg tail.
+            for i in 0..post_n {
+                let v = std::mem::replace(
+                    &mut self.stack[split + pre_take + rest_n + i],
+                    Value::Nil,
+                );
+                self.locals_arena.push(v);
+            }
+            if let Some(id) = rest_id {
+                self.locals_arena.push(Value::Array(id));
+            }
+            if plan.has_block_param {
+                self.locals_arena.push(Value::Nil);
+            }
+            for _ in plan.params_len as usize..n_locals {
+                self.locals_arena.push(Value::Nil);
+            }
+            self.stack.truncate(split);
+            crate::vm::Locals::Stack(base as u32)
+        } else {
+            let cell = self.locals_cell_nil(n_locals);
+            {
+                let mut l = cell.borrow_mut();
+                for (i, slot) in l.iter_mut().enumerate().take(pre_take) {
+                    *slot = std::mem::replace(&mut self.stack[split + i], Value::Nil);
+                }
+                for i in 0..post_n {
+                    l[positional_max - post_n + i] = std::mem::replace(
+                        &mut self.stack[split + pre_take + rest_n + i],
+                        Value::Nil,
+                    );
+                }
+                if let Some(id) = rest_id {
+                    l[positional_max] = Value::Array(id);
+                }
+                // `&blk` slot stays Nil (cell is Nil-filled).
+            }
+            self.stack.truncate(split);
+            crate::vm::Locals::Shared(cell)
+        };
+        let recv = match self_val_norecv {
+            Some(v) => v,
+            None => self
+                .stack
+                .pop()
+                .expect("ICE: nfa fast path recv underflow"),
+        };
+        self.frames.push(Frame {
+            proto_idx: m.proto_idx,
+            ip: 0,
+            locals,
+            self_val: recv,
+            base_sp: self.stack.len(),
+            is_class_body: false,
+            swap_return: None,
+            block_arg: None,
+            defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
+            lexical_cvar_class: None,
+            #[cfg(feature = "regex")] saved_last_match: None,
+            is_block: false, is_lambda: false,
+            n_given_positional: pre_take as u16,
+            kw_given_mask: 0,
+            aux: None,
+            pending_yield: false,
+            block_writeback: None,
+            captured_yield_block: None,
+        });
+        // $~ scoping is LAZY now — save_match_scope_on_write fires on
+        // the first last_match write inside this method scope.
+        Ok(true)
+    }
+
     /// Explicit-receiver monomorphic fast path — see the call site in
     /// `do_call`. Resolves via the SAME `class_of` + `lookup_method_cached`
     /// the slow path uses, so method resolution (including the
@@ -15964,8 +16187,17 @@ impl Vm {
             return Ok(true);
         }
         let fixed = match m.fixed_arity {
+            // Fixed-arity method, WRONG argc → decline; the cascade
+            // raises the canonical ArgumentError.
             Some(f) if f.required as usize == argc => f,
-            _ => return Ok(false),
+            Some(_) => return Ok(false),
+            // ADR 0031 increment 2: non-fixed arity (optionals /
+            // splat / post-required / `&blk` — NOT kwargs) binds via
+            // the precomputed per-proto plan, stack-direct. Same
+            // resolution + guards as the fixed path (IC-cached,
+            // Public, non-closure, non-builtin — all established
+            // above); kwargs/arity-miss shapes decline inside.
+            None => return self.try_invoke_nfa_method_from_stack(&m, None, argc),
         };
         self.check_frames()?;
         // Bind the argc args (stack top) into the locals, then drop the recv.
@@ -16076,6 +16308,14 @@ impl Vm {
         #[cfg(feature = "jit-native")]
         if m.closure.is_none() && self.jit_should_route(m.proto_idx, argc) {
             return Ok(false);
+        }
+        // ADR 0031 increment 2, implicit-self form: a non-fixed-arity
+        // method binds via the precomputed plan. No visibility gate —
+        // an implicit-self call legally invokes private AND protected
+        // methods (same asymmetry as the fixed path below). Closures
+        // must keep the captured-locals path.
+        if m.fixed_arity.is_none() && m.closure.is_none() {
+            return self.try_invoke_nfa_method_from_stack(&m, Some(self_val), argc);
         }
         self.try_invoke_fixed_method_from_stack(m, self_val, argc, None)
     }

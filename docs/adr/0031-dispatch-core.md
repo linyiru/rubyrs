@@ -169,3 +169,41 @@ those paths). Correctness on the happy path verified (variadic + STRESS_GC
 Neutral perf + the intricate early-return arena-corruption hardening it
 would still need = not worth shipping. **The dispatch/binder optimization
 frontier is conclusively exhausted.** Reverted to increment 1 (8c4be14b).
+
+## Increment 2 REVISITED, plan-based (2026-07-01): SHIPPED
+
+The 2026-06-24 rejection routed variadic calls to the GENERAL binder
+(Vec args + per-call re-derivation) — that's what regressed, not the
+cascade-skip itself. The shipped version keeps the invoke cheap:
+
+- A per-proto precomputed `NfaPlan` (`Vm::nfa_plans`, lazy, immutable —
+  a Proto's shape never changes) captures the tail-layout arithmetic
+  the general binder re-derives per call: required pre/post counts,
+  positional_max, rest/`&blk` presence, n_locals, stack-eligibility.
+  KWARGS (and `**`) stay INELIGIBLE — the trailing-Hash peel + per-name
+  kw binding stay on the general binder.
+- On IC hit, `try_invoke_explicit_recv_cached` (explicit) and
+  `try_invoke_self_recv_cached` (implicit-self) bind a non-fixed-arity
+  method stack-direct: args move stack→arena (or pooled cell), the
+  splat gathers into a fresh Array allocated while the args are still
+  stack-rooted (no pins), post-requireds peel from the tail, unfilled
+  optionals stay Nil with `n_given_positional` driving the body's
+  `JumpIfArgGiven` default prologue (defaults evaluate in the same
+  scope/order/once-per-call on EVERY path — they're body bytecode).
+  Arity miss / kwargs / closures / builtins / non-Public (explicit
+  form) decline to the cascade unchanged.
+
+Measured on the RuboCop cop-walk (walkonly harness, 600-line file,
+JIT off): NFA slow-cascade sends 46.7K → 5.5K per walk (−88%; total
+slow-cascade sends −16.5%), instructions −1.15% (deterministic),
+cycles −1.5%, walk wall ≈ −1%, end-to-end single-file run ≈ −2.5%
+(best-of-3). Per-send saving is real but modest (~100ns): the frame +
+binding + body cost dominates these calls; the arm-chain + args-Vec +
+`vec_nil` they no longer pay is the thin slice. Correctness: diff
+1053-green (strscan_linear_scaling flake pre-existing), new
+`nfa_dispatch_binding` fixture (defaults scope/order/once, splat
+identity, post-required, `&blk`-nil, kw-decline, visibility,
+warm-site ArgumentError, redefinition + subclass override after warm
+IC, Shared-locals variadic), STRESS_GC-identical. After this, the
+walk's slow-cascade residue is led by `public_send` (15.5%) +
+`respond_to?` (11.2%) — the send-family, not arg binding.
