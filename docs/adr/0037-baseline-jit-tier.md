@@ -198,15 +198,16 @@ f1/big1/20-file, diff_cruby 3-config green, STRESS_GC, fib canary)
 1. **Wave 1 — substrate (SHIPPED, this ADR).** Serving hooks, admission,
    statuses, stats, allowlist, the push-then-mutate fix. Walk-neutral;
    recursion/self-call chains −6..−21%.
-2. **Wave 2 — pay for the calls.** The walk is call-op-dominated, so attack
-   the per-call-op cost inside compiled bodies: an IC-fast `t2_call` helper
-   (monomorphic explicit-recv hit → resolved-method invoke, skipping the
-   do_call cascade re-entry; miss → full `do_call`), fused
-   LoadLocal/LoadIvar+Call receiver forms mirroring `LoadLocalCall`, and
-   direct native→native dispatch when the callee is itself tier-2 (the ABI
-   already permits it: callee = `(vm) -> status` after a frame push whose
-   binder can be specialized per fixed arity). Exit criterion: a measurable
-   walk win (≥3%) or a documented negative result.
+2. **Wave 2 — pay for the calls (SHIPPED — see "Wave 2 results" below).**
+   The walk is call-op-dominated, so attack the per-call-op cost inside
+   compiled bodies: the IC-fast `t2_call` helper family (`Op::Call` /
+   `Op::CallNoRecv` argc 0–2 + the `LoadLocalCall` fusion — the census's
+   84%), the `t2_return` frame-pop shortcut, direct native→native dispatch
+   via the serves' trailing `t2_enter`, and the adaptive compile threshold
+   (item 6). Exit criterion was "a measurable walk win (≥3%) or a documented
+   negative result": measured −4.6..−6.1% vs the wave-1 tier, −1.3% vs the
+   interpreter on the walk; call-chain microshapes −13% and fib −13%, both
+   on top of wave-1's wins.
 3. **Wave 3 — inline the ops.** Direct Cranelift lowering of the hot simple
    ops against the pinned `Value` layout (ADR 0035): operand-stack push/pop
    of immediates without helper calls, locals cached in native slots BETWEEN
@@ -221,9 +222,80 @@ f1/big1/20-file, diff_cruby 3-config green, STRESS_GC, fib canary)
 5. **Wave 5 — blocks (25% of the walk).** Compile block protos on the same
    substrate, served from `invoke_block` (the frame model is identical); then
    `each`-driver → native-block direct calls.
-6. **Compile-cost control (parallel).** 932ms for the walk's hot set is fine
-   for daemon/batch, too much for one-shot CLI: raise the threshold under a
-   process-lifetime heuristic, or move Cranelift compilation off-thread.
+6. **Compile-cost control (SHIPPED with wave 2).** 932ms for the walk's hot
+   set is fine for daemon/batch, too much for one-shot CLI. Shipped as an
+   adaptive entry threshold `1024 + 16 × body_ops` (compile cost is ~linear
+   in ops, ~8µs/op; per-entry savings are tens-to-hundreds of ns, so payback
+   needs O(1000) entries). Env overrides: `RUBYRS_JIT_TIER2_THRESHOLD`
+   (absolute), `_BASE`, `_PEROP`; `RUBYRS_JIT_TIER2_NOCALL` reproduces the
+   wave-1 tier for A/B. Snapshot-caching compiled code was assessed and
+   deferred: Cranelift modules bake absolute helper/`code`-buffer addresses,
+   so a cross-run cache means relocation machinery — off-thread compilation
+   is the cheaper next step if the residual matters.
+
+### Wave 2 results (2026-07-02; same box/method as wave 1, best-of-3
+interleaved rounds)
+
+Design as shipped in `jit_tier2.rs`: `t2_call`/`t2_call_norecv`/
+`t2_call_local` execute the plain fixed-argc call ops by front-loading the
+EXACT serve the `do_call` cascade would reach for each receiver shape —
+gates (`bypass_visibility_once`/`force_primitive_dispatch`/refined name) →
+explicit recv: `try_fast_primitive`+`try_fast_index` (guarded on the
+Str/Array/Block/Hash singleton flags being clear and name ≠ `call`, which
+makes the skipped cascade prefix provably inert) → the explicit-recv IC
+path → the class-singleton IC path; implicit self: `host_fns` precedence →
+toplevel-IC serve for main/Nil self (the fib shape) → the self-recv IC
+path. ANY decline falls back to the interpreter's own arm (full `do_call`
+with `trailing_hash_positional`), so misses re-resolve identically —
+method_gen redefinition, megamorphic sites, method_missing, visibility
+errors, arity errors all take the canonical path. `t2_return` mirrors the
+step arm's direct pop (`$~`/`$!` restore, `swap_return`, the
+recycle_frame_aux discipline); ensure/class-body shapes route through
+`step` itself. Native→native = a serve's trailing `t2_enter` running the
+callee's compiled body inside the caller's native frame — no new ABI, so
+every existing serve family (getter, zeroarg, int/value/objparam,
+rest-pred, NFA-plan) composes unchanged.
+
+| measurement | off | wave-1 tier | wave-2 |
+|---|---:|---:|---:|
+| walkonly big1 ×30 (broad, threshold 8) | 255.2ms | 268.5ms (+5.2%) | 256.1ms (−4.6% vs w1) |
+| walkonly big1 ×30 (adaptive threshold) | 255.2ms | — | **252.0ms (−1.3% vs off, −6.1% vs w1)** |
+| four-self-calls shape (ns/call) | 889 | 745 | **645 (−27% vs off)** |
+| one-self-call shape | 179 | 155 | 141 |
+| branchy leaf | 125 | 107 | 103 |
+| fib(30) | 0.319s | 0.251s | **0.218s (−32% vs off)** |
+| f1.rb e2e (adaptive) | 1.58–1.61s | ~1.95s (w1, threshold 8) | **1.56–1.57s (no regression)** |
+| big1.rb e2e (adaptive) | 2.28–2.31s | ~2.9s (w1, threshold 8) | **2.24–2.28s** |
+| 20-file prism batch e2e | 8.82–8.98s | — | 8.69–8.88s (≈neutral) |
+| tier-2 compile bill, f1 e2e | — | 268ms / 848 protos | **20.7ms / 97 protos** |
+| tier-2 compile bill, big1 e2e | — | 636ms / 2446 protos | **35ms / 233 protos** |
+
+Counters (walkonly ×10, adaptive): IC-fast serves 8.42M, fallbacks 2.64M
+(24%), native→native entries 4.94M, compile 111ms/686 protos. At threshold
+8 (full coverage): IC-fast 11.98M, fallbacks 4.16M, native→native 7.80M.
+
+Findings that shape wave 3:
+
+- **The call path pays for the substrate, not (yet) for the interpreter.**
+  Wave-2 calls recover the wave-1 tier's +5% per-op-helper overhead and land
+  the broad tier at −1.3% vs the interpreter on the walk. The reason the
+  walk win is small where microshapes win −27%: the serving-arms work
+  already made the cascade's Object-receiver prefix cheap, so skipping it
+  saves ~10-25ns/call, while the frame push + arg bind + `t2_enter` — which
+  wave 2 deliberately kept — still dominates per-call cost. The money
+  remains where the wave-1 report put it: frame elision (wave 4) and inline
+  ops with native-cached locals (wave 3).
+- **Adaptive threshold beats full coverage ON TOP of killing the compile
+  bill** (252.0 vs 256.1ms): compiling only genuinely hot bodies avoids
+  paying the per-op helper layer on cold/tail bodies — coverage is not the
+  metric, per-frame profit is (wave 1's lesson, now load-bearing in the
+  default config).
+- **Remaining fallbacks (24%)** are block-passing sites (`CallBlock` —
+  wave 5), kw/splat forms, non-fixed-arity misses, and receiver shapes
+  outside the mirrored serves; each fallback costs the full cascade plus
+  one wasted IC probe. Wave 3's inline-op work should also lower
+  `t2_call`'s own entry cost (helper call + gates ≈ the same magnitude as
+  the savings on already-fast serves).
 
 ### Amdahl honesty
 
@@ -261,12 +333,25 @@ arrives in one step.
 ## Known gaps / notes
 
 - `check_fuel` is not run for the 12 specialized simple ops (calls and all
-  generic ops still count); fuel-capped runs count slightly fewer ops with
-  the tier on. Default runs unaffected.
+  generic ops still count — the wave-2 `t2_call`/`t2_return` helpers charge
+  the same fuel tick `step()` would, before any stack effect); fuel-capped
+  runs count slightly fewer ops with the tier on. Default runs unaffected.
 - SIGINT safe-points inside a native body are deferred to the next
-  call/generic op (bounded by body length; same property as the existing
-  loop templates).
+  interpreted segment (bounded by body length; same property as the existing
+  loop templates and unchanged by wave 2 — tier-2 call ops never ran the
+  dispatch loop's per-op interrupt check in wave 1 either; interpreted
+  callee frames driven by `dispatch_until` still check per op).
 - Rust-stack nesting: each native serve inside a callee chain adds a Rust
-  stack segment; capped at 96 native levels, deeper recursion interprets.
+  stack segment; capped at 96 native levels, deeper recursion interprets
+  (verified by the wave-2 fixture's depth-3000 native→native recursion).
+- A `t2_call` decline costs one wasted IC probe before the full `do_call`
+  re-resolves (~24% of in-body calls on the walk); acceptable today,
+  shrinks as waves 3/5 absorb more shapes.
+- Wave 2 exposed a PRE-EXISTING jit-native (not tier-2) refinement gap: a
+  compiled body's baked obj-dispatch cross-call bypasses the
+  `refined_method_names` detour (see `JIT_KNOWN_DIVERGENCES` in
+  `diff_cruby.rs`, fixture `tier2_call_refined`; reproduces on the pristine
+  pre-wave-2 binary under `RUBYRS_JIT_NATIVE=1`). Fix belongs in
+  `jit_native.rs`'s PIC fill/lookup.
 - One flaky default-config diff_cruby failure was observed once under heavy
   machine load and did not reproduce (green on immediate re-run, twice).
