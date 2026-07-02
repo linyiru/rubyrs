@@ -3160,6 +3160,51 @@ impl Vm {
             }
             None => false,
         };
+        // `===` case-equality fast-path twins — same gen, same walk.
+        // Chain-wide (`lookup_method_uncached`), strictly more
+        // conservative than the own-table reopen gate the slow path
+        // applies, so any user `Symbol#===` / `String#===` still wins
+        // through the slow path when the flag flips off.
+        let symbol_sym = self.interner.intern("Symbol");
+        self.fast_case_eq_sym_safe = match self.classes.get(&symbol_sym).cloned() {
+            Some(c) => self.lookup_method_uncached(&c, self.sym_case_eq).is_none(),
+            None => false,
+        };
+        let string_sym = self.interner.intern("String");
+        self.fast_case_eq_str_safe = match self.classes.get(&string_sym).cloned() {
+            Some(c) => self.lookup_method_uncached(&c, self.sym_case_eq).is_none(),
+            None => false,
+        };
+        // Class-receiver twin: a user `===` INSTANCE method on the
+        // Module / Class chain (`class Module; def ===`) must disable
+        // the fast path. (Today's slow cascade doesn't consult those
+        // reopens for a Class receiver either, so disabling is
+        // conservative; the per-receiver `def self.===` singleton
+        // override is checked per call site, not here.)
+        let module_sym = self.interner.intern("Module");
+        let class_sym = self.interner.intern("Class");
+        let chain_clean = |vm: &Self, sym: SymId| match vm.classes.get(&sym) {
+            Some(c) => {
+                let c = c.clone();
+                vm.lookup_method_uncached(&c, vm.sym_case_eq).is_none()
+            }
+            None => false,
+        };
+        self.fast_case_eq_class_safe =
+            chain_clean(self, module_sym) && chain_clean(self, class_sym);
+        // Lumped Int/Float/Bool/Nil twin — any user `===` on any of
+        // the five chains turns the whole primitive arm off (costs
+        // only perf in that exotic program, never correctness).
+        let int_chain = self.interner.intern("Integer");
+        let float_chain = self.interner.intern("Float");
+        let nil_chain = self.interner.intern("NilClass");
+        let true_chain = self.interner.intern("TrueClass");
+        let false_chain = self.interner.intern("FalseClass");
+        self.fast_case_eq_prim_safe = chain_clean(self, int_chain)
+            && chain_clean(self, float_chain)
+            && chain_clean(self, nil_chain)
+            && chain_clean(self, true_chain)
+            && chain_clean(self, false_chain);
         // Reopen-precedence mask: per primitive class, does the OWN
         // method table hold any name a primitive arm claims? The
         // preamble is audited collision-free
@@ -7839,6 +7884,104 @@ impl Vm {
             && self.try_invoke_class_singleton_cached(name_id, argc, cache_id)?
         {
             return Ok(());
+        }
+        // `===` case-equality fast path (NodePattern shape): RuboCop's
+        // compiled matchers fire `SYM === node` / `Mod === node` /
+        // `"str" === x` millions of times per cop walk (~20% of the
+        // slow cascade, measured), and every one otherwise walks the
+        // FULL arm chain down to the universal `===` fallback (the
+        // last-resort arm). Mirror that arm's semantics for the three
+        // receiver shapes whose answer never needs user dispatch,
+        // gated like the other fast buckets:
+        //   - Symbol / String → `recv.ruby_eq(arg)` — the same call
+        //     the universal arm makes — gated on the method_gen-
+        //     revalidated `fast_case_eq_{sym,str}_safe` flags (any
+        //     user `===` on the Symbol/String chain flips them off,
+        //     so the reopen-precedence gate keeps winning; String
+        //     per-instance singletons were handled by the
+        //     str_singletons gate above).
+        //   - Class / Module → `arg.is_a?(recv)` via the same
+        //     `class_is_a` reachability the universal arm walks
+        //     (cached variant — answer-identical by construction),
+        //     gated on (a) `fast_case_eq_class_safe` (no `===`
+        //     instance method on the Module/Class chain), (b) a
+        //     per-site `lookup_class_singleton_cached` MISS (a
+        //     `def self.===` anywhere on the receiver's singleton
+        //     chain falls through to the canonical singleton arm,
+        //     exactly as today), and (c) no `class_tag` (a module
+        //     value that is an instance of a Module subclass resolves
+        //     instance methods from its tag class in the slow path).
+        // Regexp receivers are deliberately NOT here (`Regexp#===`
+        // publishes `$~`); Object receivers (rubocop's NodePattern
+        // instances define their own `===`) keep the explicit-recv
+        // cached bucket above / the full cascade. No allocation on a
+        // hit (Bool result), so no `maybe_gc` — same as the arm this
+        // mirrors.
+        if !maybe_refined
+            && !no_recv
+            && argc == 1
+            && name_id == self.sym_case_eq
+            && self.stack.len() >= 2
+        {
+            if self.fast_index_checked_gen != self.method_gen {
+                self.fast_index_revalidate();
+            }
+            let ridx = self.stack.len() - 2;
+            let fast_hit = match &self.stack[ridx] {
+                Value::Sym(_) => self.fast_case_eq_sym_safe,
+                Value::Str(_) => self.fast_case_eq_str_safe,
+                // Int/Float/Bool/Nil (the `Enumerable#any?(pattern)` /
+                // `grep` shape) — same `ruby_eq` the universal arm
+                // reaches; BigInt / Rational deliberately excluded
+                // (rare, and Rational has bespoke eql?-family arms).
+                Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Nil => {
+                    self.fast_case_eq_prim_safe
+                }
+                Value::Class(cls)
+                    if self.fast_case_eq_class_safe && cls.class_tag.is_none() =>
+                {
+                    let cls = cls.clone();
+                    self.lookup_class_singleton_cached(&cls, name_id, cache_id)
+                        .is_none()
+                }
+                _ => false,
+            };
+            if fast_hit {
+                let arg = self
+                    .stack
+                    .pop()
+                    .expect("ICE: === fast path arg underflow");
+                let recv = self
+                    .stack
+                    .pop()
+                    .expect("ICE: === fast path recv underflow");
+                let result = match &recv {
+                    Value::Class(target) => {
+                        // `Mod === obj` ≡ `obj.is_a?(Mod)` — mirrors the
+                        // universal arm byte-for-byte: singleton-aware
+                        // class for heap Objects, `Vm::class_of` for
+                        // everything else.
+                        let start: Option<Rc<Class>> = match &arg {
+                            Value::Object(id) => Some(self.heap.class_of(*id)),
+                            _ => {
+                                let class_val = self.class_of(&arg);
+                                if let Value::Class(c) = class_val {
+                                    Some(c)
+                                } else {
+                                    None
+                                }
+                            }
+                        };
+                        match start {
+                            Some(acls) => self.class_is_a_cached(&acls, target),
+                            None => false,
+                        }
+                    }
+                    _ => recv.ruby_eq(&arg, &self.heap),
+                };
+                self.stack.push(Value::Bool(result));
+                return Ok(());
+            }
         }
         let name = self.interner.resolve(name_id).clone();
         // Universal-Object bare-call routing. Several universal

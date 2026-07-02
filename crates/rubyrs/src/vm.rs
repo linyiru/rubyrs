@@ -1622,6 +1622,10 @@ pub(crate) struct Vm {
     /// path (PathManager.join-style guards probe both per call).
     pub(crate) sym_nil_q: SymId,
     pub(crate) sym_empty_q: SymId,
+    /// Pre-interned `===` for the case-equality fast path (RuboCop's
+    /// NodePattern matchers fire `SYM === node` / `Mod === node`
+    /// millions of times per cop walk — 20% of the slow cascade).
+    pub(crate) sym_case_eq: SymId,
     /// Collection-index fast-path override guard. The fast path may
     /// serve `h[k]` / `a[i]` directly ONLY while no user `[]` exists
     /// anywhere on the Hash / Array ancestor chain (a reopen, an
@@ -1653,6 +1657,22 @@ pub(crate) struct Vm {
     /// perf in that exotic program, never correctness).
     pub(crate) fast_prim_str_safe: bool,
     pub(crate) fast_prim_int_safe: bool,
+    /// `===` case-equality fast-path twins (same revalidation pass):
+    /// no user `===` anywhere on the Symbol / String chain (sym /
+    /// str flags), and no user `===` INSTANCE method on the Module /
+    /// Class chain (class flag — a `class Module; def ===` reopen
+    /// must fall to the slow path). A `def self.===` on a specific
+    /// class is per-receiver and is checked at the call site via the
+    /// IC-backed `lookup_class_singleton_cached` miss instead.
+    pub(crate) fast_case_eq_sym_safe: bool,
+    pub(crate) fast_case_eq_str_safe: bool,
+    pub(crate) fast_case_eq_class_safe: bool,
+    /// Lumped Int/Float/Bool/Nil twin: no user `===` anywhere on the
+    /// Integer / Float / NilClass / TrueClass / FalseClass chains.
+    /// (RuboCop's cop walk fires `Int === Int` millions of times per
+    /// file via the preamble's `Enumerable#any?/none?(pattern)` /
+    /// `grep` — measured the DOMINANT `===` receiver shape.)
+    pub(crate) fast_case_eq_prim_safe: bool,
     /// Reopen-precedence early gate (same `method_gen`-revalidated
     /// pass): bit per primitive class whose OWN method table holds
     /// at least one name a `primitive_call`-family arm claims
@@ -2025,6 +2045,7 @@ impl Vm {
         let sym_frozen_q = interner.intern("frozen?");
         let sym_nil_q = interner.intern("nil?");
         let sym_empty_q = interner.intern("empty?");
+        let sym_case_eq = interner.intern("===");
         // See the `class_singleton_deny` field doc. Union of every
         // name-keyed `do_call` arm that can fire for a Value::Class
         // receiver before the canonical user-singleton lookup, plus
@@ -2312,6 +2333,7 @@ impl Vm {
             sym_frozen_q,
             sym_nil_q,
             sym_empty_q,
+            sym_case_eq,
             fast_index_checked_gen: 0,
             fast_index_hash_safe: false,
             fast_index_array_safe: false,
@@ -2320,6 +2342,10 @@ impl Vm {
             fast_index_hash_key_safe: false,
             fast_prim_str_safe: false,
             fast_prim_int_safe: false,
+            fast_case_eq_sym_safe: false,
+            fast_case_eq_str_safe: false,
+            fast_case_eq_class_safe: false,
+            fast_case_eq_prim_safe: false,
             any_undefs: false,
             prim_reopen_mask: 0,
             inspect_stack: Vec::new(),
