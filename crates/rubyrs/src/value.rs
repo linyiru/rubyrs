@@ -45,7 +45,33 @@ pub struct StrCell {
     /// the same in any ASCII-compatible encoding) so a `force_encoding`
     /// never invalidates it — only a content write does.
     ascii_cache: Cell<i8>,
+    /// Cached UTF-8 VALIDITY of the current content: -1 unknown, 0
+    /// invalid, 1 valid. `std::str::from_utf8` is O(n), and the
+    /// char-indexed String ops (`[]`, `match(re, pos)`) ran it (or a
+    /// lossy equivalent) on EVERY call — on rubocop's 21KB source
+    /// buffer that validation alone was ~600ns/call × 8.6k
+    /// `Buffer#slice` calls per walk. Same invalidation contract as
+    /// `ascii_cache` (cleared by `borrow_mut`); ASCII-only content is
+    /// trivially valid, so `is_utf8_cached` consults the ASCII flag
+    /// first and this cell is only computed for non-ASCII content.
+    utf8_cache: Cell<i8>,
+    /// Lazily-built char→byte offset table for content that receives
+    /// CHAR-indexed ops (`String#[]` / `match(re, pos)` / `match?`):
+    /// entry `i` is the byte offset where char `i` starts, plus one
+    /// final entry == `bytes.len()`, so the byte span of chars
+    /// `[a, b)` is `starts[a]..starts[b]` — an O(1) lookup instead of
+    /// the O(n) `chars().collect()` walk the generic paths did per
+    /// call. Only strings of `CHAR_STARTS_CACHE_MIN`+ bytes cache the
+    /// table (below that the direct walk is cheaper than the alloc
+    /// churn); ASCII-only strings never need it (byte == char).
+    /// Cleared by `borrow_mut` (same contract as `hash_cache`).
+    char_starts: RefCell<Option<Rc<Vec<u32>>>>,
 }
+
+/// Content-size threshold for CACHING the char→byte table. Small
+/// strings rebuild it per call (still cheap); large buffers — the
+/// rubocop source-buffer case — keep it until the next mutation.
+const CHAR_STARTS_CACHE_MIN: usize = 256;
 
 impl StrCell {
     #[inline]
@@ -54,6 +80,8 @@ impl StrCell {
             bytes: RefCell::new(bytes),
             hash_cache: Cell::new(0),
             ascii_cache: Cell::new(-1),
+            utf8_cache: Cell::new(-1),
+            char_starts: RefCell::new(None),
         }
     }
 
@@ -63,12 +91,17 @@ impl StrCell {
         self.bytes.borrow()
     }
 
-    /// Write access — clears the cached hash AND ASCII flag BEFORE
-    /// handing out the guard (see the invalidation contract above).
+    /// Write access — clears the cached hash, ASCII/UTF-8 flags AND
+    /// the char→byte table BEFORE handing out the guard (see the
+    /// invalidation contract above).
     #[inline]
     pub fn borrow_mut(&self) -> std::cell::RefMut<'_, Vec<u8>> {
         self.hash_cache.set(0);
         self.ascii_cache.set(-1);
+        self.utf8_cache.set(-1);
+        if self.char_starts.borrow().is_some() {
+            *self.char_starts.borrow_mut() = None;
+        }
         self.bytes.borrow_mut()
     }
 
@@ -85,6 +118,70 @@ impl StrCell {
                 a
             }
         }
+    }
+
+    /// Is the content valid UTF-8? Caches the O(n) validation; the
+    /// cache is reset by `borrow_mut`. ASCII-only content (per the
+    /// ASCII cache) short-circuits to `true` without touching the
+    /// UTF-8 cell.
+    #[inline]
+    pub(crate) fn is_utf8_cached(&self) -> bool {
+        if self.ascii_cache.get() == 1 {
+            return true;
+        }
+        match self.utf8_cache.get() {
+            1 => true,
+            0 => false,
+            _ => {
+                let ok = std::str::from_utf8(&self.bytes.borrow()).is_ok();
+                self.utf8_cache.set(if ok { 1 } else { 0 });
+                ok
+            }
+        }
+    }
+
+    /// The char→byte offset table for the CURRENT content (see the
+    /// field doc): `starts[i]` = byte offset of char `i`, one extra
+    /// final entry == byte length. Chars follow the same walk the
+    /// invalid-UTF-8 `String#[]` arm has always used (well-formed
+    /// sequences advance by their length; a malformed lead /
+    /// continuation byte counts as its own 1-byte char) — for VALID
+    /// UTF-8 that is exactly the `char_indices` boundaries. Cached
+    /// for large buffers, rebuilt per call for small ones.
+    pub(crate) fn char_starts(&self) -> Rc<Vec<u32>> {
+        if let Some(cs) = self.char_starts.borrow().as_ref() {
+            return cs.clone();
+        }
+        let bytes = self.bytes.borrow();
+        let mut starts: Vec<u32> = Vec::with_capacity(bytes.len().min(1 << 20) + 1);
+        let mut i = 0;
+        while i < bytes.len() {
+            starts.push(i as u32);
+            let b = bytes[i];
+            let seq = if b < 0x80 {
+                1
+            } else if b & 0xE0 == 0xC0 {
+                2
+            } else if b & 0xF0 == 0xE0 {
+                3
+            } else if b & 0xF8 == 0xF0 {
+                4
+            } else {
+                1 // continuation byte or invalid lead → its own 1-byte char
+            };
+            let well_formed = seq > 1
+                && i + seq <= bytes.len()
+                && (1..seq).all(|k| bytes[i + k] & 0xC0 == 0x80);
+            i += if well_formed { seq } else { 1 };
+        }
+        starts.push(bytes.len() as u32);
+        let cache_it = bytes.len() >= CHAR_STARTS_CACHE_MIN;
+        drop(bytes);
+        let table = Rc::new(starts);
+        if cache_it {
+            *self.char_starts.borrow_mut() = Some(table.clone());
+        }
+        table
     }
 
     /// Cached `ruby_hash` for the current content, or 0 if not

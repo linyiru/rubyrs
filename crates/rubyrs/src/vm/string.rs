@@ -1013,6 +1013,11 @@ pub(crate) fn string_call(
         // bool without populating any match-data side state.
         #[cfg(feature = "regex")]
         (Value::Str(a), "match?", [Value::Regex(re)]) => {
+            // Known-valid-UTF-8 fast path: borrowed view, no per-call
+            // O(n) lossy validation.
+            if let Some(m) = is_match_at_char_pos(a, 0, re) {
+                return Ok(Some(Value::Bool(m)));
+            }
             // BINARY subjects match byte-wise (CRuby ASCII-8BIT); fall
             // back to the UTF-8 engine when there's no byte engine.
             let matched = if matches!(a.encoding.get(), crate::value::EncodingTag::Binary) {
@@ -1028,6 +1033,12 @@ pub(crate) fn string_call(
         // Honours a `\G` anchor (match exactly at `pos`). No `$~` update.
         #[cfg(feature = "regex")]
         (Value::Str(a), "match?", [Value::Regex(re), Value::Int(pos)]) => {
+            // Fast path (valid UTF-8, non-BINARY): O(1) pos resolve +
+            // borrowed view — the lossy path below copies the subject
+            // and walks its chars per call (13µs on a 21KB buffer).
+            if let Some(m) = is_match_at_char_pos(a, *pos, re) {
+                return Ok(Some(Value::Bool(m)));
+            }
             let lossy = a.to_string_lossy();
             let char_len = lossy.chars().count() as i64;
             let cpos = if *pos < 0 { char_len + *pos } else { *pos };
@@ -1916,6 +1927,9 @@ pub(crate) fn string_call(
         // Regex#match? mirror — same semantics either side.
         #[cfg(feature = "regex")]
         (Value::Regex(re), "match?", [Value::Str(s)]) => {
+            if let Some(m) = is_match_at_char_pos(s, 0, re) {
+                return Ok(Some(Value::Bool(m)));
+            }
             let matched = if matches!(s.encoding.get(), crate::value::EncodingTag::Binary) {
                 re.is_match_bytes(&s.content.borrow())
                     .unwrap_or_else(|| s.with_str_lossy(|s| re.is_match_from(s)))
@@ -1936,6 +1950,9 @@ pub(crate) fn string_call(
         // is no match. (rack's request parser probes with a position.)
         #[cfg(feature = "regex")]
         (Value::Regex(re), "match?", [Value::Str(s), Value::Int(pos)]) => {
+            if let Some(m) = is_match_at_char_pos(s, *pos, re) {
+                return Ok(Some(Value::Bool(m)));
+            }
             let lossy = s.to_string_lossy();
             let char_len = lossy.chars().count() as i64;
             let cpos = if *pos < 0 { char_len + *pos } else { *pos };
@@ -2723,14 +2740,18 @@ impl Vm {
                         _ => {}
                     }
                 }
-                // UTF-8-tagged but byte-INVALID receiver: char-index by
-                // UTF-8 boundaries while preserving the EXACT bytes. The
-                // generic char path below routes through to_string_lossy,
-                // which expands each invalid byte to a 3-byte U+FFFD —
-                // corrupting AND growing the slice. rack reads multipart
-                // bodies as UTF-8-tagged binary (`File.read`), and
-                // StringIO#read slices them with `@str[pos, len]`; the
-                // lossy grow bloated the parsed body. Keeps the receiver
+                // Non-ASCII receiver (valid OR invalid UTF-8): char-index
+                // via the CACHED char→byte table while preserving the
+                // EXACT bytes. The generic char path below routes through
+                // `to_string_lossy().chars().collect()` — an O(n) walk +
+                // alloc per call, and for invalid UTF-8 it also expands
+                // each invalid byte to a 3-byte U+FFFD, corrupting AND
+                // growing the slice (rack reads multipart bodies as
+                // UTF-8-tagged binary via `File.read`, and StringIO#read
+                // slices them with `@str[pos, len]`). For valid UTF-8 the
+                // table's boundaries ARE `char_indices`, so this arm now
+                // takes over that case too — O(1) per call once the table
+                // is built (invalidated on mutation). Keeps the receiver
                 // encoding. Int / (Int,len) / Range only.
                 if (name == "[]" || name == "slice")
                     && matches!(
@@ -2740,16 +2761,18 @@ impl Vm {
                             | [Value::Range(_)]
                     )
                     && s.encoding.get() != crate::value::EncodingTag::Binary
-                    && std::str::from_utf8(&s.content.borrow()).is_err()
+                    && !s.content.is_ascii_cached()
                 {
+                    let starts = s.content.char_starts();
                     let bytes = s.content.borrow();
-                    let starts = utf8_char_byte_starts(&bytes);
                     let nchars = (starts.len() - 1) as i64;
                     let tag = s.encoding.get();
                     let norm = |i: i64| if i < 0 { nchars + i } else { i };
                     let mk = |c0: usize, c1: usize| {
                         with_tag(
-                            Value::new_str_bytes(bytes[starts[c0]..starts[c1]].to_vec()),
+                            Value::new_str_bytes(
+                                bytes[starts[c0] as usize..starts[c1] as usize].to_vec(),
+                            ),
                             tag,
                         )
                     };
@@ -4511,44 +4534,50 @@ fn byte_split_values(
 /// UTF-8-tagged-but-invalid receiver there rather than byte-replacing.)
 fn wants_byte_faithful(s: &crate::value::RStr) -> bool {
     use crate::value::EncodingTag;
-    s.encoding.get() == EncodingTag::Binary
-        || std::str::from_utf8(&s.content.borrow()).is_err()
+    s.encoding.get() == EncodingTag::Binary || !s.content.is_utf8_cached()
 }
 
-/// Byte offset of each character's start, for CHAR-indexed slicing that
-/// preserves the EXACT bytes of a UTF-8-tagged-but-invalid buffer. A
-/// well-formed UTF-8 sequence is one character (advance by its length);
-/// a lone/invalid byte is one character of one byte — matching CRuby's
-/// lenient counting (`"\xC3".length == 1`). The returned vector has
-/// `char_count + 1` entries: index `i` is char `i`'s first byte and the
-/// final entry is `bytes.len()` (so `bytes[starts[i]..starts[j]]` is the
-/// slice of chars `i..j`). Used by `String#[]` / `#slice` to avoid the
-/// lossy `to_string_lossy` path that expands each bad byte to a 3-byte
-/// U+FFFD (corrupting + growing binary payloads read as UTF-8).
-fn utf8_char_byte_starts(bytes: &[u8]) -> Vec<usize> {
-    let mut starts = Vec::with_capacity(bytes.len() + 1);
-    let mut i = 0;
-    while i < bytes.len() {
-        starts.push(i);
-        let b = bytes[i];
-        let seq = if b < 0x80 {
-            1
-        } else if b & 0xE0 == 0xC0 {
-            2
-        } else if b & 0xF0 == 0xE0 {
-            3
-        } else if b & 0xF8 == 0xF0 {
-            4
-        } else {
-            1 // continuation byte or invalid lead → its own 1-byte char
-        };
-        let well_formed = seq > 1
-            && i + seq <= bytes.len()
-            && (1..seq).all(|k| bytes[i + k] & 0xC0 == 0x80);
-        i += if well_formed { seq } else { 1 };
+/// Predicate-match fast path for the `match?` family: on a KNOWN-
+/// valid-UTF-8 (non-BINARY) receiver, resolve the char-index `pos`
+/// in O(1) (ASCII identity / cached `char_starts`) and run
+/// `is_match_from` on a BORROWED view of the content — no subject
+/// copy, no per-call chars walk. Returns `None` when the receiver is
+/// BINARY or not valid UTF-8 (caller falls back to its lossy path);
+/// `Some(false)` for an out-of-range `pos` (CRuby: no match).
+#[cfg(feature = "regex")]
+fn is_match_at_char_pos(
+    s: &crate::value::RStr,
+    pos: i64,
+    re: &crate::regex_engine::CompiledRegex,
+) -> Option<bool> {
+    if s.encoding.get() == crate::value::EncodingTag::Binary || !s.content.is_utf8_cached() {
+        return None;
     }
-    starts.push(bytes.len());
-    starts
+    let byte_off = if pos == 0 {
+        0
+    } else if s.content.is_ascii_cached() {
+        let char_len = s.content.borrow().len() as i64;
+        let cpos = if pos < 0 { char_len + pos } else { pos };
+        if cpos < 0 || cpos > char_len {
+            return Some(false);
+        }
+        cpos as usize
+    } else {
+        let starts = s.content.char_starts();
+        let char_len = (starts.len() - 1) as i64;
+        let cpos = if pos < 0 { char_len + pos } else { pos };
+        if cpos < 0 || cpos > char_len {
+            return Some(false);
+        }
+        starts[cpos as usize] as usize
+    };
+    let bytes = s.content.borrow();
+    debug_assert!(std::str::from_utf8(&bytes).is_ok());
+    // SAFETY: `is_utf8_cached` above (every content mutation goes
+    // through `borrow_mut`, which resets the cache); `byte_off` is a
+    // char-boundary offset (ASCII identity or `char_starts` entry).
+    let view = unsafe { std::str::from_utf8_unchecked(&bytes) };
+    Some(re.is_match_from(&view[byte_off..]))
 }
 
 #[cfg(feature = "regex")]

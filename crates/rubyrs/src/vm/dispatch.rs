@@ -13782,9 +13782,17 @@ impl Vm {
             let result = match &args[0] {
                 Value::Str(s) => {
                     let re = re.clone();
+                    let is_binary =
+                        matches!(s.encoding.get(), crate::value::EncodingTag::Binary);
+                    // Known-valid-UTF-8 subject: borrowed-view match —
+                    // no subject copy on a miss (same fast path as
+                    // `String#match`).
+                    if !is_binary && s.content.is_utf8_cached() {
+                        self.do_regexp_match_at(&re, s, 0)?
+                    }
                     // BINARY subject: byte engine + byte-faithful captures
                     // (symmetric with the String#match arm).
-                    if matches!(s.encoding.get(), crate::value::EncodingTag::Binary)
+                    else if is_binary
                         && let Some(v) = self.do_regexp_match_binary(&re, s)?
                     {
                         v
