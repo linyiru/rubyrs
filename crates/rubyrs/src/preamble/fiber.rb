@@ -15,6 +15,12 @@
 # as `self`. A multi-arg resume/yield passes the values as an array; a
 # single arg passes the value itself; no args passes nil (CRuby shape).
 class Fiber
+  # Marker consumed by preamble/thread.rb's cooperative green-thread
+  # scheduler: real Thread scheduling is fiber-backed, so it engages
+  # only when this file (the `_fiber` build) loaded. Non-fiber builds
+  # see the constant undefined and keep the deferred thread model.
+  RUBYRS_COOP = true
+
   def self.new(&block)
     # CRuby's message (it fails creating the underlying Proc).
     raise ArgumentError, "tried to create Proc object without a block" if block.nil?

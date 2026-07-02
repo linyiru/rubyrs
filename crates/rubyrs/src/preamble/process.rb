@@ -304,18 +304,49 @@ if __rubyrs_fork_supported?
   module Kernel
     def fork(&blk)
       raise NotImplementedError, "rubyrs fork requires a block (Tier-1 subset)" unless blk
-      __rubyrs_fork_block(blk)
+      # POSIX: only the forking thread survives in the child — the
+      # cooperative scheduler's world (parent green threads, parked
+      # fds, run queue) must reset before the child's block runs, or
+      # the child could resume parent supervisors / double-poll the
+      # parent's pipe fds. (The Rust fork arm clears the VM-side fiber
+      # state; this clears the Ruby-side tables.)
+      __rubyrs_fork_block(proc {
+        ::Thread.__coop_after_fork!
+        blk.call
+      })
     end
   end
 
   module Process
+    # waitpid(2) flags (CRuby values).
+    WNOHANG = 1
+    WUNTRACED = 2
+
     def self.fork(&blk)
       raise NotImplementedError, "rubyrs fork requires a block (Tier-1 subset)" unless blk
-      __rubyrs_fork_block(blk)
+      __rubyrs_fork_block(proc {
+        ::Thread.__coop_after_fork!
+        blk.call
+      })
     end
 
     def self.waitpid(pid, flags = 0)
+      # Cooperative scheduling: a blocking wait from a green thread
+      # (the parallel gem's Worker#stop in each supervisor's ensure)
+      # must not stall the whole VM — poll with WNOHANG and park
+      # between attempts so the other supervisors keep running.
+      if flags == 0 && ::Thread.__coop_active?
+        loop do
+          r = __rubyrs_waitpid(pid, WNOHANG)
+          if r
+            $? = Process::Status.new(r[0], r[1])
+            return r[0]
+          end
+          ::Thread.__coop_sleep(0.002)
+        end
+      end
       r = __rubyrs_waitpid(pid, flags)
+      return nil if r.nil? # WNOHANG, child still running
       $? = Process::Status.new(r[0], r[1])
       r[0]
     end
@@ -484,7 +515,7 @@ class RubyrsFdReader
     raise IOError, "closed stream" if @closed
     result =
       if length.nil?
-        rest = __rubyrs_fd_read(@fd, nil)
+        rest = ::Thread.__coop_active? ? __coop_read_all : __rubyrs_fd_read(@fd, nil)
         out = @pb + (rest || "".b)
         @pb = +"".b
         out
@@ -497,7 +528,12 @@ class RubyrsFdReader
           @pb = @pb.byteslice(length, have - length) || +"".b
           out
         else
-          rest = __rubyrs_fd_read(@fd, length - have)
+          rest =
+            if ::Thread.__coop_active?
+              __coop_read_exact(length - have)
+            else
+              __rubyrs_fd_read(@fd, length - have)
+            end
           if rest.nil?
             # EOF before any fresh byte: drain the pushback if there
             # is one, else the nil-at-EOF contract.
@@ -521,6 +557,41 @@ class RubyrsFdReader
     else
       result
     end
+  end
+
+  # Cooperative twins of the blocking `__rubyrs_fd_read` shapes: same
+  # exactly-n / to-EOF contracts, but a would-block read PARKS the
+  # calling green thread on the fd (or drives the scheduler when main
+  # is the caller) instead of blocking the whole VM in read(2). The
+  # single-threaded path above never comes through here — zero cost.
+  def __coop_read_exact(n)
+    buf = +"".b
+    while buf.bytesize < n
+      chunk = __rubyrs_fd_read_step(@fd, n - buf.bytesize)
+      if chunk == false
+        ::Thread.__coop_wait_fd(@fd, :r)
+      elsif chunk.nil?
+        break # EOF
+      else
+        buf << chunk
+      end
+    end
+    buf.empty? && n > 0 ? nil : buf
+  end
+
+  def __coop_read_all
+    buf = +"".b
+    loop do
+      chunk = __rubyrs_fd_read_step(@fd, 65536)
+      if chunk == false
+        ::Thread.__coop_wait_fd(@fd, :r)
+      elsif chunk.nil?
+        break
+      else
+        buf << chunk
+      end
+    end
+    buf
   end
 
   def getbyte
@@ -559,7 +630,12 @@ class RubyrsFdReader
   def eof?
     raise IOError, "closed stream" if @closed
     return false unless @pb.empty?
-    b = __rubyrs_fd_read(@fd, 1)
+    b =
+      if ::Thread.__coop_active?
+        __coop_read_exact(1)
+      else
+        __rubyrs_fd_read(@fd, 1)
+      end
     return true if b.nil?
     @pb << b
     false
@@ -598,8 +674,33 @@ class RubyrsFdWriter
   def write(*args)
     raise IOError, "closed stream" if @closed
     total = 0
-    args.each do |a|
-      total += __rubyrs_fd_write(@fd, a.to_s)
+    if ::Thread.__coop_active?
+      # A write against a FULL pipe buffer parks the calling green
+      # thread on (fd, :w) instead of blocking the VM in write(2);
+      # EPIPE surfaces from the step exactly like the blocking path.
+      # `while` (not `args.each`): a fiber cannot suspend across a
+      # NATIVE iterator frame (vm/iter.rs truncation) — every loop
+      # around a park point must be pure Ruby.
+      ai = 0
+      while ai < args.length
+        s = args[ai].to_s
+        off = 0
+        size = s.bytesize
+        while off < size
+          r = __rubyrs_fd_write_step(@fd, s, off)
+          if r == false
+            ::Thread.__coop_wait_fd(@fd, :w)
+          else
+            off += r
+          end
+        end
+        total += size
+        ai += 1
+      end
+    else
+      args.each do |a|
+        total += __rubyrs_fd_write(@fd, a.to_s)
+      end
     end
     total
   end
@@ -618,21 +719,29 @@ class RubyrsFdWriter
     self
   end
 
+  # `while` loops (not `each`): `write` can park a green thread, and
+  # a fiber cannot suspend across a native iterator frame.
   def puts(*args)
     if args.empty?
       write("\n")
     else
-      args.each do |a|
-        s = a.to_s
+      i = 0
+      while i < args.length
+        s = args[i].to_s
         write(s)
         write("\n") unless s.end_with?("\n")
+        i += 1
       end
     end
     nil
   end
 
   def print(*args)
-    args.each { |a| write(a.to_s) }
+    i = 0
+    while i < args.length
+      write(args[i].to_s)
+      i += 1
+    end
     nil
   end
 
