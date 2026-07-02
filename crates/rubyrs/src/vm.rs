@@ -440,6 +440,71 @@ pub(crate) enum NfaPlanSlot {
     Plan(NfaPlan),
 }
 
+/// Body-shape plan for the "rest-predicate" frame-free fast path
+/// (the rubocop-ast `Node#type?(*types)` family — the hottest
+/// polymorphic call in a RuboCop cop walk). A pure-rest method whose
+/// compiled body is EXACTLY one of two op templates:
+///
+///   simple:  `def m?(*rest); rest.include?(g); end`
+///   grouped: `def m?(*rest)
+///               return true if rest.include?(g)
+///               tmp = CONST[g]
+///               !tmp.nil? && rest.include?(tmp)
+///             end`
+///
+/// where `g` is a bare (implicit-self) zero-arg call, is served
+/// WITHOUT a frame, rest-Array materialization, or any body dispatch:
+/// the serve resolves `g` through the body's own inline-cache slot
+/// (so per-receiver-class overrides and `method_gen` invalidation ride
+/// the existing IC), requires the resolution to be a trivial
+/// attr_reader (`getter_ivar`), and unrolls the `include?` scans into
+/// Symbol identity compares over the caller's still-on-stack args.
+/// Exactness is guaranteed by runtime deopts (any non-Symbol arg /
+/// ivar / group value falls through to the general path before any
+/// observable effect) plus the `method_gen`-revalidated
+/// `rest_pred_deps_ok` flag (no user overrides on the builtin methods
+/// the body would dispatch: `Array#include?`, `Hash#[]`,
+/// `Symbol#==`/`nil?`, `NilClass#nil?`, `TrueClass`/`FalseClass#!`).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RestPredPlan {
+    /// The bare zero-arg call name (`type` in rubocop-ast).
+    pub(crate) getter_name: crate::intern::SymId,
+    /// The body's OWN call-site cache id for that call — reusing it
+    /// gives per-receiver-class polymorphic resolution + method_gen
+    /// invalidation identical to actually running the body op.
+    pub(crate) getter_cache: u32,
+    /// How the grouped variant's body loads the fallback-group Hash
+    /// constant. `None` = simple variant (no group phase).
+    pub(crate) group: RestPredGroup,
+}
+
+/// Const-load shape for `RestPredPlan::group`. Serve-time resolution
+/// goes through the interpreter's OWN const caches (`const_cache_chain`
+/// keyed by (callee proto, chain idx) / `const_cache_flat`), so a
+/// cold cache simply declines to the general path — whose body op
+/// then resolves + fills the cache for every later serve. `const_gen`
+/// invalidation is therefore inherited, never reimplemented.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum RestPredGroup {
+    /// Simple variant — no group fallback phase.
+    None,
+    /// Body op 10 is `LoadConstChain(idx)` (bare const read inside a
+    /// class/module scope — the rubocop-ast shape).
+    Chain(u32),
+    /// Body op 10 is `LoadConst(sym)` (toplevel-compiled sibling).
+    Flat(crate::intern::SymId),
+}
+
+/// Lazy tri-state slot for `Vm::rest_preds` (index = `proto_idx`).
+/// A Proto's code is immutable after compile, so `No` / `Pred` are
+/// final (redefinition installs a different proto_idx).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum RestPredSlot {
+    Unknown,
+    No,
+    Pred(RestPredPlan),
+}
+
 /// RAII guard for `Vm.pinned`. Native-side code that needs heap
 /// values to survive an intervening `maybe_gc` / `?` early-return
 /// constructs one of these, calls `.pin(v)` for every value it
@@ -1871,6 +1936,22 @@ pub(crate) struct Vm {
     /// compile). Indexed by `proto_idx`; grown on demand — protos
     /// added later (eval / require) start `Unknown`.
     pub(crate) nfa_plans: Vec<NfaPlanSlot>,
+    /// Rest-predicate body-shape plans (see `RestPredPlan`), lazily
+    /// verified per proto on the first NFA fast-path attempt. Same
+    /// lifecycle as `nfa_plans` (a Proto's code is immutable).
+    pub(crate) rest_preds: Vec<RestPredSlot>,
+    /// `method_gen`-revalidated safety flag for the rest-predicate
+    /// serve (recomputed in `fast_index_revalidate`, same walk):
+    /// true when none of the builtin methods the verified body
+    /// shapes would dispatch is user-overridden anywhere on the
+    /// respective chains — `Array#include?`, `Hash#[]`,
+    /// `Symbol#==`, `Symbol#nil?`, `NilClass#nil?`,
+    /// `TrueClass#!`, `FalseClass#!`.
+    pub(crate) rest_pred_deps_ok: bool,
+    /// Env-gated (`RUBYRS_JIT_STATS`) counters for the rest-predicate
+    /// serve: (served frame-free, declined-after-plan-match). Dumped
+    /// with the JIT stats at exit.
+    pub(crate) rest_pred_stats: (u64, u64),
     /// Reopen-precedence early gate (same `method_gen`-revalidated
     /// pass): bit per primitive class whose OWN method table holds
     /// at least one name a `primitive_call`-family arm claims
@@ -2589,6 +2670,9 @@ impl Vm {
                 None
             },
             nfa_plans: Vec::new(),
+            rest_preds: Vec::new(),
+            rest_pred_deps_ok: false,
+            rest_pred_stats: (0, 0),
             any_undefs: false,
             prim_reopen_mask: 0,
             inspect_stack: Vec::new(),
@@ -2814,6 +2898,12 @@ impl Vm {
             return;
         }
         eprintln!("== RUBYRS_JIT_STATS ==");
+        if self.rest_pred_stats != (0, 0) {
+            eprintln!(
+                "rest-pred serves={} declines={}",
+                self.rest_pred_stats.0, self.rest_pred_stats.1
+            );
+        }
         for (i, name) in JIT_FAM_NAMES.iter().enumerate() {
             let [att, ok, pre] = self.jit_stats.compile[i];
             if att > 0 {

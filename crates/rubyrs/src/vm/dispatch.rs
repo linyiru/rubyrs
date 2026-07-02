@@ -3233,6 +3233,18 @@ impl Vm {
         self.fast_is_a_nil_safe = !chain_has(self, &nil_cls, self.sym_is_a)
             && !chain_has(self, &nil_cls, self.sym_kind_of);
         self.fast_eq_nil_safe = !chain_has(self, &nil_cls, self.sym_eq_op);
+        // Rest-predicate serve deps (see `Vm::rest_pred_deps_ok`):
+        // every builtin the verified body shapes would dispatch,
+        // chain-wide conservative like the twins above.
+        let true_cls = self.classes.get(&true_chain).cloned();
+        let false_cls = self.classes.get(&false_chain).cloned();
+        self.rest_pred_deps_ok = !chain_has(self, &arr_cls, self.sym_include_q)
+            && !chain_has(self, &hash_cls, self.sym_index_op)
+            && !chain_has(self, &sym_cls, self.sym_eq_op)
+            && !chain_has(self, &sym_cls, self.sym_nil_q)
+            && !chain_has(self, &nil_cls, self.sym_nil_q)
+            && !chain_has(self, &true_cls, self.sym_not)
+            && !chain_has(self, &false_cls, self.sym_not);
         // Reopen-precedence mask: per primitive class, does the OWN
         // method table hold any name a primitive arm claims? The
         // preamble is audited collision-free
@@ -15909,6 +15921,218 @@ impl Vm {
         Some(plan)
     }
 
+    /// Fetch (verifying + caching on first touch) the rest-predicate
+    /// body-shape plan for `proto_idx` — see `RestPredPlan`'s docs for
+    /// the two admitted shapes and the exactness argument. The match
+    /// is against the EXACT compiled op template (including jump
+    /// offsets), so a compiler-emission change can only DISABLE the
+    /// fast path (fall back to the general binder), never mis-serve.
+    fn rest_pred_for(&mut self, proto_idx: usize) -> Option<crate::vm::RestPredPlan> {
+        use crate::bytecode::Op;
+        use crate::vm::{RestPredGroup, RestPredPlan, RestPredSlot};
+        if proto_idx >= self.rest_preds.len() {
+            self.rest_preds.resize(proto_idx + 1, RestPredSlot::Unknown);
+        }
+        match self.rest_preds[proto_idx] {
+            RestPredSlot::Pred(p) => return Some(p),
+            RestPredSlot::No => return None,
+            RestPredSlot::Unknown => {}
+        }
+        let proto = &self.protos[proto_idx];
+        let (inc_q, idx_op, nil_q, not_op) = (
+            self.sym_include_q,
+            self.sym_index_op,
+            self.sym_nil_q,
+            self.sym_not,
+        );
+        // Param shape: EXACTLY `def m(*rest)` — one param, the rest.
+        let shape_ok = proto.rest_param.is_some()
+            && proto.params.len() == 1
+            && proto.n_required_positional == 0
+            && proto.n_required_post == 0
+            && proto.kw_param_defaults.is_empty()
+            && proto.kw_rest_param.is_none()
+            && proto.block_param.is_none();
+        let plan = if !shape_ok {
+            None
+        } else {
+            let c = &proto.code;
+            // Shared 3-op head: `rest.include?(<bare zero-arg call>)`.
+            let head = match (c.first(), c.get(1), c.get(2)) {
+                (
+                    Some(Op::LoadLocal(0)),
+                    Some(Op::CallNoRecv(g, 0, gc)),
+                    Some(Op::Call(n, 1, _)),
+                ) if *n == inc_q => Some((*g, *gc)),
+                _ => None,
+            };
+            match (head, c.len(), proto.n_locals) {
+                // simple: `def m?(*rest); rest.include?(g); end`
+                (Some((g, gc)), 4, 1) if matches!(c[3], Op::Return) => Some(RestPredPlan {
+                    getter_name: g,
+                    getter_cache: gc,
+                    group: RestPredGroup::None,
+                }),
+                // grouped: the rubocop-ast `Node#type?` template —
+                //   return true if rest.include?(g)
+                //   tmp = CONST[g]; !tmp.nil? && rest.include?(tmp)
+                (Some((g, gc)), 24, 2) => {
+                    let group = match c[10] {
+                        Op::LoadConstChain(ci) => Some(RestPredGroup::Chain(ci)),
+                        Op::LoadConst(cs) => Some(RestPredGroup::Flat(cs)),
+                        _ => None,
+                    };
+                    let tail_ok = matches!(c[3], Op::JumpIfFalse(4))
+                        && matches!(c[4], Op::LoadTrue)
+                        && matches!(c[5], Op::Return)
+                        && matches!(c[6], Op::LoadNil)
+                        && matches!(c[7], Op::Jump(1))
+                        && matches!(c[8], Op::LoadNil)
+                        && matches!(c[9], Op::Pop)
+                        && matches!(c[11], Op::CallNoRecv(g2, 0, _) if g2 == g)
+                        && matches!(c[12], Op::Call(n, 1, _) if n == idx_op)
+                        && matches!(c[13], Op::StoreLocal(1))
+                        && matches!(c[14], Op::LoadLocalCall(1, n, _) if n == nil_q)
+                        && matches!(c[15], Op::Call(n, 0, _) if n == not_op)
+                        && matches!(c[16], Op::Dup)
+                        && matches!(c[17], Op::JumpIfFalse(5))
+                        && matches!(c[18], Op::Pop)
+                        && matches!(c[19], Op::LoadLocal(0))
+                        && matches!(c[20], Op::LoadLocal(1))
+                        && matches!(c[21], Op::Call(n, 1, _) if n == inc_q)
+                        && matches!(c[22], Op::Jump(0))
+                        && matches!(c[23], Op::Return);
+                    match (group, tail_ok) {
+                        (Some(group), true) => Some(RestPredPlan {
+                            getter_name: g,
+                            getter_cache: gc,
+                            group,
+                        }),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        };
+        self.rest_preds[proto_idx] = match plan {
+            Some(p) => RestPredSlot::Pred(p),
+            None => RestPredSlot::No,
+        };
+        plan
+    }
+
+    /// Frame-free serve of a rest-predicate-shaped callee (see
+    /// `rest_pred_for`): evaluates the verified body over the
+    /// caller's still-on-stack args — no frame, no rest-Array
+    /// materialization, no body dispatch. Returns `Some(bool)` with
+    /// the stack UNTOUCHED on success (caller commits), `None` to
+    /// decline (caller falls through to the general binding with the
+    /// stack equally untouched — no observable effect has happened).
+    ///
+    /// Exactness gates, mirroring what the body ops would do:
+    ///   - `rest_pred_deps_ok` (method_gen-revalidated): no user
+    ///     override of any builtin the body dispatches;
+    ///   - active refinements anywhere → decline (conservative);
+    ///   - a host fn shadowing the bare getter name → decline (the
+    ///     body's CallNoRecv would prefer it);
+    ///   - the bare call must resolve (through the body's own IC
+    ///     slot) to a trivial attr_reader on the receiver's class;
+    ///   - the ivar value, every SCANNED arg, and the group value
+    ///     must be Symbols — `Symbol == Symbol` is identity, and the
+    ///     left-to-right scan stops exactly where `Array#include?`
+    ///     would, so an arg whose `==` could be user-defined is never
+    ///     reached on the true path and deopts on the false path;
+    ///   - the group Hash read goes through the interpreter's own
+    ///     const caches (cold → decline; the body fills them) and
+    ///     requires an untagged, default-less, non-identity Hash so
+    ///     `hash_index_lookup` equals `Hash#[]`.
+    fn rest_pred_eval(
+        &mut self,
+        rp: crate::vm::RestPredPlan,
+        callee_proto: usize,
+        recv_id: ObjId,
+        split: usize,
+        argc: usize,
+    ) -> Option<bool> {
+        use crate::vm::RestPredGroup;
+        // Cheap early out: a non-Symbol FIRST arg always deopts (the
+        // left-to-right scan reaches it before any possible hit), so
+        // skip the IC lookup for shapes like parser's
+        // `Range#is?(*what)` that match the template but always take
+        // String args.
+        if argc > 0 && !matches!(self.stack[split], Value::Sym(_)) {
+            return None;
+        }
+        if self.fast_index_checked_gen != self.method_gen {
+            self.fast_index_revalidate();
+        }
+        if !self.rest_pred_deps_ok
+            || !self.refined_method_names.is_empty()
+            || self.host_fns.contains_key(&rp.getter_name)
+        {
+            return None;
+        }
+        let cls = self.heap.try_class_of(recv_id)?;
+        let g = self.lookup_method_cached(&cls, rp.getter_name, rp.getter_cache)?;
+        if g.closure.is_some() || g.builtin.is_some() {
+            return None;
+        }
+        let ivar = self.protos[g.proto_idx].getter_ivar?;
+        let tsym = match self.heap.instance(recv_id).ivars.get(&ivar) {
+            Some(Value::Sym(s)) => *s,
+            _ => return None,
+        };
+        // Phase 1: `rest.include?(g)` unrolled over the stack args.
+        for v in &self.stack[split..split + argc] {
+            match v {
+                Value::Sym(s) => {
+                    if *s == tsym {
+                        return Some(true);
+                    }
+                }
+                _ => return None,
+            }
+        }
+        // Phase 2 (grouped variant): `tmp = CONST[g]` and
+        // `!tmp.nil? && rest.include?(tmp)`.
+        let cv = match rp.group {
+            RestPredGroup::None => return Some(false),
+            RestPredGroup::Chain(ci) => self
+                .const_cache_chain
+                .get(&(callee_proto as u32, ci))
+                .filter(|(_, cg)| *cg == self.const_gen)
+                .map(|(v, _)| v.clone()),
+            RestPredGroup::Flat(cs) => self
+                .const_cache_flat
+                .get(&cs)
+                .filter(|(_, cg)| *cg == self.const_gen)
+                .map(|(v, _)| v.clone()),
+        };
+        let Some(Value::Hash(hid)) = cv else {
+            return None;
+        };
+        if self.heap.hash_class_tag(hid).is_some()
+            || self.heap.hash_default_value(hid).is_some()
+            || self.heap.hash_default_block(hid).is_some()
+            || self.hash_is_by_identity(hid)
+        {
+            return None;
+        }
+        let group_val = self
+            .heap
+            .hash_index_lookup(hid, &Value::Sym(tsym))
+            .map(|pos| self.heap.hash(hid)[pos].1.clone());
+        match group_val {
+            None | Some(Value::Nil) => Some(false),
+            Some(Value::Sym(gsym)) => Some(
+                self.stack[split..split + argc]
+                    .iter()
+                    .any(|v| matches!(v, Value::Sym(s) if *s == gsym)),
+            ),
+            Some(_) => None,
+        }
+    }
+
     /// ADR 0031 increment 2 — stack-direct invoke of an IC-resolved
     /// NON-fixed-arity user Ruby method (the "explicit-non-fixed-
     /// arity 46.7%" bucket), binding via the precomputed `NfaPlan`
@@ -15959,6 +16183,42 @@ impl Vm {
         argc: usize,
     ) -> Result<bool, Trap> {
         debug_assert!(m.closure.is_none() && m.builtin.is_none());
+        // Rest-predicate frame-free serve (see `rest_pred_eval`):
+        // nothing on the stack moves until the serve succeeds, so a
+        // `None` decline falls through to the general plan binding
+        // below with zero observable effect.
+        if let Some(rp) = self.rest_pred_for(m.proto_idx)
+            && let Some(split) = self.stack.len().checked_sub(argc)
+        {
+            let recv_id = match &self_val_norecv {
+                Some(Value::Object(id)) => Some((*id, 0usize)),
+                Some(_) => None,
+                None => match split.checked_sub(1).map(|i| &self.stack[i]) {
+                    Some(Value::Object(id)) => Some((*id, 1usize)),
+                    _ => None,
+                },
+            };
+            if let Some((rid, pop_recv)) = recv_id {
+                match self.rest_pred_eval(rp, m.proto_idx, rid, split, argc) {
+                    Some(result) => {
+                        #[cfg(feature = "jit-native")]
+                        if self.jit_stats_on {
+                            self.rest_pred_stats.0 += 1;
+                        }
+                        self.stack.truncate(split - pop_recv);
+                        self.stack.push(Value::Bool(result));
+                        return Ok(true);
+                    }
+                    None =>
+                    {
+                        #[cfg(feature = "jit-native")]
+                        if self.jit_stats_on {
+                            self.rest_pred_stats.1 += 1;
+                        }
+                    }
+                }
+            }
+        }
         let Some(plan) = self.nfa_plan_for(m.proto_idx) else {
             return Ok(false);
         };
