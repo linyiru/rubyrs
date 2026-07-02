@@ -16,16 +16,39 @@ module Prism
   # prism.rb sets BACKEND = :CEXT before requiring "prism/prism"; don't clobber it.
   BACKEND = :RUBYRS unless const_defined?(:BACKEND)
 
+  # ADR 0036 Slice 2: prefer the NATIVE materializer — the host fn parses AND builds the
+  # Prism::ParseResult object graph in Rust, skipping the interpreted Serialize
+  # deserializer (the dominant per-file parse cost). Only when the loaded gem is the
+  # exact version the native decode table was generated against (the gem's node.rb ivar
+  # layout is baked into that table); the host fn independently pins the WIRE version.
+  # The materializer returns nil to DECLINE (unknown encoding, missing class, freeze
+  # requested, ...) — callers below then fall back to the gem's own Serialize path,
+  # whose behavior is the spec. RUBYRS_PRISM_NO_NATIVE=1 is the kill switch (debugging /
+  # A-B measurement against the interpreted deserializer).
+  NATIVE_MATERIALIZE = !ENV["RUBYRS_PRISM_NO_NATIVE"] &&
+                       defined?(__rubyrs_prism_materialize_parse) &&
+                       Serialize::MAJOR_VERSION == 1 &&
+                       Serialize::MINOR_VERSION == 9 &&
+                       Serialize::PATCH_VERSION == 0
+
   class << self
     def dump(source, **options)
       __rubyrs_prism_serialize_parse(source, dump_options(options))
     end
 
     def parse(source, **options)
+      if NATIVE_MATERIALIZE && !options.fetch(:freeze, false)
+        result = __rubyrs_prism_materialize_parse(source, dump_options(options))
+        return result if result
+      end
       Prism::Serialize.load_parse(source, __rubyrs_prism_serialize_parse(source, dump_options(options)), options.fetch(:freeze, false))
     end
 
     def parse_lex(source, **options)
+      if NATIVE_MATERIALIZE && !options.fetch(:freeze, false)
+        result = __rubyrs_prism_materialize_parse_lex(source, dump_options(options))
+        return result if result
+      end
       Prism::Serialize.load_parse_lex(source, __rubyrs_prism_serialize_parse_lex(source, dump_options(options)), options.fetch(:freeze, false))
     end
 
