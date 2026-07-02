@@ -475,6 +475,8 @@ impl Vm {
                         crate::vm::Locals::Stack(b) => Some(*b as usize),
                         crate::vm::Locals::Shared(_) => None,
                     };
+                    // Capture routing for a block frame's outer slots
+                    // (mirror of Op::LoadLocal).
                     let n = self.protos[proto_idx].n_locals as usize;
                     for slot in 0..n {
                         let name = self.protos[proto_idx]
@@ -485,7 +487,9 @@ impl Vm {
                         if name.is_empty() {
                             continue;
                         }
-                        let val = if let Some(rc) = &shared {
+                        let val = if let Some(cell) = frame.outer_cell_for(slot) {
+                            cell.borrow().get(slot).cloned().unwrap_or(Value::Nil)
+                        } else if let Some(rc) = &shared {
                             rc.borrow().get(slot).cloned().unwrap_or(Value::Nil)
                         } else if let Some(base) = stack_base {
                             self.locals_arena
@@ -4974,6 +4978,11 @@ impl Vm {
             aux: None,
             pending_yield: false,
             block_writeback: None,
+            dm_share: false,
+            own_start: 0,
+            outer_cell_start: 0,
+            outer_cell: None,
+            outer_rest: None,
             captured_yield_block: None,
         });
         // Dispatch loop. We can't just call `dispatch_until` and
@@ -5049,6 +5058,9 @@ impl Vm {
                 };
                 let f = self.frames.pop().unwrap();
                 self.stack.truncate(f.base_sp);
+                if f.dm_share {
+                    self.dm_share_depth = self.dm_share_depth.saturating_sub(1);
+                }
                 if f.is_class_body {
                     let cls = self.class_stack.pop()
                         .expect("ICE: class_stack empty unwinding through class_eval (require/_relative)");
@@ -5239,6 +5251,8 @@ impl Vm {
                 crate::vm::Locals::Stack(b) => Some(*b as usize),
                 crate::vm::Locals::Shared(_) => None,
             };
+            // Capture routing for a block frame's outer slots
+            // (mirror of Op::LoadLocal).
             let n = self.protos[proto_idx].n_locals as usize;
             for slot in 0..n {
                 let name = self.protos[proto_idx]
@@ -5249,7 +5263,9 @@ impl Vm {
                 if name.is_empty() {
                     continue;
                 }
-                let val = if let Some(rc) = &shared {
+                let val = if let Some(cell) = frame.outer_cell_for(slot) {
+                    cell.borrow().get(slot).cloned().unwrap_or(Value::Nil)
+                } else if let Some(rc) = &shared {
                     rc.borrow().get(slot).cloned().unwrap_or(Value::Nil)
                 } else if let Some(base) = stack_base {
                     self.locals_arena.get(base + slot).cloned().unwrap_or(Value::Nil)
@@ -5608,6 +5624,11 @@ impl Vm {
             aux: None,
             pending_yield: false,
             block_writeback: None,
+            dm_share: false,
+            own_start: 0,
+            outer_cell_start: 0,
+            outer_cell: None,
+            outer_rest: None,
             captured_yield_block: None,
         });
         // Same dispatch-loop shape as compile_and_run_source;
@@ -5665,6 +5686,9 @@ impl Vm {
                 }
                 let f = self.frames.pop().unwrap();
                 self.stack.truncate(f.base_sp);
+                if f.dm_share {
+                    self.dm_share_depth = self.dm_share_depth.saturating_sub(1);
+                }
                 if f.is_class_body {
                     let _cls = self.class_stack.pop()
                         .expect("ICE: class_stack empty unwinding through class_eval (eval_string)");
@@ -5680,6 +5704,9 @@ impl Vm {
             }
             let f = self.frames.pop().unwrap();
             self.stack.truncate(f.base_sp);
+            if f.dm_share {
+                self.dm_share_depth = self.dm_share_depth.saturating_sub(1);
+            }
             if f.is_class_body {
                 let cls = self.class_stack.pop()
                     .expect("ICE: class_stack empty on method-return (eval_string)");

@@ -324,12 +324,8 @@ unsafe extern "C" fn t2_call_local(
         return T2_TRAP;
     }
     let f = vm.frames.last().expect("ICE: t2_call_local no frame");
-    let v = match &f.locals {
-        crate::vm::Locals::Stack(base) => {
-            vm.locals_arena[*base as usize + slot as usize].clone()
-        }
-        crate::vm::Locals::Shared(rc) => rc.borrow()[slot as usize].clone(),
-    };
+    // Capture-routed read — mirrors the step arm's Op::LoadLocal.
+    let v = crate::vm::Vm::frame_local_get(f, &vm.locals_arena, slot as usize);
     vm.stack.push(v);
     t2_call_impl(vm, SymId(name as u32), 0, cid as u32, false)
 }
@@ -375,6 +371,9 @@ unsafe extern "C" fn t2_return(vm: *mut crate::vm::Vm, pidx: i64, ip: i64) -> i6
         return T2_TRAP;
     }
     let f = vm.frames.pop().expect("ICE: t2_return no frame");
+    if f.dm_share {
+        vm.dm_share_depth = vm.dm_share_depth.saturating_sub(1);
+    }
     // Frame-local `$~` restore (see the step arm's comment).
     #[cfg(feature = "regex")]
     if let Some(saved) = f.saved_last_match {
@@ -455,12 +454,8 @@ unsafe extern "C" fn t2_load_self(vm: *mut crate::vm::Vm) {
 unsafe extern "C" fn t2_load_local(vm: *mut crate::vm::Vm, slot: i64) {
     let vm = unsafe { &mut *vm };
     let f = vm.frames.last().expect("ICE: LoadLocal no frame");
-    let v = match &f.locals {
-        crate::vm::Locals::Stack(base) => {
-            vm.locals_arena[*base as usize + slot as usize].clone()
-        }
-        crate::vm::Locals::Shared(rc) => rc.borrow()[slot as usize].clone(),
-    };
+    // Capture-routed read — mirrors the step arm's Op::LoadLocal.
+    let v = crate::vm::Vm::frame_local_get(f, &vm.locals_arena, slot as usize);
     vm.stack.push(v);
 }
 
@@ -475,15 +470,12 @@ unsafe extern "C" fn t2_store_local(vm: *mut crate::vm::Vm, slot: i64) {
             vm.locals_arena[idx] = v;
         }
         crate::vm::Locals::Shared(rc) => {
-            rc.borrow_mut()[slot] = v.clone();
-            // Method frames never carry `block_writeback`; mirrored for
-            // exactness with the step arm anyway.
-            let in_outer_scope = frame
-                .block_writeback
-                .as_ref()
-                .is_some_and(|(_, ps)| slot < *ps as usize);
-            if in_outer_scope {
-                vm.propagate_outer_write(slot, &v);
+            // Method frames never carry a capture chain (`own_start
+            // == 0`); mirrored for exactness with the step arm.
+            if let Some(cell) = frame.outer_cell_for(slot) {
+                crate::vm::cell_store(cell, slot, v);
+            } else {
+                rc.borrow_mut()[slot] = v;
             }
         }
     }

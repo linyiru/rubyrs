@@ -470,6 +470,12 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn kernel_load() { run_diff("kernel_load"); }
 #[test] fn array_map_bang() { run_diff("array_map_bang"); }
 #[test] fn closure_in_iter_capture() { run_diff("closure_in_iter_capture"); }
+// Shared-binding closure semantics (outer-chain routing): nested blocks,
+// escaped procs, Thread/Fiber bodies, instance_eval, massign/rescue binds.
+#[test] fn closure_capture_nested() { run_diff("closure_capture_nested"); }
+// define_method bodies: per-call params/body-locals over a shared outer
+// binding (the optional-default staleness fix).
+#[test] fn closure_define_method_binding() { run_diff("closure_define_method_binding"); }
 #[test] fn callable_coerce() { run_diff("callable_coerce"); }
 #[test] fn module_function_bare() { run_diff("module_function_bare"); }
 #[test] fn array_subscript_slice() { run_diff("array_subscript_slice"); }

@@ -58,12 +58,9 @@ impl Vm {
             // nothing (fail-closed).
             crate::vm::RescueFilterSpec::SplatLocal(src_slot) => {
                 let f = self.frames.last().expect("ICE: rescue filter with no frame");
-                let src = match &f.locals {
-                    crate::vm::Locals::Stack(base) => {
-                        self.locals_arena[*base as usize + *src_slot as usize].clone()
-                    }
-                    crate::vm::Locals::Shared(rc) => rc.borrow()[*src_slot as usize].clone(),
-                };
+                // Capture-routed read — the filter local can be a
+                // captured outer local inside a block frame.
+                let src = crate::vm::Vm::frame_local_get(f, &self.locals_arena, *src_slot as usize);
                 match src {
                     Value::Array(id) => {
                         let list: Vec<Rc<Class>> = self.heap.array(id).iter()
@@ -488,6 +485,11 @@ impl Vm {
                             self.stack.pop();
                             dispatched = true;
                         } else {
+                            for f in &self.frames[pre_frames..] {
+                                if f.dm_share {
+                                    self.dm_share_depth = self.dm_share_depth.saturating_sub(1);
+                                }
+                            }
                             self.frames.truncate(pre_frames);
                         }
                     }
@@ -619,7 +621,15 @@ impl Vm {
                             self.locals_arena[idx] = exc.clone();
                         }
                         crate::vm::Locals::Shared(rc) => {
-                            rc.borrow_mut()[slot as usize] = exc.clone();
+                            // `rescue => e` where `e` is a captured
+                            // outer local (block frame): bind into the
+                            // canonical cell so the defining scope sees
+                            // it — mirror of Op::StoreLocal's routing.
+                            if let Some(cell) = f.outer_cell_for(slot as usize) {
+                                crate::vm::cell_store(cell, slot as usize, exc.clone());
+                            } else {
+                                rc.borrow_mut()[slot as usize] = exc.clone();
+                            }
                         }
                     }
                 }
@@ -637,6 +647,9 @@ impl Vm {
             }
             // No matching handler in this frame — pop it and try the caller.
             let f = self.frames.pop().expect("ICE: unwind pop empty");
+            if f.dm_share {
+                self.dm_share_depth = self.dm_share_depth.saturating_sub(1);
+            }
             self.stack.truncate(f.base_sp);
             // Frame-local `$~`: restore the popped method frame's saved
             // last-match as the exception propagates past it, so the
@@ -879,6 +892,9 @@ impl Vm {
                 self.sync_control_signals();
                 let popped = self.frames.pop()
                     .expect("ICE: continue_method_break landing with empty frames");
+                if popped.dm_share {
+                    self.dm_share_depth = self.dm_share_depth.saturating_sub(1);
+                }
                 self.stack.truncate(popped.base_sp);
                 // Frame-local `$~`: restore the popped method frame's
                 // saved last-match (block frames carry `None`). Mirrors
@@ -911,6 +927,9 @@ impl Vm {
             // to walk the next frame's ensures.
             let popped = self.frames.pop()
                 .expect("ICE: continue_method_break intermediate pop with empty frames");
+            if popped.dm_share {
+                self.dm_share_depth = self.dm_share_depth.saturating_sub(1);
+            }
             self.stack.truncate(popped.base_sp);
             // Frame-local `$~`: restore each intermediate method
             // frame's saved last-match as we unwind past it (see the

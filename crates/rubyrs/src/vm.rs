@@ -233,20 +233,56 @@ pub(crate) struct Frame {
     #[allow(dead_code)] // wired in Phase A.1
     pub(crate) pending_yield: bool,
     /// Set on block frames whose `locals` is a FRESH per-invocation
-    /// Vec cloned from the BlockHandle's `captured` at
-    /// `invoke_block`. Holds the original `captured` Rc + the
-    /// block's `param_start` so that, at Op::Return, the lower
-    /// `[0..param_start]` portion of `locals` (the outer-scope
-    /// slots — method-locals plus any enclosing block's slots) is
-    /// COPIED BACK into the original Rc. This preserves
-    /// closure-write-through to outer scope for the active
-    /// invocation while keeping per-iteration isolation for slots
-    /// that the block itself owns (params + body-locals).
-    /// `None` for method / class-body / toplevel frames, and for
-    /// block frames that don't need writeback (e.g. trivial
-    /// invokes from non-iterating callers — currently unused, but
-    /// the field allows future opt-in).
+    /// Vec (the copy path of `block_frame_locals`). Holds the
+    /// original `captured` Rc + the block's `param_start`. Since the
+    /// outer-chain routing model landed, NO value copy-back happens
+    /// through this — outer-slot reads/writes route directly to the
+    /// canonical binding cell (`outer_cell_for`). The field's
+    /// remaining role is Rc-IDENTITY for the lexical walks
+    /// (`find_lexical_owner_frame` / `find_return_target` /
+    /// `Op::ReturnMethod`'s owner stash): each block frame's
+    /// writeback points one scope outward so `yield` / non-local
+    /// `return` / `super` locate the lexical owner method.
+    /// `None` for method / class-body / toplevel frames and
+    /// share-direct block frames (their `locals` IS the outer cell,
+    /// so the identity walk already matches).
     pub(crate) block_writeback: Option<(Rc<RefCell<Vec<Value>>>, u16)>,
+    /// First slot this frame's own locals cell canonically OWNS.
+    /// `0` for method / class-body / toplevel frames and for
+    /// share-direct block frames (the cell IS the outer scope);
+    /// the block's `param_start` for copy-path block frames and
+    /// `define_method`-closure frames. Slot accesses BELOW this
+    /// boundary are captured outer locals — they route via
+    /// `outer_cell_for` to the canonical binding cell, so every
+    /// closure capturing a variable (and its defining scope)
+    /// reads/writes the SAME slot, even after intermediate
+    /// frames pop (CRuby shared-binding semantics).
+    pub(crate) own_start: u16,
+    /// `true` on a define_method SHARE-DIRECT frame (`Locals` is the
+    /// closure's captured cell itself — see the dm arm of the method
+    /// dispatch). Every frame-pop site decrements
+    /// `Vm::dm_share_depth` when set, so the dm dispatch can gate
+    /// its share fast path on `dm_share_depth == 0` (an O(1) check)
+    /// instead of scanning the frame stack for re-entrancy.
+    pub(crate) dm_share: bool,
+    /// Boundary of the `outer_cell` region: routed slots `>=
+    /// outer_cell_start` live in `outer_cell` (the running handle's
+    /// `captured` — the CREATING scope's cell); routed slots below it
+    /// live in `outer_rest`. Copied from `BlockHandle::creator_start`
+    /// / `MethodClosure::creator_start`; 0 for non-routing frames.
+    pub(crate) outer_cell_start: u16,
+    /// The creating scope's canonical cell for routed slots
+    /// `[outer_cell_start, own_start)` — the running handle's
+    /// `captured` Rc. `None` whenever `own_start == 0` (nothing to
+    /// route). Read by `Op::CreateBlock` to derive deeper closures'
+    /// chains and by the GC root walk (the ORIGINAL binding cell may
+    /// be reachable only through here while this frame runs).
+    pub(crate) outer_cell: Option<Rc<RefCell<Vec<Value>>>>,
+    /// Ancestor canonical-owner chain for routed slots
+    /// `< outer_cell_start` — cloned from the running handle's
+    /// `outer_chain`. `None` for depth-1 closures (creator owns all
+    /// captured slots). GC-walked like `outer_cell`.
+    pub(crate) outer_rest: Option<crate::value::OuterChain>,
     /// Set on block frames from the running `BlockHandle`'s
     /// `captured_yield_block` (the block belonging to the method that
     /// lexically encloses this block). `Op::Yield` reads it as the
@@ -298,7 +334,51 @@ pub(crate) struct FrameAux {
     pub(crate) begin_rescue_depths: Vec<BeginBaseline>,
 }
 
+/// Write `slot` into a routed canonical binding cell — the store half
+/// of the capture-routing pair (see `Frame::outer_cell_for`). Replaces
+/// the old `propagate_outer_write` frame-stack walk: routing hits the
+/// ORIGINAL binding cell directly, so it works even when the defining
+/// frames are no longer on the stack (escaped procs, deferred Thread
+/// bodies, suspended Fibers).
+#[inline]
+pub(crate) fn cell_store(cell: &Rc<RefCell<Vec<Value>>>, slot: usize, v: Value) {
+    let mut t = cell.borrow_mut();
+    if t.len() <= slot {
+        // Defensive: scope cells are sized to their proto's n_locals,
+        // which covers every capturable slot — but a grow beats
+        // silently dropping a user's write.
+        t.resize(slot + 1, Value::Nil);
+    }
+    t[slot] = v;
+}
+
 impl Frame {
+    /// Capture routing: the CANONICAL binding cell for `slot`, or
+    /// `None` when the slot belongs to this frame's own cell. All
+    /// slot reads/writes on `Shared` frames consult this first —
+    /// `own_start == 0` (method / class-body / toplevel /
+    /// share-direct frames) short-circuits on the first compare.
+    /// Routing to the original binding (instead of the frame's
+    /// per-invocation snapshot) is what makes a captured local ONE
+    /// shared binding across the defining scope and every closure,
+    /// even after intermediate frames pop.
+    #[inline]
+    pub(crate) fn outer_cell_for(&self, slot: usize) -> Option<&Rc<RefCell<Vec<Value>>>> {
+        if slot >= self.own_start as usize {
+            return None;
+        }
+        if slot >= self.outer_cell_start as usize {
+            // Creating scope's region — `outer_cell` is Some whenever
+            // own_start > 0; fall through defensively if not.
+            if let Some(cell) = &self.outer_cell {
+                return Some(cell);
+            }
+        }
+        self.outer_rest
+            .as_ref()
+            .map(|chain| crate::value::chain_owner_cell(chain, slot))
+    }
+
     /// Get-or-create the aux box. Call sites that only READ should
     /// prefer `aux.as_ref()` / the `..._len` style probes so an
     /// aux-less frame stays allocation-free.
@@ -2106,6 +2186,32 @@ pub(crate) struct Vm {
     /// allocation instead of minting a fresh one. Bounded so a deep
     /// recursion that unwinds doesn't park an unbounded pool.
     pub(crate) locals_pool: Vec<Rc<RefCell<Vec<Value>>>>,
+    /// Single-entry memo for `Op::CreateBlock`'s ancestor-chain
+    /// flatten (only needed for depth ≥ 2 creations — a block created
+    /// inside a chain-carrying frame), keyed by the creating frame's
+    /// `(outer_rest_ptr, outer_cell_ptr, outer_cell_start)`. The
+    /// flatten input is the creating frame's ROUTING structure, whose
+    /// dominant shape references only stable root-scope cells (the
+    /// per-invocation cell churn lives in `BlockHandle::captured`,
+    /// which is NOT part of the flattened chain), so a loop that
+    /// creates depth-2 closures hits this every iteration. Sound
+    /// because the memoized chain holds strong Rcs to the keyed cells:
+    /// the keyed addresses cannot be freed/reused while the entry
+    /// lives, so a pointer match always refers to the SAME inputs —
+    /// for which fresh construction would be identical. Holding dead
+    /// cells until the next miss is a bounded (one entry) retention;
+    /// nothing reads the memoized cells' contents through the memo.
+    pub(crate) chain_memo: Option<(usize, usize, u16, crate::value::OuterChain)>,
+    /// Count of LIVE `Frame::dm_share` frames (across fibers — the
+    /// counter is deliberately NOT swapped by FiberStashGuard, so a
+    /// dm body suspended in another fiber keeps new calls off the
+    /// share path). `0` ⇒ no dm-share invocation can be clobbered ⇒
+    /// the dm dispatch may share the closure cell without scanning
+    /// the frame stack. Non-zero (nested / cross-fiber dm calls,
+    /// rare) falls back to the per-invocation copy path — always
+    /// CORRECT, just not shared-cell fast. Wholesale frame discards
+    /// (`frames.clear()` / error-path truncates) recount or zero it.
+    pub(crate) dm_share_depth: u32,
     /// Contiguous slot storage for `Locals::Stack` frames (the
     /// escape-analysed method-call fast path). Grows like a stack in
     /// lock-step with `frames`: a Stack frame's push appends its
@@ -2806,6 +2912,8 @@ impl Vm {
             dispatch_until_depths: Vec::new(),
             method_return_locals: None,
             locals_pool: Vec::new(),
+            chain_memo: None,
+            dm_share_depth: 0,
             locals_arena: Vec::new(),
             control_signals: 0,
             pending_loop_transfer: None,
@@ -3356,6 +3464,7 @@ impl Vm {
     pub(crate) fn reset_between_requests_inner(&mut self) {
         self.stack.clear();
         self.frames.clear();
+        self.dm_share_depth = 0;
         self.locals_arena.clear();
         self.pinned.clear();
         self.class_stack.clear();

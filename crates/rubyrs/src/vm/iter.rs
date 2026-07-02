@@ -6101,8 +6101,8 @@ mod tests {
     // regression in any of:
     //
     //   * invoke_block fresh-clone path (per-iter isolation)
-    //   * `propagate_outer_write` chain walk (counter / nested
-    //     write-through to outer-method locals)
+    //   * capture routing (`Frame::outer_cell_for` — counter /
+    //     nested write-through to outer-method locals)
     //   * Op::Yield's `find_lexical_owner_frame` seed (yield from
     //     nested block must find the enclosing method even though
     //     the block frame's `locals` is no longer Rc-shared with
@@ -6129,7 +6129,7 @@ mod tests {
 
     #[test]
     fn counter_aggregation_through_each_writes_back_to_outer() {
-        // The `propagate_outer_write` contract — block-frame
+        // The capture-routing contract — block-frame
         // StoreLocal/IncLocal/IncLocalNoPush on a slot in the
         // surrounding method's scope must reach the method's
         // locals so the post-loop read sees the accumulated
@@ -6144,7 +6144,7 @@ mod tests {
 
     #[test]
     fn nested_block_writes_propagate_to_method_locals() {
-        // `propagate_outer_write`'s chain walk past intermediate
+        // Capture routing past intermediate
         // block frames. Inner block writes `result = :found`;
         // the value must reach the surrounding method's `result`
         // slot through the outer block frame's writeback Rc, not

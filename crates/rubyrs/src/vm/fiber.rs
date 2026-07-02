@@ -1962,6 +1962,8 @@ mod tests {
         // captured = empty, self_val = Nil, no rest slot.
         let body_block = BlockHandle {
             proto_idx: 0,
+            outer_chain: None,
+            creator_start: 0,
             captured: std::rc::Rc::new(std::cell::RefCell::new(vec![])),
             self_val: crate::value::Value::Nil,
             lexical_cvar_class: None,

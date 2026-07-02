@@ -554,6 +554,39 @@ pub enum Value {
 const _: () = assert!(std::mem::size_of::<Value>() == 16, "Value must stay 16 bytes (ADR 0035)");
 const _: () = assert!(std::mem::align_of::<Value>() == 8, "Value must stay 8-aligned (ADR 0035)");
 
+/// The canonical-owner chain for a closure's captured (outer) slot
+/// region. Element `i` is `(cell, start)`: `cell` is the locals cell
+/// that OWNS slots `[start_i, start_{i+1})` (the last element owns up
+/// to the closure's own `param_start`), and `chain[0].1 == 0` always
+/// — the root method / class-body / toplevel scope. Built once at
+/// `Op::CreateBlock` (a block created in a non-block scope gets the
+/// one-element chain `[(scope_cell, 0)]`; a block created inside a
+/// block frame extends the creating frame's chain with that frame's
+/// own per-invocation cell). Because each element holds a strong Rc,
+/// the ORIGINAL binding cells stay alive — and reads/writes of a
+/// captured local can be routed to the canonical cell — for the
+/// lifetime of any capturing closure, including after the defining
+/// frames pop (the shared-binding semantics CRuby closures have).
+pub(crate) type OuterChain = Rc<[(Rc<RefCell<Vec<Value>>>, u16)]>;
+
+/// The cell that canonically owns `slot` per `chain` — the LAST
+/// element whose start is `<= slot`. Chains are tiny (nesting depth
+/// of the source), so a reverse linear scan beats anything fancier.
+#[inline]
+pub(crate) fn chain_owner_cell(
+    chain: &[(Rc<RefCell<Vec<Value>>>, u16)],
+    slot: usize,
+) -> &Rc<RefCell<Vec<Value>>> {
+    for (cell, start) in chain.iter().rev() {
+        if (*start as usize) <= slot {
+            return cell;
+        }
+    }
+    // chain[0].1 == 0 by construction, so the loop always returns;
+    // defensive fallback to the root keeps this off the panic budget.
+    &chain[0].0
+}
+
 #[derive(Debug)]
 pub struct BlockHandle {
     pub(crate) proto_idx: usize,
@@ -622,6 +655,41 @@ pub struct BlockHandle {
     /// lambda-vs-proc behavioural differences (strict arity, `return`
     /// scope), a documented subset gap.
     pub(crate) is_lambda: bool,
+    /// ANCESTOR canonical-owner chain for the block's outer slot
+    /// region — the scopes OUTSIDE the creating scope. Together with
+    /// `(captured, creator_start)` this describes every captured
+    /// binding: slot `>= creator_start` (and `< param_start`) lives
+    /// in `captured` (the creating scope's cell); slot `<
+    /// creator_start` routes through this chain (see [`OuterChain`]).
+    /// `None` when the creating scope canonically owns everything —
+    /// a method / class-body / toplevel creator (the overwhelmingly
+    /// common case) and synthetic forwarder handles — which keeps
+    /// `Op::CreateBlock` allocation-free for depth-1 blocks. GC:
+    /// rooted alongside `captured` (see `each_capture_cell`).
+    pub(crate) outer_chain: Option<OuterChain>,
+    /// First slot index the CREATING scope's cell (`captured`)
+    /// canonically owns — `0` for a root-scope creator; the creating
+    /// block frame's `own_start` when this block was created inside
+    /// another block / define_method body. Invariant: `Some` chain ⇔
+    /// `creator_start > 0`.
+    pub(crate) creator_start: u16,
+}
+
+impl BlockHandle {
+    /// Every locals cell this handle can reach: `captured` plus each
+    /// distinct ancestor-chain cell. GC root walks use this so heap
+    /// values reachable only through an ORIGINAL binding cell (whose
+    /// defining frame already popped) survive collection.
+    pub(crate) fn each_capture_cell(&self, mut f: impl FnMut(&Rc<RefCell<Vec<Value>>>)) {
+        f(&self.captured);
+        if let Some(chain) = &self.outer_chain {
+            for (cell, _) in chain.iter() {
+                if !Rc::ptr_eq(cell, &self.captured) {
+                    f(cell);
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1202,6 +1270,13 @@ pub struct MethodClosure {
     pub(crate) captured: Rc<RefCell<Vec<Value>>>,
     pub(crate) param_start: u16,
     pub(crate) n_params: u16,
+    /// ANCESTOR canonical-owner chain + creating-scope boundary —
+    /// same split and semantics as `BlockHandle::outer_chain` /
+    /// `creator_start` (copied from the source handle at install
+    /// time). Snapshot-restored / synthetic closures carry `(None,
+    /// 0)`: the captured cell owns everything (pre-chain behaviour).
+    pub(crate) outer_chain: Option<OuterChain>,
+    pub(crate) creator_start: u16,
     /// The yield-block the source block lexically captured (the
     /// `block_arg` of the method that ran `define_method`), copied
     /// from the `BlockHandle` at install time. CRuby treats a
@@ -1214,6 +1289,22 @@ pub struct MethodClosure {
     /// enclosing scope had no block. GC-rooted wherever `captured`
     /// is.
     pub(crate) captured_yield_block: Option<ObjId>,
+}
+
+impl MethodClosure {
+    /// Every locals cell this closure can reach — `captured` plus
+    /// each distinct outer-chain cell. Mirror of
+    /// `BlockHandle::each_capture_cell` for the GC root walks.
+    pub(crate) fn each_capture_cell(&self, mut f: impl FnMut(&Rc<RefCell<Vec<Value>>>)) {
+        f(&self.captured);
+        if let Some(chain) = &self.outer_chain {
+            for (cell, _) in chain.iter() {
+                if !Rc::ptr_eq(cell, &self.captured) {
+                    f(cell);
+                }
+            }
+        }
+    }
 }
 
 /// Serde bridge for the LITERAL subset of `Value` — only the shapes

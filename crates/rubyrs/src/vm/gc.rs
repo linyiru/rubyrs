@@ -89,6 +89,11 @@ impl Vm {
             base_sp: self.stack.len(),
             is_class_body: false, swap_return: None, block_arg: None, defining_class: None, lexical_cvar_class: None, #[cfg(feature = "regex")] saved_last_match: None, is_block: false, is_lambda: false, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
             block_writeback: None,
+            dm_share: false,
+            own_start: 0,
+            outer_cell_start: 0,
+            outer_cell: None,
+            outer_rest: None,
             captured_yield_block: None,
         });
         self.dispatch()?;
@@ -541,6 +546,27 @@ impl Vm {
         // + pinned (native-code accumulators). class_stack holds Rc<Class>
         // which isn't GC-managed, so we don't need to walk it.
         let mut roots: Vec<Value> = Vec::with_capacity(self.stack.len() + self.pinned.len() + 64);
+        // Per-cycle dedup of locals-CELL content scans. Frames,
+        // capture-routing chains and `define_method` closures share
+        // cells heavily (rubocop-ast installs ~40 `*_type?` closures
+        // over ONE class-body cell); without dedup each sharer
+        // re-pushes the whole cell's contents every cycle — the
+        // gather cost blows up O(sharers × cell-size). Ptr-keyed
+        // dedup is sound within a single gather: no Ruby code runs
+        // mid-GC, so cell contents can't change between visits.
+        let mut seen_cells: crate::intern::FxHashSet<usize> = crate::intern::FxHashSet::default();
+        #[inline]
+        fn push_cell(
+            roots: &mut Vec<Value>,
+            seen: &mut crate::intern::FxHashSet<usize>,
+            cell: &Rc<RefCell<Vec<Value>>>,
+        ) {
+            if seen.insert(Rc::as_ptr(cell) as usize) {
+                for v in cell.borrow().iter() {
+                    roots.push(v.clone());
+                }
+            }
+        }
         for v in &self.stack { roots.push(v.clone()); }
         for v in &self.pinned { roots.push(v.clone()); }
         // In-flight break/next transfer: the break value lives only
@@ -627,7 +653,20 @@ impl Vm {
             roots.push(f.self_val.clone());
             // Stack frames' slots were covered by the arena walk above.
             if let Some(rc) = f.locals.as_shared() {
-                for v in rc.borrow().iter() { roots.push(v.clone()); }
+                push_cell(&mut roots, &mut seen_cells, rc);
+            }
+            // Capture-routing cells: an ORIGINAL binding cell (e.g. a
+            // popped scope's locals kept alive only by this escaped
+            // closure's routing) may be reachable through nothing else.
+            // Routed reads/writes dereference these, so their contents
+            // must survive collection.
+            if let Some(cell) = &f.outer_cell {
+                push_cell(&mut roots, &mut seen_cells, cell);
+            }
+            if let Some(chain) = &f.outer_rest {
+                for (cell, _) in chain.iter() {
+                    push_cell(&mut roots, &mut seen_cells, cell);
+                }
             }
             if let Some(v) = &f.swap_return { roots.push(v.clone()); }
             if let Some(id) = f.block_arg {
@@ -712,7 +751,18 @@ impl Vm {
             for f in &snap.frames {
                 roots.push(f.self_val.clone());
                 if let Some(rc) = f.locals.as_shared() {
-                    for v in rc.borrow().iter() { roots.push(v.clone()); }
+                    push_cell(&mut roots, &mut seen_cells, rc);
+                }
+                // Capture-routing cells — same reasoning as the live-
+                // frame walk above (a suspended fiber's block frame
+                // may hold the only path to an original binding cell).
+                if let Some(cell) = &f.outer_cell {
+                    push_cell(&mut roots, &mut seen_cells, cell);
+                }
+                if let Some(chain) = &f.outer_rest {
+                    for (cell, _) in chain.iter() {
+                        push_cell(&mut roots, &mut seen_cells, cell);
+                    }
                 }
                 if let Some(v) = &f.swap_return { roots.push(v.clone()); }
                 if let Some(id) = f.block_arg { roots.push(Value::Block(id)); }
@@ -746,7 +796,7 @@ impl Vm {
         for cls in self.classes.values() {
             for m in cls.methods.borrow().values() {
                 if let Some(cl) = &m.closure {
-                    for v in cl.captured.borrow().iter() { roots.push(v.clone()); }
+                    cl.each_capture_cell(|cell| push_cell(&mut roots, &mut seen_cells, cell));
                     if let Some(b) = cl.captured_yield_block { roots.push(Value::Block(b)); }
                 }
             }
@@ -758,7 +808,7 @@ impl Vm {
             // under STRESS_GC. (Code-review #253 round 5.)
             for m in cls.singleton_methods.borrow().values() {
                 if let Some(cl) = &m.closure {
-                    for v in cl.captured.borrow().iter() { roots.push(v.clone()); }
+                    cl.each_capture_cell(|cell| push_cell(&mut roots, &mut seen_cells, cell));
                     if let Some(b) = cl.captured_yield_block { roots.push(Value::Block(b)); }
                 }
             }
@@ -772,13 +822,13 @@ impl Vm {
             if let Some(shell) = cls.singleton_view.borrow().as_ref() {
                 for m in shell.methods.borrow().values() {
                     if let Some(cl) = &m.closure {
-                        for v in cl.captured.borrow().iter() { roots.push(v.clone()); }
+                        cl.each_capture_cell(|cell| push_cell(&mut roots, &mut seen_cells, cell));
                     if let Some(b) = cl.captured_yield_block { roots.push(Value::Block(b)); }
                     }
                 }
                 for m in shell.singleton_methods.borrow().values() {
                     if let Some(cl) = &m.closure {
-                        for v in cl.captured.borrow().iter() { roots.push(v.clone()); }
+                        cl.each_capture_cell(|cell| push_cell(&mut roots, &mut seen_cells, cell));
                     if let Some(b) = cl.captured_yield_block { roots.push(Value::Block(b)); }
                     }
                 }
@@ -827,7 +877,7 @@ impl Vm {
         }
         for m in self.toplevel_methods.values() {
             if let Some(cl) = &m.closure {
-                for v in cl.captured.borrow().iter() { roots.push(v.clone()); }
+                cl.each_capture_cell(|cell| push_cell(&mut roots, &mut seen_cells, cell));
                 if let Some(b) = cl.captured_yield_block { roots.push(Value::Block(b)); }
             }
         }

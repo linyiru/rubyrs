@@ -46,6 +46,23 @@ type SlotBinding = Option<(u16, Value)>;
 /// A frame's locals storage cell — the shared `Rc<RefCell<Vec<Value>>>`
 /// used by `Locals::Shared` frames and the block-locals helpers.
 type LocalsCell = Rc<RefCell<Vec<Value>>>;
+
+/// The capture-routing fields a block invocation installs on its
+/// frame — see `Frame::outer_cell_for`. `none()` is the share-direct
+/// / non-routing shape (frame cell owns everything).
+pub(crate) struct BlockRouting {
+    pub(crate) own_start: u16,
+    pub(crate) outer_cell_start: u16,
+    pub(crate) outer_cell: Option<LocalsCell>,
+    pub(crate) outer_rest: Option<crate::value::OuterChain>,
+}
+
+impl BlockRouting {
+    #[inline]
+    pub(crate) fn none() -> Self {
+        BlockRouting { own_start: 0, outer_cell_start: 0, outer_cell: None, outer_rest: None }
+    }
+}
 /// A block frame's `block_writeback`: the outer-scope cell plus the
 /// `param_start` boundary. `None` on the share-direct path.
 type BlockWriteback = Option<(LocalsCell, u16)>;
@@ -3624,14 +3641,15 @@ impl Vm {
                 self.stack.push(Value::Nil);
                 return Ok(CallableOutcome::Handled);
             };
-            let (proto_idx, captured, self_val, lex) = {
+            let (proto_idx, captured, self_val, lex, bh_creator_start, bh_chain) = {
                 let bh = self.heap.block(*bid);
-                (bh.proto_idx, bh.captured.clone(), bh.self_val.clone(), bh.lexical_cvar_class.clone())
+                (bh.proto_idx, bh.captured.clone(), bh.self_val.clone(), bh.lexical_cvar_class.clone(), bh.creator_start, bh.outer_chain.clone())
             };
-            // Snapshot the block's NAMED locals (slot → value) from the
-            // captured cell — the block shares this vector with its
-            // enclosing scope, so it carries the outer locals `eval`
-            // needs to resolve.
+            // Snapshot the block's NAMED locals (slot → value). Outer
+            // slots (`< param_start`) read their canonical binding
+            // cell via the handle's chain — the captured cell may be
+            // an enclosing block's per-invocation snapshot whose
+            // outer region has gone stale.
             let mut snap: Vec<(String, Value)> = Vec::new();
             {
                 let cap = captured.borrow();
@@ -3641,7 +3659,29 @@ impl Vm {
                     if lname.is_empty() {
                         continue;
                     }
-                    let val = cap.get(slot).cloned().unwrap_or(Value::Nil);
+                    let val = if slot < bh_creator_start as usize
+                        && let Some(chain) = &bh_chain
+                    {
+                        // Ancestor-owned capture: read the canonical
+                        // binding cell (guarding the self-borrow case
+                        // where an ancestor cell IS `captured`).
+                        let cell = crate::value::chain_owner_cell(chain, slot);
+                        if Rc::ptr_eq(cell, &captured) {
+                            cap.get(slot).cloned().unwrap_or(Value::Nil)
+                        } else {
+                            cell.borrow().get(slot).cloned().unwrap_or(Value::Nil)
+                        }
+                    } else {
+                        // Creator-owned capture (`[creator_start,
+                        // param_start)`) or the block's own slot —
+                        // both live in `captured` for the purposes of
+                        // this snapshot (own slots persist there
+                        // between invocations of a share-direct
+                        // block; a copy-path block's own slots are
+                        // per-invocation and read as their last
+                        // captured value, same as before).
+                        cap.get(slot).cloned().unwrap_or(Value::Nil)
+                    };
                     snap.push((lname, val));
                 }
             }
@@ -15583,6 +15623,25 @@ impl Vm {
         }
     }
 
+    /// All-Nil per-invocation cell (pool-reused) — for frames whose
+    /// OWN region is rebound wholesale each call and whose outer
+    /// region routes through an `outer_chain` (the `define_method`
+    /// closure path). Skipping the captured-cell byte copy matters:
+    /// rubocop-ast defines every `Node#*_type?` via `define_method`,
+    /// so this constructor runs on each AST-walk predicate call.
+    fn block_locals_fresh(&mut self, n_locals: usize) -> Rc<RefCell<Vec<Value>>> {
+        if let Some(cell) = self.locals_pool.pop() {
+            {
+                let mut v = cell.borrow_mut();
+                v.clear();
+                v.resize(n_locals, Value::Nil);
+            }
+            cell
+        } else {
+            Rc::new(RefCell::new(vec![Value::Nil; n_locals]))
+        }
+    }
+
     /// Decide a block invocation's locals representation, returning the
     /// frame `Locals` plus the `block_writeback` to install.
     ///
@@ -15611,20 +15670,23 @@ impl Vm {
         needed: usize,
         param_start: u16,
         captured_is_method_scope: bool,
-    ) -> (LocalsCell, BlockWriteback) {
+        block_id: ObjId,
+    ) -> (LocalsCell, BlockWriteback, BlockRouting) {
         // Share-direct requires ALL of:
         //  - `captured` is a genuine method / class-body / toplevel
-        //    scope, not an enclosing block's per-invocation COPY —
-        //    sharing a copy would skip its write-back chain and lose
-        //    the propagation to the grandparent (the `[[1,2]].each
-        //    { |p| p.each { |n| total += n } }` case);
+        //    scope that canonically owns EVERY slot (not an enclosing
+        //    block's per-invocation cell, and not a chain-carrying
+        //    define_method frame) — sharing anything else would land
+        //    outer writes on a non-canonical cell;
         //  - no inner closure can capture & leak this frame's slots
         //    (`!creates_block`);
         //  - the same block isn't already live on the stack
         //    (`!reentrant`), which would clobber its scratch.
-        // Returns the locals cell (caller wraps in `Locals::Shared`)
-        // and the `block_writeback` — `None` for the share path
-        // (writes hit the method scope directly).
+        // Returns the locals cell (caller wraps in `Locals::Shared`),
+        // the `block_writeback` (`None` for the share path — writes
+        // hit the method scope directly; identity-only otherwise),
+        // and the frame's `BlockRouting` (`none()` for the share
+        // path: the cell owns everything).
         if captured_is_method_scope
             && !self.protos[proto_idx].creates_block
             && !self.block_is_reentrant(proto_idx, captured)
@@ -15638,10 +15700,36 @@ impl Vm {
                     c.resize(needed, Value::Nil);
                 }
             }
-            (captured.clone(), None)
+            (captured.clone(), None, BlockRouting::none())
         } else {
+            // COPY path: this invocation owns `[param_start, needed)`
+            // (params + body locals, fresh per invocation); slots
+            // below `param_start` are captured outer locals whose
+            // reads/writes route through `outer_chain` to the
+            // canonical binding cell. The cell still snapshots the
+            // whole captured Vec — the outer region is never read
+            // back through routed accesses, but synthetic forwarder
+            // protos (param_start == 0) read their scratch slots
+            // from it, and it keeps un-routed introspection sane.
+            // The routing pieces are fetched HERE (not by the
+            // caller) so the share-direct hot path above pays zero
+            // refcount traffic for them. `outer_cell` is the running
+            // handle's `captured` — the creating scope's cell.
             let cell = self.block_locals_from_captured(captured, needed);
-            (cell, Some((captured.clone(), param_start)))
+            let (rest, cell_start) = {
+                let bh = self.heap.block(block_id);
+                (bh.outer_chain.clone(), bh.creator_start)
+            };
+            (
+                cell,
+                Some((captured.clone(), param_start)),
+                BlockRouting {
+                    own_start: param_start,
+                    outer_cell_start: cell_start,
+                    outer_cell: Some(captured.clone()),
+                    outer_rest: rest,
+                },
+            )
         }
     }
 
@@ -15722,24 +15810,43 @@ impl Vm {
         base as u32
     }
 
-    /// Read a slot of the TOP frame's locals, representation-agnostic.
-    /// Cold-path convenience — the hot ops (`LoadLocal` & co) inline
-    /// the match themselves.
+    /// Read a slot of the TOP frame's locals, representation-agnostic
+    /// and capture-routed (an outer-scope slot of a block frame reads
+    /// the canonical binding cell via `outer_chain`). Cold-path
+    /// convenience — the hot ops (`LoadLocal` & co) inline the match
+    /// themselves.
     #[inline]
     pub(crate) fn get_local_top(&self, slot: usize) -> Value {
         let frame = self.frames.last().expect("ICE: get_local_top no frame");
+        crate::vm::Vm::frame_local_get(frame, &self.locals_arena, slot)
+    }
+
+    /// Read `slot` of an arbitrary frame's locals, routing captured
+    /// outer slots (`slot < own_start`) to the canonical binding cell.
+    #[inline]
+    pub(crate) fn frame_local_get(
+        frame: &crate::vm::Frame,
+        locals_arena: &[Value],
+        slot: usize,
+    ) -> Value {
         match &frame.locals {
             crate::vm::Locals::Stack(base) => {
-                self.locals_arena[*base as usize + slot].clone()
+                locals_arena[*base as usize + slot].clone()
             }
-            crate::vm::Locals::Shared(rc) => rc.borrow()[slot].clone(),
+            crate::vm::Locals::Shared(rc) => {
+                if let Some(cell) = frame.outer_cell_for(slot) {
+                    return cell.borrow().get(slot).cloned().unwrap_or(Value::Nil);
+                }
+                rc.borrow()[slot].clone()
+            }
         }
     }
 
-    /// Write a slot of the TOP frame's locals, representation-agnostic.
-    /// NOTE: does NOT run the block-writeback propagation — callers
-    /// that can be a block frame writing an outer-scope slot must use
-    /// the `Op::StoreLocal` machinery instead.
+    /// Write a slot of the TOP frame's locals, representation-agnostic
+    /// and capture-routed: an outer-scope slot of a block frame writes
+    /// the canonical binding cell (via `outer_chain`), so the defining
+    /// scope and every capturing closure observe the update — even
+    /// after intermediate frames pop.
     #[inline]
     pub(crate) fn set_local_top(&mut self, slot: usize, v: Value) {
         let frame = self.frames.last().expect("ICE: set_local_top no frame");
@@ -15748,7 +15855,13 @@ impl Vm {
                 let idx = *base as usize + slot;
                 self.locals_arena[idx] = v;
             }
-            crate::vm::Locals::Shared(rc) => rc.borrow_mut()[slot] = v,
+            crate::vm::Locals::Shared(rc) => {
+                if let Some(cell) = frame.outer_cell_for(slot) {
+                    crate::vm::cell_store(cell, slot, v);
+                    return;
+                }
+                rc.borrow_mut()[slot] = v;
+            }
         }
     }
 
@@ -16351,6 +16464,11 @@ impl Vm {
             aux: None,
             pending_yield: false,
             block_writeback: None,
+            dm_share: false,
+            own_start: 0,
+            outer_cell_start: 0,
+            outer_cell: None,
+            outer_rest: None,
             captured_yield_block: None,
         });
         // $~ scoping is LAZY now — save_match_scope_on_write fires on
@@ -16670,6 +16788,11 @@ impl Vm {
             aux: None,
             pending_yield: false,
             block_writeback: None,
+            dm_share: false,
+            own_start: 0,
+            outer_cell_start: 0,
+            outer_cell: None,
+            outer_rest: None,
             captured_yield_block: None,
         });
         // $~ scoping is LAZY now — save_match_scope_on_write fires on
@@ -16889,6 +17012,11 @@ impl Vm {
             aux: None,
             pending_yield: false,
             block_writeback: None,
+            dm_share: false,
+            own_start: 0,
+            outer_cell_start: 0,
+            outer_cell: None,
+            outer_rest: None,
             captured_yield_block: None,
         });
         // $~ scoping is LAZY now — save_match_scope_on_write fires on
@@ -17015,6 +17143,11 @@ impl Vm {
             aux: None,
             pending_yield: false,
             block_writeback: None,
+            dm_share: false,
+            own_start: 0,
+            outer_cell_start: 0,
+            outer_cell: None,
+            outer_rest: None,
             captured_yield_block: None,
         });
         // TIER-2 (ADR 0037): run the just-pushed frame natively when compiled.
@@ -17252,6 +17385,11 @@ impl Vm {
             aux: None,
             pending_yield: false,
             block_writeback: None,
+            dm_share: false,
+            own_start: 0,
+            outer_cell_start: 0,
+            outer_cell: None,
+            outer_rest: None,
             captured_yield_block: None,
         });
         // $~ scoping is LAZY now — save_match_scope_on_write fires on
@@ -20635,12 +20773,55 @@ impl Vm {
                 None
             };
             let cl = m.closure.as_ref().unwrap();
-            {
-                let mut caps = cl.captured.borrow_mut();
-                let need = param_start.max(proto_n_locals);
-                if caps.len() < need {
-                    caps.resize(need, Value::Nil);
+            // The body's OWN region — params at `[param_start, …)`
+            // plus body-introduced locals — must start FRESH every
+            // call (`define_method(:dm) { |a, b = (a+10)| … }` used
+            // to see the PREVIOUS call's `b` and skip the default;
+            // `t ||= v` kept the first call's `t` forever), while
+            // captured outer locals stay ONE shared binding with the
+            // defining scope.
+            //
+            // SHARE-DIRECT fast path (mirrors `block_frame_locals`):
+            // when the closure's captured cell canonically owns every
+            // outer slot (depth-1 `define_method`, the ubiquitous
+            // rubocop-ast `Node#*_type?` shape), the body creates no
+            // inner closure that could leak this call's slots, and no
+            // live frame is already running on this cell (recursion),
+            // the frame reuses `captured` ITSELF — zero cell traffic;
+            // freshness comes from the own-region Nil reset below.
+            // Outer writes land directly on the defining scope's cell.
+            //
+            // COPY path otherwise: an all-Nil per-invocation cell;
+            // outer slots route through `(outer_cell, outer_rest)` to
+            // the canonical binding cells. A snapshot-restored closure
+            // carries `(None, 0)` — all captured slots route to
+            // `captured` (pre-chain semantics).
+            let need = param_start.max(proto_n_locals);
+            let dm_share = cl.creator_start == 0
+                && cl.outer_chain.is_none()
+                && !self.protos[proto_idx].creates_block
+                // O(1) re-entrancy gate: ANY live dm-share frame
+                // (this fiber or a stashed one) sends this call to
+                // the copy path — see `Vm::dm_share_depth`.
+                && self.dm_share_depth == 0;
+            let dm_cell = if dm_share {
+                {
+                    let mut caps = cl.captured.borrow_mut();
+                    if caps.len() < need {
+                        caps.resize(need, Value::Nil);
+                    }
+                    // Own-region reset — per-call freshness on the
+                    // shared cell.
+                    for slot in param_start..need {
+                        caps[slot] = Value::Nil;
+                    }
                 }
+                cl.captured.clone()
+            } else {
+                self.block_locals_fresh(need)
+            };
+            {
+                let mut caps = dm_cell.borrow_mut();
                 for (i, a) in head_args.into_iter().enumerate() {
                     caps[param_start + i] = a;
                 }
@@ -20657,10 +20838,13 @@ impl Vm {
                     caps[slot] = Value::Hash(hid);
                 }
             }
+            if dm_share {
+                self.dm_share_depth += 1;
+            }
             self.frames.push(Frame {
                 proto_idx,
                 ip: 0,
-                locals: crate::vm::Locals::Shared(cl.captured.clone()),
+                locals: crate::vm::Locals::Shared(dm_cell),
                 self_val,
                 base_sp: self.stack.len(),
                 // M27 A2/A3: `define_method`'d method bodies don't
@@ -20690,6 +20874,17 @@ impl Vm {
                 }),
                 pending_yield: false,
                 block_writeback: None,
+                // Share path: the frame cell IS the defining scope's
+                // cell — no routing (`own_start: 0`, today's fast
+                // shape). Copy path: captured outer locals
+                // (`slot < param_start`) route to the canonical
+                // binding cells; the dm frame's own cell only
+                // canonically owns params + body locals.
+                dm_share,
+                own_start: if dm_share { 0 } else { cl.param_start },
+                outer_cell_start: cl.creator_start,
+                outer_cell: if dm_share { None } else { Some(cl.captured.clone()) },
+                outer_rest: cl.outer_chain.clone(),
                 // Restore the LEXICALLY-captured yield-block (the block
                 // active where this `define_method` body was created)
                 // so `yield` inside it resolves — CRuby treats the
@@ -20736,6 +20931,11 @@ impl Vm {
                 aux: None,
                 pending_yield: false,
                 block_writeback: None,
+                dm_share: false,
+                own_start: 0,
+                outer_cell_start: 0,
+                outer_cell: None,
+                outer_rest: None,
                 captured_yield_block: None,
             });
             // $~ scoping is LAZY now — save_match_scope_on_write fires on
@@ -21078,6 +21278,11 @@ impl Vm {
             kw_given_mask,
             aux: None, pending_yield: false,
             block_writeback: None,
+            dm_share: false,
+            own_start: 0,
+            outer_cell_start: 0,
+            outer_cell: None,
+            outer_rest: None,
             captured_yield_block: None,
         });
         // $~ scoping is LAZY now — save_match_scope_on_write fires on
@@ -21204,9 +21409,9 @@ impl Vm {
         args: Vec<Value>,
     ) -> Result<(), Trap> {
         self.check_frames()?;
-        let (proto_idx, captured, param_start, n_params, rest_slot, bh_lexical_cvar_class) = {
+        let (proto_idx, captured, param_start, n_params, rest_slot, bh_lexical_cvar_class, captured_is_method_scope) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params, bh.rest_slot, bh.lexical_cvar_class.clone())
+            (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params, bh.rest_slot, bh.lexical_cvar_class.clone(), bh.captured_is_method_scope)
         };
         // Bind args into the block's param slots, same auto-splat
         // shape as `invoke_block`. For instance_eval/class_eval
@@ -21255,10 +21460,26 @@ impl Vm {
         };
         let proto = &self.protos[proto_idx];
         let needed = proto.n_locals as usize;
+        let body_local_start = proto.block_body_local_start;
+        // Same share-direct / per-invocation-copy decision as
+        // `invoke_block` (this path used to share `captured`
+        // unconditionally and bind params INTO it — when `captured`
+        // was an enclosing block's per-invocation cell, outer-local
+        // writes inside `instance_eval { }` landed on that private
+        // copy and never reached the defining scope).
+        let (block_cell, writeback, routing) =
+            self.block_frame_locals(&captured, proto_idx, needed, param_start, captured_is_method_scope, block_id);
         {
-            let mut locals = captured.borrow_mut();
+            let mut locals = block_cell.borrow_mut();
             if locals.len() < needed {
                 while locals.len() < needed { locals.push(Value::Nil); }
+            }
+            // Fresh body-introduced locals each invocation — mirrors
+            // `invoke_block` (a no-op for the `u16::MAX` sentinel).
+            if (body_local_start as usize) < needed {
+                for slot in body_local_start as usize..needed {
+                    locals[slot] = Value::Nil;
+                }
             }
             for (i, a) in args.into_iter().enumerate() {
                 if i < n_params as usize {
@@ -21291,7 +21512,7 @@ impl Vm {
         self.frames.push(Frame {
             proto_idx,
             ip: 0,
-            locals: crate::vm::Locals::Shared(captured),
+            locals: crate::vm::Locals::Shared(block_cell),
             self_val: new_self,
             base_sp: self.stack.len(),
             is_class_body: as_class_body,
@@ -21324,7 +21545,12 @@ impl Vm {
             n_given_positional: 0,
             kw_given_mask: 0,
             aux: None, pending_yield: false,
-            block_writeback: None,
+            block_writeback: writeback,
+            dm_share: false,
+            own_start: routing.own_start,
+            outer_cell_start: routing.outer_cell_start,
+            outer_cell: routing.outer_cell,
+            outer_rest: routing.outer_rest,
             captured_yield_block: None,
         });
         // `instance_eval`/`instance_exec` (NOT class_eval): a bare `def`
@@ -21456,6 +21682,9 @@ impl Vm {
         let id = g.vm.heap.alloc(HeapObj::Block(crate::value::BlockHandle {
             proto_idx,
             captured,
+            // Synthetic scratch cell owns everything (param_start 0).
+            outer_chain: None,
+            creator_start: 0,
             self_val: Value::Nil,
             lexical_cvar_class: None,
             param_start: 0,
@@ -21555,6 +21784,9 @@ impl Vm {
         let id = g.vm.heap.alloc(HeapObj::Block(crate::value::BlockHandle {
             proto_idx,
             captured,
+            // Synthetic scratch cell owns everything (param_start 0).
+            outer_chain: None,
+            creator_start: 0,
             self_val: Value::Nil,
             lexical_cvar_class: None,
             param_start: 0,
@@ -21573,59 +21805,6 @@ impl Vm {
         Ok(id)
     }
 
-    /// Propagate a single-slot write made inside a block frame
-    /// to every enclosing scope's storage that owns this slot
-    /// index. The block-locals model uses a per-invocation fresh
-    /// Vec for each `invoke_block`; outer-scope writes need to
-    /// reach (a) the BlockHandle's `captured` Rc (which is the
-    /// outer block's CURRENT-invocation fresh Vec, still on the
-    /// frame stack) and possibly (b) further outer scopes if
-    /// nested block frames also hold their own writebacks.
-    /// Walking stops as soon as the slot index sits in the
-    /// current target frame's OWN range (`>= param_start` for
-    /// that frame's block proto), because then the target frame
-    /// IS the canonical storage for the slot.
-    ///
-    /// Called from every `Op::StoreLocal` / `Op::IncLocal` /
-    /// `Op::IncLocalNoPush` site whose write hit slot
-    /// `< frame.block_writeback.1` (i.e. an outer-scope write
-    /// from inside a block frame).
-    pub(crate) fn propagate_outer_write(&self, slot: usize, v: &Value) {
-        let frame = self.frames.last().expect("ICE: propagate_outer_write no frame");
-        let mut target = match &frame.block_writeback {
-            Some((p, _)) => p.clone(),
-            None => return,
-        };
-        loop {
-            {
-                let mut t = target.borrow_mut();
-                if slot < t.len() {
-                    t[slot] = v.clone();
-                }
-            }
-            // Is `target` the locals of another block frame still
-            // on the stack? If so AND `slot` is still in THAT
-            // frame's outer scope, walk further; otherwise stop.
-            let outer = self
-                .frames
-                .iter()
-                .rposition(|f| {
-                    f.is_block
-                        && f.locals
-                            .as_shared()
-                            .is_some_and(|l| Rc::ptr_eq(l, &target))
-                });
-            match outer {
-                Some(idx) => match &self.frames[idx].block_writeback {
-                    Some((parent, ps)) if slot < *ps as usize => {
-                        target = parent.clone();
-                    }
-                    _ => return,
-                },
-                None => return,
-            }
-        }
-    }
 
     /// Walk the frame stack to find the topmost non-block frame
     /// whose `locals` Rc matches the lexical-owner identity rooted
@@ -21743,8 +21922,8 @@ impl Vm {
         let proto = &self.protos[proto_idx];
         let needed = proto.n_locals as usize;
         let body_local_start = proto.block_body_local_start;
-        let (block_cell, writeback) =
-            self.block_frame_locals(&captured, proto_idx, needed, param_start, captured_is_method_scope);
+        let (block_cell, writeback, routing) =
+            self.block_frame_locals(&captured, proto_idx, needed, param_start, captured_is_method_scope, block_id);
         {
             let mut locals = block_cell.borrow_mut();
             if (body_local_start as usize) < needed {
@@ -21767,6 +21946,11 @@ impl Vm {
             #[cfg(feature = "regex")] saved_last_match: None,
             is_block: true, is_lambda: bh_is_lambda, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
             block_writeback: writeback,
+            dm_share: false,
+            own_start: routing.own_start,
+            outer_cell_start: routing.outer_cell_start,
+            outer_cell: routing.outer_cell,
+            outer_rest: routing.outer_rest,
             captured_yield_block,
         });
         Ok(())
@@ -21795,8 +21979,8 @@ impl Vm {
         let proto = &self.protos[proto_idx];
         let needed = proto.n_locals as usize;
         let body_local_start = proto.block_body_local_start;
-        let (block_cell, writeback) =
-            self.block_frame_locals(&captured, proto_idx, needed, param_start, captured_is_method_scope);
+        let (block_cell, writeback, routing) =
+            self.block_frame_locals(&captured, proto_idx, needed, param_start, captured_is_method_scope, block_id);
         {
             let mut locals = block_cell.borrow_mut();
             if (body_local_start as usize) < needed {
@@ -21818,6 +22002,11 @@ impl Vm {
             #[cfg(feature = "regex")] saved_last_match: None,
             is_block: true, is_lambda: bh_is_lambda, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
             block_writeback: writeback,
+            dm_share: false,
+            own_start: routing.own_start,
+            outer_cell_start: routing.outer_cell_start,
+            outer_cell: routing.outer_cell,
+            outer_rest: routing.outer_rest,
             captured_yield_block,
         });
         Ok(())
@@ -22101,24 +22290,22 @@ impl Vm {
         // next iteration's), so their slot reads land on this
         // invocation's values.
         //
-        // To preserve closure-write-through to outer-method scope
-        // (e.g. `counter = 0; arr.each { counter += 1 }; counter`),
-        // we remember the original `captured` Rc plus this block's
-        // `param_start`. At Op::Return the lower `[0..param_start]`
-        // portion of the fresh Vec — slots owned by the surrounding
-        // method / outer blocks — is copied back into the original
-        // Rc. This keeps the active-invocation outer-write-through
-        // working; only the post-pop write-through (a *detached*
-        // inner closure mutating outer-method vars AFTER its
-        // outer block frame has popped) is a documented Tier-1
-        // divergence — see the Op::Return write-back arm and
-        // SUBSET.md for the trade-off.
+        // Closure-write-through to outer scope (e.g. `counter = 0;
+        // arr.each { counter += 1 }; counter`) — including from a
+        // DETACHED inner closure running after its creating frames
+        // popped (stored procs, Thread/Fiber bodies) — is handled by
+        // capture ROUTING: slot accesses below the frame's
+        // `own_start` go straight to the canonical binding cell
+        // (`Frame::outer_cell_for`, fed from the handle's
+        // `captured`/`creator_start`/`outer_chain`). The fresh Vec
+        // holds only this invocation's OWN region (params +
+        // body-locals) plus an inert snapshot of the outer region.
         // Snapshot the captured outer scope into a fresh (pool-reused)
         // cell sized to `needed` — or share the captured Vec directly
         // for a non-capturing, non-re-entrant block (no per-iteration
         // copy). See `block_frame_locals`.
-        let (block_cell, writeback) =
-            self.block_frame_locals(&captured, proto_idx, needed, param_start, captured_is_method_scope);
+        let (block_cell, writeback, routing) =
+            self.block_frame_locals(&captured, proto_idx, needed, param_start, captured_is_method_scope, block_id);
         {
             let mut locals = block_cell.borrow_mut();
             // Reset body-introduced block-local slots before
@@ -22182,6 +22369,11 @@ impl Vm {
             #[cfg(feature = "regex")] saved_last_match: None,
             is_block: true, is_lambda: bh_is_lambda, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
             block_writeback: writeback,
+            dm_share: false,
+            own_start: routing.own_start,
+            outer_cell_start: routing.outer_cell_start,
+            outer_cell: routing.outer_cell,
+            outer_rest: routing.outer_rest,
             captured_yield_block,
         });
         Ok(())
@@ -22883,9 +23075,9 @@ impl Vm {
                 // the existing match below which raises
                 // NoMethodError / ArgumentError as appropriate.
             }
-            let (proto_idx, captured, param_start, n_params, captured_yield_block) = {
+            let (proto_idx, captured, param_start, n_params, captured_yield_block, outer_chain, creator_start) = {
                 let bh = self.heap.block(block);
-                (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params, bh.captured_yield_block)
+                (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params, bh.captured_yield_block, bh.outer_chain.clone(), bh.creator_start)
             };
             let proto = &self.protos[proto_idx];
             let params = proto.params.clone();
@@ -22908,7 +23100,7 @@ impl Vm {
                         fixed_arity: None,
                         defining_class: Some(std::rc::Rc::downgrade(&sc)),
                         visibility: std::cell::Cell::new(crate::value::Visibility::Public),
-                        closure: Some(crate::value::MethodClosure { captured, param_start, n_params, captured_yield_block }),
+                        closure: Some(crate::value::MethodClosure { captured, param_start, n_params, captured_yield_block, outer_chain: outer_chain.clone(), creator_start }),
                         builtin: None,
                         original_name: Some(name_sym),
                     });
@@ -22922,7 +23114,7 @@ impl Vm {
                         fixed_arity: None,
                         defining_class: Some(std::rc::Rc::downgrade(&c)),
                         visibility: std::cell::Cell::new(crate::value::Visibility::Public),
-                        closure: Some(crate::value::MethodClosure { captured, param_start, n_params, captured_yield_block }),
+                        closure: Some(crate::value::MethodClosure { captured, param_start, n_params, captured_yield_block, outer_chain: outer_chain.clone(), creator_start }),
                         builtin: None,
                         original_name: Some(name_sym),
                     });
@@ -23060,9 +23252,9 @@ impl Vm {
                     self.stack.push(Value::Sym(installed));
                     return Ok(());
                 }
-                let (proto_idx, captured, param_start, n_params, captured_yield_block) = {
+                let (proto_idx, captured, param_start, n_params, captured_yield_block, outer_chain, creator_start) = {
                     let bh = self.heap.block(block);
-                    (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params, bh.captured_yield_block)
+                    (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params, bh.captured_yield_block, bh.outer_chain.clone(), bh.creator_start)
                 };
                 let proto = &self.protos[proto_idx];
                 let params = proto.params.clone();
@@ -23079,7 +23271,7 @@ impl Vm {
                     // (Code-review #253 round 1 #1.)
                     defining_class: Some(std::rc::Rc::downgrade(&target_cls.effective_install_class())),
                     visibility: std::cell::Cell::new(vis),
-                    closure: Some(crate::value::MethodClosure { captured, param_start, n_params, captured_yield_block }),
+                    closure: Some(crate::value::MethodClosure { captured, param_start, n_params, captured_yield_block, outer_chain: outer_chain.clone(), creator_start }),
                     builtin: None,
                     original_name: Some(name_sym),
                 });
@@ -24159,6 +24351,8 @@ impl Vm {
                         param_start: bh.param_start,
                         n_params: bh.n_params,
                         captured_yield_block: bh.captured_yield_block,
+                        outer_chain: bh.outer_chain.clone(),
+                        creator_start: bh.creator_start,
                     },
                 })
             }

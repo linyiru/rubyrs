@@ -1930,6 +1930,7 @@ impl Runtime {
         // --- Volatile per-eval state: reset to empty. ---
         self.vm.stack.clear();
         self.vm.frames.clear();
+        self.vm.dm_share_depth = 0;
         self.vm.pinned.clear();
         self.vm.globals.clear();
         self.vm.toplevel_cvars.clear();
@@ -2225,6 +2226,7 @@ impl Runtime {
         // Per-request transient state — all cleared.
         self.vm.stack.clear();
         self.vm.frames.clear();
+        self.vm.dm_share_depth = 0;
         self.vm.pinned.clear();
         self.vm.class_stack.clear();
         self.vm.class_visibility_stack.clear();
@@ -3547,6 +3549,11 @@ self.eval_inner(
             // Truncate frames back to the count before THIS
             // handler ran.
             if self.vm.frames.len() > pre_frames {
+                for f in &self.vm.frames[pre_frames..] {
+                    if f.dm_share {
+                        self.vm.dm_share_depth = self.vm.dm_share_depth.saturating_sub(1);
+                    }
+                }
                 self.vm.frames.truncate(pre_frames);
             }
             // Frames discarded wholesale above never ran their pop
@@ -3627,6 +3634,7 @@ self.eval_inner(
                 self.vm.fuel = None;
                 self.vm.deadline_at = None;
                 self.vm.frames.clear();
+        self.vm.dm_share_depth = 0;
                 self.vm.stack.clear();
                 self.vm.pinned.clear();
                 self.vm.clear_control_flow_signals();
@@ -3711,6 +3719,7 @@ self.eval_inner(
         // The dispatch state shouldn't. Clear it now so the new
         // eval starts from a known baseline.
         self.vm.frames.clear();
+        self.vm.dm_share_depth = 0;
         self.vm.stack.clear();
         self.vm.pinned.clear();
         // Shared with `Runtime::reset` — see the helper for why

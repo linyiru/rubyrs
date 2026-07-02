@@ -1487,7 +1487,21 @@ impl Vm {
                     crate::vm::Locals::Stack(base) => {
                         self.locals_arena[*base as usize + s as usize].clone()
                     }
-                    crate::vm::Locals::Shared(rc) => rc.borrow()[s as usize].clone(),
+                    crate::vm::Locals::Shared(rc) => {
+                        // Captured outer local (`slot < own_start`):
+                        // read the CANONICAL binding cell, not this
+                        // invocation's snapshot — a sibling closure /
+                        // suspended fiber / the defining scope itself
+                        // may have rebound it since this frame was
+                        // pushed. `own_start == 0` (method / class-body
+                        // / toplevel / share-direct frames) keeps the
+                        // one-compare fast path.
+                        if let Some(cell) = f.outer_cell_for(s as usize) {
+                            cell.borrow().get(s as usize).cloned().unwrap_or(Value::Nil)
+                        } else {
+                            rc.borrow()[s as usize].clone()
+                        }
+                    }
                 };
                 self.stack.push(v);
             }
@@ -1497,31 +1511,25 @@ impl Vm {
                 let frame = self.frames.last().expect("ICE: StoreLocal no frame");
                 match &frame.locals {
                     // Stack frames are method frames by construction —
-                    // never a block, so no writeback propagation.
+                    // never a block, so no capture routing.
                     crate::vm::Locals::Stack(base) => {
                         let idx = *base as usize + slot;
                         self.locals_arena[idx] = v;
                     }
                     crate::vm::Locals::Shared(rc) => {
-                        rc.borrow_mut()[slot] = v.clone();
-                        // Per-invocation block-locals model: outer-scope
-                        // writes (slot < block.param_start) propagate
-                        // through every enclosing fresh-Vec back to the
-                        // lexical method's locals. `propagate_outer_write`
-                        // walks the writeback chain. Without this,
-                        // `counter = 0; arr.each { counter += 1 }`
-                        // would update only the block frame's fresh Vec
-                        // and the method would still see 0 after the
-                        // loop. The propagation is a no-op when frame
-                        // has no `block_writeback` (method / class-body
-                        // / toplevel frames), or when the slot sits in
-                        // the current block's own param/body range.
-                        let in_outer_scope = frame
-                            .block_writeback
-                            .as_ref()
-                            .is_some_and(|(_, ps)| slot < *ps as usize);
-                        if in_outer_scope {
-                            self.propagate_outer_write(slot, &v);
+                        // Captured outer local: write the CANONICAL
+                        // binding cell (`cell_store`), so the
+                        // defining scope and every capturing closure
+                        // observe the update — including after this
+                        // frame's creator popped (escaped proc,
+                        // deferred Thread body, suspended Fiber).
+                        // Replaces the old write-to-own-copy +
+                        // live-frame writeback walk, which lost
+                        // updates once an intermediate frame died.
+                        if let Some(cell) = frame.outer_cell_for(slot) {
+                            crate::vm::cell_store(cell, slot, v);
+                        } else {
+                            rc.borrow_mut()[slot] = v;
                         }
                     }
                 }
@@ -1541,37 +1549,31 @@ impl Vm {
                         }
                     }
                     crate::vm::Locals::Shared(rc) => {
-                        let mut locals = rc.borrow_mut();
-                        match &mut locals[slot] {
-                            Value::Int(n) => {
+                        // Captured outer local: increment the CANONICAL
+                        // binding cell in place — see Op::StoreLocal.
+                        let cell = frame.outer_cell_for(slot).unwrap_or(rc);
+                        let mut locals = cell.borrow_mut();
+                        match locals.get_mut(slot) {
+                            Some(Value::Int(n)) => {
                                 *n = (*n).wrapping_add(1);
                                 None
                             }
-                            cur => Some(cur.clone()),
+                            Some(cur) => Some(cur.clone()),
+                            // Owner cell shorter than the slot — the
+                            // routed store below grows it.
+                            None => Some(Value::Nil),
                         }
                     }
                 };
                 if let Some(cur) = slow_cur {
                     // Slow path: rebind via `+`. push, dispatch, store, drop result.
+                    // (`set_local_top` routes captured outer slots.)
                     self.stack.push(cur);
                     self.stack.push(Value::Int(1));
                     let plus_id = self.interner.intern("+");
                     self.do_call(plus_id, 1, false, u32::MAX)?;
                     let v = self.stack.pop().unwrap_or(Value::Nil);
                     self.set_local_top(slot, v);
-                }
-                // Per-invocation block-locals propagation — see
-                // Op::StoreLocal. (Stack frames are never blocks —
-                // block_writeback is None by construction, so the
-                // get_local_top read only ever fires on Shared.)
-                let frame = self.frames.last().expect("ICE: IncLocalNoPush no frame");
-                let in_outer = frame
-                    .block_writeback
-                    .as_ref()
-                    .is_some_and(|(_, ps)| slot < *ps as usize);
-                if in_outer {
-                    let v = self.get_local_top(slot);
-                    self.propagate_outer_write(slot, &v);
                 }
             }
             Op::IncLocal(s) => {
@@ -1590,9 +1592,12 @@ impl Vm {
                         }
                     }
                     crate::vm::Locals::Shared(rc) => {
-                        let mut locals = rc.borrow_mut();
-                        match &mut locals[slot] {
-                            Value::Int(n) => {
+                        // Captured outer local: increment the CANONICAL
+                        // binding cell in place — see Op::StoreLocal.
+                        let cell = frame.outer_cell_for(slot).unwrap_or(rc);
+                        let mut locals = cell.borrow_mut();
+                        match locals.get_mut(slot) {
+                            Some(Value::Int(n)) => {
                                 let new_n = (*n).wrapping_add(1);
                                 *n = new_n;
                                 Some(new_n)
@@ -1604,6 +1609,8 @@ impl Vm {
                 if let Some(new_n) = fast_new_n {
                     self.stack.push(Value::Int(new_n));
                 } else {
+                    // (`get_local_top` / `set_local_top` route captured
+                    // outer slots to the canonical binding cell.)
                     let cur = self.get_local_top(slot);
                     // Slow path: replicate `slot = slot + 1` via BinOp semantics,
                     // including user-defined `+` on the receiver type.
@@ -1613,17 +1620,6 @@ impl Vm {
                     self.do_call(plus_id, 1, false, u32::MAX)?;
                     let new_val = self.stack.last().expect("ICE: IncLocal slow path no result").clone();
                     self.set_local_top(slot, new_val);
-                }
-                // Per-invocation block-locals propagation — see
-                // Op::StoreLocal.
-                let frame = self.frames.last().expect("ICE: IncLocal no frame");
-                let in_outer = frame
-                    .block_writeback
-                    .as_ref()
-                    .is_some_and(|(_, ps)| slot < *ps as usize);
-                if in_outer {
-                    let v = self.get_local_top(slot);
-                    self.propagate_outer_write(slot, &v);
                 }
             }
             Op::Dup => {
@@ -2768,7 +2764,15 @@ impl Vm {
                     crate::vm::Locals::Stack(base) => {
                         self.locals_arena[*base as usize + slot as usize].clone()
                     }
-                    crate::vm::Locals::Shared(rc) => rc.borrow()[slot as usize].clone(),
+                    crate::vm::Locals::Shared(rc) => {
+                        // Captured outer local → canonical binding cell
+                        // (see Op::LoadLocal).
+                        if let Some(cell) = f.outer_cell_for(slot as usize) {
+                            cell.borrow().get(slot as usize).cloned().unwrap_or(Value::Nil)
+                        } else {
+                            rc.borrow()[slot as usize].clone()
+                        }
+                    }
                 };
                 self.stack.push(v);
                 self.trailing_hash_positional = true;
@@ -3455,7 +3459,7 @@ impl Vm {
                 // closures captured during that invocation thus
                 // hold a Rc to the per-invocation Vec, isolated
                 // from subsequent iterations.
-                let (captured, self_val, captured_is_method_scope, captured_yield_block) = {
+                let (captured, self_val, captured_is_method_scope, captured_yield_block, outer_chain, creator_start) = {
                     let f = self.frames.last().expect("ICE: CreateBlock no frame");
                     let captured = match &f.locals {
                         crate::vm::Locals::Shared(rc) => rc.clone(),
@@ -3467,6 +3471,62 @@ impl Vm {
                             unreachable!("ICE: CreateBlock in a Locals::Stack frame")
                         }
                     };
+                    // Ancestor chain + creating-scope boundary for the
+                    // new handle. A non-routing creating frame (method
+                    // / class-body / toplevel / eval / share-direct
+                    // block) canonically owns every slot it exposes →
+                    // `(None, 0)`, ALLOCATION-FREE (the dominant
+                    // depth-1 case). A routing frame (copy-path block
+                    // / define_method body) owns only `[own_start, …)`
+                    // → the new handle's ancestors are THIS frame's
+                    // routing structure flattened (outer_rest ⊕
+                    // outer_cell), so the closure keeps routing
+                    // straight to each ORIGINAL binding, immune to
+                    // this frame popping. The flatten is served from
+                    // the single-entry `chain_memo`: its inputs
+                    // reference stable outer-scope cells (per-
+                    // invocation churn lives in `captured`, which is
+                    // NOT flattened), so loops hit the memo.
+                    let (outer_chain, creator_start): (Option<crate::value::OuterChain>, u16) =
+                        if f.own_start == 0 {
+                            (None, 0)
+                        } else {
+                            let rest_key = f
+                                .outer_rest
+                                .as_ref()
+                                .map(|p| std::rc::Rc::as_ptr(p) as *const u8 as usize)
+                                .unwrap_or(0);
+                            let cell_key = f
+                                .outer_cell
+                                .as_ref()
+                                .map(|c| std::rc::Rc::as_ptr(c) as usize)
+                                .unwrap_or(0);
+                            let start_key = f.outer_cell_start;
+                            let chain: crate::value::OuterChain = match &self.chain_memo {
+                                Some((rk, ck, sk, chain))
+                                    if *rk == rest_key && *ck == cell_key && *sk == start_key =>
+                                {
+                                    chain.clone()
+                                }
+                                _ => {
+                                    let rest_len =
+                                        f.outer_rest.as_ref().map(|r| r.len()).unwrap_or(0);
+                                    let mut v: Vec<(std::rc::Rc<std::cell::RefCell<Vec<Value>>>, u16)> =
+                                        Vec::with_capacity(rest_len + 1);
+                                    if let Some(rest) = &f.outer_rest {
+                                        v.extend(rest.iter().cloned());
+                                    }
+                                    if let Some(cell) = &f.outer_cell {
+                                        v.push((cell.clone(), f.outer_cell_start));
+                                    }
+                                    let chain: crate::value::OuterChain = std::rc::Rc::from(v);
+                                    self.chain_memo =
+                                        Some((rest_key, cell_key, start_key, chain.clone()));
+                                    chain
+                                }
+                            };
+                            (Some(chain), f.own_start)
+                        };
                     // `yield` inside this block resolves to the block of
                     // the lexically-enclosing METHOD. Capture it now so an
                     // ESCAPED closure (whose defining method has already
@@ -3489,9 +3549,13 @@ impl Vm {
                         f.block_arg.or(f.captured_yield_block)
                     };
                     // A non-block creating frame (method / class body /
-                    // toplevel) means `captured` is a real outer scope
-                    // → the block's outer-write share path is sound.
-                    (captured, f.self_val.clone(), !f.is_block, captured_yield_block)
+                    // toplevel) whose cell canonically owns EVERY slot
+                    // (own_start == 0 — a define_method body is
+                    // non-block but only owns its own region) means
+                    // `captured` is a real outer scope → the block's
+                    // outer-write share path is sound.
+                    let is_method_scope = !f.is_block && f.own_start == 0;
+                    (captured, f.self_val.clone(), is_method_scope, captured_yield_block, outer_chain, creator_start)
                 };
                 // Capture the lexical class for `@@cvar` resolution. For
                 // a block created inside another block this returns the
@@ -3516,6 +3580,8 @@ impl Vm {
                     captured_is_method_scope,
                     captured_yield_block,
                     is_lambda,
+                    outer_chain,
+                    creator_start,
                 }));
                 self.stack.push(Value::Block(id));
             }
@@ -4686,9 +4752,9 @@ impl Vm {
                 let id = if let Value::Block(id) = bv { id } else {
                     panic!("ICE: DefMethodBlock without Block on stack");
                 };
-                let (proto_idx, captured, param_start, n_params, captured_yield_block) = {
+                let (proto_idx, captured, param_start, n_params, captured_yield_block, outer_chain, creator_start) = {
                     let bh = self.heap.block(id);
-                    (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params, bh.captured_yield_block)
+                    (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params, bh.captured_yield_block, bh.outer_chain.clone(), bh.creator_start)
                 };
                 let proto = &self.protos[proto_idx];
                 let params = proto.params.clone();
@@ -4708,7 +4774,7 @@ impl Vm {
                     fixed_arity: None,
                     defining_class,
                     visibility: std::cell::Cell::new(vis),
-                    closure: Some(crate::value::MethodClosure { captured, param_start, n_params, captured_yield_block }),
+                    closure: Some(crate::value::MethodClosure { captured, param_start, n_params, captured_yield_block, outer_chain: outer_chain.clone(), creator_start }),
                 builtin: None,
                 original_name: Some(name_id),
                 });
@@ -4750,9 +4816,9 @@ impl Vm {
                 };
                 let recv = self.stack.pop()
                     .expect("ICE: DefObjectSingletonMethodBlock no receiver on stack");
-                let (proto_idx, captured, param_start, n_params, captured_yield_block) = {
+                let (proto_idx, captured, param_start, n_params, captured_yield_block, outer_chain, creator_start) = {
                     let bh = self.heap.block(block_id);
-                    (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params, bh.captured_yield_block)
+                    (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params, bh.captured_yield_block, bh.outer_chain.clone(), bh.creator_start)
                 };
                 let proto = &self.protos[proto_idx];
                 let params = proto.params.clone();
@@ -4774,7 +4840,7 @@ impl Vm {
                             fixed_arity: None,
                             defining_class: Some(Rc::downgrade(&sc)),
                             visibility: std::cell::Cell::new(Visibility::Public),
-                            closure: Some(crate::value::MethodClosure { captured, param_start, n_params, captured_yield_block }),
+                            closure: Some(crate::value::MethodClosure { captured, param_start, n_params, captured_yield_block, outer_chain: outer_chain.clone(), creator_start }),
                             builtin: None,
                             original_name: Some(name_id),
                         });
@@ -4788,7 +4854,7 @@ impl Vm {
                             fixed_arity: None,
                             defining_class: Some(Rc::downgrade(cls)),
                             visibility: std::cell::Cell::new(Visibility::Public),
-                            closure: Some(crate::value::MethodClosure { captured, param_start, n_params, captured_yield_block }),
+                            closure: Some(crate::value::MethodClosure { captured, param_start, n_params, captured_yield_block, outer_chain: outer_chain.clone(), creator_start }),
                             builtin: None,
                             original_name: Some(name_id),
                         });
@@ -4808,7 +4874,7 @@ impl Vm {
                             fixed_arity: None,
                             defining_class: Some(Rc::downgrade(&sc)),
                             visibility: std::cell::Cell::new(Visibility::Public),
-                            closure: Some(crate::value::MethodClosure { captured, param_start, n_params, captured_yield_block }),
+                            closure: Some(crate::value::MethodClosure { captured, param_start, n_params, captured_yield_block, outer_chain: outer_chain.clone(), creator_start }),
                             builtin: None,
                             original_name: Some(name_id),
                         });
@@ -5173,6 +5239,11 @@ impl Vm {
                     base_sp: self.stack.len(),
                     is_class_body: true, swap_return: None, block_arg: None, defining_class: None, lexical_cvar_class: None, #[cfg(feature = "regex")] saved_last_match: None, is_block: false, is_lambda: false, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
                     block_writeback: None,
+                    dm_share: false,
+                    own_start: 0,
+                    outer_cell_start: 0,
+                    outer_cell: None,
+                    outer_rest: None,
                     captured_yield_block: None,
                 });
             }
@@ -5213,6 +5284,11 @@ impl Vm {
                     base_sp: self.stack.len(),
                     is_class_body: true, swap_return: None, block_arg: None, defining_class: None, lexical_cvar_class: None, #[cfg(feature = "regex")] saved_last_match: None, is_block: false, is_lambda: false, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
                     block_writeback: None,
+                    dm_share: false,
+                    own_start: 0,
+                    outer_cell_start: 0,
+                    outer_cell: None,
+                    outer_rest: None,
                     captured_yield_block: None,
                 });
             }
@@ -5633,8 +5709,18 @@ impl Vm {
                             )
                         }
                         crate::vm::Locals::Shared(rc) => {
-                            let locals = rc.borrow();
-                            (locals[a_slot as usize].clone(), locals[b_slot as usize].clone())
+                            // Either operand can be a captured outer
+                            // local → canonical binding cell (see
+                            // Op::LoadLocal). Per-slot routing because
+                            // the two slots may live in different cells
+                            // (`sum = sum + x`: sum outer, x own).
+                            let read = |slot: u16| -> Value {
+                                if let Some(cell) = frame.outer_cell_for(slot as usize) {
+                                    return cell.borrow().get(slot as usize).cloned().unwrap_or(Value::Nil);
+                                }
+                                rc.borrow()[slot as usize].clone()
+                            };
+                            (read(a_slot), read(b_slot))
                         }
                     },
                     None => unreachable!("BinOpLocalLocal with empty frame stack"),
@@ -5726,6 +5812,9 @@ impl Vm {
                     return Ok(!self.frames.is_empty());
                 }
                 let f = self.frames.pop().expect("ICE: Return no frame");
+                if f.dm_share {
+                    self.dm_share_depth = self.dm_share_depth.saturating_sub(1);
+                }
                 // Frame-local `$~`: a method frame saved its caller's
                 // last-match on entry (block frames carry `None` and
                 // are transparent — they share the enclosing method's
@@ -5754,23 +5843,17 @@ impl Vm {
                 {
                     self.globals.insert(self.sym_bang, saved);
                 }
-                // Per-invocation block-locals model: writes to
-                // outer-scope slots (slot < block.param_start)
-                // are propagated AT-WRITE-TIME via the
-                // `propagate_outer_write` helper at every
-                // `Op::StoreLocal` / `Op::IncLocalNoPush` site,
-                // rather than via a bulk write-back here. A bulk
-                // copy at Op::Return would CLOBBER outer-slot
-                // mutations performed by OTHER code paths
-                // (`define_method`-installed closures dispatch
-                // through `m.closure.captured`, which IS the
-                // outer Rc, so their writes hit the parent
-                // directly; a stomp-copy here would replace those
-                // with this block frame's stale snapshot). The
-                // block_writeback field remains useful for
-                // `find_lexical_owner_frame` (Op::Yield /
-                // Op::ReturnMethod's lexical-method walk) — that's
-                // its remaining role.
+                // Capture-routing model: writes to outer-scope
+                // slots (slot < own_start) are routed AT-WRITE-TIME
+                // to the canonical binding cell (see
+                // `Frame::outer_cell_for`), never via a bulk
+                // write-back here. A bulk copy at Op::Return would
+                // CLOBBER outer-slot mutations performed by OTHER
+                // code paths with this block frame's stale
+                // snapshot. The block_writeback field remains
+                // useful for `find_lexical_owner_frame` (Op::Yield
+                // / Op::ReturnMethod's lexical-method walk) —
+                // that's its remaining role.
                 let ret = self.stack.pop().unwrap_or(Value::Nil);
                 self.stack.truncate(f.base_sp);
                 if f.is_class_body {

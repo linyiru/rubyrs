@@ -825,6 +825,13 @@ fn build_method(
         param_start: cl.param_start,
         n_params: cl.n_params,
         captured_yield_block: cl.captured_yield_block.map(crate::value::ObjId),
+        // Snapshot images don't carry the capture chain (cell
+        // identity is already broken by the deep-copy above — each
+        // restored closure gets a private cell). `(None, 0)` → every
+        // captured slot routes to `captured`, preserving the restored
+        // closure's pre-chain semantics.
+        outer_chain: None,
+        creator_start: 0,
     });
     Rc::new(Method {
         params: mi.params.clone(),
@@ -1036,6 +1043,12 @@ fn build_heap(
                     .collect();
                 Slot::Live(HeapObj::Block(crate::value::BlockHandle {
                     proto_idx: *proto_idx as usize,
+                    // Cell identity is broken by the image round-trip
+                    // (deep copy), so the best restorable shape is
+                    // "the captured cell owns everything" — the
+                    // pre-chain semantics for restored blocks.
+                    outer_chain: None,
+                    creator_start: 0,
                     captured: std::rc::Rc::new(std::cell::RefCell::new(env)),
                     self_val: value_from_image(self_val, classes, kinds),
                     lexical_cvar_class: lexical_cvar_class.map(|id| classes[id as usize].clone()),
