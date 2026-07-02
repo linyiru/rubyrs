@@ -149,6 +149,26 @@ rescue ArgumentError => e
 end
 puts(y_multi { |a, b| [a, b] }.inspect)
 
+# -- lambda strict arity THROUGH yield and through an iter driver
+def m_y1
+  yield 1
+end
+begin
+  m_y1(&->() { :x })
+  puts "yield->0param-lambda: no error"
+rescue ArgumentError => e
+  puts "#{e.class}: #{e.message}"
+end
+begin
+  [1].each(&->() { :x })
+  puts "each->0param-lambda: no error"
+rescue ArgumentError => e
+  puts "#{e.class}: #{e.message}"
+end
+la = 0
+2000.times { m_y1(&->(a) { la += a }) }
+puts la
+
 # -- kw and block-param blocks (interpreter binder + compiled body)
 pk = proc { |a, k: 10| a + k }
 2000.times { pk.call(1, k: 5) }

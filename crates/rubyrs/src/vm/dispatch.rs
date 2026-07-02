@@ -21923,7 +21923,15 @@ impl Vm {
             (bh.proto_idx, bh.captured.clone(), bh.self_val.clone(),
              bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot, bh.lexical_cvar_class.clone(), bh.captured_is_method_scope, bh.captured_yield_block, bh.is_lambda)
         };
+        // A LAMBDA with any arity other than exactly one falls back so the
+        // general path's strict positional-arity check raises CRuby's
+        // ArgumentError (`[1].each(&->() {})` / `yield 1` to a 0-param
+        // lambda must raise; the old `n_params > 1`-only gate silently
+        // dropped the arg for the 0-param case). 1-param lambdas — the
+        // common shape — stay on this fast path (given 1, expected 1 is
+        // always in range).
         if rest_slot.is_some() || kw_rest_slot.is_some() || n_params > 1
+            || (bh_is_lambda && n_params != 1)
             || !self.protos[proto_idx].block_kw_params.is_empty()
             || self.protos[proto_idx].block_param_slot.is_some() {
             return self.invoke_block(block_id, vec![arg]);
