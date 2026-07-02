@@ -29,7 +29,12 @@
 #     2.7.0 template.rb:439) is deterministic and call-time-stable.
 #
 # DIVERGENCES (documented, deliberate):
-#   - `Thread.list`, `Thread.kill`, real scheduling — absent.
+#   - Real scheduling — absent. `Thread#kill` (below) marks the
+#     deferred thread dead; a thread killed BEFORE its first
+#     `join`/`value` never runs AT ALL, whereas CRuby's would already
+#     have been scheduled and may have partially executed. Correct
+#     for the supervisor shape (kill = "don't want this work"), wrong
+#     for code that relies on pre-kill side effects.
 #   - Because `Thread.current` returns the Thread class, class-level
 #     reflection (`.class` / `.name` / `.ancestors`) resolves via
 #     Class's normal dispatch instead of raising; a known, benign
@@ -199,8 +204,34 @@ class Thread
     !@done
   end
 
-  def status
-    @done ? false : "run"
+  # `Thread#kill` / `#exit` / `#terminate` — terminate the thread.
+  # In the deferred model "terminate" is marking it done WITHOUT
+  # running the captured block: a killed-before-first-join thread
+  # never executes (see the DIVERGENCES note in the header), and a
+  # kill after completion is a no-op — both report `alive?` false /
+  # `status` false and `value` nil-or-result afterwards, matching
+  # what CRuby's killed/finished threads observably report. Returns
+  # self (CRuby returns the thread). Motivating consumer: the
+  # parallel gem's supervisor (`in_threads` runs
+  # `threads.map(&:value)` then `ensure threads.each(&:kill)`, and
+  # `work_in_processes` kills workers via `w.thread&.kill` on the
+  # exception path) — rubocop's default multi-file run auto-enables
+  # --parallel through it.
+  def kill
+    @done = true
+    self
+  end
+  alias exit kill
+  alias terminate kill
+
+  # `Thread.kill(thread)` — class-level form, same termination.
+  # CRuby type-checks the argument (TypeError, not NoMethodError,
+  # for a non-Thread).
+  def self.kill(thread)
+    unless thread.is_a?(Thread)
+      raise TypeError, "wrong argument type #{thread.class} (expected VM/thread)"
+    end
+    thread.kill
   end
 
   # Worker bodies set `Thread.current.abort_on_exception = true`;

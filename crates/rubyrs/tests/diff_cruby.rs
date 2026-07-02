@@ -1993,3 +1993,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // 1.88's Options#invalid_arguments_for_parallel (`flags > {...}` on
 // every multi-file run).
 #[test] fn hash_compare_ops() { run_diff("hash_compare_ops"); }
+// Thread#kill / #exit / #terminate + Thread.kill in the deferred
+// green-thread model. Surfaced by the parallel gem's in_threads
+// supervisor (`ensure threads.each(&:kill)`) under rubocop's
+// default auto---parallel multi-file run.
+#[test] fn thread_kill() { run_diff("thread_kill"); }
