@@ -16707,6 +16707,29 @@ impl Vm {
         if m.builtin.is_some() {
             return Ok(false);
         }
+        // Frame-free getter serve — the implicit-self twin of the
+        // explicit-recv path's "PoC getter fast path": a bare `foo`
+        // on an Object self whose resolution is a trivial attr_reader
+        // (`getter_ivar`) reads the ivar directly — NO frame push, NO
+        // 2-op run, NO frame pop. `argc == 0` keeps `foo(x)`'s
+        // ArgumentError on the general path; no visibility gate (an
+        // implicit-self call legally reaches private getters). Placed
+        // BEFORE the JIT routing gate, matching the explicit path's
+        // "trivial attr_readers never pay a JIT probe" ordering.
+        if argc == 0
+            && m.closure.is_none()
+            && let Some(gsym) = self.protos[m.proto_idx].getter_ivar
+        {
+            let v = self
+                .heap
+                .instance(id)
+                .ivars
+                .get(&gsym)
+                .cloned()
+                .unwrap_or(Value::Nil);
+            self.stack.push(v);
+            return Ok(true);
+        }
         // D selective routing (self-recv): route to the JIT hook only for
         // non-closure methods the JIT can speed up; everything else stays fast.
         #[cfg(feature = "jit-native")]
