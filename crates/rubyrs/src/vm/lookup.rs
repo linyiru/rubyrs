@@ -1092,6 +1092,7 @@ impl Vm {
             ),
             Value::Hash(_) => matches!(name,
                 "freeze" | "frozen?" |
+                "<" | "<=" | ">" | ">=" |
                 "length" | "size" | "[]" | "[]=" | "empty?" |
                 "include?" | "has_key?" | "key?" | "member?" |
                 "keys" | "values" | "values_at" | "to_h" | "to_hash" | "to_a" |

@@ -1989,3 +1989,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn real_mod_name_bind() { run_diff("real_mod_name_bind"); }
 #[test] fn array_instance_methods_native() { run_diff("array_instance_methods_native"); }
 #[test] fn splat_assignment_dup_frozen_array() { run_diff("splat_assignment_dup_frozen_array"); }
+// Hash `< <= > >=` subset/superset comparison. Surfaced by rubocop
+// 1.88's Options#invalid_arguments_for_parallel (`flags > {...}` on
+// every multi-file run).
+#[test] fn hash_compare_ops() { run_diff("hash_compare_ops"); }

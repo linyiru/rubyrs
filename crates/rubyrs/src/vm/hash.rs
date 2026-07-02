@@ -286,6 +286,66 @@ impl Vm {
         }
     }
 
+    /// Resolve the operand of a Hash comparison (`< <= > >=`) to a Hash
+    /// ObjId — CRuby's `rb_to_hash_type`: a Hash passes through, an
+    /// object with `to_hash` converts (result must be a Hash), anything
+    /// else raises TypeError `no implicit conversion of X into Hash`
+    /// (nil/true/false render as their literals, objects as their class
+    /// name — same shape as CRuby's convert-type message).
+    fn hash_cmp_operand(&mut self, other: &Value) -> Result<ObjId, Trap> {
+        if let Value::Hash(oid) = other {
+            return Ok(*oid);
+        }
+        // `to_hash` duck conversion — the Kernel#Hash shape (kernel.rs).
+        let mid = self.interner.intern("to_hash");
+        let m = match self.class_of(other) {
+            Value::Class(cls) => self.lookup_method_uncached(&cls, mid),
+            _ => None,
+        };
+        if let Some(m) = m {
+            let r = self.call_resolved_method(m, other.clone(), vec![])?;
+            if let Value::Hash(oid) = r {
+                return Ok(oid);
+            }
+        }
+        let tn = match other {
+            Value::Object(oid) => {
+                crate::value::class_display_name(&self.heap.class_of(*oid))
+            }
+            v => super::numeric::type_name_for_coerce(v).to_string(),
+        };
+        Err(self.trap(RubyError::TypeError {
+            msg: format!("no implicit conversion of {} into Hash", tn),
+        }))
+    }
+
+    /// Pairwise subset test for Hash comparison: every `[k, v]` of `sub`
+    /// is present in `sup` — the key found with Hash-lookup semantics
+    /// (`vm_hash_find`, honoring user `hash`/`eql?`), the value compared
+    /// with `==` (`ruby_eq`, the same equality `rassoc`/`value?` use).
+    /// Both hashes are pinned across the walk: `vm_hash_find` may run
+    /// Ruby-level `eql?`/`hash` which can allocate and GC, and neither
+    /// receiver nor operand is rooted here (both arrived as popped
+    /// Rust-local ObjIds from do_call).
+    fn vm_hash_pairs_subset(&mut self, sub: ObjId, sup: ObjId) -> Result<bool, Trap> {
+        let pairs: Vec<(Value, Value)> = self.heap.hash(sub).clone();
+        let mut g = PinGuard::new(self);
+        g.pin(Value::Hash(sub));
+        g.pin(Value::Hash(sup));
+        for (k, v) in pairs {
+            match g.vm.vm_hash_find(sup, &k)? {
+                Some(pos) => {
+                    let other_v = g.vm.heap.hash(sup)[pos].1.clone();
+                    if !v.ruby_eq(&other_v, &g.vm.heap) {
+                        return Ok(false);
+                    }
+                }
+                None => return Ok(false),
+            }
+        }
+        Ok(true)
+    }
+
     /// Hash#X methods that don't take a block. Block-form
     /// methods (each / map / sort_by / etc.) still live in
     /// `collection_call_block` until that gets factored out.
@@ -701,6 +761,36 @@ impl Vm {
                     ("compare_by_identity?", []) => Some(Value::Bool(
                         matches!(self.heap.get(id), HeapObj::Hash(h) if h.by_identity.get()),
                     )),
+                    // `h < other` / `<=` / `>` / `>=` — proper/improper
+                    // subset comparison (CRuby hash.c rb_hash_lt/le/gt/ge):
+                    // `a <= b` iff every [key, value] pair of `a` is in `b`
+                    // (key matched with Hash-lookup semantics — user
+                    // `hash`/`eql?` honored via vm_hash_find — value
+                    // compared with `==`); `<` additionally requires `a` to
+                    // be strictly smaller. `>` / `>=` mirror with the sides
+                    // swapped. A non-Hash argument goes through implicit
+                    // `to_hash` conversion, TypeError otherwise (CRuby's
+                    // rb_to_hash_type). Motivating consumer: rubocop 1.88's
+                    // `Options#invalid_arguments_for_parallel` compares the
+                    // parsed flag hash with `>` on every multi-file run.
+                    ("<" | "<=" | ">" | ">=", [other]) => {
+                        let oid = self.hash_cmp_operand(other)?;
+                        let (sub, sup) = if matches!(name, "<" | "<=") { (id, oid) } else { (oid, id) };
+                        let sub_len = self.heap.hash(sub).len();
+                        let sup_len = self.heap.hash(sup).len();
+                        let strict = matches!(name, "<" | ">");
+                        let ok = if sub_len > sup_len || (strict && sub_len == sup_len) {
+                            false
+                        } else {
+                            self.vm_hash_pairs_subset(sub, sup)?
+                        };
+                        Some(Value::Bool(ok))
+                    }
+                    ("<" | "<=" | ">" | ">=", many) => {
+                        return Err(self.trap(crate::error::RubyError::ArgumentError {
+                            msg: format!("wrong number of arguments (given {}, expected 1)", many.len()),
+                        }));
+                    }
                     // `Hash#flatten(level = 1)` == `to_a.flatten(level)`:
                     // `to_a` is `[[k, v], ...]`, so level 1 spreads the
                     // pairs (`[k, v, k, v, ...]`) and leaves array VALUES
