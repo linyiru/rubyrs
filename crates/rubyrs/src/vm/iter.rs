@@ -18,43 +18,30 @@ use crate::value::{ObjId, Value};
 
 use super::{value_cmp_v, PinGuard, Vm};
 
-/// Build a `LastMatch` from one native-regex hit so a `String#scan`
-/// block iteration can publish `$~` (and the English aliases
-/// `$LAST_MATCH_INFO` / `$&` / `` $` `` / `$'` / `$1`..). CRuby sets
-/// `$~` to each successive MatchData while a `scan` block runs;
+/// Build a `LastMatch` from one engine-agnostic `OwnedCaptures` hit so
+/// a `String#scan` block iteration can publish `$~` (and the English
+/// aliases `$LAST_MATCH_INFO` / `$&` / `` $` `` / `$'` / `$1`..). CRuby
+/// sets `$~` to each successive MatchData while a `scan` block runs;
 /// dotenv's parser reads `$LAST_MATCH_INFO[:key]` inside exactly such
 /// a block, so without this the global stays nil and indexing it
-/// raises NoMethodError.
+/// raises NoMethodError. `cap_names` (names for groups 1..N) comes
+/// from `CompiledRegex::capture_group_names()`, computed once per
+/// scan by the caller.
 #[cfg(feature = "regex")]
-fn scan_last_match(re: &regex::Regex, caps: &regex::Captures, input: &str) -> crate::vm::LastMatch {
-    let whole_m = caps.get(0).expect("capture group 0 always present on a hit");
-    let caps_vec: Vec<Option<String>> = (1..caps.len())
-        .map(|i| caps.get(i).map(|m| m.as_str().to_string()))
-        .collect();
-    let named: Vec<(String, Option<String>)> = re
-        .capture_names()
-        .flatten()
-        .map(|n| (n.to_string(), caps.name(n).map(|m| m.as_str().to_string())))
-        .collect();
-    // Byte spans (full-`input` coords) + names for groups 1..N, so a
-    // `$~` materialised inside a scan block backs #begin/#end/#offset.
-    let group_spans: Vec<Option<(usize, usize)>> = (1..caps.len())
-        .map(|i| caps.get(i).map(|m| (m.start(), m.end())))
-        .collect();
-    let cap_names: Vec<Option<String>> = re
-        .capture_names()
-        .skip(1)
-        .map(|n| n.map(|s| s.to_string()))
-        .collect();
+fn scan_last_match_owned(
+    oc: crate::regex_engine::OwnedCaptures,
+    input: &str,
+    cap_names: &[Option<String>],
+) -> crate::vm::LastMatch {
     crate::vm::LastMatch {
-        whole: whole_m.as_str().to_string(),
-        caps: caps_vec,
+        whole: oc.whole,
+        caps: oc.groups,
         input: input.to_string(),
-        m_start: whole_m.start(),
-        m_end: whole_m.end(),
-        named,
-        group_spans,
-        cap_names,
+        m_start: oc.m_start,
+        m_end: oc.m_end,
+        named: oc.named,
+        group_spans: oc.group_spans,
+        cap_names: cap_names.to_vec(),
         binary: None,
     }
 }
@@ -1243,18 +1230,27 @@ impl Vm {
             match &args[0] {
                 #[cfg(feature = "regex")]
                 Value::Regex(re) => {
-                    // Layer #17: scan with regex receiver
-                    // hasn't been migrated to the dual-engine
-                    // dispatcher yet. Native patterns take the
-                    // existing fast path; fancy patterns trap
-                    // clearly until the follow-up wires it.
-                    let native = re.as_native().ok_or_else(|| g.vm.trap(crate::error::RubyError::RuntimeError {
-                        msg: format!(
-                            "regex op 'String#scan' is not yet supported on patterns requiring the fancy-regex engine (pattern: /{}/)",
-                            re.as_str(),
-                        ),
-                    }))?;
-                    let has_groups = native.captures_len() > 1;
+                    // Dual-engine (layer #17 follow-up): matches come
+                    // from `captures_iter_owned`, which walks EITHER
+                    // the linear `regex` backend OR the fancy-regex
+                    // fallback, so lookahead/lookbehind patterns work
+                    // in block-form scan too. Motivating consumer:
+                    // rubocop 1.88 drives fancy patterns through
+                    // block-form scan on EVERY file (Style/
+                    // MagicCommentFormat's `values`, MatchRange#
+                    // each_match_range under the percent-literal
+                    // Layout cops); the old `as_native()` gate made
+                    // those cops error out, which kept the runner's
+                    // `errors.any?` true and silently blocked every
+                    // result-cache save. A fancy match-time error
+                    // (recursion-limit blow-up) traps like block-gsub's.
+                    let owned_matches = re.captures_iter_owned(&source_str).map_err(|e| {
+                        g.vm.trap(crate::error::RubyError::RuntimeError {
+                            msg: format!("regex match failed: {} (pattern: /{}/)", e, re.as_str()),
+                        })
+                    })?;
+                    let has_groups = re.captures_len() > 1;
+                    let cap_names = re.capture_group_names();
                     // CRuby publishes `$~` (and its English aliases) for
                     // each successive match while the scan block runs.
                     // Save the caller's match into the enclosing method
@@ -1270,15 +1266,16 @@ impl Vm {
                     // pops exactly once and classifies, fixing the
                     // double-pop bug as a side effect.
                     if has_groups {
-                        for caps in native.captures_iter(&source_str) {
-                            g.vm.last_match = Some(scan_last_match(native, &caps, &source_str));
-                            let mut group_vec: Vec<Value> = Vec::with_capacity(caps.len() - 1);
-                            for i in 1..caps.len() {
-                                let v = caps.get(i)
-                                    .map(|m| Value::new_str(m.as_str()))
-                                    .unwrap_or(Value::Nil);
-                                group_vec.push(v);
+                        for oc in owned_matches {
+                            let mut group_vec: Vec<Value> = Vec::with_capacity(oc.groups.len());
+                            for grp in &oc.groups {
+                                group_vec.push(
+                                    grp.as_ref()
+                                        .map(|t| Value::new_str(t.clone()))
+                                        .unwrap_or(Value::Nil),
+                                );
                             }
+                            g.vm.last_match = Some(scan_last_match_owned(oc, &source_str, &cap_names));
                             g.vm.maybe_gc();
                             g.vm.check_alloc()?;
                             let gid = g.vm.heap.alloc(HeapObj::Array(group_vec.into()));
@@ -1321,9 +1318,9 @@ impl Vm {
                             }
                         }
                     } else {
-                        for caps in native.captures_iter(&source_str) {
-                            let whole = caps.get(0).expect("group 0 present on a hit").as_str().to_string();
-                            g.vm.last_match = Some(scan_last_match(native, &caps, &source_str));
+                        for oc in owned_matches {
+                            let whole = oc.whole.clone();
+                            g.vm.last_match = Some(scan_last_match_owned(oc, &source_str, &cap_names));
                             match g.vm.step_block1(block, Value::new_str(&whole), pre_frames)? {
                                 BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
                                 BlockStep::Break(r) => { early = Some(r); break; }
