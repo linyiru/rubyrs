@@ -1021,9 +1021,17 @@ pub(crate) const JFLAG_TIER2_HAS: u8 = 16;
 /// sets BASE and zeroes PER_OP), `RUBYRS_JIT_TIER2_BASE`,
 /// `RUBYRS_JIT_TIER2_PEROP`.
 #[cfg(feature = "jit-native")]
-const T2_THRESHOLD_BASE_DEFAULT: u32 = 1024;
+const T2_THRESHOLD_BASE_DEFAULT: u32 = 2048;
 #[cfg(feature = "jit-native")]
-const T2_THRESHOLD_PER_OP_DEFAULT: u32 = 16;
+// Wave 3: the inline lowering grew per-op compile cost ~2.4x (guards +
+// slow-edge blocks), so the threshold scales to match — payback needs
+// entries proportional to compile cost (measured ~19us/op vs wave-2's
+// ~8us/op). Re-measured on f1 e2e: 1024+16/op left a +2.6% one-shot
+// regression (65.7ms bill); 2048+64/op is e2e-NEUTRAL (30.5ms bill, 50
+// protos, 629k IC-fast serves) while hot workloads (fib, the walk's
+// 100k+-call bodies) still compile within their first few thousand
+// entries.
+const T2_THRESHOLD_PER_OP_DEFAULT: u32 = 64;
 /// Tier-2 native-nesting cap: each nested native body adds a Rust stack
 /// segment (native fn + helper + dispatch_until + step); deeper Ruby
 /// recursion falls back to the flat interpreter loop, which has no Rust-stack

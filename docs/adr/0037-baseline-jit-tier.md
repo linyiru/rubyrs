@@ -299,6 +299,138 @@ Findings that shape wave 3:
   `t2_call`'s own entry cost (helper call + gates ≈ the same magnitude as
   the savings on already-fast serves).
 
+### Wave 3 results (2026-07-02; same box/method — interleaved best-of-3
+rounds; the walk table re-measured on a quiet machine)
+
+Design as shipped in `jit_tier2.rs` (wave 3 = "inline the ops"):
+
+- **Inline lowering against the pinned `Value` layout (ADR 0035).** The
+  codegen views a `Value` as two raw i64 words (tag byte at 0, bool at 1,
+  u32 payloads at 4, i64/f64/Rc at 8) and lowers the hot op set with NO
+  helper call on the fast path: literals (Int/Float/Sym/Bool/Nil),
+  `Locals::Stack` `LoadLocal`/`StoreLocal`/`IncLocal*`, `LoadSelf`,
+  small-Int `+`/`-`/`*` (native overflow flags), Int comparisons, same-tag
+  Int/Sym `==`/`!=`, truthiness + fused compare-and-branch,
+  `Dup`/`Pop`/`Swap`, and `x.nil?` on a virtual receiver (same
+  `prim_reopen_mask` gate as `try_fast_primitive`'s universal arm).
+  `LoadIvar` (Object-self guard via the baked oid) and `StoreIvar` /
+  `CaseEqLit` (literal + gates mirrored) run through LEAN register-passing
+  helpers that skip the operand-stack round trip. The op set was chosen
+  from the measured dynamic op mix of the RuboCop walk (walkonly big1,
+  interpreter): LoadLocal 16.7%, JumpIfFalse 13.4%, Call 8.9%, Dup 6.2%,
+  Return 5.9%, StoreLocal 5.1%, Pop 5.0%, CaseEqLit 4.8%, LoadIvar 3.7%,
+  LoadConstInt 3.6%, BinOp family 4.2%, LoadSymbol 1.0% — the inline set
+  covers ~87% of executed ops.
+- **The virtual stack + boundary discipline.** Operand-stack values live in
+  SSA registers between ops (a compile-time "virtual stack" of raw value
+  words, all trivially-tagged — no `Rc` payloads, so copy=clone and
+  discard=free); every point foreign code can observe the VM (any helper
+  call, every branch edge, every bail) MATERIALIZES the virtual stack
+  first. `vm.stack`'s ptr/len/cap are read through empirically-probed Vec
+  field offsets (probe failure disables the inline lowering entirely —
+  helper emission is the universal fallback, never a miscompile).
+- **Local read cache, write-through stores.** `Locals::Stack` slots (method
+  protos with `creates_block == false` only — block protos and
+  closure-carrying bodies keep capture-routed helpers, which is what makes
+  the shared-binding closure model (4f6ef741) correct by construction) are
+  cached in SSA within a basic block. STORES ARE WRITE-THROUGH: the
+  canonical slot is updated at the store op itself (with an inline
+  drop-guard on the old value's tag), so the frame is canonical at every
+  instruction and the cache is a pure READ cache — the "write-back before
+  boundary" matrix degenerates to "nothing to write back", eliminating the
+  GC-rooting and Binding-observability hazard classes outright. What
+  remains of the matrix: (a) reads of the frame's locals by foreign code —
+  `Kernel#binding` / string-`class_eval` snapshots (inside call helpers;
+  slots canonical ✓), backtraces (ip-only), the GC root walk (slots
+  canonical ✓, and cached ObjIds are copies of rooted slot values —
+  mark-sweep never moves objects); (b) writes INTO the frame's locals by
+  foreign code — PROVEN IMPOSSIBLE: callees cannot capture a
+  `Locals::Stack` frame (no `CreateBlock` in the body, by construction),
+  rubyrs `Kernel#binding` snapshots into `Vm::binding_locals` and nothing
+  ever writes a Binding back into a frame (`extract_binding_ctx` seeds a
+  fresh eval frame; `Binding#local_variable_set` does not exist), so the
+  cache survives call boundaries (the fib win) and is invalidated only by
+  the op's own slow edges and by generic-`t2_op` ops (conservative).
+- **Slow edges = straight-line resume, never re-execution.** Guards
+  (unexpected tag, Int overflow, gated fast-flags) run BEFORE any effect of
+  their op; a failed guard materializes the virtual stack and hands the
+  REST of the segment — through the segment-ending branch — to `t2_resume`
+  (per-op `step()`, the interpreter's own semantics), which reports the
+  landing ip so native code re-enters at the right block. Bail/trap
+  contracts are unchanged from waves 1–2.
+- **Backward-branch poll.** Loop back-edges gate on three inline byte loads
+  (`control_signals`, the new `t2_poll_flags` fuel/deadline mirror —
+  recomputed per serve — and the baked `interrupt_pending` address); when
+  any fires, a helper charges `check_fuel` and BAILs for signals/interrupts
+  (delivery stays owned by the dispatch loop heads). Fuel-capped runs now
+  charge per back-edge instead of per op inside compiled bodies — an
+  extension of the wave-1 "specialized ops don't charge fuel" note.
+- **`t2_call` entry cost (item 3): per-site settled-verdict byte.**
+  `Vm::t2_site_verdict` (dense by cache_id) counts consecutive fast-probe
+  declines per call site; at 16 the probe is skipped (straight to the
+  cascade) with a ~1/1024 periodic retry keyed off `op_counter`. On f1 e2e
+  this cut fallback probes 719k → 482k (−33%); ~426k further calls left
+  the family entirely via the `nil?` fusion.
+
+| measurement | off | wave-2 | wave-3 |
+|---|---:|---:|---:|
+| leaf predicate (`@t == :send`), ns/call | 251.3 | 241.7 | **207.2 (−18% vs off, −14% vs w2)** |
+| branchy leaf | 281.9 | 258.0 | **220.3 (−22% vs off, −15% vs w2)** |
+| one self-call | 355.3 | 315.9 | 294.2 (−17%) |
+| four self-calls | 1033.4 | 764.1 | **636.2 (−38% vs off, −17% vs w2)** |
+| fib(30) whole program | 0.33s | 0.25s | **0.16s (−52% vs off, −36% vs w2)** |
+| walkonly big1 ×30 (adaptive) | 267–284ms | 259–287ms | 267–309ms — **indistinguishable** (box noise ±4% > any delta; the −5% target NOT met) |
+| f1.rb e2e (adaptive, tuned threshold) | 1.68–1.73s | 1.69–1.78s | 1.70–1.78s (**neutral**; interleaved pairs −0.01..+0.05s) |
+| big1.rb e2e (adaptive, tuned threshold) | 2.35–2.54s | 2.36–2.49s | 2.38–2.52s (neutral) |
+| tier-2 compile bill, f1 e2e | — | 27.4ms / 97 protos | 65.7ms/97 at the wave-2 threshold → **30.5ms / 50 protos** at the wave-3 default |
+| tier-2 compile bill, big1 e2e | — | 35ms / 233 protos | 53.5ms / 116 protos |
+
+(The microshape harness's ns/call includes the un-tiered driver block +
+its yield dispatch — a fixed ~150ns constant — so the per-METHOD delta is
+substantially larger than the headline percentage; the leaf/branchy
+targets read against that floor. Wave 5's block compilation removes the
+constant.)
+
+Findings that shape wave 4:
+
+- **Inline ops pay exactly where the profile said**: shapes dominated by
+  local/ivar/compare/branch work (leaf −18%, branchy −21%, fib −52%)
+  collapse, and the call-chain shape stacks the savings of every frame in
+  the chain (four-calls −38%). The remaining per-call cost is frame push +
+  arg bind + `t2_enter` — wave 4's frame-lite entry remains the money.
+- **The write-through simplification held**: zero write-back machinery, no
+  deopt, no GC surface, and the maximal-exposure gate (every method
+  compiled, `THRESHOLD=1`) runs the full 1065-fixture diff suite green,
+  including the new write-back battery (binding hostages, mid-body raises,
+  ensure, deep recursion past the native cap, method redefinition
+  mid-loop, Int overflow promotion, Str locals/ivars) and the own-region
+  capture-rebind fixtures.
+- **The walk did NOT move** — the honest negative result of this wave. The
+  walk's in-body time sits in ops whose cost is a hash lookup or a full
+  dispatch either way (`LoadIvar`/`CaseEqLit`'s FxHashMap probes, the call
+  family), so inlining the surrounding locals/branches shaves only a few
+  ns per frame while the bigger native bodies add icache pressure and the
+  2.4× compile bill; net: within the noise band of wave-2/off. This
+  CONFIRMS the wave-1/2 diagnosis with a stronger instrument: the walk's
+  remaining pool is frame push + arg bind + `t2_enter` per call (wave 4,
+  frame-lite) and flat-ivar object layout (ADR 0035 phases 4/5) — not
+  per-op execution.
+- **Compile bill grew ~2.4×/proto** (bigger IR: guards + slow-edge
+  blocks), so the adaptive threshold was re-tuned to keep the wave-2
+  payback rule "entries ∝ compile cost": defaults moved 1024+16/op →
+  **2048+64/op**, which is one-shot-e2e NEUTRAL (f1: 30.5ms bill, 50
+  protos, 629k IC-fast serves; at the old threshold wave-3 f1 e2e
+  regressed +2.6%). Hot workloads still compile within their first few
+  thousand entries (fib crosses its ~3k-entry threshold in the first
+  0.2% of its 1.6M calls). Off-thread compilation remains the next lever
+  if the one-shot bill ever matters again.
+- **The backward-edge poll fixed a wave-2 gap**: SIGINT now terminates an
+  all-native loop (`while true; i += 1; end` compiled at threshold 1 hung
+  under the wave-2 tier; wave 3 exits with the proper Interrupt), and
+  fuel-capped runs charge once per loop back-edge inside compiled bodies
+  (previously per generic-helper op; both are documented divergences from
+  per-op interpreter fuel counts).
+
 ### Wave 5 results (2026-07-02; blocks — same box/method, interleaved
 best-of rounds against the unmodified-HEAD baseline binary)
 
