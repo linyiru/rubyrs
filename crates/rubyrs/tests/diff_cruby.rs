@@ -2013,6 +2013,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // Style/MagicCommentFormat (`text[wrong_separator]`), where the missing
 // form crashed the cop and blocked every result-cache save.
 #[test] fn string_bracket_substring() { run_diff("string_bracket_substring"); }
+// Char->byte index / UTF-8-validity caches on StrCell: char-indexed
+// slicing + match-at-pos on LARGE (cache-threshold+) strings, and the
+// invalidate-on-mutation contract (<< / []= / sub! then re-slice).
+#[test] fn string_char_index_cache() { run_diff("string_char_index_cache"); }
 // Block-form String#scan on fancy-engine (lookahead/lookbehind)
 // patterns — dual-engine migration of the block arm. Surfaced by
 // rubocop 1.88's MagicCommentFormat / percent-literal Layout cops.
