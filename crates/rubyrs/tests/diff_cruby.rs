@@ -42,11 +42,21 @@ fn ruby_available() -> bool {
 /// `RUBYRS_JIT_NATIVE=1`) lands GREEN while guarding against NEW regressions.
 /// Add a name here only with a tracking note; delete once the JIT bug is fixed.
 ///
-/// Currently EMPTY: the original four (`comparison_failed_message`,
+/// History: the original four (`comparison_failed_message`,
 /// `method_to_proc`, `time_components`, `time_strftime`) were all one bug —
 /// Bool/nil-returning native methods boxed their i64 result as `Integer`
 /// (Ruby `0` is truthy, so predicates flipped) — fixed by `NativeProto::box_ret`.
-const JIT_KNOWN_DIVERGENCES: &[&str] = &[];
+///
+/// `tier2_call_refined`: PRE-EXISTING jit-native gap exposed by the tier-2
+/// wave-2 fixture (diverges identically on the pristine pre-wave-2 binary).
+/// A compiled body's baked obj-dispatch cross-call (objparam2 family)
+/// resolves the callee name WITHOUT the `refined_method_names` detour, so a
+/// refinement-overridden method (`n.calc(x)` inside a compiled caller)
+/// serves the ORIGINAL method. The interpreter and the tier-2 `t2_call`
+/// path both gate on the refined-name set and are exact. Fix belongs in
+/// `jit_native.rs`'s PIC fill/lookup (add the refined-name gate the
+/// interpreter's `do_call` applies).
+const JIT_KNOWN_DIVERGENCES: &[&str] = &["tier2_call_refined"];
 
 fn run_diff(name: &str) {
     if !ruby_available() {
@@ -1069,6 +1079,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn jit_sym_hash_walk() { run_diff("jit_sym_hash_walk"); }
 #[test] fn jit_obj_arg_crosscall() { run_diff("jit_obj_arg_crosscall"); }
 #[test] fn jit_stmt_if_merge() { run_diff("jit_stmt_if_merge"); }
+#[test] fn tier2_call_family() { run_diff("tier2_call_family"); }
+#[test] fn tier2_call_refined() { run_diff("tier2_call_refined"); }
 #[test] fn comparable_clamp_range() { run_diff("comparable_clamp_range"); }
 #[test] fn float_precision() { run_diff("float_precision"); }
 #[test] fn compact_filter_map() { run_diff("compact_filter_map"); }
