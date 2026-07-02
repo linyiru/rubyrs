@@ -2509,6 +2509,131 @@ impl Vm {
                 ].into()));
                 Some(Ok(Value::Array(id)))
             }
+            // ---- Real-fd pipe primitives (unix) --------------------
+            // `IO.pipe`'s fd-backed half: the preamble wraps these raw
+            // fds in RubyrsFdReader / RubyrsFdWriter so pipe endpoints
+            // survive fork(2) — the parallel gem's work_in_processes
+            // protocol (fork worker, Marshal frames over the pipe) is
+            // the motivating consumer (rubocop --parallel). CLOEXEC is
+            // set on both ends: fork keeps them (what we need), an
+            // exec'd `Kernel#system` subprocess doesn't inherit them
+            // (CRuby's pipes are CLOEXEC too).
+            #[cfg(all(unix, not(target_os = "wasi")))]
+            "__rubyrs_pipe" => {
+                let mut fds = [0i32; 2];
+                if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+                    let e = std::io::Error::last_os_error();
+                    return Some(Err(self.trap(crate::vm::fileops::io_error(&e, None))));
+                }
+                unsafe {
+                    libc::fcntl(fds[0], libc::F_SETFD, libc::FD_CLOEXEC);
+                    libc::fcntl(fds[1], libc::F_SETFD, libc::FD_CLOEXEC);
+                }
+                self.maybe_gc();
+                if let Err(e) = self.check_alloc() { return Some(Err(e)); }
+                let id = self.heap.alloc(HeapObj::Array(vec![
+                    Value::Int(fds[0] as i64),
+                    Value::Int(fds[1] as i64),
+                ].into()));
+                Some(Ok(Value::Array(id)))
+            }
+            // `__rubyrs_fd_read(fd, len_or_nil)` — BLOCKING read(2).
+            //   len = Integer n → read exactly n bytes (looping across
+            //     short reads), returning fewer only at EOF; nil when
+            //     EOF arrives before the first byte (IO#read(n)).
+            //   len = nil → read to EOF; "" at immediate EOF (IO#read).
+            // EINTR retries (a trapped SIGCHLD mustn't truncate a
+            // Marshal frame mid-read).
+            #[cfg(all(unix, not(target_os = "wasi")))]
+            "__rubyrs_fd_read" => {
+                let fd = match args.first() {
+                    Some(Value::Int(n)) => *n as i32,
+                    _ => return Some(Err(self.trap(RubyError::TypeError {
+                        msg: "fd must be an Integer".into(),
+                    }))),
+                };
+                let want: Option<usize> = match args.get(1) {
+                    Some(Value::Int(n)) if *n >= 0 => Some(*n as usize),
+                    Some(Value::Nil) | None => None,
+                    _ => return Some(Err(self.trap(RubyError::TypeError {
+                        msg: "read length must be a non-negative Integer or nil".into(),
+                    }))),
+                };
+                let mut buf: Vec<u8> = Vec::new();
+                let mut chunk = [0u8; 65536];
+                loop {
+                    let cap = match want {
+                        Some(n) => {
+                            let rem = n - buf.len();
+                            if rem == 0 { break; }
+                            rem.min(chunk.len())
+                        }
+                        None => chunk.len(),
+                    };
+                    let r = unsafe {
+                        libc::read(fd, chunk.as_mut_ptr() as *mut libc::c_void, cap)
+                    };
+                    if r < 0 {
+                        let e = std::io::Error::last_os_error();
+                        if e.raw_os_error() == Some(libc::EINTR) { continue; }
+                        return Some(Err(self.trap(crate::vm::fileops::io_error(&e, None))));
+                    }
+                    if r == 0 { break; } // EOF
+                    buf.extend_from_slice(&chunk[..r as usize]);
+                }
+                match want {
+                    Some(n) if n > 0 && buf.is_empty() => Some(Ok(Value::Nil)),
+                    _ => Some(Ok(Value::new_str_bytes_binary(buf))),
+                }
+            }
+            // `__rubyrs_fd_write(fd, str)` — full write(2) loop; EINTR
+            // retries; a closed read end surfaces as Errno::EPIPE (the
+            // parallel gem's DeadWorker discipline rescues it). Rust's
+            // runtime already SIG_IGNs SIGPIPE, so write returns the
+            // errno instead of killing the process.
+            #[cfg(all(unix, not(target_os = "wasi")))]
+            "__rubyrs_fd_write" => {
+                let fd = match args.first() {
+                    Some(Value::Int(n)) => *n as i32,
+                    _ => return Some(Err(self.trap(RubyError::TypeError {
+                        msg: "fd must be an Integer".into(),
+                    }))),
+                };
+                let bytes: Vec<u8> = match args.get(1) {
+                    Some(Value::Str(s)) => s.content.borrow().clone(),
+                    _ => return Some(Err(self.trap(RubyError::TypeError {
+                        msg: "write data must be a String".into(),
+                    }))),
+                };
+                let mut off = 0usize;
+                while off < bytes.len() {
+                    let r = unsafe {
+                        libc::write(
+                            fd,
+                            bytes[off..].as_ptr() as *const libc::c_void,
+                            bytes.len() - off,
+                        )
+                    };
+                    if r < 0 {
+                        let e = std::io::Error::last_os_error();
+                        if e.raw_os_error() == Some(libc::EINTR) { continue; }
+                        return Some(Err(self.trap(crate::vm::fileops::io_error(&e, None))));
+                    }
+                    off += r as usize;
+                }
+                Some(Ok(Value::Int(bytes.len() as i64)))
+            }
+            #[cfg(all(unix, not(target_os = "wasi")))]
+            "__rubyrs_fd_close" => {
+                let fd = match args.first() {
+                    Some(Value::Int(n)) => *n as i32,
+                    _ => return Some(Err(self.trap(RubyError::TypeError {
+                        msg: "fd must be an Integer".into(),
+                    }))),
+                };
+                unsafe { libc::close(fd) };
+                Some(Ok(Value::Nil))
+            }
             "system" => {
                 if !self.allow_process_spawn {
                     return Some(Ok(Value::Nil));
@@ -2918,6 +3043,21 @@ impl Vm {
                         Some(t) => Some(Err(t)),
                         None => Some(Ok(Value::Nil)),
                     },
+                }
+            }
+            // `__rubyrs_marshal_check_dumpable(obj)` — the dumpability
+            // probe as a standalone raise-or-nil. The IO-framed dump
+            // path uses it to produce CRuby's TypeError ("no _dump_data
+            // is defined for class Proc", "singleton can't be dumped",
+            // ...) BEFORE declaring an in-subset-but-unbyteable graph a
+            // rubyrs limitation — a registry token can't cross the
+            // process boundary an IO port implies, so there is no token
+            // fallback on that path.
+            "__rubyrs_marshal_check_dumpable" => {
+                let obj = args.first().cloned().unwrap_or(Value::Nil);
+                match self.marshal_dumpable(&obj) {
+                    Ok(()) => Some(Ok(Value::Nil)),
+                    Err(why) => Some(Err(self.trap(RubyError::TypeError { msg: why }))),
                 }
             }
             "__rubyrs_marshal_stash" => {
@@ -5420,8 +5560,27 @@ impl Vm {
                             if ename.is_empty() || ename.starts_with("#<") {
                                 return Err("can't dump anonymous class".into());
                             }
-                            for iv in inst.ivars.values() {
-                                stack.push(iv.clone());
+                            // A class with its own marshal hooks
+                            // (`marshal_dump` / `_dump`) REPLACES its
+                            // ivar graph with the hook payload — don't
+                            // reject (or descend) based on raw ivars.
+                            // rubocop's Offense#marshal_dump drops
+                            // @corrector, whose TreeRewriter graph
+                            // holds Procs; the raw-ivar walk would
+                            // veto a dump CRuby accepts. (`get_id`
+                            // not `intern`: a name nothing interned
+                            // is a name nothing defines.)
+                            let has_hook = ["marshal_dump", "_dump"].iter().any(|n| {
+                                self.interner
+                                    .get_id(n)
+                                    .is_some_and(|sid| {
+                                        self.lookup_method_uncached(&inst.class, sid).is_some()
+                                    })
+                            });
+                            if !has_hook {
+                                for iv in inst.ivars.values() {
+                                    stack.push(iv.clone());
+                                }
                             }
                         }
                         // IO-ish / opaque host shapes can't serialize.
@@ -5992,6 +6151,53 @@ impl MarshalReader<'_> {
             b'T' => Ok(Value::Bool(true)),
             b'F' => Ok(Value::Bool(false)),
             b'i' => Ok(Value::Int(self.long()?)),
+            // Bignum: sign byte, length in 16-bit words, magnitude
+            // little-endian. Demotes to Int when it fits in i64
+            // (rubyrs's BigInt invariant); registers in the object
+            // link table either way (CRuby registers Bignums).
+            b'l' => {
+                let sign = self.byte()?;
+                let words = self.long()?;
+                let raw = self
+                    .take(usize::try_from(words).map_err(|_| "bad bignum length".to_string())? * 2)?
+                    .to_vec();
+                #[cfg(feature = "bignum")]
+                {
+                    let s = if sign == b'-' {
+                        num_bigint::Sign::Minus
+                    } else {
+                        num_bigint::Sign::Plus
+                    };
+                    let big = num_bigint::BigInt::from_bytes_le(s, &raw);
+                    let v = vm
+                        .bigint_to_value(big)
+                        .map_err(|_| "allocation limit".to_string())?;
+                    if let Value::BigInt(_) = &v {
+                        vm.pinned.push(v.clone());
+                    }
+                    self.objects.push(v.clone());
+                    Ok(v)
+                }
+                #[cfg(not(feature = "bignum"))]
+                {
+                    // No BigInt in this build: accept magnitudes that
+                    // still fit i64 (the writer's own out-of-32-bit Int
+                    // form arrives as `l`), reject genuinely big ones.
+                    if raw.len() > 16 {
+                        return Err("Bignum is not supported in this build (enable bignum)".into());
+                    }
+                    let mut mag: u128 = 0;
+                    for (i, b) in raw.iter().enumerate() {
+                        mag |= (*b as u128) << (8 * i);
+                    }
+                    let signed: i128 = if sign == b'-' { -(mag as i128) } else { mag as i128 };
+                    let v = i64::try_from(signed)
+                        .map(Value::Int)
+                        .map_err(|_| "Bignum is not supported in this build (enable bignum)".to_string())?;
+                    self.objects.push(v.clone());
+                    Ok(v)
+                }
+            }
             b'f' => {
                 let n = self.long()?;
                 let raw = self.take(n.max(0) as usize)?;
@@ -6235,6 +6441,48 @@ impl MarshalReader<'_> {
                     Value::Sym(s) => vm.interner.resolve(s).to_string(),
                     _ => return Err("object class must be a symbol".into()),
                 };
+                // `o :Range` is CRuby's builtin-Range form (bare
+                // `excl`/`begin`/`end` slots) — rubyrs Ranges are a
+                // Value variant, not an Instance, so materialise the
+                // heap RangeObj directly. Register a placeholder
+                // BEFORE the endpoint reads (CRuby's link order), then
+                // patch it in place.
+                if cname == "Range" {
+                    vm.maybe_gc();
+                    vm.check_alloc().map_err(|_| "allocation limit".to_string())?;
+                    let rid = vm.heap.alloc(crate::heap::HeapObj::Range(crate::heap::RangeObj {
+                        begin: Value::Nil,
+                        end: Value::Nil,
+                        exclusive: false,
+                    }));
+                    self.objects.push(Value::Range(rid));
+                    vm.pinned.push(Value::Range(rid));
+                    let n = self.long()?;
+                    for _ in 0..n.max(0) {
+                        let key = self.read_value(vm)?;
+                        let val = self.read_value(vm)?;
+                        let kname = match key {
+                            Value::Sym(s) => vm.interner.resolve(s).to_string(),
+                            _ => return Err("ivar key must be a symbol".into()),
+                        };
+                        // Patch each slot IMMEDIATELY (not via Rust
+                        // locals held across the next child read) —
+                        // the pinned placeholder is what keeps an
+                        // already-read endpoint alive through a GC
+                        // triggered by the following read.
+                        if let crate::heap::HeapObj::Range(r) = vm.heap.get_mut(rid) {
+                            match kname.as_str() {
+                                "excl" => r.exclusive = matches!(val, Value::Bool(true)),
+                                "begin" => r.begin = val,
+                                "end" => r.end = val,
+                                other => {
+                                    return Err(format!("unsupported Range slot :{other}"));
+                                }
+                            }
+                        }
+                    }
+                    return Ok(Value::Range(rid));
+                }
                 let cls = Self::marshal_resolve_cname(vm, &cname)?;
                 let is_exc = marshal_is_exception(&cls);
                 vm.maybe_gc();
@@ -6455,8 +6703,27 @@ impl MarshalWriter {
             Value::Bool(true) => self.out.push(b'T'),
             Value::Bool(false) => self.out.push(b'F'),
             Value::Int(n) => {
-                self.out.push(b'i');
-                self.write_long(*n);
+                // Marshal's `i` long form carries AT MOST 4 payload
+                // bytes — CRuby dumps a 64-bit Fixnum outside i32 range
+                // through the Bignum `l` tag instead (w_object's
+                // RSHIFT(x,31) check). Mirroring that keeps the stream
+                // well-formed (a 5-byte `i` payload desyncs any reader)
+                // and CRuby-loadable.
+                if i32::try_from(*n).is_ok() {
+                    self.out.push(b'i');
+                    self.write_long(*n);
+                } else {
+                    self.objects.push(ObjKey::Opaque);
+                    self.out.push(b'l');
+                    self.out.push(if *n < 0 { b'-' } else { b'+' });
+                    let mut bytes = n.unsigned_abs().to_le_bytes().to_vec();
+                    // Trim trailing zero 16-bit words (CRuby's shortlen).
+                    while bytes.len() > 2 && bytes[bytes.len() - 1] == 0 && bytes[bytes.len() - 2] == 0 {
+                        bytes.truncate(bytes.len() - 2);
+                    }
+                    self.write_long((bytes.len() / 2) as i64);
+                    self.out.extend_from_slice(&bytes);
+                }
             }
             Value::Float(f) => {
                 self.objects.push(ObjKey::Opaque);
@@ -6735,8 +7002,55 @@ impl MarshalWriter {
                     }
                 }
             }
-            // Bignum, Range, Block/Proc, Class, … — outside the byte
-            // subset; signal the caller to use the registry token.
+            // Range → CRuby's builtin-object form: `o :Range` with the
+            // bare `excl` / `begin` / `end` slots (no `@`), in CRuby's
+            // field order. Registered in the object link table (CRuby
+            // registers Ranges; a graph sharing one Range twice links).
+            Value::Range(id) => {
+                if let Some(i) = self.objects.iter().position(|k| *k == ObjKey::Heap(*id)) {
+                    self.out.push(b'@');
+                    self.write_long(i as i64);
+                    return Ok(());
+                }
+                self.objects.push(ObjKey::Heap(*id));
+                let (b, e, excl) = {
+                    let r = vm.heap.range(*id);
+                    (r.begin.clone(), r.end.clone(), r.exclusive)
+                };
+                self.out.push(b'o');
+                let range_sym = vm.interner.intern("Range");
+                self.write_symbol(vm, range_sym);
+                self.write_long(3);
+                let excl_sym = vm.interner.intern("excl");
+                self.write_symbol(vm, excl_sym);
+                self.out.push(if excl { b'T' } else { b'F' });
+                let begin_sym = vm.interner.intern("begin");
+                self.write_symbol(vm, begin_sym);
+                self.write_value(vm, &b)?;
+                let end_sym = vm.interner.intern("end");
+                self.write_symbol(vm, end_sym);
+                self.write_value(vm, &e)?;
+            }
+            // Bignum → CRuby's `l` tag: sign byte, length in 16-bit
+            // words, magnitude little-endian. rubyrs's BigInt invariant
+            // (always outside i64) means the writer never sees an
+            // in-range one; the reader demotes to Int when it fits.
+            #[cfg(feature = "bignum")]
+            Value::BigInt(id) => {
+                self.objects.push(ObjKey::Opaque);
+                let big = vm.heap.bigint(*id).clone();
+                self.out.push(b'l');
+                let (sign, mag) = big.into_parts();
+                self.out.push(if sign == num_bigint::Sign::Minus { b'-' } else { b'+' });
+                let mut bytes = mag.to_bytes_le();
+                if bytes.len() % 2 == 1 {
+                    bytes.push(0);
+                }
+                self.write_long((bytes.len() / 2) as i64);
+                self.out.extend_from_slice(&bytes);
+            }
+            // Block/Proc, Class, … — outside the byte subset; signal
+            // the caller to use the registry token.
             _ => return Err(()),
         }
         Ok(())

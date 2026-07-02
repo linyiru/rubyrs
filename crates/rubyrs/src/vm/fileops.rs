@@ -1884,6 +1884,10 @@ fn io_errno(e: &std::io::Error) -> (&'static str, &'static str) {
             21 => return ("Errno::EISDIR", "Is a directory"),
             22 => return ("Errno::EINVAL", "Invalid argument"),
             28 => return ("Errno::ENOSPC", "No space left on device"),
+            // Same number on Linux and macOS. Raised by the fd-pipe
+            // write primitive when the read end is gone — the parallel
+            // gem's Worker#work rescues it as DeadWorker.
+            32 => return ("Errno::EPIPE", "Broken pipe"),
             _ => {
                 // ELOOP's number differs by platform (62 macOS / 40
                 // Linux), so compare against libc's constant rather

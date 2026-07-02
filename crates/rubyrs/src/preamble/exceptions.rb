@@ -470,6 +470,14 @@ module Errno
   class ENOTEMPTY < SystemCallError; end
   ## Broken pipe.
   class EPIPE < SystemCallError; end
+  ## Illegal seek — seek/rewind on a non-seekable stream (a pipe).
+  ## The fd-backed IO.pipe endpoints raise it from #rewind, matching
+  ## CRuby's real-pipe behavior.
+  class ESPIPE < SystemCallError; end
+  ## No child processes — waitpid with nothing to reap. The native
+  ## `__rubyrs_waitpid` raises it by name; the class must exist for
+  ## `rescue Errno::ECHILD` to catch it.
+  class ECHILD < SystemCallError; end
   ## Connection refused.
   class ECONNREFUSED < SystemCallError; end
   ## Connection reset by peer.

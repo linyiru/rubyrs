@@ -1441,6 +1441,16 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // `u` (_dump/_load) + `U` (marshal_dump/marshal_load) user hooks —
 // reentrant Ruby calls from the serializer; exceptions propagate.
 #[test] fn marshal_user_hooks() { run_diff("marshal_user_hooks"); }
+// Marshal dump-to-port / load-from-port over an in-process IO.pipe —
+// frame sequencing, port discipline (dump returns port; EOFError at
+// stream end; TypeError before a corrupt frame), StringIO ports. The
+// protocol rubocop --parallel runs across parallel's fork boundary.
+#[test] fn marshal_io_pipe_frames() { run_diff("marshal_io_pipe_frames"); }
+// Object-graph coverage through the byte stream: link-table shared
+// refs + cycles, nested-class-name user objects, marshal_dump hooks
+// dropping un-dumpable ivars (Offense/@corrector shape), Range,
+// out-of-i32 Int (`l` form) + Bignum, encodings, frozen-not-preserved.
+#[test] fn marshal_graph_roundtrip() { run_diff("marshal_graph_roundtrip"); }
 // Numeric to_s/inspect output is US-ASCII (CRuby), not UTF-8.
 #[test] fn numeric_to_s_encoding() { run_diff("numeric_to_s_encoding"); }
 // nil/true/false to_s/inspect + Symbol to_s/name/inspect encoding.
