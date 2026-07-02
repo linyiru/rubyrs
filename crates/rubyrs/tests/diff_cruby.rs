@@ -2022,6 +2022,23 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // supervisor (`ensure threads.each(&:kill)`) under rubocop's
 // default auto---parallel multi-file run.
 #[test] fn thread_kill() { run_diff("thread_kill"); }
+// Cooperative green-thread scheduling battery: spawn/join/value,
+// Thread.current identity, queue handoffs + ping-pong interleaving,
+// Mutex contention, ConditionVariable wait/signal, sleep-as-yield-
+// point, kill-runs-ensures, exception-at-join, join timeout,
+// per-thread locals, per-thread `$~`, wakeup, and the parallel-gem
+// supervisor drain shape. Fiber-backed (needs the `_fiber` build);
+// every case is scheduling-order-deterministic so preemptive CRuby
+// prints identical bytes.
+#[cfg(feature = "_fiber")]
+#[test] fn thread_coop_sched() { run_diff("thread_coop_sched"); }
+// Cooperative scheduler x real fork(2)+pipe(2): N forked workers fed
+// concurrently by N green supervisor threads over Marshal frames —
+// the parallel gem's work_in_processes protocol (rubocop --parallel)
+// in miniature, plus kill-on-error supervision and the fork-resets-
+// scheduler contract.
+#[cfg(feature = "_fiber")]
+#[test] fn thread_coop_pipes() { run_diff("thread_coop_pipes"); }
 // String#[](substr) substring-search form. Surfaced by rubocop 1.88's
 // Style/MagicCommentFormat (`text[wrong_separator]`), where the missing
 // form crashed the cop and blocked every result-cache save.
