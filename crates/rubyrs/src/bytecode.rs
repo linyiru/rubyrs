@@ -538,6 +538,28 @@ pub(crate) enum Op {
     /// `do_call` cold path for user-defined operators. Targets the
     /// `i < n` loop-condition shape and two-local arithmetic.
     BinOpLocalLocal(BinOpKind, u16, u16),
+    /// `<literal> === <expr>` — the case/when desugar's per-arm test
+    /// with a LITERAL Integer/Float/Symbol/String/nil/true/false
+    /// receiver (`case x; when 5; when :sym; when "s"; ...`), lowered
+    /// at compile time so each arm skips the whole `do_call` cascade
+    /// (whitequark's ragel lexer runs giant `case state when <int>`
+    /// chains per token; RuboCop cop bodies use symbol/string arms).
+    /// Stack: pops the predicate value, pushes Bool.
+    ///
+    /// Semantics guard: bare-literal `===` on these receivers is
+    /// `==` (`ruby_eq` — the exact call the universal `===` arm and
+    /// the do_call `===` fast bucket make) ONLY while no user `===`
+    /// exists on the receiver's chain. The handler re-checks the
+    /// same `method_gen`-revalidated `fast_case_eq_{prim,sym,str}_safe`
+    /// flags the `===` fast bucket uses, plus the `===`-refinement
+    /// probe, EVERY execution; when unsafe it materializes the
+    /// literal receiver (exactly as the unlowered `LoadConst*` op
+    /// would have) and re-enters `do_call("===")` with the carried
+    /// inline-cache slot — byte-identical to the unlowered sequence.
+    /// String literals materialize through the same
+    /// source-encoding / frozen_string_literal stamping as
+    /// `Op::LoadConstStr`.
+    CaseEqLit(CaseLit, u32),
     /// Args: handler-offset, bind-slot, bind-flag, filter-class
     /// SymId. The filter SymId is resolved to a class at push-time
     /// by looking it up in `Vm.classes`. Bare `rescue` (no class
@@ -672,6 +694,21 @@ pub(crate) enum Op {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "preamble-cache", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) enum BinOpKind { Add, Sub, Mul, Div, Mod, Lt, Le, Gt, Ge, Eq, Ne }
+
+/// Inline literal operand for `Op::CaseEqLit` — the receiver of a
+/// lowered `<literal> === <expr>` case/when arm. `Str`/`Sym` carry
+/// the interned SymId (same pipeline as `LoadConstStr`/`LoadSymbol`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "preamble-cache", derive(serde::Serialize, serde::Deserialize))]
+pub(crate) enum CaseLit {
+    Int(i64),
+    Float(f64),
+    Sym(SymId),
+    Str(SymId),
+    Nil,
+    True,
+    False,
+}
 
 impl BinOpKind {
     pub(crate) fn name(self) -> &'static str {

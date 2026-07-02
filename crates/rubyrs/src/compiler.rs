@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::ast::{BlockParam, Expr, SExpr};
-use crate::bytecode::{BinOpKind, Op, Proto};
+use crate::bytecode::{BinOpKind, CaseLit, Op, Proto};
 use crate::error::Span;
 use crate::intern::Interner;
 use crate::value::Value;
@@ -1195,6 +1195,35 @@ fn compile_call_arm(
         b.emit(Op::Raise);
         b.emit(Op::LoadNil);
         return;
+    }
+    // `<literal> === <expr>` — the case/when desugar's per-arm test
+    // (ast.rs lowers `case x; when LIT` to `LIT === x`). A literal
+    // Integer/Float/Symbol/String/nil/true/false receiver compiles
+    // to a single `Op::CaseEqLit` instead of LoadConst* + a full
+    // `===` dispatch per arm; the op re-validates the same
+    // reopen-safety flags the `===` fast bucket uses per execution
+    // and falls back to `do_call("===")` (via the carried cache
+    // slot) when a user `===` exists — see the op doc in
+    // bytecode.rs. Regexp / Range / const / splat receivers keep
+    // the generic path.
+    if name == "===" && args.len() == 1 && !kwargs_trailing
+        && let Some(r) = receiver.as_ref()
+    {
+        let lit = match &r.node {
+            Expr::IntLit(i) => Some(CaseLit::Int(*i)),
+            Expr::FloatLit(f) => Some(CaseLit::Float(*f)),
+            Expr::SymbolLit(s) => Some(CaseLit::Sym(interner.intern(s))),
+            Expr::StrLit(s) => Some(CaseLit::Str(interner.intern(s))),
+            Expr::BoolLit(bl) => Some(if *bl { CaseLit::True } else { CaseLit::False }),
+            Expr::Nil => Some(CaseLit::Nil),
+            _ => None,
+        };
+        if let Some(lit) = lit {
+            compile_expr(b, &args[0], protos, interner, cc);
+            let cid = alloc_cid(cc);
+            b.emit(Op::CaseEqLit(lit, cid));
+            return;
+        }
     }
     // `<expr> <op> <rhs>` fusion → single BinOp* superinstruction.
     if let (Some(r), 1, Some(kind)) = (receiver.as_ref(), args.len(), BinOpKind::from_op_name(name)) {

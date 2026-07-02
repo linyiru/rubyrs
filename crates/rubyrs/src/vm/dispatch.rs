@@ -3108,7 +3108,7 @@ impl Vm {
     /// (`classes["Hash"]` / `classes["Array"]` — the Rcs `class_of`
     /// caches), so the two paths can't disagree. Missing class (raw
     /// pre-preamble Vm) → flag stays off → slow path, correct.
-    fn fast_index_revalidate(&mut self) {
+    pub(crate) fn fast_index_revalidate(&mut self) {
         self.fast_index_checked_gen = self.method_gen;
         let idx_sym = self.sym_index_op;
         let set_sym = self.sym_index_set_op;

@@ -1233,6 +1233,27 @@ impl Vm {
         }))
     }
 
+    /// Materialize a `CaseLit::Str` literal receiver — byte-for-byte
+    /// what `Op::LoadConstStr` pushes for the same SymId in the same
+    /// proto (fresh Value::Str, source-encoding retag,
+    /// frozen_string_literal stamp). Used by `Op::CaseEqLit` for both
+    /// the ruby_eq compare and the do_call fallback.
+    fn case_lit_str(&mut self, id: crate::intern::SymId, proto_idx: usize) -> Value {
+        let s = self.interner.resolve(id).clone();
+        let v = Value::new_str(s.to_string());
+        if let Some(enc) = self.protos[proto_idx].source_encoding
+            && let Value::Str(rs) = &v
+        {
+            self.retag_literal_to_source_encoding(rs, enc);
+        }
+        if self.protos[proto_idx].frozen_string_literal
+            && let Value::Str(rs) = &v
+        {
+            rs.frozen.set(true);
+        }
+        v
+    }
+
     /// Execute one op; returns Ok(false) if we just popped the last frame.
     /// `_proto_idx` is reserved for future per-op span lookup; with the
     /// global interner, ops no longer need it for string resolution.
@@ -2762,6 +2783,74 @@ impl Vm {
                 if !matches!(self.stack.last(), Some(Value::Str(_))) {
                     let to_s = self.sym_to_s;
                     self.do_call(to_s, 0, false, cache_id)?;
+                }
+            }
+            Op::CaseEqLit(lit, cache_id) => {
+                // `<literal> === <predicate>` (lowered case/when arm).
+                // Safety: the same method_gen-revalidated flags the
+                // do_call `===` fast bucket gates on, re-checked per
+                // execution, plus the `===`-refinement probe. On the
+                // safe path the answer is `lit.ruby_eq(predicate)` —
+                // exactly the universal `===` arm / fast bucket call.
+                // Otherwise materialize the receiver and re-enter
+                // `do_call("===")`: byte-identical to the unlowered
+                // `LoadConst*; Call("===", 1)` sequence (including
+                // `trailing_hash_positional`, which Op::Call sets).
+                if self.fast_index_checked_gen != self.method_gen {
+                    self.fast_index_revalidate();
+                }
+                use crate::bytecode::CaseLit;
+                let refined = !self.refined_method_names.is_empty()
+                    && self.refined_method_names.contains(&self.sym_case_eq);
+                let safe = !refined
+                    && match lit {
+                        CaseLit::Sym(_) => self.fast_case_eq_sym_safe,
+                        CaseLit::Str(_) => self.fast_case_eq_str_safe,
+                        CaseLit::Int(_)
+                        | CaseLit::Float(_)
+                        | CaseLit::Nil
+                        | CaseLit::True
+                        | CaseLit::False => self.fast_case_eq_prim_safe,
+                    };
+                if safe {
+                    let arg = self
+                        .stack
+                        .pop()
+                        .expect("ICE: CaseEqLit predicate underflow");
+                    // Non-Str literals are alloc-free; Str builds the
+                    // same fresh literal Value LoadConstStr would.
+                    let recv = match lit {
+                        CaseLit::Int(n) => Value::Int(n),
+                        CaseLit::Float(f) => Value::Float(f),
+                        CaseLit::Sym(s) => Value::Sym(s),
+                        CaseLit::Nil => Value::Nil,
+                        CaseLit::True => Value::Bool(true),
+                        CaseLit::False => Value::Bool(false),
+                        CaseLit::Str(s) => self.case_lit_str(s, proto_idx),
+                    };
+                    let result = recv.ruby_eq(&arg, &self.heap);
+                    self.stack.push(Value::Bool(result));
+                } else {
+                    let recv = match lit {
+                        CaseLit::Int(n) => Value::Int(n),
+                        CaseLit::Float(f) => Value::Float(f),
+                        CaseLit::Sym(s) => Value::Sym(s),
+                        CaseLit::Nil => Value::Nil,
+                        CaseLit::True => Value::Bool(true),
+                        CaseLit::False => Value::Bool(false),
+                        CaseLit::Str(s) => self.case_lit_str(s, proto_idx),
+                    };
+                    let insertion = self
+                        .stack
+                        .len()
+                        .checked_sub(1)
+                        .expect("ICE: CaseEqLit fallback predicate underflow");
+                    self.stack.insert(insertion, recv);
+                    let case_eq = self.sym_case_eq;
+                    self.trailing_hash_positional = true;
+                    let r = self.do_call(case_eq, 1, false, cache_id);
+                    self.trailing_hash_positional = false;
+                    r?;
                 }
             }
             Op::CallAset(name_id, argc, cache_id) => {
