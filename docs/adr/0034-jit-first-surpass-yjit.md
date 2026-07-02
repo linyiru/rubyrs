@@ -954,6 +954,37 @@ directly — a deep but well-scoped change (heap rep + GC + every value-op touch
 remains out of scope for this ADR; the PoC just proves the lever is real and de-risks the
 investment.
 
+## Reality check on real rubocop (2026-07-01) — the walk win does NOT transfer; the JIT is net-negative there
+
+A full lever campaign (5-agent decomposition + PoCs, all gated on byte-identical rubocop
+output + diff_cruby green) measured the JIT against the REAL RuboCop 1.88 cop walk
+(`Team#investigate`, 600-line file), not the `bench_walk` skeleton:
+
+- **JIT-on 390ms vs JIT-off 359ms — the JIT is ~8% net-NEGATIVE on the real walk.** Per
+  process: 7,865 compile attempts, 35 ok, and the only native method that ever *executed*
+  (`on_newline`) deopted on 100% of its 631 calls. The 34 compiled `objparam` predicates are
+  structurally unreachable: the slow-cascade serving hook (`invoke_method_with_block_inner`)
+  and the explicit-recv D-Layer-4 block have no `objparam`/loop-driver arms, so their
+  compiled code can never fire. The microbench walk shapes beat YJIT because the WHOLE loop
+  compiles; the real walk never enters native code at all.
+- **The real walk is interpreter-dispatch-bound**: ~2.2M dispatches per file-walk, 45.7%
+  through the full slow cascade, dominated by primitive/reflection sends on builtin
+  receivers (`===`, `is_a?`, `!`, `include?`, `public_send`, `respond_to?`) from NodePattern
+  matchers — receivers a method-body JIT cannot target. Broadening `compile()` op coverage
+  toward the decline histogram is low-value here: the bodies bottleneck on those same
+  primitive sends.
+- **Consequence for the rubocop north-star**: the surpass path on this workload is (a)
+  dispatch-core fast paths (the shipped builtin `===` bucket cut whitequark parse 2.5×
+  because case/when desugars to `===` do_calls — the ragel lexer is one giant
+  `case state when <int>`), (b) the parser_prism engine (native prism backend) for parse,
+  and (c) making the compiled predicates actually servable (plumbing, low expected value)
+  — NOT more compile() coverage. For rubocop-shaped CLI runs, `RUBYRS_JIT_NATIVE` off is
+  currently the faster configuration; the compile-attempt tax should be gated before the
+  JIT is defaulted on for such workloads.
+- Canonical rubocop-workload build: `--features stdlib,jit-native,mimalloc` — mimalloc is a
+  measured win on every leg of this workload (single-file wall −10.6%, `require` −12%,
+  walk −3.5%, 20-file batch −4.7%).
+
 ## Risks
 
 - **YJIT-class scope.** A full method JIT with PIC + deopt + broad coverage is a
