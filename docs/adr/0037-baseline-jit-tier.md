@@ -219,9 +219,11 @@ f1/big1/20-file, diff_cruby 3-config green, STRESS_GC, fib canary)
    −21..34%/call to the broad-admission population. Requires arg binding into
    native slots + a shadow-frame recipe for `caller`/raise; land per shape
    class (leaf predicates first).
-5. **Wave 5 — blocks (25% of the walk).** Compile block protos on the same
-   substrate, served from `invoke_block` (the frame model is identical); then
-   `each`-driver → native-block direct calls.
+5. **Wave 5 — blocks (25% of the walk) (SHIPPED — see "Wave 5 results"
+   below).** Compile block protos on the same substrate, served from
+   `invoke_block` (the frame model is identical); then `each`-driver →
+   native-block direct calls (NOT yet shipped — named by the wave-5
+   measurement as where the remaining block pool lives).
 6. **Compile-cost control (SHIPPED with wave 2).** 932ms for the walk's hot
    set is fine for daemon/batch, too much for one-shot CLI. Shipped as an
    adaptive entry threshold `1024 + 16 × body_ops` (compile cost is ~linear
@@ -296,6 +298,94 @@ Findings that shape wave 3:
   one wasted IC probe. Wave 3's inline-op work should also lower
   `t2_call`'s own entry cost (helper call + gates ≈ the same magnitude as
   the savings on already-fast serves).
+
+### Wave 5 results (2026-07-02; blocks — same box/method, interleaved
+best-of rounds against the unmodified-HEAD baseline binary)
+
+Design as shipped: block protos compile through the SAME `compile_tier2`
+entry (identical admission — a block body containing `break`
+(`Op::Break`) or `return` (`Op::ReturnMethod`) declines and stays
+interpreted; `next` compiles as the block's `Op::Return` → the native
+`t2_return` pop; `redo` is an intra-proto backward jump, admitted and
+native). Serving = `t2_enter_block`, a twin of `t2_enter` called RIGHT
+AFTER the interpreter's own block binders pushed the frame — param
+binding (autosplat, `|*a|` whole-capture, kw/kw-rest with CRuby's
+missing/unknown error order, `&b` block-params, lambda strict arity,
+numbered params) is `invoke_block`/`invoke_block1`/`invoke_block2`'s
+by construction, so there are NO binding-shape declines at all. Hooked
+sites: the `Op::Yield` arm (extracted verbatim to `Vm::do_yield`, still
+the single source of truth for the break/fiber/non-local postlude), the
+`step_block`/`step_block1`/`step_block2` drivers (covers every Rust
+iterator: `Array#each`/`map`/…, `Hash#each`, `Integer#times`), and the
+three `proc.call` arms. NOT hooked (cold, or post-push frame mutation):
+fiber body first-resume, at_exit/fork-child/signal-trap/host-API
+invocations, `invoke_block_with_self` (instance_eval/class_eval — its
+`instance_eval_definee` post-push stamp is exactly the wave-1 bug
+class). In compiled METHOD bodies, `Op::Yield`/`Op::ApplyYield` lower
+to `t2_yield` (ip advance + fuel + `do_yield`) and
+`Op::CallBlock`/`Op::CallNoRecvBlock` to `t2_call_block` — the arm's
+`do_call_block` already front-loads the block-form IC + trailing
+`t2_enter`, so a compiled caller → compiled callee → compiled block is
+a full native chain, with yield case (a) breaks landing as
+frames-below-entry → DONE (the break value placed as the method's
+return) and case (b)/non-local-return/fiber as BAIL. Shipped alongside:
+the yield BINDER fast path — `do_yield` routes argc 1/2 through
+`invoke_block1`/`invoke_block2` (no per-yield args-Vec allocation, no
+general-binder pass), an interpreter-side win too. Env:
+`RUBYRS_JIT_TIER2_NOBLOCK` disables block serving for A/B;
+`RUBYRS_JIT_STATS=1` adds `tier2 blocks invocations/native_serves/
+native_yield_serves`.
+
+| measurement | baseline (tier2) | wave-5 (tier2) |
+|---|---:|---:|
+| walkonly big1 ×30 (adaptive; quiet-phase interleaved, best) | 266.1ms | **263.3ms (−1.1%)**; 10/11 interleaved pairs favour wave-5 (−3..−9ms per pair) |
+| walkonly, `NOBLOCK=1` on the wave-5 binary | — | 268.9ms best ≈ baseline (hook plumbing is free) |
+| `each`-driver block loop (ns/elem) | 104–107 | **79.5–81.8 (−22%)** |
+| nested `each` (ns/elem) | 114–115 | 97.5–99.5 (−13%) |
+| visit_descendants-shaped yield/proc recursion (ns/node) | 948–951 (interp: 917) | 872–911 (−6..8%, now BELOW interp — the wave-1 tier had been a loss on this shape) |
+| fib canary (default / jit-native / tier2) | 0.312s / 0.008s / 0.240s | 0.306s / 0.008s / 0.234s |
+| f1.rb e2e (adaptive) | 1.66–1.72s | 1.68–1.69s (band) |
+| big1.rb e2e | 2.34–2.35s | 2.30–2.34s |
+| 20-file prism batch e2e | 9.27–9.44s | 9.13–9.23s |
+| tier-2 compile bill, f1 e2e | 25.6ms / 97 protos | **28.5ms / 130 protos** (+2.9ms for 33 block protos) |
+
+Counters (walkonly ×10, adaptive, stats build): block invocations at
+the hooked sites 1.82M, served natively **1.44M (79%)**, of which 267k
+native-yield serves; in-body t2_call ic_fast 9.41M / fallback 4.05M
+(30%) / native→native 6.64M (wave-2: 8.42M / 2.64M / 4.94M — compiled
+block bodies route ~1.4M more call ops through the IC-fast family at a
+somewhat higher miss rate).
+
+**Finding (the wave-1 lesson holds for blocks).** 79% of block
+invocations served natively moves the walk only −1%: block-BODY
+fetch/decode was never the money — the walk's flat profile with wave 5
+on shows the residue in `do_call` fallback re-resolution (30% of
+in-body calls; `step` + `do_call` + `lookup_method_cached` +
+`walk_module` dominate self-time) and in the per-invocation
+frame-build machinery wave 5 deliberately kept (`invoke_block1`'s
+handle snapshot + locals cell + 24-field frame push; the reentrancy
+scan). Where the block body is a tight loop over IC-served calls the
+tier now wins −13..−22% (and the yield-recursion shape went from a
+regression to a win), which is exactly the microshape family RuboCop's
+blocks are NOT. The wave-5 walk target (−15ms) is therefore NOT met by
+body compilation alone — the remaining block pool belongs to (a) the
+`each`-driver → native-block DIRECT call (bind-once/frame-reuse, the
+follow-on this ADR already names), (b) wave-3 inline ops lowering
+`t2_call`'s own entry cost, and (c) absorbing the fallback shapes.
+
+Gates: diff_cruby **1066/0** ×4 configs (default / `RUBYRS_JIT_NATIVE=1`
+/ `RUBYRS_JIT_TIER2=1` / tier2+`THRESHOLD=1`); the
+`tier2_block_family` battery (break-through-compiled-yielder incl.
+two-level, next-with-value, nested/splat/multi-arg yield,
+captured-local rebinding, copy-path isolation, $~ transparency,
+ensure-on-break, `&block` forwarding, proc-vs-lambda arity, kw/block
+params, numbered params, escaped-proc rebinding, redo,
+Enumerator/StopIteration) byte-identical under all 4 configs AND
+STRESS_GC; `closure_capture_nested` under tier2 `THRESHOLD=1` (+
+STRESS_GC) identical; rubocop f1/big1 tier-on/off byte-identical + a
+fresh CRuby oracle; 20-file prism batch == the CRuby expectation;
+4-file `--parallel` == `--no-parallel`; STRESS_GC on the
+`jit_*_walk` fixtures with the tier forced on.
 
 ### Amdahl honesty
 
