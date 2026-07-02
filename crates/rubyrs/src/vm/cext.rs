@@ -959,6 +959,35 @@ impl Vm {
         };
         self.check_load_allowed("cext_require", Some(&canon_so))?;
 
+        // ABI guard: an extension compiled FOR CRUBY dynamically links
+        // `libruby` (macOS: an LC_LOAD_DYLIB on `…/libruby.3.4.dylib`;
+        // Linux: a DT_NEEDED on `libruby.so.3.4`). Such a library can
+        // NEVER work here — its `Init_*` would execute real libruby
+        // code against a CRuby runtime that was never booted, which
+        // SEGFAULTS the whole process the moment the init runs
+        // (observed: prism.bundle's `Init_prism` →
+        // `rb_ext_ractor_safe` → KERN_INVALID_ADDRESS). rubyrs-
+        // compatible extensions are linked with `-undefined
+        // dynamic_lookup` / `--unresolved-symbols=ignore-all` (see
+        // examples/*/build.sh) and resolve their `rb_*` against the
+        // host binary's shim exports, so they carry no `libruby.`
+        // reference. Detect the linkage by byte-scan (the dependency
+        // path/soname is a plain string in the load commands /
+        // .dynstr) and refuse with LoadError — the class `begin
+        // require; rescue LoadError` gems use to gate optional native
+        // backends (prism's `prism/prism` require is the motivating
+        // consumer: rubocop-ast requires prism unconditionally).
+        if let Ok(bytes) = std::fs::read(&canon_so)
+            && bytes.windows(b"libruby.".len()).any(|w| w == b"libruby.")
+        {
+            return Err(self.trap(RubyError::LoadError {
+                msg: format!(
+                    "incompatible library -- {} is a CRuby extension (links libruby) and cannot be loaded into rubyrs",
+                    so_path.display(),
+                ),
+            }));
+        }
+
         let stem = so_path
             .file_stem()
             .and_then(|s| s.to_str())
@@ -975,11 +1004,19 @@ impl Vm {
         // is for the Ruby-language layer, not the FFI layer.
         unsafe {
             rubyrs_cext::enter();
+            // dlopen / dlsym failures raise LoadError, matching CRuby
+            // (its `dln_load` wraps both in LoadError), so `begin
+            // require; rescue LoadError` feature-gates catch a broken
+            // or foreign shared object instead of aborting on an
+            // unexpected RuntimeError. The Linux twin of the libruby
+            // guard above lands here too: a CRuby ext without the
+            // DT_NEEDED (linked `--no-as-needed`-less) fails dlopen
+            // with unresolved `rb_*` symbols.
             let lib = match Library::new(&so_path) {
                 Ok(l) => l,
                 Err(e) => {
                     let _ = rubyrs_cext::leave();
-                    return Err(self.trap(RubyError::RuntimeError {
+                    return Err(self.trap(RubyError::LoadError {
                         msg: format!("dlopen {}: {}", so_path.display(), e),
                     }));
                 }
@@ -988,7 +1025,7 @@ impl Vm {
                 Ok(s) => s,
                 Err(e) => {
                     let _ = rubyrs_cext::leave();
-                    return Err(self.trap(RubyError::RuntimeError {
+                    return Err(self.trap(RubyError::LoadError {
                         msg: format!(
                             "symbol {} not found in {}: {}",
                             init_sym,
