@@ -522,11 +522,11 @@ struct Tables {
 }
 
 fn build_tables(vm: &Vm, seal: &Seal, comm: ObjId) -> DRes<Tables> {
-    let ivars = &vm.heap.instance(comm).ivars;
-    let Some(&Value::Hash(cb_hid)) = ivars.get(&seal.sym_ivar_callbacks) else {
+    let inst = vm.heap.instance(comm);
+    let Some(&Value::Hash(cb_hid)) = inst.ivar_get(seal.sym_ivar_callbacks) else {
         return decline("@callbacks missing or not a Hash");
     };
-    let Some(&Value::Hash(rm_hid)) = ivars.get(&seal.sym_ivar_restricted) else {
+    let Some(&Value::Hash(rm_hid)) = inst.ivar_get(seal.sym_ivar_restricted) else {
         return decline("@restricted_map missing or not a Hash");
     };
 
@@ -615,10 +615,10 @@ fn prepass(vm: &Vm, seal: &mut Seal, t: &Tables, root: ObjId) -> DRes<Vec<PItem>
                     return decline("node has an eigenclass");
                 }
                 let cls = inst.class.clone();
-                let Some(&Value::Sym(ts)) = inst.ivars.get(&seal.sym_ivar_type) else {
+                let Some(&Value::Sym(ts)) = inst.ivar_get(seal.sym_ivar_type) else {
                     return decline("node @type missing or not a Symbol");
                 };
-                let children_v = inst.ivars.get(&seal.sym_ivar_children).cloned();
+                let children_v = inst.ivar_get(seal.sym_ivar_children).cloned();
                 if !node_class_verified(vm, seal, &cls) {
                     return decline("node class overrides type/children");
                 }
@@ -708,7 +708,7 @@ fn prepass(vm: &Vm, seal: &mut Seal, t: &Tables, root: ObjId) -> DRes<Vec<PItem>
 /// by the builder (anything else declines at prepass).
 fn send_mname(vm: &Vm, seal: &Seal, node: ObjId) -> DRes<SymId> {
     let HeapObj::Instance(inst) = vm.heap.get(node) else { return decline("send node not an instance") };
-    let Some(Value::Array(cid)) = inst.ivars.get(&seal.sym_ivar_children) else {
+    let Some(Value::Array(cid)) = inst.ivar_get(seal.sym_ivar_children) else {
         return decline("send node @children missing");
     };
     match vm.heap.array(*cid).get(1) {

@@ -1646,7 +1646,7 @@ impl Vm {
                 // "uninitialized ivar reads as nil" rule.
                 let self_val = self.frames.last().expect("ICE: LoadIvar no frame").self_val.clone();
                 let v = match &self_val {
-                    Value::Object(id) => self.heap.instance(*id).ivars.get(&name_id).cloned().unwrap_or(Value::Nil),
+                    Value::Object(id) => self.heap.instance(*id).ivar_get(name_id).cloned().unwrap_or(Value::Nil),
                     Value::Class(c) => c.ivars.borrow().get(&name_id).cloned().unwrap_or(Value::Nil),
                     // Hash-subclass instances carry their own ivar table.
                     Value::Hash(id) => self.heap.hash_ivar_get(*id, name_id).unwrap_or(Value::Nil),
@@ -1671,7 +1671,7 @@ impl Vm {
                 let self_val = self.frames.last().expect("ICE: StoreIvar no frame").self_val.clone();
                 self.frozen_ivar_guard(&self_val)?;
                 match &self_val {
-                    Value::Object(id) => { self.heap.instance_mut(*id).ivars.insert(name_id, v); }
+                    Value::Object(id) => { self.heap.instance_mut(*id).ivar_set(name_id, v); }
                     Value::Class(c) => { c.ivars.borrow_mut().insert(name_id, v); }
                     // Hash-subclass instances carry their own ivar table.
                     Value::Hash(id) => { self.heap.hash_ivar_set(*id, name_id, v); }
@@ -1738,7 +1738,7 @@ impl Vm {
                 let self_val = self.frames.last().expect("ICE: IncIvarNoPush no frame").self_val.clone();
                 self.frozen_ivar_guard(&self_val)?;
                 let cur = match &self_val {
-                    Value::Object(id) => self.heap.instance(*id).ivars.get(&name_id).cloned(),
+                    Value::Object(id) => self.heap.instance(*id).ivar_get(name_id).cloned(),
                     Value::Class(c) => c.ivars.borrow().get(&name_id).cloned(),
                     _ => None,
                 };
@@ -1756,7 +1756,7 @@ impl Vm {
                 };
                 if let Some(v) = new_v {
                     match &self_val {
-                        Value::Object(id) => { self.heap.instance_mut(*id).ivars.insert(name_id, v); }
+                        Value::Object(id) => { self.heap.instance_mut(*id).ivar_set(name_id, v); }
                         Value::Class(c) => { c.ivars.borrow_mut().insert(name_id, v); }
                         _ => { /* drop */ }
                     }
@@ -1768,7 +1768,7 @@ impl Vm {
                 let self_val = self.frames.last().expect("ICE: IncIvar no frame").self_val.clone();
                 self.frozen_ivar_guard(&self_val)?;
                 let cur = match &self_val {
-                    Value::Object(id) => self.heap.instance(*id).ivars.get(&name_id).cloned(),
+                    Value::Object(id) => self.heap.instance(*id).ivar_get(name_id).cloned(),
                     Value::Class(c) => c.ivars.borrow().get(&name_id).cloned(),
                     _ => None,
                 };
@@ -1776,7 +1776,7 @@ impl Vm {
                     Some(Value::Int(n)) => {
                         let nv = Value::Int(n.wrapping_add(1));
                         match &self_val {
-                            Value::Object(id) => { self.heap.instance_mut(*id).ivars.insert(name_id, nv.clone()); }
+                            Value::Object(id) => { self.heap.instance_mut(*id).ivar_set(name_id, nv.clone()); }
                             Value::Class(c) => { c.ivars.borrow_mut().insert(name_id, nv.clone()); }
                             _ => {}
                         }
@@ -1791,7 +1791,7 @@ impl Vm {
                         self.do_call(plus_id, 1, false, u32::MAX)?;
                         let v = self.stack.last().expect("ICE: IncIvar slow path no result").clone();
                         match &self_val {
-                            Value::Object(id) => { self.heap.instance_mut(*id).ivars.insert(name_id, v.clone()); }
+                            Value::Object(id) => { self.heap.instance_mut(*id).ivar_set(name_id, v.clone()); }
                             Value::Class(c) => { c.ivars.borrow_mut().insert(name_id, v.clone()); }
                             _ => {}
                         }
@@ -4759,6 +4759,7 @@ impl Vm {
                     singleton_target: RefCell::new(None),
                     undefed: RefCell::new(crate::intern::FxHashSet::default()),
                     anon_serial: std::cell::Cell::new(0),
+                    ivar_shape: std::cell::RefCell::new(crate::value::IvarShape::default()),
                     class_vars: RefCell::new(crate::intern::FxHashMap::default()),
             consts: RefCell::new(crate::intern::FxHashMap::default()),
                     assigned_name: RefCell::new(None),

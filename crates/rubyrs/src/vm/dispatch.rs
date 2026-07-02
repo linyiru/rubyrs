@@ -1710,7 +1710,7 @@ impl Vm {
                     return None;
                 }
                 let name_id = self.interner.intern("@name");
-                match inst.ivars.get(&name_id) {
+                match inst.ivar_get(name_id) {
                     Some(Value::Str(s)) => s.to_string_lossy(),
                     _ => return None,
                 }
@@ -1771,7 +1771,7 @@ impl Vm {
             _ => return Ok(false),
         };
         let name_sym = self.interner.intern("@name");
-        let enc_name = match self.heap.instance(enc_id).ivars.get(&name_sym) {
+        let enc_name = match self.heap.instance(enc_id).ivar_get(name_sym) {
             Some(Value::Str(s)) => s.to_string_lossy(),
             // Not a recognisable Encoding instance — fall through.
             _ => return Ok(false),
@@ -2236,8 +2236,7 @@ impl Vm {
         let msg = self
             .heap
             .instance(*id)
-            .ivars
-            .get(&msg_sym)
+            .ivar_get(msg_sym)
             .cloned()
             .map(|v| v.to_display(&self.heap, &self.interner))
             .unwrap_or_default();
@@ -3693,9 +3692,9 @@ impl Vm {
             self.maybe_gc();
             self.check_alloc()?;
             let mut ivars = crate::value::IvarTable::default();
-            ivars.insert(self.interner.intern("@__self"), self_val);
+            ivars.insert(&bcls, self.interner.intern("@__self"), self_val);
             if let Some(c) = lex {
-                ivars.insert(self.interner.intern("@__lexical_class"), Value::Class(c));
+                ivars.insert(&bcls, self.interner.intern("@__lexical_class"), Value::Class(c));
             }
             let id = self.heap.alloc(HeapObj::Instance(crate::value::Instance {
                 class: bcls,
@@ -6541,6 +6540,7 @@ impl Vm {
             is_module: true,
             undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
             anon_serial: std::cell::Cell::new(0),
+            ivar_shape: std::cell::RefCell::new(crate::value::IvarShape::default()),
             ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
@@ -6702,6 +6702,7 @@ impl Vm {
             is_module: false,
             undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
             anon_serial: std::cell::Cell::new(0),
+            ivar_shape: std::cell::RefCell::new(crate::value::IvarShape::default()),
             ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
@@ -7272,6 +7273,7 @@ impl Vm {
                 is_module: !as_class,
                 undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
                 anon_serial: std::cell::Cell::new(serial),
+                ivar_shape: std::cell::RefCell::new(crate::value::IvarShape::default()),
                 ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                 methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                 singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
@@ -12369,11 +12371,11 @@ impl Vm {
                         if is_exception {
                             let msg_id = self.interner.intern("@message");
                             let bt_id = self.interner.intern("@backtrace");
-                            inst.ivars.keys().copied()
+                            inst.ivar_names().into_iter()
                                 .filter(|k| *k != msg_id && *k != bt_id)
                                 .collect()
                         } else {
-                            inst.ivars.keys().copied().collect()
+                            inst.ivar_names()
                         }
                     } else {
                         Vec::new()
@@ -12561,7 +12563,7 @@ impl Vm {
             let v = match &recv {
                 Value::Object(oid) => match self.heap.get(*oid) {
                     crate::heap::HeapObj::Instance(inst) => {
-                        inst.ivars.get(&ivar_id).cloned().unwrap_or(Value::Nil)
+                        inst.ivar_get(ivar_id).cloned().unwrap_or(Value::Nil)
                     }
                     _ => Value::Nil,
                 },
@@ -12607,7 +12609,7 @@ impl Vm {
             match &recv {
                 Value::Object(oid) => match self.heap.get_mut(*oid) {
                     crate::heap::HeapObj::Instance(inst) => {
-                        inst.ivars.insert(ivar_id, value.clone());
+                        inst.ivar_set(ivar_id, value.clone());
                         self.stack.push(value);
                         return Ok(());
                     }
@@ -12679,7 +12681,7 @@ impl Vm {
             let ivar_id = self.resolve_ivar_name_arg(&args[0])?;
             let removed = match &recv {
                 Value::Object(oid) => match self.heap.get_mut(*oid) {
-                    crate::heap::HeapObj::Instance(inst) => inst.ivars.remove(&ivar_id),
+                    crate::heap::HeapObj::Instance(inst) => inst.ivar_remove(ivar_id),
                     _ => None,
                 },
                 Value::Class(cls) => cls.ivars.borrow_mut().remove(&ivar_id),
@@ -12707,7 +12709,7 @@ impl Vm {
             let defined = match &recv {
                 Value::Object(oid) => match self.heap.get(*oid) {
                     crate::heap::HeapObj::Instance(inst) => {
-                        inst.ivars.contains_key(&ivar_id)
+                        inst.ivar_defined(ivar_id)
                     }
                     _ => false,
                 },
@@ -16217,7 +16219,7 @@ impl Vm {
             return None;
         }
         let ivar = self.protos[g.proto_idx].getter_ivar?;
-        let tsym = match self.heap.instance(recv_id).ivars.get(&ivar) {
+        let tsym = match self.heap.instance(recv_id).ivar_get(ivar) {
             Some(Value::Sym(s)) => *s,
             _ => return None,
         };
@@ -16688,8 +16690,7 @@ impl Vm {
             let v = self
                 .heap
                 .instance(id)
-                .ivars
-                .get(&gsym)
+                .ivar_get(gsym)
                 .cloned()
                 .unwrap_or(Value::Nil);
             // argc == 0 → the receiver is the stack top; overwrite it
@@ -16902,8 +16903,7 @@ impl Vm {
             let v = self
                 .heap
                 .instance(id)
-                .ivars
-                .get(&gsym)
+                .ivar_get(gsym)
                 .cloned()
                 .unwrap_or(Value::Nil);
             self.stack.push(v);
@@ -21356,6 +21356,7 @@ impl Vm {
             is_module: true,
             undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
             anon_serial: std::cell::Cell::new(0),
+            ivar_shape: std::cell::RefCell::new(crate::value::IvarShape::default()),
             ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
@@ -22907,6 +22908,7 @@ impl Vm {
                 is_module: false,
                 undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
                 anon_serial: std::cell::Cell::new(0),
+                ivar_shape: std::cell::RefCell::new(crate::value::IvarShape::default()),
                 ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                 methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                 singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
@@ -22974,6 +22976,7 @@ impl Vm {
                 is_module: true,
                 undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
                 anon_serial: std::cell::Cell::new(0),
+                ivar_shape: std::cell::RefCell::new(crate::value::IvarShape::default()),
                 ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                 methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                 singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
@@ -25748,6 +25751,7 @@ impl Vm {
             singleton_target: std::cell::RefCell::new(None),
             undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
             anon_serial: std::cell::Cell::new(0),
+            ivar_shape: std::cell::RefCell::new(crate::value::IvarShape::default()),
             class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             assigned_name: std::cell::RefCell::new(None),
@@ -25790,6 +25794,7 @@ impl Vm {
             singleton_target: std::cell::RefCell::new(None),
             undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
             anon_serial: std::cell::Cell::new(0),
+            ivar_shape: std::cell::RefCell::new(crate::value::IvarShape::default()),
             class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             assigned_name: std::cell::RefCell::new(None),
@@ -25835,6 +25840,7 @@ impl Vm {
             singleton_target: std::cell::RefCell::new(None),
             undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
             anon_serial: std::cell::Cell::new(0),
+            ivar_shape: std::cell::RefCell::new(crate::value::IvarShape::default()),
             class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             assigned_name: std::cell::RefCell::new(None),

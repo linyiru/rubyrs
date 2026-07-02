@@ -3842,7 +3842,7 @@ self.eval_inner(
         ) {
             (Some(crate::value::Value::Object(id)), Some(sym)) => {
                 match self.vm.heap.get(*id) {
-                    crate::heap::HeapObj::Instance(inst) => match inst.ivars.get(&sym) {
+                    crate::heap::HeapObj::Instance(inst) => match inst.ivar_get(sym) {
                         Some(crate::value::Value::Int(n)) => *n as i32,
                         _ => 0,
                     },

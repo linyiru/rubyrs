@@ -188,7 +188,7 @@ impl Vm {
             frozen: std::cell::Cell::new(false),
                     }));
                     let msg_id = self.interner.intern("@message");
-                    self.heap.instance_mut(id).ivars.insert(msg_id, v);
+                    self.heap.instance_mut(id).ivar_set(msg_id, v);
                     Value::Object(id)
                 } else {
                     v
@@ -231,7 +231,7 @@ impl Vm {
                             frozen: std::cell::Cell::new(false),
                         }));
                         let msg_id = self.interner.intern("@message");
-                        self.heap.instance_mut(id).ivars.insert(msg_id, msg);
+                        self.heap.instance_mut(id).ivar_set(msg_id, msg);
                         Value::Object(id)
                     }
                 }
@@ -254,7 +254,7 @@ impl Vm {
                             frozen: std::cell::Cell::new(false),
                         }));
                         let msg_id = self.interner.intern("@message");
-                        self.heap.instance_mut(id).ivars.insert(
+                        self.heap.instance_mut(id).ivar_set(
                             msg_id,
                             Value::new_str("exception class/object expected".to_string()),
                         );
@@ -327,11 +327,11 @@ impl Vm {
             frozen: std::cell::Cell::new(false),
         }));
         let msg_sym = self.interner.intern("@message");
-        self.heap.instance_mut(id).ivars.insert(msg_sym, Value::new_str(message));
+        self.heap.instance_mut(id).ivar_set(msg_sym, Value::new_str(message));
         if let Some(nm) = wrong_const_name {
             let name_sym = self.interner.intern(&nm);
             let name_ivar = self.interner.intern("@name");
-            self.heap.instance_mut(id).ivars.insert(name_ivar, Value::Sym(name_sym));
+            self.heap.instance_mut(id).ivar_set(name_ivar, Value::Sym(name_sym));
         }
         // `@backtrace` is filled centrally by `unwind_with_exception`
         // from the live frame stack on the first unwind hop — same
@@ -388,10 +388,10 @@ impl Vm {
             && bang_id != *exc_id
         {
             let cause_sym = self.interner.intern("@cause");
-            let already = self.heap.instance(*exc_id).ivars.get(&cause_sym)
+            let already = self.heap.instance(*exc_id).ivar_get(cause_sym)
                 .is_some_and(|v| !matches!(v, Value::Nil));
             if !already {
-                self.heap.instance_mut(*exc_id).ivars.insert(cause_sym, Value::Object(bang_id));
+                self.heap.instance_mut(*exc_id).ivar_set(cause_sym, Value::Object(bang_id));
             }
         }
         // Populate `@backtrace` on the raised exception from the
@@ -414,7 +414,7 @@ impl Vm {
             if class_chain_has_name(&self.heap.real_class_of(*id), "RubyrsThrowSignal"));
         if let Value::Object(exc_id) = &exc {
             let bt_sym = self.interner.intern("@backtrace");
-            let already_set = self.heap.instance(*exc_id).ivars.get(&bt_sym)
+            let already_set = self.heap.instance(*exc_id).ivar_get(bt_sym)
                 .map(|v| !matches!(v, Value::Nil))
                 .unwrap_or(false);
             if !already_set && !exc_is_throw {
@@ -495,8 +495,8 @@ impl Vm {
                     }
                     for _ in 0..n_pinned { self.pinned.pop(); }
                     if !dispatched {
-                        self.heap.instance_mut(*exc_id).ivars
-                            .insert(bt_sym, Value::Array(bt_arr_id));
+                        self.heap.instance_mut(*exc_id)
+                            .ivar_set(bt_sym, Value::Array(bt_arr_id));
                     }
                 }
             }
@@ -691,7 +691,7 @@ impl Vm {
                 let message = match &exc {
                     Value::Object(id) => {
                         let msg_sym = self.interner.intern("@message");
-                        match self.heap.instance(*id).ivars.get(&msg_sym).cloned() {
+                        match self.heap.instance(*id).ivar_get(msg_sym).cloned() {
                             Some(m) => m.to_display(&self.heap, &self.interner),
                             None => String::new(),
                         }
@@ -997,7 +997,7 @@ pub(crate) fn build_interrupt_exception(vm: &mut crate::vm::Vm) -> Option<crate:
     }));
     let message_sym = vm.interner.intern("@message");
     let msg_val = Value::Str(std::rc::Rc::new(RStr::new("interrupt".to_string())));
-    vm.heap.instance_mut(id).ivars.insert(message_sym, msg_val);
+    vm.heap.instance_mut(id).ivar_set(message_sym, msg_val);
     Some(Value::Object(id))
 }
 
@@ -1028,6 +1028,7 @@ mod tests {
             superclass: RefCell::new(superclass),
             undefed: RefCell::new(crate::intern::FxHashSet::default()),
             anon_serial: std::cell::Cell::new(0),
+            ivar_shape: std::cell::RefCell::new(crate::value::IvarShape::default()),
                     class_vars: RefCell::new(crate::intern::FxHashMap::default()),
             consts: RefCell::new(crate::intern::FxHashMap::default()),
             assigned_name: RefCell::new(None),
@@ -1084,7 +1085,7 @@ mod tests {
         assert_eq!(vm.heap.class_of(id).name, "RuntimeError");
         // `@message` is the original string.
         let msg_sym = vm.interner.intern("@message");
-        let stored = vm.heap.instance(id).ivars.get(&msg_sym).cloned()
+        let stored = vm.heap.instance(id).ivar_get(msg_sym).cloned()
             .expect("@message ivar should be set");
         assert!(matches!(stored, Value::Str(_)));
     }
@@ -1170,7 +1171,7 @@ mod tests {
         assert!(Rc::ptr_eq(&vm.heap.class_of(id), &cls));
 
         let msg_sym = vm.interner.intern("@message");
-        let stored = vm.heap.instance(id).ivars.get(&msg_sym).cloned()
+        let stored = vm.heap.instance(id).ivar_get(msg_sym).cloned()
             .expect("@message ivar should be set");
         // The message string carries the trap's message.
         let s = stored.to_display(&vm.heap, &vm.interner);

@@ -677,9 +677,9 @@ impl Vm {
         let meth_iv = g.vm.interner.intern("@meth");
         let args_iv = g.vm.interner.intern("@args");
         let inst = g.vm.heap.instance_mut(inst_id);
-        inst.ivars.insert(obj_iv, recv);
-        inst.ivars.insert(meth_iv, Value::Sym(meth_sym));
-        inst.ivars.insert(args_iv, Value::Array(args_id));
+        inst.ivar_set(obj_iv, recv);
+        inst.ivar_set(meth_iv, Value::Sym(meth_sym));
+        inst.ivar_set(args_iv, Value::Array(args_id));
         drop(g);
         Ok(Value::Object(inst_id))
     }

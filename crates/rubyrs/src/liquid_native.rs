@@ -215,10 +215,10 @@ fn to_lvalue(vm: &mut crate::vm::Vm, v: &Value, depth: usize) -> Option<LValue> 
             let sec_id = vm.interner.intern("@sec");
             let local_id = vm.interner.intern("@local");
             let inst = vm.heap.instance(*id);
-            let Some(Value::Int(sec)) = inst.ivars.get(&sec_id).cloned() else {
+            let Some(Value::Int(sec)) = inst.ivar_get(sec_id).cloned() else {
                 return None;
             };
-            let local = matches!(inst.ivars.get(&local_id), Some(Value::Bool(true)));
+            let local = matches!(inst.ivar_get(local_id), Some(Value::Bool(true)));
             LValue::Time { sec, local }
         }
         _ => return None,

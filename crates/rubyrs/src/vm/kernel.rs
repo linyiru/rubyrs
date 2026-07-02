@@ -165,8 +165,7 @@ impl Vm {
                     let delegating = self
                         .heap
                         .instance(*id)
-                        .ivars
-                        .get(&delegate_sym)
+                        .ivar_get(delegate_sym)
                         .is_some_and(|d| !matches!(d, Value::Nil));
                     if delegating { Some(v) } else { None }
                 } else {
@@ -507,9 +506,9 @@ impl Vm {
                     return Some(Err(e));
                 }
                 let mut ivars = crate::value::IvarTable::default();
-                ivars.insert(self.interner.intern("@__self"), self_val);
+                ivars.insert(&bcls, self.interner.intern("@__self"), self_val);
                 if let Some(c) = lex {
-                    ivars.insert(self.interner.intern("@__lexical_class"), Value::Class(c));
+                    ivars.insert(&bcls, self.interner.intern("@__lexical_class"), Value::Class(c));
                 }
                 let id = self.heap.alloc(HeapObj::Instance(crate::value::Instance {
                     class: bcls,
@@ -994,7 +993,7 @@ impl Vm {
                         .unwrap_or(Value::Nil);
                     let hit = match &self_val {
                         Value::Object(oid) => {
-                            self.heap.instance(*oid).ivars.contains_key(sid)
+                            self.heap.instance(*oid).ivar_defined(*sid)
                         }
                         // Class-level ivars: `defined?(@name)` inside
                         // `def self.x` reads the class object's own
@@ -2125,7 +2124,7 @@ impl Vm {
                             Some(Value::Object(id)) => {
                                 let cls_name = self.heap.real_class_of(id).name.clone();
                                 let msg_sym = self.interner.intern("@message");
-                                let inner = self.heap.instance(id).ivars.get(&msg_sym).cloned()
+                                let inner = self.heap.instance(id).ivar_get(msg_sym).cloned()
                                     .map(|v| v.to_display(&self.heap, &self.interner))
                                     .unwrap_or_default();
                                 Some(format!("{cls_name}: {inner}"))
@@ -2363,7 +2362,7 @@ impl Vm {
                         let exc = self.normalize_exception(args[0].clone());
                         if let (Value::Object(id), Value::Str(_)) = (&exc, &args[1]) {
                             let msg_id = self.interner.intern("@message");
-                            self.heap.instance_mut(*id).ivars.insert(msg_id, args[1].clone());
+                            self.heap.instance_mut(*id).ivar_set(msg_id, args[1].clone());
                         }
                         exc
                     }
@@ -3741,6 +3740,7 @@ impl Vm {
                                         is_module,
                                         undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
                                         anon_serial: std::cell::Cell::new(0),
+                                        ivar_shape: std::cell::RefCell::new(crate::value::IvarShape::default()),
                                         methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                                         singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
                                         superclass: std::cell::RefCell::new(None),
@@ -5224,8 +5224,8 @@ impl Vm {
             .unwrap_or_default();
         match self.heap.get(*id) {
             crate::heap::HeapObj::Instance(inst) if inst.class.name == "Binding" => {
-                let self_o = inst.ivars.get(&self_sym).cloned()?;
-                let cctx = match inst.ivars.get(&lex_sym) {
+                let self_o = inst.ivar_get(self_sym).cloned()?;
+                let cctx = match inst.ivar_get(lex_sym) {
                     Some(Value::Class(c)) => Some(c.clone()),
                     _ => None,
                 };
@@ -6357,7 +6357,7 @@ impl Vm {
                 && let crate::heap::HeapObj::Instance(inst) = self.heap.get(*id)
             {
                 let status_sym = self.interner.intern("@status");
-                if let Some(Value::Int(n)) = inst.ivars.get(&status_sym) {
+                if let Some(Value::Int(n)) = inst.ivar_get(status_sym) {
                     return *n as i32;
                 }
             }
@@ -6849,7 +6849,7 @@ impl MarshalReader<'_> {
                         (vm.interner.intern(&kname), val)
                     };
                     if let crate::heap::HeapObj::Instance(inst) = vm.heap.get_mut(id) {
-                        inst.ivars.insert(ivar, val);
+                        inst.ivar_set(ivar, val);
                     }
                 }
                 Ok(Value::Object(id))
@@ -6899,7 +6899,7 @@ impl MarshalReader<'_> {
                     };
                     let ivar = vm.interner.intern(&format!("@{mname}"));
                     if let crate::heap::HeapObj::Instance(inst) = vm.heap.get_mut(id) {
-                        inst.ivars.insert(ivar, mval);
+                        inst.ivar_set(ivar, mval);
                     }
                 }
                 Ok(Value::Object(id))
@@ -7261,7 +7261,7 @@ impl MarshalWriter {
                         let v = vm
                             .interner
                             .get_id(&format!("@{mname}"))
-                            .and_then(|isym| vm.heap.instance(*id).ivars.get(&isym).cloned())
+                            .and_then(|isym| vm.heap.instance(*id).ivar_get(isym).cloned())
                             .unwrap_or(Value::Nil);
                         self.write_value(vm, &v)?;
                     }
@@ -7282,9 +7282,9 @@ impl MarshalWriter {
                 let mut ivars: Vec<(crate::intern::SymId, Value)> = vm
                     .heap
                     .instance(*id)
-                    .ivars
-                    .iter()
-                    .map(|(k, v)| (*k, v.clone()))
+                    .ivar_pairs()
+                    .into_iter()
+                    .map(|(k, v)| (k, v.clone()))
                     .collect();
                 if is_exc {
                     // CRuby stores an Exception's message/backtrace in the
@@ -7479,8 +7479,8 @@ fn raise_system_exit(vm: &mut Vm, status: i32, message: &str) -> Option<Result<V
     let status_sym = vm.interner.intern("@status");
     let message_sym = vm.interner.intern("@message");
     let msg_val = Value::Str(std::rc::Rc::new(crate::value::RStr::new(message.to_string())));
-    vm.heap.instance_mut(id).ivars.insert(status_sym, Value::Int(status as i64));
-    vm.heap.instance_mut(id).ivars.insert(message_sym, msg_val);
+    vm.heap.instance_mut(id).ivar_set(status_sym, Value::Int(status as i64));
+    vm.heap.instance_mut(id).ivar_set(message_sym, msg_val);
     // Route through the same unwind path Op::Raise uses.
     if let Err(trap) = vm.unwind_with_exception(Value::Object(id)) {
         return Some(Err(trap));

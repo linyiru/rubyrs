@@ -713,8 +713,8 @@ impl<'a> Ctx<'a> {
         let real_sym = self.vm.interner.intern("@real");
         let imag_sym = self.vm.interner.intern("@imaginary");
         let mut ivars = crate::value::IvarTable::default();
-        ivars.insert(real_sym, real);
-        ivars.insert(imag_sym, imag);
+        ivars.insert(&class, real_sym, real);
+        ivars.insert(&class, imag_sym, imag);
         self.check_alloc()?;
         let oid = self.vm.heap.alloc(crate::heap::HeapObj::Instance(crate::value::Instance {
             class,

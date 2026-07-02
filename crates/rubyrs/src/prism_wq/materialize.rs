@@ -112,7 +112,8 @@ fn lookup_class(vm: &mut Vm, name: &str) -> CRes<Rc<Class>> {
 }
 
 impl<'vm> M<'vm> {
-    fn alloc_instance(&mut self, class: Rc<Class>, ivars: IvarTable, frozen: bool) -> CRes<Value> {
+    fn alloc_instance(&mut self, class: Rc<Class>, pairs: Vec<(SymId, Value)>, frozen: bool) -> CRes<Value> {
+        let ivars = IvarTable::from_pairs(&class, pairs);
         self.vm.check_alloc().map_err(|_| Decline("alloc cap"))?;
         let id = self.vm.heap.alloc(HeapObj::Instance(Instance {
             class,
@@ -136,10 +137,10 @@ impl<'vm> M<'vm> {
         if let Some(v) = self.range_cache.get(&(r.b, r.e)) {
             return Ok(v.clone());
         }
-        let mut ivars = IvarTable::default();
-        ivars.insert(self.s_source_buffer, self.buffer.clone());
-        ivars.insert(self.s_begin_pos, Value::Int(r.b as i64));
-        ivars.insert(self.s_end_pos, Value::Int(r.e as i64));
+        let mut ivars: Vec<(SymId, Value)> = Vec::new();
+        ivars.push((self.s_source_buffer, self.buffer.clone()));
+        ivars.push((self.s_begin_pos, Value::Int(r.b as i64)));
+        ivars.push((self.s_end_pos, Value::Int(r.e as i64)));
         let class = self.range_class.clone();
         let v = self.alloc_instance(class, ivars, true)?;
         self.range_cache.insert((r.b, r.e), v.clone());
@@ -159,7 +160,7 @@ impl<'vm> M<'vm> {
     /// and freezes once the owning node exists.
     fn map_obj(&mut self, map: &Map) -> CRes<Value> {
         let i = |m: &mut M<'vm>, name: &str| m.vm.interner.intern(name);
-        let mut ivars = IvarTable::default();
+        let mut ivars: Vec<(SymId, Value)> = Vec::new();
         let mut late_operator: Option<(SymId, Value)> = None;
 
         let class_name: &'static str = match &map.k {
@@ -170,8 +171,8 @@ impl<'vm> M<'vm> {
                 let ev = self.orange(e)?;
                 let sb = i(self, "@begin");
                 let se = i(self, "@end");
-                ivars.insert(sb, bv);
-                ivars.insert(se, ev);
+                ivars.push((sb, bv));
+                ivars.push((se, ev));
                 "Parser::Source::Map::Collection"
             }
             MK::Constant { dc, name, op } => {
@@ -180,8 +181,8 @@ impl<'vm> M<'vm> {
                 let nv = self.range(name)?;
                 let s1 = i(self, "@double_colon");
                 let s2 = i(self, "@name");
-                ivars.insert(s1, dcv);
-                ivars.insert(s2, nv);
+                ivars.push((s1, dcv));
+                ivars.push((s2, nv));
                 if let Some(op) = op {
                     let ov = self.range(op)?;
                     late_operator = Some((i(self, "@operator"), ov));
@@ -192,7 +193,7 @@ impl<'vm> M<'vm> {
                 let (name, op) = (*name, *op);
                 let nv = self.orange(name)?;
                 let s1 = i(self, "@name");
-                ivars.insert(s1, nv);
+                ivars.push((s1, nv));
                 if let Some(op) = op {
                     let ov = self.range(op)?;
                     late_operator = Some((i(self, "@operator"), ov));
@@ -203,7 +204,7 @@ impl<'vm> M<'vm> {
                 let op = *op;
                 let ov = self.orange(op)?;
                 let s1 = i(self, "@operator");
-                ivars.insert(s1, ov);
+                ivars.push((s1, ov));
                 "Parser::Source::Map::Operator"
             }
             MK::Send { dot, sel, b, e, op } => {
@@ -216,10 +217,10 @@ impl<'vm> M<'vm> {
                 let s2 = i(self, "@selector");
                 let s3 = i(self, "@begin");
                 let s4 = i(self, "@end");
-                ivars.insert(s1, dv);
-                ivars.insert(s2, sv);
-                ivars.insert(s3, bv);
-                ivars.insert(s4, ev);
+                ivars.push((s1, dv));
+                ivars.push((s2, sv));
+                ivars.push((s3, bv));
+                ivars.push((s4, ev));
                 if let Some(op) = op {
                     let ov = self.range(op)?;
                     late_operator = Some((i(self, "@operator"), ov));
@@ -236,10 +237,10 @@ impl<'vm> M<'vm> {
                 let s2 = i(self, "@begin");
                 let s3 = i(self, "@else");
                 let s4 = i(self, "@end");
-                ivars.insert(s1, kv);
-                ivars.insert(s2, bv);
-                ivars.insert(s3, lv);
-                ivars.insert(s4, ev);
+                ivars.push((s1, kv));
+                ivars.push((s2, bv));
+                ivars.push((s3, lv));
+                ivars.push((s4, ev));
                 "Parser::Source::Map::Condition"
             }
             MK::Keyword { kw, b, e } => {
@@ -250,9 +251,9 @@ impl<'vm> M<'vm> {
                 let s1 = i(self, "@keyword");
                 let s2 = i(self, "@begin");
                 let s3 = i(self, "@end");
-                ivars.insert(s1, kv);
-                ivars.insert(s2, bv);
-                ivars.insert(s3, ev);
+                ivars.push((s1, kv));
+                ivars.push((s2, bv));
+                ivars.push((s3, ev));
                 "Parser::Source::Map::Keyword"
             }
             MK::Ternary { q, c } => {
@@ -261,8 +262,8 @@ impl<'vm> M<'vm> {
                 let cv = self.range(c)?;
                 let s1 = i(self, "@question");
                 let s2 = i(self, "@colon");
-                ivars.insert(s1, qv);
-                ivars.insert(s2, cv);
+                ivars.push((s1, qv));
+                ivars.push((s2, cv));
                 "Parser::Source::Map::Ternary"
             }
             MK::For { kw, inn, b, e } => {
@@ -275,10 +276,10 @@ impl<'vm> M<'vm> {
                 let s2 = i(self, "@in");
                 let s3 = i(self, "@begin");
                 let s4 = i(self, "@end");
-                ivars.insert(s1, kv);
-                ivars.insert(s2, iv);
-                ivars.insert(s3, bv);
-                ivars.insert(s4, ev);
+                ivars.push((s1, kv));
+                ivars.push((s2, iv));
+                ivars.push((s3, bv));
+                ivars.push((s4, ev));
                 "Parser::Source::Map::For"
             }
             MK::Definition { kw, op, name, e } => {
@@ -291,10 +292,10 @@ impl<'vm> M<'vm> {
                 let s2 = i(self, "@operator");
                 let s3 = i(self, "@name");
                 let s4 = i(self, "@end");
-                ivars.insert(s1, kv);
-                ivars.insert(s2, ov);
-                ivars.insert(s3, nv);
-                ivars.insert(s4, ev);
+                ivars.push((s1, kv));
+                ivars.push((s2, ov));
+                ivars.push((s3, nv));
+                ivars.push((s4, ev));
                 "Parser::Source::Map::Definition"
             }
             MK::MethodDefinition { kw, op, name, e, assign } => {
@@ -309,11 +310,11 @@ impl<'vm> M<'vm> {
                 let s3 = i(self, "@name");
                 let s4 = i(self, "@end");
                 let s5 = i(self, "@assignment");
-                ivars.insert(s1, kv);
-                ivars.insert(s2, ov);
-                ivars.insert(s3, nv);
-                ivars.insert(s4, ev);
-                ivars.insert(s5, av);
+                ivars.push((s1, kv));
+                ivars.push((s2, ov));
+                ivars.push((s3, nv));
+                ivars.push((s4, ev));
+                ivars.push((s5, av));
                 "Parser::Source::Map::MethodDefinition"
             }
             MK::RescueBody { kw, assoc, b } => {
@@ -324,9 +325,9 @@ impl<'vm> M<'vm> {
                 let s1 = i(self, "@keyword");
                 let s2 = i(self, "@assoc");
                 let s3 = i(self, "@begin");
-                ivars.insert(s1, kv);
-                ivars.insert(s2, av);
-                ivars.insert(s3, bv);
+                ivars.push((s1, kv));
+                ivars.push((s2, av));
+                ivars.push((s3, bv));
                 "Parser::Source::Map::RescueBody"
             }
             MK::Heredoc { body, hd_end } => {
@@ -335,17 +336,17 @@ impl<'vm> M<'vm> {
                 let ev = self.range(hd_end)?;
                 let s1 = i(self, "@heredoc_body");
                 let s2 = i(self, "@heredoc_end");
-                ivars.insert(s1, bv);
-                ivars.insert(s2, ev);
+                ivars.push((s1, bv));
+                ivars.push((s2, ev));
                 "Parser::Source::Map::Heredoc"
             }
         };
 
         let ev = self.orange(map.expr)?;
-        ivars.insert(self.s_expression, ev);
-        ivars.insert(self.s_node, Value::Nil);
+        ivars.push((self.s_expression, ev));
+        ivars.push((self.s_node, Value::Nil));
         if let Some((sym, v)) = late_operator {
-            ivars.insert(sym, v);
+            ivars.push((sym, v));
         }
 
         let class = lookup_class(self.vm, class_name)?;
@@ -399,21 +400,21 @@ impl<'vm> M<'vm> {
         self.vm.check_alloc().map_err(|_| Decline("alloc cap"))?;
         let mattrs = Value::Hash(self.vm.heap.alloc(HeapObj::Hash(HashObj::with_pairs(vec![]))));
 
-        let mut ivars = IvarTable::default();
-        ivars.insert(self.s_mutable_attributes, mattrs);
-        ivars.insert(self.s_type, Value::Sym(type_sym));
-        ivars.insert(self.s_children, children_val);
+        let mut ivars: Vec<(SymId, Value)> = Vec::new();
+        ivars.push((self.s_mutable_attributes, mattrs));
+        ivars.push((self.s_type, Value::Sym(type_sym)));
+        ivars.push((self.s_children, children_val));
         if let Some(mv) = &map_val {
-            ivars.insert(self.s_location, mv.clone());
+            ivars.push((self.s_location, mv.clone()));
         }
-        ivars.insert(self.s_hash, Value::Int(hash_val));
+        ivars.push((self.s_hash, Value::Int(hash_val)));
 
         let node_val = self.alloc_instance(class, ivars, true)?;
 
         // location.node = self (freezes the map).
         if let Some(Value::Object(map_id)) = map_val {
             let inst = self.vm.heap.instance_mut(map_id);
-            inst.ivars.insert(self.s_node, node_val.clone());
+            inst.ivar_set(self.s_node, node_val.clone());
             inst.frozen.set(true);
         }
 
@@ -422,7 +423,7 @@ impl<'vm> M<'vm> {
             let Value::Object(cid) = child else { continue };
             let mattr = {
                 let inst = self.vm.heap.instance_mut(cid);
-                inst.ivars.get(&self.s_mutable_attributes).cloned()
+                inst.ivar_get(self.s_mutable_attributes).cloned()
             };
             if let Some(Value::Hash(hid)) = mattr
                 && let HeapObj::Hash(h) = self.vm.heap.get_mut(hid)
@@ -494,16 +495,16 @@ pub(crate) fn materialize(
         // Offsets: byte → char.
         let cr = R { b: off.c(start), e: off.c(end) };
         let range_val = m.range(cr)?;
-        let mut map_ivars = IvarTable::default();
-        map_ivars.insert(m.s_expression, range_val);
+        let mut map_ivars: Vec<(SymId, Value)> = Vec::new();
+        map_ivars.push((m.s_expression, range_val));
         let map_val = m.alloc_instance(map_class.clone(), map_ivars, false)?;
         let text_bytes = src.get(start as usize..end as usize).unwrap_or(&[]).to_vec();
         let text_rs = crate::value::RStr::from_bytes(text_bytes);
         text_rs.encoding.set(enc);
         text_rs.frozen.set(true);
-        let mut ivars = IvarTable::default();
-        ivars.insert(s_location, map_val);
-        ivars.insert(s_text, Value::Str(Rc::new(text_rs)));
+        let mut ivars: Vec<(SymId, Value)> = Vec::new();
+        ivars.push((s_location, map_val));
+        ivars.push((s_text, Value::Str(Rc::new(text_rs))));
         comments_out.push(m.alloc_instance(comment_class.clone(), ivars, true)?);
     }
     let comments_val = m.alloc_array(comments_out, false)?;

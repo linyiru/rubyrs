@@ -835,6 +835,7 @@ impl Heap {
             singleton_target: RefCell::new(None),
             undefed: RefCell::new(crate::intern::FxHashSet::default()),
             anon_serial: std::cell::Cell::new(0),
+            ivar_shape: std::cell::RefCell::new(crate::value::IvarShape::default()),
                     class_vars: RefCell::new(crate::intern::FxHashMap::default()),
             consts: RefCell::new(crate::intern::FxHashMap::default()),
             assigned_name: RefCell::new(None),
@@ -2256,19 +2257,19 @@ impl Value {
             Value::Object(id) => {
                 let head = self.to_display(heap, interner);
                 let inst_ivars = match heap.get(*id) {
-                    HeapObj::Instance(inst) => Some(&inst.ivars),
+                    HeapObj::Instance(inst) => Some(inst.ivar_pairs()),
                     _ => None,
                 };
                 match inst_ivars {
                     Some(iv) if !iv.is_empty() => {
                         let mut pairs: Vec<(String, String)> = iv
-                            .iter()
+                            .into_iter()
                             .map(|(k, v)| {
                                 let val = match v {
                                     Value::Object(_) => v.to_display(heap, interner),
                                     _ => v.to_inspect(heap, interner),
                                 };
-                                (interner.resolve(*k).to_string(), val)
+                                (interner.resolve(k).to_string(), val)
                             })
                             .collect();
                         pairs.sort_by(|a, b| a.0.cmp(&b.0));
@@ -2773,6 +2774,7 @@ mod tests {
             singleton_target: RefCell::new(None),
             undefed: RefCell::new(crate::intern::FxHashSet::default()),
             anon_serial: Cell::new(0),
+            ivar_shape: std::cell::RefCell::new(crate::value::IvarShape::default()),
             class_vars: RefCell::new(crate::intern::FxHashMap::default()),
             consts: RefCell::new(crate::intern::FxHashMap::default()),
             assigned_name: RefCell::new(None),

@@ -488,8 +488,8 @@ impl Vm {
                 if let HeapObj::Instance(inst) = self.heap.get(*oid) {
                     let mut sec: Option<i64> = None;
                     let mut nsec: i64 = 0;
-                    for (k, val) in inst.ivars.iter() {
-                        match self.interner.resolve(*k).as_ref() {
+                    for (k, val) in inst.ivar_pairs() {
+                        match self.interner.resolve(k).as_ref() {
                             "@sec" => if let Value::Int(n) = val { sec = Some(*n); },
                             "@nsec" => if let Value::Int(n) = val { nsec = *n; },
                             _ => {}

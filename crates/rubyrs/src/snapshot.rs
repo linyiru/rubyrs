@@ -351,8 +351,17 @@ fn image_value(v: &crate::value::Value, ids: &mut ClassIds) -> ValueImage {
     }
 }
 
-fn image_ivars(it: &crate::value::IvarTable, ids: &mut ClassIds) -> Vec<(u32, ValueImage)> {
-    it.iter().map(|(s, v)| (s.0, image_value(v, ids))).collect()
+/// Image an Instance's ivars as `(SymId, ValueImage)` pairs in the
+/// object's ASSIGNMENT order — the image format is name-keyed (NOT
+/// slot-keyed), so it is independent of the class's ivar-shape slot
+/// numbering (ADR 0035 Ph4/5): restore re-interns names into the
+/// restored class's shape in encounter order.
+fn image_ivars(
+    it: &crate::value::IvarTable,
+    class: &crate::value::Class,
+    ids: &mut ClassIds,
+) -> Vec<(u32, ValueImage)> {
+    it.iter(class).into_iter().map(|(s, v)| (s.0, image_value(v, ids))).collect()
 }
 
 fn image_fx_ivars(
@@ -374,7 +383,7 @@ fn capture_heap(vm: &crate::vm::Vm, ids: &mut ClassIds) -> Vec<HeapObjImage> {
             Slot::Live(obj) => match obj {
                 HeapObj::Instance(i) => HeapObjImage::Instance {
                     class: ids.intern(&i.class),
-                    ivars: image_ivars(&i.ivars, ids),
+                    ivars: image_ivars(&i.ivars, &i.class, ids),
                     frozen: i.frozen.get(),
                 },
                 HeapObj::Array(a) => HeapObjImage::Array {
@@ -785,6 +794,7 @@ fn new_class_shell(name: String, is_module: bool) -> Rc<Class> {
         is_module,
         undefed: RefCell::new(crate::intern::FxHashSet::default()),
         anon_serial: Cell::new(0),
+        ivar_shape: std::cell::RefCell::new(crate::value::IvarShape::default()),
         ivars: RefCell::new(crate::intern::FxHashMap::default()),
         methods: RefCell::new(crate::intern::FxHashMap::default()),
         singleton_methods: RefCell::new(crate::intern::FxHashMap::default()),
@@ -957,15 +967,17 @@ fn build_heap(
                 ivars,
                 frozen,
             } => {
+                let cls = classes[*class as usize].clone();
                 let mut it = IvarTable::default();
                 for (s, vi) in ivars {
                     it.insert(
+                        &cls,
                         crate::intern::SymId(*s),
                         value_from_image(vi, classes, kinds),
                     );
                 }
                 Slot::Live(HeapObj::Instance(Instance {
-                    class: classes[*class as usize].clone(),
+                    class: cls,
                     ivars: it,
                     singleton_class: None,
                     frozen: std::cell::Cell::new(*frozen),

@@ -70,8 +70,8 @@ impl Vm {
         let whole_ivar = self.interner.intern("@whole");
         let caps_ivar = self.interner.intern("@caps");
         let inst = self.heap.instance_mut(obj_id);
-        inst.ivars.insert(whole_ivar, Value::new_str(whole));
-        inst.ivars.insert(caps_ivar, Value::Array(caps_arr));
+        inst.ivar_set(whole_ivar, Value::new_str(whole));
+        inst.ivar_set(caps_ivar, Value::Array(caps_arr));
         // Optional context ivars — only inserted when the caller
         // supplied the data. Absent ivars resolve to nil via the
         // standard ivar-read fallback, so the MatchData methods
@@ -82,16 +82,16 @@ impl Vm {
         let str_ivar = self.interner.intern("@string");
         let re_ivar = self.interner.intern("@regexp");
         if let Some(s) = ctx.pre_match {
-            self.heap.instance_mut(obj_id).ivars.insert(pre_ivar, Value::new_str(s));
+            self.heap.instance_mut(obj_id).ivar_set(pre_ivar, Value::new_str(s));
         }
         if let Some(s) = ctx.post_match {
-            self.heap.instance_mut(obj_id).ivars.insert(post_ivar, Value::new_str(s));
+            self.heap.instance_mut(obj_id).ivar_set(post_ivar, Value::new_str(s));
         }
         if let Some(s) = ctx.string {
-            self.heap.instance_mut(obj_id).ivars.insert(str_ivar, Value::new_str(s));
+            self.heap.instance_mut(obj_id).ivar_set(str_ivar, Value::new_str(s));
         }
         if let Some(v) = ctx.regexp {
-            self.heap.instance_mut(obj_id).ivars.insert(re_ivar, v);
+            self.heap.instance_mut(obj_id).ivar_set(re_ivar, v);
         }
         // Named captures install as @named_caps: Hash<String,
         // String | nil>. The preamble's `MatchData#[]` consults
@@ -115,7 +115,7 @@ impl Vm {
                 crate::heap::HashObj::with_pairs(pairs)
             ));
             let nc_ivar = self.interner.intern("@named_caps");
-            self.heap.instance_mut(obj_id).ivars.insert(nc_ivar, Value::Hash(h_id));
+            self.heap.instance_mut(obj_id).ivar_set(nc_ivar, Value::Hash(h_id));
         }
         // Group byte spans (@group_byte_offsets) + group names
         // (@cap_names) back MatchData#begin/#end/#offset (+ byte*).
@@ -140,7 +140,7 @@ impl Vm {
             self.check_alloc()?;
             let off_id = self.heap.alloc(HeapObj::Array(span_vals.into()));
             let off_ivar = self.interner.intern("@group_byte_offsets");
-            self.heap.instance_mut(obj_id).ivars.insert(off_ivar, Value::Array(off_id));
+            self.heap.instance_mut(obj_id).ivar_set(off_ivar, Value::Array(off_id));
         }
         if !ctx.cap_names.is_empty() {
             let name_vals: Vec<Value> = ctx.cap_names
@@ -153,7 +153,7 @@ impl Vm {
             self.check_alloc()?;
             let names_id = self.heap.alloc(HeapObj::Array(name_vals.into()));
             let names_ivar = self.interner.intern("@cap_names");
-            self.heap.instance_mut(obj_id).ivars.insert(names_ivar, Value::Array(names_id));
+            self.heap.instance_mut(obj_id).ivar_set(names_ivar, Value::Array(names_id));
         }
         Ok(Value::Object(obj_id))
     }

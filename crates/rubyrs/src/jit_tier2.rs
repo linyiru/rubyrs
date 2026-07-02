@@ -464,7 +464,7 @@ unsafe extern "C" fn t2_ivar_get(vm: *mut crate::vm::Vm, oid: i64, sym: i64, out
     let vm = unsafe { &mut *vm };
     let name_id = SymId(sym as u32);
     let id = crate::value::ObjId(oid as u32);
-    match vm.heap.instance(id).ivars.get(&name_id) {
+    match vm.heap.instance(id).ivar_get(name_id) {
         Some(v) => {
             if t2_tags().trivial_mask & (1u64 << tag_of(v)) != 0 {
                 let w = value_words(v);
@@ -522,7 +522,7 @@ unsafe extern "C" fn t2_ivar_set_v(
     }
     match &self_val {
         Value::Object(id) => {
-            vm.heap.instance_mut(*id).ivars.insert(name_id, v);
+            vm.heap.instance_mut(*id).ivar_set(name_id, v);
         }
         Value::Class(c) => {
             c.ivars.borrow_mut().insert(name_id, v);
@@ -1371,8 +1371,7 @@ unsafe extern "C" fn t2_load_ivar(vm: *mut crate::vm::Vm, name_id: i64) {
         Value::Object(id) => vm
             .heap
             .instance(*id)
-            .ivars
-            .get(&name_id)
+            .ivar_get(name_id)
             .cloned()
             .unwrap_or(Value::Nil),
         Value::Class(c) => c.ivars.borrow().get(&name_id).cloned().unwrap_or(Value::Nil),

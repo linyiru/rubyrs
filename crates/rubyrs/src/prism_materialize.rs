@@ -233,7 +233,8 @@ fn prism_class(vm: &mut Vm, name: &str) -> Option<Rc<Class>> {
 /// Allocate an instance of `class` with `ivars` — the native equivalent of `Klass.new(...)`
 /// for the data-carrier classes whose `initialize` only assigns ivars (all prism result
 /// classes are of this shape; verified against parse_result.rb / node.rb).
-fn alloc_instance(vm: &mut Vm, class: Rc<Class>, ivars: IvarTable) -> Option<Value> {
+fn alloc_instance(vm: &mut Vm, class: Rc<Class>, pairs: Vec<(crate::intern::SymId, Value)>) -> Option<Value> {
+    let ivars = IvarTable::from_pairs(&class, pairs);
     // Respect an embedder heap cap (read-only check; never collects).
     vm.check_alloc().ok()?;
     let id = vm.heap.alloc(HeapObj::Instance(Instance {
@@ -278,11 +279,11 @@ impl<'a, 'vm> Mat<'a, 'vm> {
             "Source"
         };
         let class = prism_class(vm, class_name)?;
-        let mut ivars = IvarTable::default();
-        ivars.insert(syms.at_source, Value::Str(input_str.clone()));
-        ivars.insert(syms.at_start_line, Value::Int(1));
+        let mut ivars: Vec<(crate::intern::SymId, Value)> = Vec::new();
+        ivars.push((syms.at_source, Value::Str(input_str.clone())));
+        ivars.push((syms.at_start_line, Value::Int(1)));
         let offsets = alloc_array(vm, Vec::new())?;
-        ivars.insert(syms.at_offsets, offsets);
+        ivars.push((syms.at_offsets, offsets));
         alloc_instance(vm, class, ivars)
     }
 
@@ -317,12 +318,12 @@ impl<'a, 'vm> Mat<'a, 'vm> {
             self.location_class = Some(prism_class(self.vm, "Location")?);
         }
         let class = self.location_class.clone()?;
-        let mut ivars = IvarTable::default();
-        ivars.insert(self.syms.at_source, self.source_val.clone());
-        ivars.insert(self.syms.at_start_offset, Value::Int(start as i64));
-        ivars.insert(self.syms.at_length, Value::Int(length as i64));
-        ivars.insert(self.syms.at_leading_comments, Value::Nil);
-        ivars.insert(self.syms.at_trailing_comments, Value::Nil);
+        let mut ivars: Vec<(crate::intern::SymId, Value)> = Vec::new();
+        ivars.push((self.syms.at_source, self.source_val.clone()));
+        ivars.push((self.syms.at_start_offset, Value::Int(start as i64)));
+        ivars.push((self.syms.at_length, Value::Int(length as i64)));
+        ivars.push((self.syms.at_leading_comments, Value::Nil));
+        ivars.push((self.syms.at_trailing_comments, Value::Nil));
         alloc_instance(self.vm, class, ivars)
     }
 
@@ -357,8 +358,8 @@ impl<'a, 'vm> Mat<'a, 'vm> {
                 1 => embdoc_class.clone(),
                 _ => return None,
             };
-            let mut ivars = IvarTable::default();
-            ivars.insert(self.syms.at_location, loc);
+            let mut ivars: Vec<(crate::intern::SymId, Value)> = Vec::new();
+            ivars.push((self.syms.at_location, loc));
             out.push(alloc_instance(self.vm, class, ivars)?);
         }
         alloc_array(self.vm, out)
@@ -371,9 +372,9 @@ impl<'a, 'vm> Mat<'a, 'vm> {
         for _ in 0..n {
             let key_loc = self.load_location_object()?;
             let value_loc = self.load_location_object()?;
-            let mut ivars = IvarTable::default();
-            ivars.insert(self.syms.at_key_loc, key_loc);
-            ivars.insert(self.syms.at_value_loc, value_loc);
+            let mut ivars: Vec<(crate::intern::SymId, Value)> = Vec::new();
+            ivars.push((self.syms.at_key_loc, key_loc));
+            ivars.push((self.syms.at_value_loc, value_loc));
             out.push(alloc_instance(self.vm, class.clone(), ivars)?);
         }
         alloc_array(self.vm, out)
@@ -402,11 +403,11 @@ impl<'a, 'vm> Mat<'a, 'vm> {
             let msg = new_str(self.r.read(len)?.to_vec(), self.enc, true);
             let loc = self.load_location_object()?;
             let level = *levels.get(self.r.u8()? as usize)?;
-            let mut ivars = IvarTable::default();
-            ivars.insert(self.syms.at_type, type_sym);
-            ivars.insert(self.syms.at_message, msg);
-            ivars.insert(self.syms.at_location, loc);
-            ivars.insert(self.syms.at_level, Value::Sym(level));
+            let mut ivars: Vec<(crate::intern::SymId, Value)> = Vec::new();
+            ivars.push((self.syms.at_type, type_sym));
+            ivars.push((self.syms.at_message, msg));
+            ivars.push((self.syms.at_location, loc));
+            ivars.push((self.syms.at_level, Value::Sym(level)));
             out.push(alloc_instance(self.vm, class.clone(), ivars)?);
         }
         alloc_array(self.vm, out)
@@ -538,11 +539,11 @@ impl<'a, 'vm> Mat<'a, 'vm> {
         }
         let class = self.node_classes[ty - 1].clone()?;
 
-        let mut ivars = IvarTable::default();
-        ivars.insert(self.syms.at_source, self.source_val.clone());
-        ivars.insert(self.syms.at_node_id, Value::Int(node_id as i64));
-        ivars.insert(self.syms.at_location, location);
-        ivars.insert(self.syms.at_flags, Value::Int(flags as i64));
+        let mut ivars: Vec<(crate::intern::SymId, Value)> = Vec::new();
+        ivars.push((self.syms.at_source, self.source_val.clone()));
+        ivars.push((self.syms.at_node_id, Value::Int(node_id as i64)));
+        ivars.push((self.syms.at_location, location));
+        ivars.push((self.syms.at_flags, Value::Int(flags as i64)));
 
         for fi in 0..spec.fields.len() {
             let kind = spec.fields[fi].0;
@@ -589,7 +590,7 @@ impl<'a, 'vm> Mat<'a, 'vm> {
                 FieldKind::Double => Value::Float(self.r.f64_native()?),
             };
             let sym = self.node_field_syms[ty - 1].as_ref()?[fi];
-            ivars.insert(sym, value);
+            ivars.push((sym, value));
         }
 
         alloc_instance(self.vm, class, ivars)
@@ -619,11 +620,11 @@ impl<'a, 'vm> Mat<'a, 'vm> {
                 .input
                 .get(start as usize..(start as usize).checked_add(length as usize)?)?;
             let value = new_str(slice.to_vec(), enc, false);
-            let mut ivars = IvarTable::default();
-            ivars.insert(self.syms.at_source, self.source_val.clone());
-            ivars.insert(type_sym, Value::Sym(type_id));
-            ivars.insert(value_sym, value);
-            ivars.insert(self.syms.at_location, loc);
+            let mut ivars: Vec<(crate::intern::SymId, Value)> = Vec::new();
+            ivars.push((self.syms.at_source, self.source_val.clone()));
+            ivars.push((type_sym, Value::Sym(type_id)));
+            ivars.push((value_sym, value));
+            ivars.push((self.syms.at_location, loc));
             let token = alloc_instance(self.vm, token_class.clone(), ivars)?;
             let pair = alloc_array(self.vm, vec![token, Value::Int(lex_state as i64)])?;
             out.push(pair);
@@ -660,8 +661,8 @@ fn load_parse_body(m: &mut Mat) -> Option<LoadedParse> {
     let offsets_val = alloc_array(m.vm, offsets)?;
     if let Value::Object(sid) = m.source_val {
         let inst = m.vm.heap.instance_mut(sid);
-        inst.ivars.insert(m.syms.at_start_line, Value::Int(start_line));
-        inst.ivars.insert(m.syms.at_offsets, offsets_val);
+        inst.ivar_set(m.syms.at_start_line, Value::Int(start_line));
+        inst.ivar_set(m.syms.at_offsets, offsets_val);
     }
 
     let comments = m.comments()?;
@@ -688,14 +689,14 @@ fn load_parse_body(m: &mut Mat) -> Option<LoadedParse> {
 /// Assemble a `Prism::ParseResult` / `Prism::ParseLexResult` (`value` differs).
 fn build_result(m: &mut Mat, class_name: &str, value: Value, body: LoadedParse) -> Option<Value> {
     let class = prism_class(m.vm, class_name)?;
-    let mut ivars = IvarTable::default();
-    ivars.insert(m.syms.at_value, value);
-    ivars.insert(m.syms.at_comments, body.comments);
-    ivars.insert(m.syms.at_magic_comments, body.magic_comments);
-    ivars.insert(m.syms.at_data_loc, body.data_loc);
-    ivars.insert(m.syms.at_errors, body.errors);
-    ivars.insert(m.syms.at_warnings, body.warnings);
-    ivars.insert(m.syms.at_source, m.source_val.clone());
+    let mut ivars: Vec<(crate::intern::SymId, Value)> = Vec::new();
+    ivars.push((m.syms.at_value, value));
+    ivars.push((m.syms.at_comments, body.comments));
+    ivars.push((m.syms.at_magic_comments, body.magic_comments));
+    ivars.push((m.syms.at_data_loc, body.data_loc));
+    ivars.push((m.syms.at_errors, body.errors));
+    ivars.push((m.syms.at_warnings, body.warnings));
+    ivars.push((m.syms.at_source, m.source_val.clone()));
     alloc_instance(m.vm, class, ivars)
 }
 
@@ -773,7 +774,7 @@ pub(crate) fn materialize_parse_lex(vm: &mut Vm, source: &Rc<RStr>, blob: &[u8])
                 && let Some(Value::Object(tok_id)) = m.vm.heap.array(pid).first().cloned()
             {
                 let value_sym = m.vm.interner.intern("@value");
-                if let Some(Value::Str(s)) = m.vm.heap.instance(tok_id).ivars.get(&value_sym) {
+                if let Some(Value::Str(s)) = m.vm.heap.instance(tok_id).ivar_get(value_sym) {
                     s.encoding.set(enc);
                 }
             }

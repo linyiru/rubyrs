@@ -3279,6 +3279,7 @@ mod tests {
             superclass: RefCell::new(superclass),
             undefed: RefCell::new(crate::intern::FxHashSet::default()),
             anon_serial: std::cell::Cell::new(0),
+            ivar_shape: std::cell::RefCell::new(crate::value::IvarShape::default()),
                     class_vars: RefCell::new(crate::intern::FxHashMap::default()),
             consts: RefCell::new(crate::intern::FxHashMap::default()),
             assigned_name: RefCell::new(None),
