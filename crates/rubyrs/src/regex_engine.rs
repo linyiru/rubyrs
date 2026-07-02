@@ -227,13 +227,21 @@ pub(crate) fn compile_with_flags(
         // load). `engine()` builds native-then-fancy lazily, mirroring
         // the linear path's deferral.
         //
-        // SMALL patterns keep the EAGER build: it's cheap (<0.5ms) and
-        // preserves the construction-time RegexpError that the common
-        // `Regexp.new(str)` validation idiom relies on. Only the rare
-        // large-and-malformed pattern would shift its error to first
-        // match — and the lazy linear path already made that same
-        // resource-limit tradeoff.
-        Err(_) if prepared.len() > LAZY_FANCY_THRESHOLD => {
+        // SMALL patterns used to keep the EAGER build for its
+        // construction-time RegexpError — but "small" is no shield
+        // against a pathological build: a ~20-char case-insensitive
+        // lookaround over `[\W_]` costs ~6.5ms in fancy-regex's
+        // NFA construction (Unicode case-fold expansion), and rubocop's
+        // Naming/InclusiveLanguage compiles five such per FILE (~26ms
+        // per file, never matched — the cop is disabled). So small
+        // patterns now defer too, as long as `Expr::parse_tree`
+        // (a cheap syntax-only parse) accepts them — that keeps the
+        // construction-time RegexpError for malformed patterns; only
+        // a pattern that parses but fails the full NFA build (resource
+        // limits) shifts its error to first match, the same tradeoff
+        // the linear path and the large-pattern branch already made.
+        Err(_) if prepared.len() > LAZY_FANCY_THRESHOLD
+            || fancy_regex::Expr::parse_tree(&prepared).is_ok() => {
             if std::env::var_os("RUBYRS_REGEX_STATS").is_some_and(|v| v == "2") {
                 eprintln!("[fancy-regex:lazy] /{}/", bare_source);
             }
