@@ -25,6 +25,153 @@ use crate::value::{Class, Instance, Value};
 use super::{class_is_a, LoopTransfer, LoopTransferKind, RescueFilter, Vm};
 
 impl Vm {
+    /// Resolve a rescue handler's filter spec to concrete classes, AT
+    /// MATCH TIME (an exception is in flight; CRuby evaluates
+    /// `rescue <expr>` class expressions at exactly this point). The
+    /// handler being probed always belongs to the CURRENT top frame —
+    /// the unwinder pops a frame only after exhausting its handlers —
+    /// so the top frame's proto (lexical scope) and locals are the
+    /// handler's own. Returns `None` when the name doesn't resolve to
+    /// a class (fail-closed: matches nothing), matching the old
+    /// push-time behaviour for unloaded classes.
+    ///
+    /// `RescueFilterSpec::Sym` resolution mirrors `Op::LoadConstChain`:
+    /// the compiler stamps only the bare source sym (e.g. `Sig`), but a
+    /// class defined as `module M; class Sig` is keyed in `self.classes`
+    /// by its QUALIFIED sym (`M::Sig`) — so the enclosing scopes are
+    /// walked innermost-first, qualifying the bare name, before the
+    /// bare fallback (which covers top-level classes and `rescue
+    /// Foo::Bar` whose sym is already qualified). Splatted syms
+    /// (`rescue *PASSTHROUGH` — minitest's PASSTHROUGH_EXCEPTIONS
+    /// idiom) resolve the constant's Array VALUE through the same
+    /// chain; `rescue ::Foo::Bar` absolute paths skip the lex-walk.
+    fn resolve_rescue_filter(
+        &mut self,
+        spec: &crate::vm::RescueFilterSpec,
+    ) -> Option<RescueFilter> {
+        cold_path();
+        match spec {
+            crate::vm::RescueFilterSpec::None => None,
+            // `rescue *local` — read the slot now and snapshot its
+            // Array elements as the filter list. A single Class
+            // coerces to a one-element filter; Nil/other values match
+            // nothing (fail-closed).
+            crate::vm::RescueFilterSpec::SplatLocal(src_slot) => {
+                let f = self.frames.last().expect("ICE: rescue filter with no frame");
+                let src = match &f.locals {
+                    crate::vm::Locals::Stack(base) => {
+                        self.locals_arena[*base as usize + *src_slot as usize].clone()
+                    }
+                    crate::vm::Locals::Shared(rc) => rc.borrow()[*src_slot as usize].clone(),
+                };
+                match src {
+                    Value::Array(id) => {
+                        let list: Vec<Rc<Class>> = self.heap.array(id).iter()
+                            .filter_map(|v| match v {
+                                Value::Class(c) => Some(c.clone()),
+                                _ => None,
+                            })
+                            .collect();
+                        Some(RescueFilter::Any(list))
+                    }
+                    Value::Class(c) => Some(RescueFilter::Class(c)),
+                    _ => None,
+                }
+            }
+            crate::vm::RescueFilterSpec::Sym(filter_sym) => {
+                let filter_sym = *filter_sym;
+                // Clone the `Rc<str>` instead of materializing a
+                // fresh `String` — the interner returns `&Rc<str>`
+                // so the clone is a refcount bump.
+                let bare_name: Rc<str> = self.interner.resolve(filter_sym).clone();
+                // Splatted filter (`rescue *PASSTHROUGH`) — the marked
+                // name is a CONSTANT holding an Array of classes.
+                // Unresolved names and non-Array/non-Class values
+                // yield `None` (match nothing): fail-closed, where a
+                // dropped-splat lowering would degrade to a bare
+                // rescue that matched EVERY StandardError.
+                if let Some(splat_inner) = crate::const_marker::strip_splat(&bare_name) {
+                    let val: Option<Value> = if let Some(abs) = crate::const_marker::strip_absolute(splat_inner) {
+                        let abs_sym = self.interner.intern(abs);
+                        self.constants.get(&abs_sym).cloned()
+                    } else {
+                        let proto_idx = self.frames.last().expect("ICE: rescue filter with no frame").proto_idx;
+                        let lex = self.protos[proto_idx].lexical_scope.clone();
+                        let mut found = None;
+                        for scope_sym in &lex {
+                            let scope_name = self.interner.resolve(*scope_sym).clone();
+                            let qualified = format!("{}::{}", scope_name, splat_inner);
+                            let qsym = self.interner.intern(&qualified);
+                            if let Some(v) = self.constants.get(&qsym) {
+                                found = Some(v.clone());
+                                break;
+                            }
+                        }
+                        found.or_else(|| {
+                            let inner_sym = self.interner.intern(splat_inner);
+                            self.constants.get(&inner_sym).cloned()
+                        })
+                    };
+                    match val {
+                        Some(Value::Array(id)) => {
+                            let list: Vec<Rc<Class>> = self.heap.array(id).iter()
+                                .filter_map(|v| match v {
+                                    Value::Class(c) => Some(c.clone()),
+                                    _ => None,
+                                })
+                                .collect();
+                            Some(RescueFilter::Any(list))
+                        }
+                        // `rescue *X` where X holds a single class —
+                        // CRuby Array()-coerces, so it behaves as a
+                        // one-element list.
+                        Some(Value::Class(c)) => Some(RescueFilter::Class(c)),
+                        _ => None,
+                    }
+                }
+                // Absolute paths (`rescue ::Foo::Bar`) carry a leading
+                // `::` marker from the AST lowering. CRuby semantics:
+                // skip the lex-walk and look up the joined name at top
+                // level only.
+                else if let Some(absolute_bare) = crate::const_marker::strip_absolute(&bare_name) {
+                    let abs_sym = self.interner.intern(absolute_bare);
+                    self.classes.get(&abs_sym).cloned()
+                        .or_else(|| match self.constants.get(&abs_sym) {
+                            Some(Value::Class(c)) => Some(c.clone()),
+                            _ => None,
+                        })
+                        .map(RescueFilter::Class)
+                } else {
+                    let proto_idx = self.frames.last().expect("ICE: rescue filter with no frame").proto_idx;
+                    let lex = self.protos[proto_idx].lexical_scope.clone();
+                    let mut found = None;
+                    if !lex.is_empty() {
+                        for scope_sym in &lex {
+                            let scope_name = self.interner.resolve(*scope_sym).clone();
+                            let qualified = format!("{}::{}", scope_name, bare_name);
+                            let qsym = self.interner.intern(&qualified);
+                            if let Some(c) = self.classes.get(&qsym).cloned() {
+                                found = Some(c);
+                                break;
+                            }
+                            if let Some(Value::Class(c)) = self.constants.get(&qsym) {
+                                found = Some(c.clone());
+                                break;
+                            }
+                        }
+                    }
+                    found
+                        .or_else(|| self.classes.get(&filter_sym).cloned())
+                        .or_else(|| match self.constants.get(&filter_sym) {
+                            Some(Value::Class(c)) => Some(c.clone()),
+                            _ => None,
+                        })
+                        .map(RescueFilter::Class)
+                }
+            }
+        }
+    }
+
     /// Convert a Ruby-level `raise` argument into an Exception instance.
     /// `raise "msg"` becomes `RuntimeError.new("msg")` — we construct the
     /// instance directly (skipping the `initialize` dispatch) and set
@@ -386,41 +533,45 @@ impl Vm {
             // that doesn't match is dropped, not re-pushed: the rescue
             // clause was tied to *this* begin/end scope, which we're
             // unwinding past anyway.
-            let chosen = {
-                let f = self.frames.last_mut().expect("ICE: unwind with empty frames");
-                let mut chosen = None;
-                while let Some(h) = f.pop_rescue() {
-                    let matches = if h.is_ensure {
-                        // ensure is unconditional — always runs.
-                        true
-                    } else if let Some(filter) = &h.filter_class {
-                        // explicit class filter (including bare
-                        // `rescue` which compiles to StandardError).
-                        // The splat form (`rescue *PASSTHROUGH`)
-                        // matches if ANY listed class matches.
-                        exc_class.as_ref().is_some_and(|cls| {
-                            // Throw carrier: only a filter that is itself
-                            // RubyrsThrowSignal-or-narrower may catch it.
-                            let filter_ok = |f: &Rc<Class>| {
-                                class_is_a(cls, f)
-                                    && (!exc_is_throw_signal
-                                        || class_chain_has_name(f, "RubyrsThrowSignal"))
-                            };
-                            match filter {
-                                RescueFilter::Class(f) => filter_ok(f),
-                                RescueFilter::Any(list) => list.iter().any(filter_ok),
-                            }
-                        })
-                    } else {
-                        // Non-ensure handler with no resolved filter
-                        // class means the source said `rescue Foo`
-                        // where `Foo` wasn't loaded at push-time.
-                        // Matches nothing — keep unwinding.
-                        false
-                    };
-                    if matches { chosen = Some(h); break; }
-                }
-                chosen
+            let chosen = loop {
+                let popped = self
+                    .frames
+                    .last_mut()
+                    .expect("ICE: unwind with empty frames")
+                    .pop_rescue();
+                let Some(h) = popped else { break None };
+                let matches = if h.is_ensure {
+                    // ensure is unconditional — always runs.
+                    true
+                } else if let Some(filter) = self.resolve_rescue_filter(&h.filter) {
+                    // explicit class filter (including bare
+                    // `rescue` which compiles to StandardError),
+                    // resolved NOW — at match time, CRuby's own
+                    // evaluation point for a rescue class expr (the
+                    // handler only carries the SymId / local slot).
+                    // The splat form (`rescue *PASSTHROUGH`)
+                    // matches if ANY listed class matches.
+                    exc_class.as_ref().is_some_and(|cls| {
+                        // Throw carrier: only a filter that is itself
+                        // RubyrsThrowSignal-or-narrower may catch it.
+                        let filter_ok = |f: &Rc<Class>| {
+                            class_is_a(cls, f)
+                                && (!exc_is_throw_signal
+                                    || class_chain_has_name(f, "RubyrsThrowSignal"))
+                        };
+                        match &filter {
+                            RescueFilter::Class(f) => filter_ok(f),
+                            RescueFilter::Any(list) => list.iter().any(filter_ok),
+                        }
+                    })
+                } else {
+                    // Non-ensure handler whose filter doesn't resolve
+                    // to a class means the source said `rescue Foo`
+                    // where `Foo` isn't loaded. Matches nothing —
+                    // keep unwinding (fail-closed).
+                    false
+                };
+                if matches { break Some(h); }
             };
             if let Some(h) = chosen {
                 self.stack.truncate(h.stack_depth);
@@ -504,6 +655,10 @@ impl Vm {
             // truncate for Stack frames, recycle for Shared) — every
             // frame-pop site must do this.
             self.release_frame_locals(f.locals);
+            // Recycle the aux box (its remaining handlers were already
+            // drained by the pop_rescue loop above; clearing drops any
+            // leftover loop/begin bookkeeping).
+            self.recycle_frame_aux(f.aux);
             if self.frames.is_empty() {
                 // No rescue clause anywhere — surface the exception
                 // to the host as a Trap instead of terminating the
@@ -746,6 +901,7 @@ impl Vm {
                     self.stack.push(mb.value);
                 }
                 self.release_frame_locals(popped.locals);
+                self.recycle_frame_aux(popped.aux);
                 return Ok(());
             }
             // Phase A.5: above the target. Pop this intermediate
@@ -773,6 +929,7 @@ impl Vm {
                 self.module_function_active_stack.pop();
             }
             self.release_frame_locals(popped.locals);
+            self.recycle_frame_aux(popped.aux);
         }
     }
 }

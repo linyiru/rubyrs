@@ -529,21 +529,33 @@ pub(crate) struct RescueHandler {
     /// `rescues` to the wrong depth, leaving outer rescue
     /// handlers stranded. (Code-review #306 round 2.)
     pub(crate) begin_depth_at_push: usize,
-    /// Class filter for `rescue`. `None` means catch-all (used for
-    /// `ensure` and as a future hook for internal/host-only handlers).
-    /// `Some(Class(cls))` means the handler only fires when the raised
-    /// exception's class is `cls` or a descendant. Bare `rescue` (no
-    /// class listed) populates this with `StandardError`, so any
-    /// exception that intentionally lives outside the StandardError
-    /// subtree (e.g. `ResourceExhausted`) cannot be silently swallowed
-    /// by `rescue => e`. Explicit `rescue ClassName => e` carries the
-    /// resolved Class here. Multi-class clauses (`rescue A, B => e`)
-    /// emit one handler per class — same handler_ip, same bind_slot —
-    /// so each entry holds exactly one filter. `Some(Any(list))` is
-    /// the splat form `rescue *CONST`: the constant's Array value is
-    /// snapshotted into a class list at push time and the handler
-    /// fires when ANY entry matches.
-    pub(crate) filter_class: Option<RescueFilter>,
+    /// UNRESOLVED class filter for `rescue` — resolved lazily by the
+    /// unwinder at MATCH time (see `Vm::resolve_rescue_filter`).
+    /// CRuby evaluates a `rescue <expr>` class expression when an
+    /// exception is actually in flight, not at begin entry — and
+    /// eager push-time resolution made every begin/rescue prologue
+    /// pay a lexical-scope walk (Vec clone + `format!` + intern +
+    /// class-table probes per enclosing scope, per call): rubocop's
+    /// `Commissioner#with_cop_error_handling` spent ~0.5µs/call on it,
+    /// 25.6k calls per file walk. Now the non-raising path stores two
+    /// plain words and the resolution cost rides on the raise.
+    pub(crate) filter: RescueFilterSpec,
+}
+
+/// The unresolved filter carried by a `RescueHandler` (resolution
+/// happens at match time — see `filter`'s doc).
+#[derive(Clone, Copy)]
+pub(crate) enum RescueFilterSpec {
+    /// `ensure` entries — no class filter (they match unconditionally
+    /// via `is_ensure`).
+    None,
+    /// `rescue <Name>` — the compiler-stamped SymId (possibly carrying
+    /// the splat / absolute-path markers). Bare `rescue` stamps
+    /// `StandardError`. Multi-class clauses (`rescue A, B => e`) emit
+    /// one handler per class, so each entry holds exactly one sym.
+    Sym(crate::intern::SymId),
+    /// `rescue *local` — the local slot, read at match time.
+    SplatLocal(u16),
 }
 
 /// The two resolved shapes a `rescue` class filter can take. The
@@ -552,12 +564,9 @@ pub(crate) struct RescueHandler {
 pub(crate) enum RescueFilter {
     /// `rescue Foo` / bare `rescue` (= StandardError) — one class.
     Class(Rc<Class>),
-    /// `rescue *CONST` — match if any listed class matches. The
-    /// list is the constant's Array value AS OF push time; CRuby
-    /// re-evaluates the expression at match time, a divergence
-    /// only observable if the array is mutated while the body
-    /// runs (no real gem does this — minitest's
-    /// PASSTHROUGH_EXCEPTIONS pattern is a frozen-ish constant).
+    /// `rescue *CONST` / `rescue *local` — match if any listed class
+    /// matches. The list is the expression's Array value as of MATCH
+    /// time (CRuby semantics).
     Any(Vec<Rc<Class>>),
 }
 
@@ -1490,6 +1499,14 @@ pub(crate) struct Vm {
     pub(crate) refined_method_names: crate::intern::FxHashSet<SymId>,
     pub(crate) stack: Vec<Value>,
     pub(crate) frames: Vec<Frame>,
+    /// Recycled `FrameAux` boxes (cleared, capacities kept warm) so a
+    /// begin/rescue-bearing method doesn't malloc a fresh box + Vec
+    /// backings on EVERY call (rubocop's `with_cop_error_handling`
+    /// enters a begin 25.6k times per file walk). `top_aux_mut` pops
+    /// from here; the frame-pop sites push back via
+    /// `recycle_frame_aux`. Pooled boxes hold NO `Value`s (cleared at
+    /// recycle time), so the GC never needs to walk this.
+    pub(crate) frame_aux_pool: Vec<Box<FrameAux>>,
     pub(crate) heap: Heap,
     /// Native-code holding pen for heap values across GC points; see ADR 0005.
     pub(crate) pinned: Vec<Value>,
@@ -2391,6 +2408,7 @@ impl Vm {
             refined_method_names: crate::intern::FxHashSet::default(),
             stack: Vec::with_capacity(1024),
             frames: vec![],
+            frame_aux_pool: Vec::new(),
             heap: Heap::new(),
             pinned: Vec::new(),
             // ADR 0017 Rule 2 closure: default sink is silent
@@ -2552,8 +2570,41 @@ impl Vm {
 
 impl Vm {
 
+    /// Get-or-create the TOP frame's aux box, reusing a pooled box
+    /// when one is available (see `frame_aux_pool`). The hot aux
+    /// creators (`Op::EnterBegin` / `Op::PushRescue` / `Op::PushEnsure`
+    /// / `Op::EnterLoop`) route through here so a begin/rescue-bearing
+    /// method stays malloc-free per call once the pool is warm.
+    #[inline]
+    pub(crate) fn top_aux_mut(&mut self) -> &mut FrameAux {
+        let f = self.frames.last_mut().expect("ICE: aux access with no frame");
+        if f.aux.is_none() {
+            f.aux = Some(self.frame_aux_pool.pop().unwrap_or_default());
+        }
+        f.aux.as_mut().unwrap()
+    }
 
-
+    /// Return a popped frame's aux box to the pool: clear every field
+    /// (keeping the Vec capacities — that's the point) so the pool
+    /// holds no `Value`s / stale state, and cap the pool size so a
+    /// deep-recursion spike doesn't pin memory forever. Frame-pop
+    /// sites call this best-effort; a frame dropped elsewhere (e.g.
+    /// `frames.truncate` on an error path) simply frees its box.
+    #[inline]
+    pub(crate) fn recycle_frame_aux(&mut self, aux: Option<Box<FrameAux>>) {
+        const FRAME_AUX_POOL_MAX: usize = 32;
+        if let Some(mut a) = aux
+            && self.frame_aux_pool.len() < FRAME_AUX_POOL_MAX
+        {
+            a.invoked_name = None;
+            a.instance_eval_definee = None;
+            a.rescues.clear();
+            a.loop_rescue_depths.clear();
+            a.loop_stack_depths.clear();
+            a.begin_rescue_depths.clear();
+            self.frame_aux_pool.push(a);
+        }
+    }
 
 
 

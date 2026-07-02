@@ -18,7 +18,7 @@ use crate::error::{RubyError, Trap};
 use crate::heap::HeapObj;
 use crate::value::{BlockHandle, Class, Method, ObjId, Value, Visibility};
 
-use super::{primitive_call, vec_nil, Frame, LoopTransferKind, RescueFilter, RescueHandler, Vm};
+use super::{primitive_call, vec_nil, Frame, LoopTransferKind, RescueHandler, Vm};
 
 /// Translate Onigmo-specific regex constructs into something the
 /// Rust `regex` crate accepts. The crate is by design less
@@ -5246,6 +5246,16 @@ impl Vm {
                 self.op_new_hash(n as usize)?;
             }
             Op::PushRescue(off, slot, bind, filter_sym) => {
+                // The class filter is NOT resolved here: the handler
+                // stores the compiler-stamped SymId and the unwinder
+                // resolves it at MATCH time (`Vm::resolve_rescue_filter`
+                // in raise.rs — CRuby's own evaluation point for a
+                // `rescue <expr>` class). Push-time resolution made
+                // every begin/rescue prologue pay the lexical-scope
+                // walk (Vec clone + `format!` + intern + class-table
+                // probes per scope, per CALL) — ~0.5µs/call on
+                // rubocop's `with_cop_error_handling`, its #1
+                // self-time method (25.6k calls/walk).
                 let f = self.frames.last().expect("ICE: PushRescue no frame");
                 let ip = f.ip;
                 let loop_depth = f.loop_depth();
@@ -5253,141 +5263,19 @@ impl Vm {
                 let target = (ip as i32 + off) as usize;
                 let depth = self.stack.len();
                 let bind_slot = if bind != 0 { Some(slot) } else { None };
-                // The compiler emits the SymId of the class to filter
-                // by — for bare `rescue` that's `StandardError`, for
-                // `rescue Foo::Bar` the qualified-form SymId stamped
-                // by the lexical dual-write. We resolve through the
-                // same fallback chain as `Op::LoadConst`: `classes`
-                // first (bare names + dual-write copies), then
-                // `constants` (where user `Foo::Bar = …` aliases land).
-                // If neither hits, `filter_class` stays `None` and
-                // the handler fails every match check — closer to
-                // CRuby than silently catching everything.
-                // Resolve the rescue-class name through the lexical
-                // nesting, exactly like `Op::LoadConstChain` resolves a
-                // bare constant read. The compiler stamps only the bare
-                // source sym (e.g. `Sig`), but a class defined as
-                // `module M; class Sig` is keyed in `self.classes` by
-                // its QUALIFIED sym (`M::Sig`) — so a plain
-                // `classes.get("Sig")` missed it and `rescue Sig` inside
-                // `module M` never matched, letting the exception escape
-                // (the `raise` side already resolves via the lexical
-                // chain, so the two sides disagreed). Walk the enclosing
-                // scopes innermost-first, qualifying the bare name, then
-                // fall back to the bare lookup (covers top-level classes
-                // and `rescue Foo::Bar` whose sym is already qualified).
-                let filter = {
-                    // Clone the `Rc<str>` instead of materializing a
-                    // fresh `String` — the interner returns
-                    // `&Rc<str>` so the clone is a refcount bump.
-                    // Defer the lex-walk's `lexical_scope.clone()`
-                    // into the relative branch so absolute rescues
-                    // don't pay for the Vec copy.
-                    let bare_name: std::rc::Rc<str> = self.interner.resolve(filter_sym).clone();
-                    // Splatted filter (`rescue *PASSTHROUGH`) — the
-                    // marked name is a CONSTANT holding an Array of
-                    // classes (minitest's PASSTHROUGH_EXCEPTIONS
-                    // idiom). Resolve the constant's VALUE — absolute
-                    // or via the same lex-walk as the relative branch
-                    // below — and snapshot its class elements.
-                    // Unresolved names and non-Array/non-Class values
-                    // yield `None` (match nothing): fail-closed,
-                    // where the old dropped-splat lowering degraded
-                    // to a bare rescue that matched EVERY
-                    // StandardError (minitest's passthrough arm then
-                    // re-raised every test error and killed the run).
-                    if let Some(splat_inner) = crate::const_marker::strip_splat(&bare_name) {
-                        let val: Option<Value> = if let Some(abs) = crate::const_marker::strip_absolute(splat_inner) {
-                            let abs_sym = self.interner.intern(abs);
-                            self.constants.get(&abs_sym).cloned()
-                        } else {
-                            let proto_idx = self.frames.last().expect("ICE: PushRescue no frame").proto_idx;
-                            let lex = self.protos[proto_idx].lexical_scope.clone();
-                            let mut found = None;
-                            for scope_sym in &lex {
-                                let scope_name = self.interner.resolve(*scope_sym).clone();
-                                let qualified = format!("{}::{}", scope_name, splat_inner);
-                                let qsym = self.interner.intern(&qualified);
-                                if let Some(v) = self.constants.get(&qsym) {
-                                    found = Some(v.clone());
-                                    break;
-                                }
-                            }
-                            found.or_else(|| {
-                                let inner_sym = self.interner.intern(splat_inner);
-                                self.constants.get(&inner_sym).cloned()
-                            })
-                        };
-                        match val {
-                            Some(Value::Array(id)) => {
-                                let list: Vec<std::rc::Rc<Class>> = self.heap.array(id).iter()
-                                    .filter_map(|v| match v {
-                                        Value::Class(c) => Some(c.clone()),
-                                        _ => None,
-                                    })
-                                    .collect();
-                                Some(RescueFilter::Any(list))
-                            }
-                            // `rescue *X` where X holds a single
-                            // class — CRuby Array()-coerces, so it
-                            // behaves as a one-element list.
-                            Some(Value::Class(c)) => Some(RescueFilter::Class(c)),
-                            _ => None,
-                        }
-                    }
-                    // Absolute paths (`rescue ::Foo::Bar`) carry a
-                    // leading `::` marker from the AST lowering.
-                    // CRuby semantics: skip the lex-walk and look up
-                    // the joined name at top level only.
-                    else if let Some(absolute_bare) = crate::const_marker::strip_absolute(&bare_name) {
-                        let abs_sym = self.interner.intern(absolute_bare);
-                        self.classes.get(&abs_sym).cloned()
-                            .or_else(|| match self.constants.get(&abs_sym) {
-                                Some(Value::Class(c)) => Some(c.clone()),
-                                _ => None,
-                            })
-                            .map(RescueFilter::Class)
-                    } else {
-                        let proto_idx = self.frames.last().expect("ICE: PushRescue no frame").proto_idx;
-                        let lex = self.protos[proto_idx].lexical_scope.clone();
-                        let mut found = None;
-                        if !lex.is_empty() {
-                            for scope_sym in &lex {
-                                let scope_name = self.interner.resolve(*scope_sym).clone();
-                                let qualified = format!("{}::{}", scope_name, bare_name);
-                                let qsym = self.interner.intern(&qualified);
-                                if let Some(c) = self.classes.get(&qsym).cloned() {
-                                    found = Some(c);
-                                    break;
-                                }
-                                if let Some(Value::Class(c)) = self.constants.get(&qsym) {
-                                    found = Some(c.clone());
-                                    break;
-                                }
-                            }
-                        }
-                        found
-                            .or_else(|| self.classes.get(&filter_sym).cloned())
-                            .or_else(|| match self.constants.get(&filter_sym) {
-                                Some(Value::Class(c)) => Some(c.clone()),
-                                _ => None,
-                            })
-                            .map(RescueFilter::Class)
-                    }
-                };
-                self.frames.last_mut().expect("ICE: PushRescue no frame").aux_mut().rescues.push(RescueHandler {
+                self.top_aux_mut().rescues.push(RescueHandler {
                     handler_ip: target, stack_depth: depth, bind_slot, is_ensure: false,
-                    filter_class: filter, loop_depth_at_push: loop_depth,
+                    filter: crate::vm::RescueFilterSpec::Sym(filter_sym),
+                    loop_depth_at_push: loop_depth,
                     begin_depth_at_push: begin_depth,
                 });
             }
             Op::PushRescueSplatLocal(off, slot, bind, src_slot) => {
-                // `rescue *exp` on a local — read the slot NOW (push
-                // time) and snapshot its Array elements as the filter
-                // list. A single Class coerces to a one-element
-                // filter; Nil/other values match nothing
-                // (fail-closed). See Op::PushRescue for the shared
-                // handler bookkeeping.
+                // `rescue *exp` on a local — the slot is read at MATCH
+                // time (with the same lazy discipline as PushRescue;
+                // CRuby also evaluates the splat expression when an
+                // exception is in flight). See Op::PushRescue for the
+                // shared handler bookkeeping.
                 let f = self.frames.last().expect("ICE: PushRescueSplatLocal no frame");
                 let ip = f.ip;
                 let loop_depth = f.loop_depth();
@@ -5395,28 +5283,10 @@ impl Vm {
                 let target = (ip as i32 + off) as usize;
                 let depth = self.stack.len();
                 let bind_slot = if bind != 0 { Some(slot) } else { None };
-                let src = match &f.locals {
-                    crate::vm::Locals::Stack(base) => {
-                        self.locals_arena[*base as usize + src_slot as usize].clone()
-                    }
-                    crate::vm::Locals::Shared(rc) => rc.borrow()[src_slot as usize].clone(),
-                };
-                let filter = match src {
-                    Value::Array(id) => {
-                        let list: Vec<std::rc::Rc<Class>> = self.heap.array(id).iter()
-                            .filter_map(|v| match v {
-                                Value::Class(c) => Some(c.clone()),
-                                _ => None,
-                            })
-                            .collect();
-                        Some(RescueFilter::Any(list))
-                    }
-                    Value::Class(c) => Some(RescueFilter::Class(c)),
-                    _ => None,
-                };
-                self.frames.last_mut().expect("ICE: PushRescueSplatLocal no frame").aux_mut().rescues.push(RescueHandler {
+                self.top_aux_mut().rescues.push(RescueHandler {
                     handler_ip: target, stack_depth: depth, bind_slot, is_ensure: false,
-                    filter_class: filter, loop_depth_at_push: loop_depth,
+                    filter: crate::vm::RescueFilterSpec::SplatLocal(src_slot),
+                    loop_depth_at_push: loop_depth,
                     begin_depth_at_push: begin_depth,
                 });
             }
@@ -5430,8 +5300,7 @@ impl Vm {
                 // whole program. (See `BeginBaseline::saved_dollar_bang`.)
                 let saved_dollar_bang =
                     self.globals.get(&self.sym_bang).cloned().unwrap_or(Value::Nil);
-                let f = self.frames.last_mut().expect("ICE: EnterBegin no frame");
-                let aux = f.aux_mut();
+                let aux = self.top_aux_mut();
                 let baseline = crate::vm::BeginBaseline {
                     rescues_len: aux.rescues.len(),
                     loop_rescue_depths_len: aux.loop_rescue_depths.len(),
@@ -5479,9 +5348,9 @@ impl Vm {
                 let begin_depth = f.begin_depth();
                 let target = (ip as i32 + off) as usize;
                 let depth = self.stack.len();
-                self.frames.last_mut().expect("ICE: PushEnsure no frame").aux_mut().rescues.push(RescueHandler {
+                self.top_aux_mut().rescues.push(RescueHandler {
                     handler_ip: target, stack_depth: depth, bind_slot: None, is_ensure: true,
-                    filter_class: None, // ensure is unconditional
+                    filter: crate::vm::RescueFilterSpec::None, // ensure is unconditional
                     loop_depth_at_push: loop_depth,
                     begin_depth_at_push: begin_depth,
                 });
@@ -5538,8 +5407,7 @@ impl Vm {
             }
             Op::EnterLoop => {
                 let stack_depth = self.stack.len();
-                let f = self.frames.last_mut().expect("ICE: EnterLoop no frame");
-                let aux = f.aux_mut();
+                let aux = self.top_aux_mut();
                 let depth = aux.rescues.len();
                 aux.loop_rescue_depths.push(depth);
                 aux.loop_stack_depths.push(stack_depth);
@@ -5935,6 +5803,9 @@ impl Vm {
                 // see `recycle_frame_locals`'s strong_count guard), or
                 // truncate its arena segment for a Stack frame.
                 self.release_frame_locals(f.locals);
+                // Recycle the aux box (begin/rescue/loop bookkeeping)
+                // so the next begin-bearing call skips the malloc.
+                self.recycle_frame_aux(f.aux);
                 if done {
                     return Ok(false);
                 }
