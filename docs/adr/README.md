@@ -84,3 +84,6 @@ graveyard is part of the value — it shows how thinking evolved.
 - [0032 — Native (Cranelift) JIT — surpassing CRuby](0032-jit-native-surpass.md)
 - [0033 — Lean VM core (superseded by 0034)](0033-lean-vm-core.md)
 - [0034 — JIT-first: a full method JIT to surpass CRuby + YJIT](0034-jit-first-surpass-yjit.md)
+- [0035 — JIT inline object access](0035-jit-inline-object-access.md)
+- [0036 — Objects as pointers](0036-objects-as-pointers.md)
+- [0037 — Baseline JIT tier: frame-keeping direct-threaded substrate](0037-baseline-jit-tier.md)
