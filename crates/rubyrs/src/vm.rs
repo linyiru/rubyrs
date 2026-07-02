@@ -1136,6 +1136,26 @@ pub(crate) struct Vm {
     /// serves that came from the `Op::Yield` arm (native-yield count).
     #[cfg(feature = "jit-native")]
     pub(crate) t2_block_stats: [u64; 3],
+    /// Wave-3 (`RUBYRS_JIT_TIER2_NOINLINE`): disable the inline op lowering
+    /// (reproduces the wave-2 tier — per-op helpers + IC-fast calls) for
+    /// controlled A/B.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_tier2_noinline: bool,
+    /// Wave-3 item 3: per-call-site settled-verdict bytes for the `t2_call`
+    /// fast probes, dense by `cache_id`. Counts consecutive fast-probe
+    /// declines; ≥ `T2_SITE_SETTLE` short-circuits the probe (with a
+    /// ~1/1024 periodic retry keyed off `op_counter`). Reset to 0 on any
+    /// fast serve. Grows on demand at the decline path only.
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_site_verdict: Vec<u8>,
+    /// Wave-3 backward-branch poll gate: nonzero when fuel or a wall-clock
+    /// deadline is active, so compiled loop back-edges call the poll helper
+    /// (which charges `check_fuel`). Recomputed at every tier-2 serve entry
+    /// (fuel/deadline activation only changes between evals). Read INLINE
+    /// by generated code via its baked field offset, alongside
+    /// `control_signals` and the interrupt flag.
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_poll_flags: u8,
     /// FLOAT-param specialization of a 1-arg method (`def scale(n); n*1.5; end`
     /// called with a Float arg): the param binds as Float, the i64 arg carries f64
     /// bits. Leaf methods only (no cross-calls — those decline). Keyed by proto,
@@ -2618,6 +2638,11 @@ impl Vm {
             jit_tier2_noblock: std::env::var_os("RUBYRS_JIT_TIER2_NOBLOCK").is_some(),
             #[cfg(feature = "jit-native")]
             t2_block_stats: [0; 3],
+            jit_tier2_noinline: std::env::var_os("RUBYRS_JIT_TIER2_NOINLINE").is_some(),
+            #[cfg(feature = "jit-native")]
+            t2_site_verdict: Vec::new(),
+            #[cfg(feature = "jit-native")]
+            t2_poll_flags: 0,
             #[cfg(feature = "jit-native")]
             jit_native_fparam: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
@@ -3129,7 +3154,13 @@ impl Vm {
             let compile_t0 = self
                 .jit_stats_on
                 .then(std::time::Instant::now);
-            match crate::jit_tier2::compile_tier2(&self.protos[pidx], pidx, self.jit_tier2_nocall)
+            let t2ctx = crate::jit_tier2::T2Ctx {
+                nocall: self.jit_tier2_nocall,
+                noinline: self.jit_tier2_noinline,
+                interrupt_addr: std::sync::Arc::as_ptr(&self.interrupt_pending) as usize,
+                sym_nil_q: self.sym_nil_q.0,
+            };
+            match crate::jit_tier2::compile_tier2(&self.protos[pidx], pidx, &t2ctx)
             {
                 Some(p) => {
                     let entry = p.ptr;
@@ -3166,6 +3197,10 @@ impl Vm {
         if self.jit_stats_on && self.t2_depth > 0 {
             self.t2_call_stats[2] += 1;
         }
+        // Wave-3 backward-branch poll gate: fuel/deadline activation only
+        // changes between evals, so a per-serve recompute can never be
+        // stale while native code runs.
+        self.t2_poll_flags = (self.fuel.is_some() || self.deadline_at.is_some()) as u8;
         self.t2_depth += 1;
         let status = f(self as *mut Vm);
         self.t2_depth -= 1;
