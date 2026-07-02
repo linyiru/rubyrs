@@ -1724,6 +1724,15 @@ pub(crate) struct Vm {
     /// the CLI at exit; used for per-phase attribution of the
     /// RuboCop workload (parse vs cop-walk).
     pub(crate) cascade_stats: Option<Box<FxHashMap<(SymId, u8), u64>>>,
+    /// TEMPORARY diagnostics (same `RUBYRS_CASCADE_STATS=1` gate):
+    /// non-fixed-arity user-Ruby-method callee census, recorded at
+    /// the canonical Object-recv invoke arms in the slow cascade.
+    /// Key = (method name, argc passed, packed param shape,
+    /// no_recv). Shape bits (LSB→): req_pre:6 | n_opt:6 | rest:1 |
+    /// req_post:4 | kw_count:6 | kw_rest:1 | block_param:1 |
+    /// closure:1 | non_public:1. Dumped as `nfa-stats` rows by the
+    /// CLI at exit alongside `cascade-stats`.
+    pub(crate) nfa_stats: Option<Box<FxHashMap<(SymId, u16, u32, bool), u64>>>,
     /// Reopen-precedence early gate (same `method_gen`-revalidated
     /// pass): bit per primitive class whose OWN method table holds
     /// at least one name a `primitive_call`-family arm claims
@@ -2423,6 +2432,11 @@ impl Vm {
             fast_is_a_nil_safe: false,
             fast_eq_nil_safe: false,
             cascade_stats: if std::env::var_os("RUBYRS_CASCADE_STATS").is_some() {
+                Some(Box::default())
+            } else {
+                None
+            },
+            nfa_stats: if std::env::var_os("RUBYRS_CASCADE_STATS").is_some() {
                 Some(Box::default())
             } else {
                 None

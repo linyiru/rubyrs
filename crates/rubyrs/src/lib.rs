@@ -3337,6 +3337,45 @@ self.eval_inner(
         rows
     }
 
+    /// TEMPORARY diagnostics (same `RUBYRS_CASCADE_STATS=1` gate):
+    /// the non-fixed-arity user-Ruby-method callee census, as
+    /// (method name, argc, decoded shape string, no_recv, count)
+    /// rows sorted by count descending. Shape string spells out the
+    /// param signature: `req:N opt:N rest post:N kw:N kwrest blk
+    /// closure nonpub` (flags omitted when absent). Empty when the
+    /// env var was not set.
+    pub fn nfa_stats_rows(&self) -> Vec<(String, u16, String, bool, u64)> {
+        let mut rows: Vec<(String, u16, String, bool, u64)> = match &self.vm.nfa_stats {
+            Some(m) => m
+                .iter()
+                .map(|((name_id, argc, shape, no_recv), n)| {
+                    let mut s = format!(
+                        "req:{} opt:{}",
+                        shape & 0x3f,
+                        (shape >> 6) & 0x3f
+                    );
+                    if shape & (1 << 12) != 0 { s.push_str(" rest"); }
+                    if (shape >> 13) & 0xf != 0 { s.push_str(&format!(" post:{}", (shape >> 13) & 0xf)); }
+                    if (shape >> 17) & 0x3f != 0 { s.push_str(&format!(" kw:{}", (shape >> 17) & 0x3f)); }
+                    if shape & (1 << 23) != 0 { s.push_str(" kwrest"); }
+                    if shape & (1 << 24) != 0 { s.push_str(" blk"); }
+                    if shape & (1 << 25) != 0 { s.push_str(" closure"); }
+                    if shape & (1 << 26) != 0 { s.push_str(" nonpub"); }
+                    (
+                        self.vm.interner.resolve(*name_id).to_string(),
+                        *argc,
+                        s,
+                        *no_recv,
+                        *n,
+                    )
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        rows.sort_by(|a, b| b.4.cmp(&a.4).then_with(|| a.0.cmp(&b.0)));
+        rows
+    }
+
     /// Register a host function callable from Ruby code with `name(args)`.
     /// The function receives evaluated argument values and returns either
     /// a `Value` or a `Trap`.

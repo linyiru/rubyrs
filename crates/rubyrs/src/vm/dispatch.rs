@@ -8708,6 +8708,9 @@ impl Vm {
             if let Value::Object(id) = &self_val {
                 let cls = self.heap.class_of(*id);
                 if let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {
+                    if self.nfa_stats.is_some() {
+                        self.record_nfa_stat(name_id, args.len(), &m, true);
+                    }
                     self.invoke_method(m, self_val.clone(), args.into_vec())?;
                     return Ok(());
                 }
@@ -10361,6 +10364,9 @@ impl Vm {
             // recursion).
             if !force_primitive
                 && let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {
+                if self.nfa_stats.is_some() {
+                    self.record_nfa_stat(name_id, args.len(), &m, false);
+                }
                 self.check_method_visibility(&m, &recv, &name, bypass_visibility)?;
                 self.invoke_method(m, recv.clone(), args.into_vec())?;
                 return Ok(());
@@ -15783,6 +15789,45 @@ impl Vm {
             break;
         }
         self.last_match.as_ref()
+    }
+
+    /// TEMPORARY diagnostics (gated on the `RUBYRS_CASCADE_STATS=1`
+    /// census maps): record a slow-cascade invoke of a NON-fixed-arity
+    /// user Ruby method — the ADR 0031 "explicit-non-fixed-arity"
+    /// bucket — with its param shape packed into u32 (see the
+    /// `Vm::nfa_stats` field doc for the bit layout).
+    #[cold]
+    fn record_nfa_stat(&mut self, name_id: SymId, argc: usize, m: &Rc<Method>, no_recv: bool) {
+        if m.builtin.is_some() || m.fixed_arity.is_some() {
+            return;
+        }
+        let proto = &self.protos[m.proto_idx];
+        let kw_count = proto.kw_param_defaults.len() as u32;
+        // `n_optional_params` is block-proto-only (0 for methods);
+        // derive method optionals from the params-tail layout the
+        // general binder uses: positional_max = params.len() minus
+        // rest/kw/kwrest/blk tail, optionals = positional_max minus
+        // the two required groups.
+        let positional_max = m.params.len()
+            - proto.rest_param.is_some() as usize
+            - kw_count as usize
+            - proto.kw_rest_param.is_some() as usize
+            - proto.block_param.is_some() as usize;
+        let n_opt = positional_max
+            .saturating_sub(proto.n_required_positional as usize)
+            .saturating_sub(proto.n_required_post as usize);
+        let shape: u32 = (proto.n_required_positional as u32 & 0x3f)
+            | ((n_opt as u32 & 0x3f) << 6)
+            | ((proto.rest_param.is_some() as u32) << 12)
+            | ((proto.n_required_post as u32 & 0xf) << 13)
+            | ((kw_count & 0x3f) << 17)
+            | ((proto.kw_rest_param.is_some() as u32) << 23)
+            | ((proto.block_param.is_some() as u32) << 24)
+            | ((m.closure.is_some() as u32) << 25)
+            | (((m.visibility.get() != Visibility::Public) as u32) << 26);
+        if let Some(map) = self.nfa_stats.as_mut() {
+            *map.entry((name_id, argc as u16, shape, no_recv)).or_insert(0) += 1;
+        }
     }
 
     /// Explicit-receiver monomorphic fast path — see the call site in

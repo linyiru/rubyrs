@@ -521,6 +521,19 @@ fn main() {
         for (name, shape, n) in rt.cascade_stats_rows() {
             eprintln!("cascade-stats\t{}\t{}\t{}", name, shape, n);
         }
+        // The non-fixed-arity user-method callee census (ADR 0031
+        // "explicit-non-fixed-arity" bucket): name, argc passed,
+        // decoded param shape, recv form, count.
+        for (name, argc, shape, no_recv, n) in rt.nfa_stats_rows() {
+            eprintln!(
+                "nfa-stats\t{}\targc={}\t{}\t{}\t{}",
+                name,
+                argc,
+                shape,
+                if no_recv { "norecv" } else { "explicit" },
+                n
+            );
+        }
     }
     #[cfg(feature = "ic-stats")]
     if env_lookup("RUBYRS_IC_STATS").is_some() {
