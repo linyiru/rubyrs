@@ -1538,7 +1538,7 @@ fn float_adjacent(f: f64, up: bool) -> f64 {
 /// - `try_int_shl_lossless(1, 64)` → `None` (shift count ≥ 64
 ///   handled by the `u32::try_from` + `>= 64` check below)
 #[cfg(feature = "bignum")]
-fn try_int_shl_lossless(a: i64, shift: i64) -> Option<i64> {
+pub(crate) fn try_int_shl_lossless(a: i64, shift: i64) -> Option<i64> {
     debug_assert!(shift >= 0, "negative shift should swap direction before reaching here");
     let s = u32::try_from(shift).ok()?;
     if s >= 64 {

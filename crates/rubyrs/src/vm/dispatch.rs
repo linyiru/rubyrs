@@ -3205,6 +3205,34 @@ impl Vm {
             && chain_clean(self, nil_chain)
             && chain_clean(self, true_chain)
             && chain_clean(self, false_chain);
+        // Walk-attributed fast-bucket twins — same gen, same walk.
+        // Chain-wide on the Array / Symbol class Rcs, mirroring the
+        // "primitive-receiver fallback to the user-Class method
+        // table" gate those receivers resolve user methods through
+        // in the slow cascade (see the Vm field docs).
+        let chain_has = |vm: &Self, cls: &Option<Rc<crate::value::Class>>, sym: SymId| match cls {
+            Some(c) => vm.lookup_method_uncached(c, sym).is_some(),
+            None => true, // missing class (raw pre-preamble Vm) → flag off
+        };
+        let arr_cls = self.classes.get(&array_sym).cloned();
+        self.fast_arr_read_safe = !chain_has(self, &arr_cls, self.sym_size)
+            && !chain_has(self, &arr_cls, self.sym_length)
+            && !chain_has(self, &arr_cls, self.sym_empty_q)
+            && !chain_has(self, &arr_cls, self.sym_include_q)
+            && !chain_has(self, &arr_cls, self.sym_member_q);
+        self.fast_arr_push_safe = !chain_has(self, &arr_cls, self.sym_push);
+        self.fast_arr_shovel_safe = !chain_has(self, &arr_cls, self.sym_shovel);
+        let sym_cls = self.classes.get(&symbol_sym).cloned();
+        self.fast_is_a_sym_safe = !chain_has(self, &sym_cls, self.sym_is_a)
+            && !chain_has(self, &sym_cls, self.sym_kind_of);
+        let hash_cls = self.classes.get(&hash_sym).cloned();
+        self.fast_hash_read_safe = !chain_has(self, &hash_cls, self.sym_size)
+            && !chain_has(self, &hash_cls, self.sym_length)
+            && !chain_has(self, &hash_cls, self.sym_empty_q);
+        let nil_cls = self.classes.get(&nil_chain).cloned();
+        self.fast_is_a_nil_safe = !chain_has(self, &nil_cls, self.sym_is_a)
+            && !chain_has(self, &nil_cls, self.sym_kind_of);
+        self.fast_eq_nil_safe = !chain_has(self, &nil_cls, self.sym_eq_op);
         // Reopen-precedence mask: per primitive class, does the OWN
         // method table hold any name a primitive arm claims? The
         // preamble is audited collision-free
@@ -7980,6 +8008,325 @@ impl Vm {
                     _ => recv.ruby_eq(&arg, &self.heap),
                 };
                 self.stack.push(Value::Bool(result));
+                return Ok(());
+            }
+        }
+        // Walk-attributed fast buckets (RuboCop `Team#investigate`
+        // per-phase attribution, 2026-07): `is_a?`/`kind_of?`, `!`,
+        // `nil?`, Array `size`/`length`/`empty?`/`include?`/
+        // `member?`/`push`/`<<`, Int `-@`/`<<`, and the bare
+        // `Kernel#Array` identity case — together ~40% of the walk's
+        // slow-cascade sends (plus the parse phase's top three).
+        // Same contract as the `===` bucket above: every hit mirrors
+        // the arm the cascade would reach byte-for-byte; anything
+        // uncertain falls through untouched. Guards, per shape:
+        //   - Array receivers: the `fast_arr_*` chain-clean flags
+        //     (method_gen-revalidated) mirror the cascade's
+        //     "primitive-receiver fallback to the user-Class method
+        //     table" gate; tagged subclass instances and frozen /
+        //     byte-capped writes fall through to the canonical arms
+        //     (which own the FrozenError / cap semantics).
+        //   - Int / Bool / Nil receivers: the own-table
+        //     `prim_reopen_mask` bit — the exact gate the cascade
+        //     consults before `primitive_call` answers these names
+        //     (chain methods below the own table are shadowed by
+        //     the primitive arms today, so the bit is sufficient).
+        //   - Object receivers: `is_a?` requires an IC-backed
+        //     `lookup_method_cached` miss (the same slot
+        //     `try_invoke_explicit_recv_cached` just probed, so
+        //     this is an IC hit); `!` / `nil?` need no per-chain
+        //     guard — `primitive_call`'s universal arms answer them
+        //     ahead of every user-chain gate, and a public
+        //     fixed-arity override was already served by
+        //     `try_invoke_explicit_recv_cached` above.
+        //   - `any_undefs` turns the whole bucket off (an
+        //     `undef_method` tombstone walk sits ahead of the
+        //     primitive arms in the cascade; rare, perf-only).
+        // No GC-heap allocation on any hit (Bool/Int results or
+        // in-place Vec append), so no `maybe_gc` — same as the arms
+        // these mirror.
+        if !maybe_refined && !force_primitive && !self.any_undefs {
+            if !no_recv && argc < self.stack.len() {
+                if self.fast_index_checked_gen != self.method_gen {
+                    self.fast_index_revalidate();
+                }
+                let ridx = self.stack.len() - 1 - argc;
+                if argc == 0 {
+                    // `!` — truthiness flip.
+                    if name_id == self.sym_not {
+                        let serve = match &self.stack[ridx] {
+                            Value::Bool(_) => self.prim_reopen_mask & (1 << 5) == 0,
+                            Value::Nil => self.prim_reopen_mask & (1 << 4) == 0,
+                            Value::Object(_) => true,
+                            _ => false,
+                        };
+                        if serve {
+                            let recv = self.stack.pop().expect("ICE: ! fast path recv");
+                            self.stack.push(Value::Bool(!recv.is_truthy()));
+                            return Ok(());
+                        }
+                    }
+                    // `nil?` on heap shapes (primitive shapes are
+                    // covered by try_fast_primitive) — the universal
+                    // arm's constant `false`.
+                    if name_id == self.sym_nil_q
+                        && matches!(
+                            &self.stack[ridx],
+                            Value::Object(_) | Value::Array(_) | Value::Hash(_)
+                        )
+                    {
+                        self.stack.pop();
+                        self.stack.push(Value::Bool(false));
+                        return Ok(());
+                    }
+                    // Array#size / #length / #empty? (and the Hash
+                    // twins, same canonical constant-shape arms).
+                    if name_id == self.sym_size
+                        || name_id == self.sym_length
+                        || name_id == self.sym_empty_q
+                    {
+                        if self.fast_arr_read_safe
+                            && let Value::Array(id) = &self.stack[ridx]
+                        {
+                            let id = *id;
+                            if self.heap.array_class_tag(id).is_none() {
+                                let v = if name_id == self.sym_empty_q {
+                                    Value::Bool(self.heap.array(id).is_empty())
+                                } else {
+                                    Value::Int(self.heap.array(id).len() as i64)
+                                };
+                                self.stack.pop();
+                                self.stack.push(v);
+                                return Ok(());
+                            }
+                        }
+                        if self.fast_hash_read_safe
+                            && let Value::Hash(id) = &self.stack[ridx]
+                        {
+                            let id = *id;
+                            if self.heap.hash_class_tag(id).is_none() {
+                                let v = if name_id == self.sym_empty_q {
+                                    Value::Bool(self.heap.hash(id).is_empty())
+                                } else {
+                                    Value::Int(self.heap.hash(id).len() as i64)
+                                };
+                                self.stack.pop();
+                                self.stack.push(v);
+                                return Ok(());
+                            }
+                        }
+                    }
+                    // Symbol#to_s / #to_sym — mirrors sym_primitive's
+                    // arms (US-ASCII tag for ascii-only names).
+                    if (name_id == self.sym_to_s || name_id == self.sym_to_sym)
+                        && self.prim_reopen_mask & (1 << 3) == 0
+                        && let Value::Sym(s) = &self.stack[ridx]
+                    {
+                        let s = *s;
+                        let v = if name_id == self.sym_to_sym {
+                            Value::Sym(s)
+                        } else {
+                            let n = self.interner.resolve(s).to_string();
+                            if n.is_ascii() {
+                                Value::new_str_us_ascii(n)
+                            } else {
+                                Value::new_str(n)
+                            }
+                        };
+                        self.stack.pop();
+                        self.stack.push(v);
+                        return Ok(());
+                    }
+                    // Integer#-@ (unary minus). i64::MIN falls
+                    // through (BigInt promotion path under bignum).
+                    if name_id == self.sym_neg_at
+                        && self.prim_reopen_mask & 1 == 0
+                        && let Value::Int(n) = &self.stack[ridx]
+                    {
+                        let n = *n;
+                        #[cfg(feature = "bignum")]
+                        let fits = n != i64::MIN;
+                        #[cfg(not(feature = "bignum"))]
+                        let fits = true;
+                        if fits {
+                            self.stack.pop();
+                            self.stack.push(Value::Int(n.wrapping_neg()));
+                            return Ok(());
+                        }
+                    }
+                } else if argc == 1 {
+                    // Array#include? / #member? — the canonical
+                    // ruby_eq value scan.
+                    if (name_id == self.sym_include_q || name_id == self.sym_member_q)
+                        && self.fast_arr_read_safe
+                        && let Value::Array(id) = &self.stack[ridx]
+                    {
+                        let id = *id;
+                        if self.heap.array_class_tag(id).is_none() {
+                            let needle = &self.stack[ridx + 1];
+                            let hit = self
+                                .heap
+                                .array(id)
+                                .iter()
+                                .any(|x| x.ruby_eq(needle, &self.heap));
+                            self.stack.truncate(ridx);
+                            self.stack.push(Value::Bool(hit));
+                            return Ok(());
+                        }
+                    }
+                    // `is_a?` / `kind_of?` with a Class/Module
+                    // argument — the universal arm's cached
+                    // ancestor-set walk. Object receivers guard on
+                    // the IC-backed user-method miss; Symbol
+                    // receivers on the chain-clean flag.
+                    if name_id == self.sym_is_a || name_id == self.sym_kind_of {
+                        let target: Option<Rc<crate::value::Class>> =
+                            match &self.stack[ridx + 1] {
+                                Value::Class(c) => Some(c.clone()),
+                                _ => None,
+                            };
+                        if let Some(target) = target {
+                            match &self.stack[ridx] {
+                                Value::Object(oid) => {
+                                    let oid = *oid;
+                                    if let Some(cls) = self.heap.try_class_of(oid)
+                                        && self
+                                            .lookup_method_cached(&cls, name_id, cache_id)
+                                            .is_none()
+                                    {
+                                        // Mirrors the arm: the walk class for
+                                        // an Object is the singleton-aware
+                                        // `heap.class_of` (same Rc as
+                                        // `try_class_of` here).
+                                        let result = self.class_is_a_cached(&cls, &target);
+                                        self.stack.truncate(ridx);
+                                        self.stack.push(Value::Bool(result));
+                                        return Ok(());
+                                    }
+                                }
+                                Value::Sym(s) if self.fast_is_a_sym_safe => {
+                                    let sv = Value::Sym(*s);
+                                    if let Value::Class(c) = self.class_of(&sv) {
+                                        let result = self.class_is_a_cached(&c, &target);
+                                        self.stack.truncate(ridx);
+                                        self.stack.push(Value::Bool(result));
+                                        return Ok(());
+                                    }
+                                }
+                                Value::Nil if self.fast_is_a_nil_safe => {
+                                    if let Value::Class(c) = self.class_of(&Value::Nil) {
+                                        let result = self.class_is_a_cached(&c, &target);
+                                        self.stack.truncate(ridx);
+                                        self.stack.push(Value::Bool(result));
+                                        return Ok(());
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    // `nil == x` — the universal cross-type `==`
+                    // fallback reduces to `ruby_eq(Nil, x)`: true
+                    // iff x is nil.
+                    if name_id == self.sym_eq_op
+                        && self.fast_eq_nil_safe
+                        && matches!(&self.stack[ridx], Value::Nil)
+                    {
+                        let eq = matches!(&self.stack[ridx + 1], Value::Nil);
+                        self.stack.truncate(ridx);
+                        self.stack.push(Value::Bool(eq));
+                        return Ok(());
+                    }
+                    // Array#<< — in-place append; frozen / tagged /
+                    // byte-capped receivers keep their semantics in
+                    // the canonical arm.
+                    if name_id == self.sym_shovel {
+                        if self.fast_arr_shovel_safe
+                            && self.max_value_bytes.is_none()
+                            && let Value::Array(id) = &self.stack[ridx]
+                        {
+                            let id = *id;
+                            if self.heap.array_class_tag(id).is_none()
+                                && !self.heap.array_frozen(id)
+                            {
+                                let v = self.stack.pop().expect("ICE: << fast path arg");
+                                self.stack.pop();
+                                self.heap.array_mut(id).push(v);
+                                self.stack.push(Value::Array(id));
+                                return Ok(());
+                            }
+                        }
+                        // Integer#<< (bit shift) — mirrors the
+                        // numeric arm: lossless left shift or
+                        // clamped right shift via negative count;
+                        // overflow falls through (BigInt promotion
+                        // under bignum).
+                        if self.prim_reopen_mask & 1 == 0
+                            && let (Value::Int(a), Value::Int(b)) =
+                                (&self.stack[ridx], &self.stack[ridx + 1])
+                        {
+                            let (a, b) = (*a, *b);
+                            let shifted: Option<i64> = if b >= 0 {
+                                #[cfg(feature = "bignum")]
+                                {
+                                    super::numeric::try_int_shl_lossless(a, b)
+                                }
+                                #[cfg(not(feature = "bignum"))]
+                                {
+                                    Some(a.wrapping_shl((b as u32).min(63)))
+                                }
+                            } else {
+                                let mag =
+                                    if b == i64::MIN { 63 } else { (-b).min(63) as u32 };
+                                Some(a.wrapping_shr(mag))
+                            };
+                            if let Some(r) = shifted {
+                                self.stack.truncate(ridx);
+                                self.stack.push(Value::Int(r));
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+                // Array#push — variadic append (argc 0 is a no-op
+                // returning self; matches the canonical arm).
+                if name_id == self.sym_push
+                    && self.fast_arr_push_safe
+                    && self.max_value_bytes.is_none()
+                    && let Value::Array(id) = &self.stack[ridx]
+                {
+                    let id = *id;
+                    if self.heap.array_class_tag(id).is_none() && !self.heap.array_frozen(id) {
+                        if argc == 1 {
+                            let v = self.stack.pop().expect("ICE: push fast path arg");
+                            self.stack.pop();
+                            self.heap.array_mut(id).push(v);
+                        } else {
+                            let split = self.stack.len() - argc;
+                            let vs: Vec<Value> = self.stack.drain(split..).collect();
+                            self.stack.pop();
+                            let arr = self.heap.array_mut(id);
+                            for v in vs {
+                                arr.push(v);
+                            }
+                        }
+                        self.stack.push(Value::Array(id));
+                        return Ok(());
+                    }
+                }
+            } else if no_recv
+                && argc == 1
+                && name_id == self.sym_kernel_array
+                && !self.host_fns.contains_key(&name_id)
+                && matches!(self.stack.last(), Some(Value::Array(_)))
+            {
+                // Bare `Array(x)` with an Array argument — the
+                // builtin's identity case (`args[0].clone()`): the
+                // argument already on the stack IS the result.
+                // Builtin precedence for the "Array" name mirrors
+                // the cascade (`is_builtin_name` excludes it from
+                // the toplevel fast path; a host fn would win, hence
+                // the `host_fns` probe).
                 return Ok(());
             }
         }

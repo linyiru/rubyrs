@@ -1626,6 +1626,20 @@ pub(crate) struct Vm {
     /// NodePattern matchers fire `SYM === node` / `Mod === node`
     /// millions of times per cop walk — 20% of the slow cascade).
     pub(crate) sym_case_eq: SymId,
+    /// Pre-interned names for the walk-attributed fast buckets
+    /// (RuboCop `Team#investigate` per-phase profile, 2026-07:
+    /// `is_a?` 10.4%, `!` 6.4%, Array `include?`/`size`/`empty?`
+    /// ~15%, `Kernel#Array` 4.6% of the walk's slow-cascade sends;
+    /// `push`/`-@`/`<<` are the parse phase's top three).
+    pub(crate) sym_not: SymId,
+    pub(crate) sym_is_a: SymId,
+    pub(crate) sym_kind_of: SymId,
+    pub(crate) sym_push: SymId,
+    pub(crate) sym_shovel: SymId,
+    pub(crate) sym_neg_at: SymId,
+    pub(crate) sym_kernel_array: SymId,
+    pub(crate) sym_eq_op: SymId,
+    pub(crate) sym_to_sym: SymId,
     /// Collection-index fast-path override guard. The fast path may
     /// serve `h[k]` / `a[i]` directly ONLY while no user `[]` exists
     /// anywhere on the Hash / Array ancestor chain (a reopen, an
@@ -1673,6 +1687,35 @@ pub(crate) struct Vm {
     /// file via the preamble's `Enumerable#any?/none?(pattern)` /
     /// `grep` — measured the DOMINANT `===` receiver shape.)
     pub(crate) fast_case_eq_prim_safe: bool,
+    /// Walk-attributed fast-bucket twins (same `method_gen`-
+    /// revalidated pass as the flags above). Chain-wide
+    /// `lookup_method_uncached` verdicts, mirroring the
+    /// "primitive-receiver fallback to the user-Class method
+    /// table" gate the slow cascade applies to Array / Symbol
+    /// receivers — any user method anywhere on the chain flips
+    /// the flag off and the canonical path resolves it.
+    ///   - `fast_arr_read_safe`: no user `size` / `length` /
+    ///     `empty?` / `include?` / `member?` on the Array chain.
+    ///   - `fast_arr_push_safe` / `fast_arr_shovel_safe`: no user
+    ///     `push` / `<<` on the Array chain (per-name so a
+    ///     `<<`-only reopen keeps `push` fast).
+    ///   - `fast_is_a_sym_safe`: no user `is_a?` / `kind_of?` on
+    ///     the Symbol chain.
+    /// (Int `-@`/`<<` and Bool/Nil `!` need no new flags — their
+    /// guard is the existing own-table `prim_reopen_mask` bit,
+    /// which is exactly the gate the cascade consults before
+    /// `primitive_call` answers those names today.)
+    pub(crate) fast_arr_read_safe: bool,
+    pub(crate) fast_arr_push_safe: bool,
+    pub(crate) fast_arr_shovel_safe: bool,
+    pub(crate) fast_is_a_sym_safe: bool,
+    /// Hash twin of `fast_arr_read_safe`: no user `size` / `length`
+    /// / `empty?` on the Hash chain.
+    pub(crate) fast_hash_read_safe: bool,
+    /// NilClass twins: no user `is_a?`/`kind_of?` (resp. `==`) on
+    /// the NilClass chain.
+    pub(crate) fast_is_a_nil_safe: bool,
+    pub(crate) fast_eq_nil_safe: bool,
     /// TEMPORARY diagnostics (env-gated, `RUBYRS_CASCADE_STATS=1`):
     /// per-(name, receiver-shape) counters of do_call sends that
     /// reach the slow cascade (i.e. fell through every fast bucket
@@ -2054,6 +2097,15 @@ impl Vm {
         let sym_nil_q = interner.intern("nil?");
         let sym_empty_q = interner.intern("empty?");
         let sym_case_eq = interner.intern("===");
+        let sym_not = interner.intern("!");
+        let sym_is_a = interner.intern("is_a?");
+        let sym_kind_of = interner.intern("kind_of?");
+        let sym_push = interner.intern("push");
+        let sym_shovel = interner.intern("<<");
+        let sym_neg_at = interner.intern("-@");
+        let sym_kernel_array = interner.intern("Array");
+        let sym_eq_op = interner.intern("==");
+        let sym_to_sym = interner.intern("to_sym");
         // See the `class_singleton_deny` field doc. Union of every
         // name-keyed `do_call` arm that can fire for a Value::Class
         // receiver before the canonical user-singleton lookup, plus
@@ -2342,6 +2394,15 @@ impl Vm {
             sym_nil_q,
             sym_empty_q,
             sym_case_eq,
+            sym_not,
+            sym_is_a,
+            sym_kind_of,
+            sym_push,
+            sym_shovel,
+            sym_neg_at,
+            sym_kernel_array,
+            sym_eq_op,
+            sym_to_sym,
             fast_index_checked_gen: 0,
             fast_index_hash_safe: false,
             fast_index_array_safe: false,
@@ -2354,6 +2415,13 @@ impl Vm {
             fast_case_eq_str_safe: false,
             fast_case_eq_class_safe: false,
             fast_case_eq_prim_safe: false,
+            fast_arr_read_safe: false,
+            fast_arr_push_safe: false,
+            fast_arr_shovel_safe: false,
+            fast_is_a_sym_safe: false,
+            fast_hash_read_safe: false,
+            fast_is_a_nil_safe: false,
+            fast_eq_nil_safe: false,
             cascade_stats: if std::env::var_os("RUBYRS_CASCADE_STATS").is_some() {
                 Some(Box::default())
             } else {
