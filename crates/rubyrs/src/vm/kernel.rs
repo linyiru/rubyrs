@@ -1919,7 +1919,12 @@ impl Vm {
             // Negative durations: CRuby raises
             // `ArgumentError("time interval must not be
             // negative")`; we match.
-            "sleep" => {
+            // `__rubyrs_kernel_sleep` is the escape hatch the
+            // cooperative scheduler's Ruby-level `Object#sleep`
+            // override (preamble/thread.rb) uses to reach the native
+            // sleep without re-entering the override check below —
+            // otherwise override → native → override would loop.
+            "sleep" | "__rubyrs_kernel_sleep" => {
                 // A user/stub override on self's class chain wins —
                 // bare `sleep(10)` in CRuby is an ordinary Kernel
                 // method, and minitest's `self.stub :sleep, nil`
@@ -1927,7 +1932,7 @@ impl Vm {
                 // Same cold-path gate shape as Op::Raise's; the
                 // kernel-alias forwarder (the saved original) is
                 // excluded so the restore cycle can't loop.
-                {
+                if name == "sleep" {
                     let sleep_sym = self.interner.intern("sleep");
                     let self_val = self.frames.last().map(|f| f.self_val.clone());
                     if let Some(Value::Object(oid)) = &self_val {
@@ -2444,6 +2449,22 @@ impl Vm {
                 self.stack.clear();
                 self.pinned.clear();
                 self.clear_control_flow_signals();
+                // POSIX fork semantics: only the forking thread
+                // survives in the child. If the fork happened while
+                // green-thread fibers existed (cooperative scheduler,
+                // preamble/thread.rb), the child must not carry the
+                // parent's fiber execution state — a stray
+                // current_fiber_id would make Fiber.current /
+                // Fiber.yield in the child act as if it were inside a
+                // fiber whose frames were just cleared. The Ruby-level
+                // scheduler tables are reset by the preamble fork
+                // wrapper (`Thread.__coop_after_fork!`).
+                #[cfg(feature = "_fiber")]
+                {
+                    self.current_fiber_id = None;
+                    self.fiber_yield_pending = None;
+                    self.fiber_stash_stack.clear();
+                }
                 let mut status: i32 = {
                     let r = self.invoke_block(blk, Vec::new())
                         .and_then(|()| self.dispatch_until(0))
@@ -2485,13 +2506,29 @@ impl Vm {
                         msg: "waitpid pid must be an Integer".into(),
                     }))),
                 };
+                // Flags pass through to waitpid(2). WNOHANG (1) is the
+                // cooperative scheduler's probe: Process.wait from a
+                // green thread polls with WNOHANG + parks between
+                // attempts instead of blocking the whole VM.
+                let flags = match args.get(1) {
+                    Some(Value::Int(n)) => *n as i32,
+                    Some(Value::Nil) | None => 0,
+                    _ => return Some(Err(self.trap(RubyError::TypeError {
+                        msg: "waitpid flags must be an Integer".into(),
+                    }))),
+                };
                 let mut st: i32 = 0;
-                let r = unsafe { libc::waitpid(pid, &mut st, 0) };
+                let r = unsafe { libc::waitpid(pid, &mut st, flags) };
                 if r < 0 {
                     return Some(Err(self.trap(RubyError::HostException {
                         class_name: "Errno::ECHILD".to_string(),
                         message: format!("No child processes - waitpid({pid})"),
                     })));
+                }
+                if r == 0 {
+                    // WNOHANG and the child hasn't changed state:
+                    // CRuby's waitpid returns nil here.
+                    return Some(Ok(Value::Nil));
                 }
                 let exitstatus: i64 = if libc::WIFEXITED(st) {
                     libc::WEXITSTATUS(st) as i64
@@ -2633,6 +2670,230 @@ impl Vm {
                 };
                 unsafe { libc::close(fd) };
                 Some(Ok(Value::Nil))
+            }
+            // ---- Cooperative-scheduler fd primitives ----------------
+            // The green-thread scheduler (preamble/thread.rb) turns
+            // blocking pipe reads/writes into YIELD POINTS: a thread
+            // that would block parks on the fd and the scheduler polls.
+            // These are the non-blocking single-step halves; the
+            // blocking `__rubyrs_fd_read`/`__rubyrs_fd_write` above stay
+            // the zero-overhead single-threaded path.
+            //
+            // `__rubyrs_fd_read_step(fd, maxlen)` — ONE non-blocking
+            // read attempt: `false` when the fd isn't readable yet
+            // (caller parks), `nil` at EOF, else a 1..maxlen-byte
+            // binary String. poll(2)-before-read instead of O_NONBLOCK
+            // so the open file description's flags are never mutated
+            // (they're shared with the forked child's copy).
+            #[cfg(all(unix, not(target_os = "wasi")))]
+            "__rubyrs_fd_read_step" => {
+                let fd = match args.first() {
+                    Some(Value::Int(n)) => *n as i32,
+                    _ => return Some(Err(self.trap(RubyError::TypeError {
+                        msg: "fd must be an Integer".into(),
+                    }))),
+                };
+                let maxlen: usize = match args.get(1) {
+                    Some(Value::Int(n)) if *n > 0 => (*n as usize).min(1 << 20),
+                    _ => return Some(Err(self.trap(RubyError::TypeError {
+                        msg: "read length must be a positive Integer".into(),
+                    }))),
+                };
+                let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+                let pr = unsafe { libc::poll(&mut pfd, 1, 0) };
+                if pr < 0 {
+                    let e = std::io::Error::last_os_error();
+                    if e.raw_os_error() == Some(libc::EINTR) {
+                        return Some(Ok(Value::Bool(false)));
+                    }
+                    return Some(Err(self.trap(crate::vm::fileops::io_error(&e, None))));
+                }
+                if pr == 0 {
+                    return Some(Ok(Value::Bool(false)));
+                }
+                let mut buf = vec![0u8; maxlen];
+                let r = unsafe {
+                    libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, maxlen)
+                };
+                if r < 0 {
+                    let e = std::io::Error::last_os_error();
+                    match e.raw_os_error() {
+                        Some(libc::EINTR) | Some(libc::EAGAIN) => {
+                            return Some(Ok(Value::Bool(false)));
+                        }
+                        _ => return Some(Err(self.trap(crate::vm::fileops::io_error(&e, None)))),
+                    }
+                }
+                if r == 0 {
+                    return Some(Ok(Value::Nil)); // EOF
+                }
+                buf.truncate(r as usize);
+                Some(Ok(Value::new_str_bytes_binary(buf)))
+            }
+            // `__rubyrs_fd_write_step(fd, str, offset)` — ONE
+            // non-blocking write attempt from byte `offset`: `false`
+            // when the pipe buffer is full (caller parks), else the
+            // byte count written. A closed read end surfaces as
+            // Errno::EPIPE exactly like the blocking write.
+            #[cfg(all(unix, not(target_os = "wasi")))]
+            "__rubyrs_fd_write_step" => {
+                let fd = match args.first() {
+                    Some(Value::Int(n)) => *n as i32,
+                    _ => return Some(Err(self.trap(RubyError::TypeError {
+                        msg: "fd must be an Integer".into(),
+                    }))),
+                };
+                let bytes: Vec<u8> = match args.get(1) {
+                    Some(Value::Str(s)) => s.content.borrow().clone(),
+                    _ => return Some(Err(self.trap(RubyError::TypeError {
+                        msg: "write data must be a String".into(),
+                    }))),
+                };
+                let off: usize = match args.get(2) {
+                    Some(Value::Int(n)) if *n >= 0 => *n as usize,
+                    None => 0,
+                    _ => return Some(Err(self.trap(RubyError::TypeError {
+                        msg: "write offset must be a non-negative Integer".into(),
+                    }))),
+                };
+                if off >= bytes.len() {
+                    return Some(Ok(Value::Int(0)));
+                }
+                let mut pfd = libc::pollfd { fd, events: libc::POLLOUT, revents: 0 };
+                let pr = unsafe { libc::poll(&mut pfd, 1, 0) };
+                if pr < 0 {
+                    let e = std::io::Error::last_os_error();
+                    if e.raw_os_error() == Some(libc::EINTR) {
+                        return Some(Ok(Value::Bool(false)));
+                    }
+                    return Some(Err(self.trap(crate::vm::fileops::io_error(&e, None))));
+                }
+                if pr == 0 {
+                    return Some(Ok(Value::Bool(false)));
+                }
+                let r = unsafe {
+                    libc::write(
+                        fd,
+                        bytes[off..].as_ptr() as *const libc::c_void,
+                        bytes.len() - off,
+                    )
+                };
+                if r < 0 {
+                    let e = std::io::Error::last_os_error();
+                    match e.raw_os_error() {
+                        Some(libc::EINTR) | Some(libc::EAGAIN) => {
+                            return Some(Ok(Value::Bool(false)));
+                        }
+                        _ => return Some(Err(self.trap(crate::vm::fileops::io_error(&e, None)))),
+                    }
+                }
+                Some(Ok(Value::Int(r as i64)))
+            }
+            // `__rubyrs_fd_poll(read_fds, write_fds, timeout_ms)` — the
+            // scheduler's "nothing runnable" wait. Blocks in poll(2)
+            // over every parked fd (timeout -1 = indefinitely, else
+            // millisecond cap for sleeping threads) and returns
+            // `[ready_read_fds, ready_write_fds]`. POLLHUP/POLLERR
+            // count as ready (the woken reader then observes EOF /
+            // EPIPE through its normal step call). EINTR returns two
+            // empty arrays so the Ruby loop re-enters through the
+            // dispatch safe-point (SIGINT traps stay deliverable).
+            #[cfg(all(unix, not(target_os = "wasi")))]
+            "__rubyrs_fd_poll" => {
+                let read_fds: Vec<i32> = match args.first() {
+                    Some(Value::Array(id)) => self
+                        .heap
+                        .array(*id)
+                        .iter()
+                        .filter_map(|v| match v {
+                            Value::Int(n) => Some(*n as i32),
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => return Some(Err(self.trap(RubyError::TypeError {
+                        msg: "poll read set must be an Array of fds".into(),
+                    }))),
+                };
+                let write_fds: Vec<i32> = match args.get(1) {
+                    Some(Value::Array(id)) => self
+                        .heap
+                        .array(*id)
+                        .iter()
+                        .filter_map(|v| match v {
+                            Value::Int(n) => Some(*n as i32),
+                            _ => None,
+                        })
+                        .collect(),
+                    Some(Value::Nil) | None => Vec::new(),
+                    _ => return Some(Err(self.trap(RubyError::TypeError {
+                        msg: "poll write set must be an Array of fds".into(),
+                    }))),
+                };
+                let timeout_ms: i32 = match args.get(2) {
+                    Some(Value::Int(n)) => (*n).clamp(-1, i32::MAX as i64) as i32,
+                    Some(Value::Nil) | None => -1,
+                    _ => return Some(Err(self.trap(RubyError::TypeError {
+                        msg: "poll timeout must be an Integer (ms) or nil".into(),
+                    }))),
+                };
+                let mut pfds: Vec<libc::pollfd> = read_fds
+                    .iter()
+                    .map(|&fd| libc::pollfd { fd, events: libc::POLLIN, revents: 0 })
+                    .chain(write_fds.iter().map(|&fd| libc::pollfd {
+                        fd,
+                        events: libc::POLLOUT,
+                        revents: 0,
+                    }))
+                    .collect();
+                let (mut ready_r, mut ready_w) = (Vec::new(), Vec::new());
+                let pr = unsafe {
+                    libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, timeout_ms)
+                };
+                if pr < 0 {
+                    let e = std::io::Error::last_os_error();
+                    if e.raw_os_error() != Some(libc::EINTR) {
+                        return Some(Err(self.trap(crate::vm::fileops::io_error(&e, None))));
+                    }
+                    // EINTR: fall through with empty ready sets.
+                } else if pr > 0 {
+                    for (i, pfd) in pfds.iter().enumerate() {
+                        if pfd.revents == 0 {
+                            continue;
+                        }
+                        if i < read_fds.len() {
+                            ready_r.push(Value::Int(pfd.fd as i64));
+                        } else {
+                            ready_w.push(Value::Int(pfd.fd as i64));
+                        }
+                    }
+                }
+                self.maybe_gc();
+                if let Err(e) = self.check_alloc() { return Some(Err(e)); }
+                let rid = self.heap.alloc(HeapObj::Array(ready_r.into()));
+                // Pin the first result array across the following
+                // allocations (GC rooting discipline — pin before
+                // alloc; see the recurring bug-class note).
+                let mut g = crate::vm::PinGuard::new(self);
+                g.pin(Value::Array(rid));
+                let wid = g.vm.heap.alloc(HeapObj::Array(ready_w.into()));
+                g.pin(Value::Array(wid));
+                let outer = g.vm.heap.alloc(HeapObj::Array(vec![
+                    Value::Array(rid),
+                    Value::Array(wid),
+                ].into()));
+                drop(g);
+                Some(Ok(Value::Array(outer)))
+            }
+            // `__rubyrs_nprocessors` — honest logical-core count for
+            // Etc.nprocessors. With the cooperative scheduler giving
+            // `rubocop --parallel` real N-way supervision, the parallel
+            // gem's `processor_count` should size worker pools to the
+            // machine, exactly like CRuby.
+            "__rubyrs_nprocessors" => {
+                let n = std::thread::available_parallelism()
+                    .map(|n| n.get() as i64)
+                    .unwrap_or(1);
+                Some(Ok(Value::Int(n)))
             }
             "system" => {
                 if !self.allow_process_spawn {
