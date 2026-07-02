@@ -1125,6 +1125,17 @@ pub(crate) struct Vm {
     /// while already inside tier-2 native code, i.e. `t2_depth > 0`).
     #[cfg(feature = "jit-native")]
     pub(crate) t2_call_stats: [u64; 3],
+    /// Wave-5 (`RUBYRS_JIT_TIER2_NOBLOCK`): disable BLOCK-proto serving
+    /// (`t2_enter_block` becomes a no-op) for controlled blocks-off A/B runs;
+    /// method-frame serving is unaffected.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_tier2_noblock: bool,
+    /// Wave-5 block-serving counters (stats-gated): `[0]` block invocations
+    /// that reached a serving hook (the invoke_block-family sites), `[1]`
+    /// invocations served natively (compiled block body ran), `[2]` native
+    /// serves that came from the `Op::Yield` arm (native-yield count).
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_block_stats: [u64; 3],
     /// FLOAT-param specialization of a 1-arg method (`def scale(n); n*1.5; end`
     /// called with a Float arg): the param binds as Float, the i64 arg carries f64
     /// bits. Leaf methods only (no cross-calls — those decline). Keyed by proto,
@@ -2604,6 +2615,10 @@ impl Vm {
             #[cfg(feature = "jit-native")]
             t2_call_stats: [0; 3],
             #[cfg(feature = "jit-native")]
+            jit_tier2_noblock: std::env::var_os("RUBYRS_JIT_TIER2_NOBLOCK").is_some(),
+            #[cfg(feature = "jit-native")]
+            t2_block_stats: [0; 3],
+            #[cfg(feature = "jit-native")]
             jit_native_fparam: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_poly: crate::intern::FxHashMap::default(),
@@ -3036,21 +3051,55 @@ impl Vm {
         if !self.jit_tier2_on {
             return Ok(());
         }
-        self.t2_enter_slow()
+        self.t2_enter_slow().map(|_served| ())
     }
 
+    /// TIER-2 BLOCK serving hook (ADR 0037 wave 5), called RIGHT AFTER the
+    /// interpreter's block binders (`invoke_block`/`invoke_block1`/
+    /// `invoke_block2`) pushed a block frame at the hot invocation sites
+    /// (the `Op::Yield` arm, the `step_block` family, the `proc.call`
+    /// arms): run the just-pushed block frame's body natively when a
+    /// tier-2 compile exists. Identical serving discipline to `t2_enter`
+    /// — param binding (autosplat, rest, kw, block-param, lambda arity)
+    /// already happened in the interpreter's own binder, so the compiled
+    /// body starts at op 0 with the frame exactly as interpretation would
+    /// see it; a bail is a mode switch (the caller's `dispatch_until`
+    /// continues the frame at `ip`), never a re-execution. `from_yield`
+    /// only labels the stats counter (native-yield count).
     #[cfg(feature = "jit-native")]
-    fn t2_enter_slow(&mut self) -> Result<(), crate::error::Trap> {
+    #[inline]
+    pub(crate) fn t2_enter_block(&mut self, from_yield: bool) -> Result<(), crate::error::Trap> {
+        if !self.jit_tier2_on || self.jit_tier2_noblock {
+            return Ok(());
+        }
+        if self.jit_stats_on {
+            self.t2_block_stats[0] += 1;
+        }
+        let served = self.t2_enter_slow()?;
+        if served && self.jit_stats_on {
+            self.t2_block_stats[1] += 1;
+            if from_yield {
+                self.t2_block_stats[2] += 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns whether the top frame was actually run natively (`Ok(true)`)
+    /// or left for the interpreter (`Ok(false)`); `t2_enter` ignores the
+    /// flag, `t2_enter_block` feeds its stats counters from it.
+    #[cfg(feature = "jit-native")]
+    fn t2_enter_slow(&mut self) -> Result<bool, crate::error::Trap> {
         let pidx = match self.frames.last() {
             Some(f) => f.proto_idx,
-            None => return Ok(()),
+            None => return Ok(false),
         };
         let flags = self.jit_flags_get(pidx);
         if flags & JFLAG_NO_TIER2 != 0 {
-            return Ok(());
+            return Ok(false);
         }
         if self.t2_depth >= T2_MAX_NATIVE_DEPTH {
-            return Ok(()); // deep recursion: interpret (flat loop, no Rust stack)
+            return Ok(false); // deep recursion: interpret (flat loop, no Rust stack)
         }
         if flags & JFLAG_TIER2_HAS == 0 {
             let c = self.t2_hot.entry(pidx).or_insert(0);
@@ -3066,13 +3115,13 @@ impl Vm {
                         .saturating_mul(self.protos[pidx].code.len() as u32),
                 );
             if *c < threshold {
-                return Ok(());
+                return Ok(false);
             }
             if let Some(only) = &self.jit_tier2_only
                 && !only.contains(&self.protos[pidx].name)
             {
                 self.jit_flags_set(pidx, JFLAG_NO_TIER2);
-                return Ok(());
+                return Ok(false);
             }
             if self.jit_stats_on {
                 self.jit_stats.compile[7][0] += 1;
@@ -3096,7 +3145,7 @@ impl Vm {
                 }
                 None => {
                     self.jit_flags_set(pidx, JFLAG_NO_TIER2);
-                    return Ok(());
+                    return Ok(false);
                 }
             }
             if let Some(t0) = compile_t0 {
@@ -3109,7 +3158,7 @@ impl Vm {
         // same discipline as `NpEntry`).
         let f = match self.t2_ptrs.get(pidx).copied().flatten() {
             Some(f) => f,
-            None => return Ok(()),
+            None => return Ok(false),
         };
         // native→native accounting: entering a tier-2 body while already
         // inside tier-2 native code (`t2_depth > 0`) is the wave-2 direct
@@ -3129,7 +3178,7 @@ impl Vm {
                 .take()
                 .expect("ICE: tier-2 trap status without a stored trap"));
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Settle-check for `JFLAG_NO_ONEARG`: set the bit iff all three 1-arg
@@ -3249,6 +3298,12 @@ impl Vm {
             eprintln!(
                 "tier2 t2_call ic_fast={} fallback={} native_native={}",
                 self.t2_call_stats[0], self.t2_call_stats[1], self.t2_call_stats[2]
+            );
+        }
+        if self.t2_block_stats != [0; 3] {
+            eprintln!(
+                "tier2 blocks invocations={} native_serves={} native_yield_serves={}",
+                self.t2_block_stats[0], self.t2_block_stats[1], self.t2_block_stats[2]
             );
         }
         for (i, name) in JIT_FAM_NAMES.iter().enumerate() {

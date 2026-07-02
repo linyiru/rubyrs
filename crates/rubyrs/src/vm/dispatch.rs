@@ -3455,6 +3455,11 @@ impl Vm {
                 // returns, leave the result on the stack.
                 let pre_frames = self.frames.len();
                 self.invoke_block(*bid, args.into_vec())?;
+                // TIER-2 wave 5 (ADR 0037): run the just-pushed block
+                // frame natively when compiled; the dispatch_until below
+                // no-ops on DONE and continues the frame on BAIL.
+                #[cfg(feature = "jit-native")]
+                self.t2_enter_block(false)?;
                 self.dispatch_until(pre_frames)?;
                 // ADR 0024 Phase A.6 round 2: stored Proc tried
                 // to `break` after returning to its caller. There
@@ -7949,6 +7954,10 @@ impl Vm {
                 };
                 let pre_frames = self.frames.len();
                 self.invoke_block(bid, args)?;
+                // TIER-2 wave 5: native block serve (see the Proc#call
+                // intrinsics arm).
+                #[cfg(feature = "jit-native")]
+                self.t2_enter_block(false)?;
                 self.dispatch_until(pre_frames)?;
                 if self.break_signaled {
                     self.break_signaled = false;
@@ -22657,6 +22666,11 @@ impl Vm {
                 g.vm.pending_block_arg = Some(block);
                 g.vm.invoke_block(target, args)?;
             }
+            // TIER-2 wave 5: native block serve (see the Proc#call
+            // intrinsics arm). After invoke_block the frame roots the
+            // bound args, so the pins above are no longer needed.
+            #[cfg(feature = "jit-native")]
+            self.t2_enter_block(false)?;
             self.dispatch_until(pre_frames)?;
             // Same proc-closure break contract as the no-block
             // intrinsics arm: a stored Proc breaking after its

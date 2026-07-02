@@ -330,6 +330,100 @@ unsafe extern "C" fn t2_call_local(
     t2_call_impl(vm, SymId(name as u32), 0, cid as u32, false)
 }
 
+/// `Op::CallBlock` / `Op::CallNoRecvBlock` — the block-passing call ops
+/// (wave 5). Mirrors the step arms byte for byte: the explicit-brace
+/// trailing-Hash-is-positional flag is set around `do_call_block` exactly
+/// like `Op::CallBlock`'s arm (a `k: v`/`**h` + block call compiles to
+/// `CallKwBlock`, which stays on the generic helper). `do_call_block`
+/// itself front-loads the block-form IC fast path
+/// (`try_invoke_explicit_recv_block_cached`, whose trailing `t2_enter`
+/// runs a compiled callee natively), builds the BlockHandle through the
+/// interpreter's own `CreateBlock` arm (already executed as a prior op of
+/// this body — outer-chain flattening and all), and the callee's `yield`
+/// serves the compiled block via the `do_yield` hook — the full
+/// native→native block-passing chain.
+#[inline]
+fn t2_call_block_impl(
+    vm: &mut crate::vm::Vm,
+    name_id: SymId,
+    argc: usize,
+    cache_id: u32,
+    no_recv: bool,
+) -> i64 {
+    let depth = vm.frames.len();
+    vm.trailing_hash_positional = true;
+    let r = vm.do_call_block(name_id, argc, no_recv, cache_id);
+    vm.trailing_hash_positional = false;
+    if let Err(t) = r {
+        vm.t2_trap = Some(t);
+        return T2_TRAP;
+    }
+    t2_finish(vm, depth)
+}
+
+/// `Op::CallBlock(name, argc, cid)` — explicit receiver, literal block.
+unsafe extern "C" fn t2_call_block(
+    vm: *mut crate::vm::Vm,
+    name: i64,
+    argc: i64,
+    cid: i64,
+    ip: i64,
+) -> i64 {
+    let vm = unsafe { &mut *vm };
+    if t2_call_prologue(vm, ip).is_err() {
+        return T2_TRAP;
+    }
+    t2_call_block_impl(vm, SymId(name as u32), argc as usize, cid as u32, false)
+}
+
+/// `Op::CallNoRecvBlock(name, argc, cid)` — implicit self, literal block.
+unsafe extern "C" fn t2_call_norecv_block(
+    vm: *mut crate::vm::Vm,
+    name: i64,
+    argc: i64,
+    cid: i64,
+    ip: i64,
+) -> i64 {
+    let vm = unsafe { &mut *vm };
+    if t2_call_prologue(vm, ip).is_err() {
+        return T2_TRAP;
+    }
+    t2_call_block_impl(vm, SymId(name as u32), argc as usize, cid as u32, true)
+}
+
+/// `Op::Yield(n)` / `Op::ApplyYield` (wave 5): run the interpreter's own
+/// yield executor (`Vm::do_yield`, the extracted `Op::Yield` arm — the
+/// single source of truth for the lexical-owner walk, `YieldDepthGuard`,
+/// and the break/fiber/non-local-return postlude) without the `step`
+/// fetch/decode round-trip. The arm's `invoke_block` is followed by the
+/// wave-5 `t2_enter_block` hook, so a compiled method yielding to a
+/// compiled block runs the block body natively (native→native yield).
+/// `argc` carries `Op::Yield`'s static count, or -1 for `Op::ApplyYield`
+/// (the arm pops + expands the args Array itself). Status mapping matches
+/// `t2_op`: a break consuming this very frame (yield case (a)) lands as
+/// frames-below-entry → DONE with the method's return value placed;
+/// pending signals (case (b) parked breaks, non-local returns, fiber
+/// yields) → BAIL with `ip` at the resume point.
+unsafe extern "C" fn t2_yield(vm: *mut crate::vm::Vm, argc: i64, ip: i64) -> i64 {
+    let vm = unsafe { &mut *vm };
+    let depth = vm.frames.len();
+    {
+        let f = vm.frames.last_mut().expect("ICE: t2_yield with empty frame stack");
+        f.ip = ip as usize + 1;
+    }
+    // `step` charges the fuel tick before its arm; mirror it.
+    if let Err(t) = vm.check_fuel() {
+        vm.t2_trap = Some(t);
+        return T2_TRAP;
+    }
+    let op = if argc < 0 { Op::ApplyYield } else { Op::Yield(argc as u8) };
+    if let Err(t) = vm.do_yield(op) {
+        vm.t2_trap = Some(t);
+        return T2_TRAP;
+    }
+    t2_finish(vm, depth)
+}
+
 /// `Op::Return` — the frame-pop shortcut (wave 2): mirrors `step()`'s
 /// `Op::Return` arm without the fetch/decode/match round-trip, so a
 /// native→native callee returns straight to its caller's native code. The
@@ -640,6 +734,9 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize, nocall: bool) -> Op
     builder.symbol("t2_call_norecv", t2_call_norecv as *const u8);
     builder.symbol("t2_call_local", t2_call_local as *const u8);
     builder.symbol("t2_return", t2_return as *const u8);
+    builder.symbol("t2_call_block", t2_call_block as *const u8);
+    builder.symbol("t2_call_norecv_block", t2_call_norecv_block as *const u8);
+    builder.symbol("t2_yield", t2_yield as *const u8);
     let mut module = JITModule::new(builder);
     let ptr_ty = module.target_config().pointer_type();
 
@@ -726,6 +823,11 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize, nocall: bool) -> Op
     let f_call_local =
         module.declare_function("t2_call_local", Linkage::Import, &sig_vm_4i64_ret).ok()?;
     let f_return = module.declare_function("t2_return", Linkage::Import, &sig_vm_2i64_ret).ok()?;
+    let f_call_block =
+        module.declare_function("t2_call_block", Linkage::Import, &sig_vm_4i64_ret).ok()?;
+    let f_call_norecv_block =
+        module.declare_function("t2_call_norecv_block", Linkage::Import, &sig_vm_4i64_ret).ok()?;
+    let f_yield = module.declare_function("t2_yield", Linkage::Import, &sig_vm_2i64_ret).ok()?;
 
     let mut fbctx = FunctionBuilderContext::new();
     {
@@ -749,6 +851,9 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize, nocall: bool) -> Op
         let r_call_norecv = module.declare_func_in_func(f_call_norecv, fb.func);
         let r_call_local = module.declare_func_in_func(f_call_local, fb.func);
         let r_return = module.declare_func_in_func(f_return, fb.func);
+        let r_call_block = module.declare_func_in_func(f_call_block, fb.func);
+        let r_call_norecv_block = module.declare_func_in_func(f_call_norecv_block, fb.func);
+        let r_yield = module.declare_func_in_func(f_yield, fb.func);
 
         let entry = fb.create_block();
         fb.append_block_params_for_function_params(entry);
@@ -873,6 +978,36 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize, nocall: bool) -> Op
                     let n = fb.ins().iconst(types::I64, name.0 as i64);
                     let c = fb.ins().iconst(types::I64, *cid as i64);
                     let call = fb.ins().call(r_call_local, &[vm, s, n, c, ipc]);
+                    let st = fb.inst_results(call)[0];
+                    check_status!(fb, st);
+                }
+                // --- wave-5 block-passing calls + yield (kw/splat block
+                // forms stay on the generic helper below). ---
+                Op::CallBlock(name, argc, cid) if !nocall => {
+                    let n = fb.ins().iconst(types::I64, name.0 as i64);
+                    let a = fb.ins().iconst(types::I64, *argc as i64);
+                    let c = fb.ins().iconst(types::I64, *cid as i64);
+                    let call = fb.ins().call(r_call_block, &[vm, n, a, c, ipc]);
+                    let st = fb.inst_results(call)[0];
+                    check_status!(fb, st);
+                }
+                Op::CallNoRecvBlock(name, argc, cid) if !nocall => {
+                    let n = fb.ins().iconst(types::I64, name.0 as i64);
+                    let a = fb.ins().iconst(types::I64, *argc as i64);
+                    let c = fb.ins().iconst(types::I64, *cid as i64);
+                    let call = fb.ins().call(r_call_norecv_block, &[vm, n, a, c, ipc]);
+                    let st = fb.inst_results(call)[0];
+                    check_status!(fb, st);
+                }
+                Op::Yield(n) if !nocall => {
+                    let a = fb.ins().iconst(types::I64, *n as i64);
+                    let call = fb.ins().call(r_yield, &[vm, a, ipc]);
+                    let st = fb.inst_results(call)[0];
+                    check_status!(fb, st);
+                }
+                Op::ApplyYield if !nocall => {
+                    let a = fb.ins().iconst(types::I64, -1);
+                    let call = fb.ins().call(r_yield, &[vm, a, ipc]);
                     let st = fb.inst_results(call)[0];
                     check_status!(fb, st);
                 }

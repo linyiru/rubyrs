@@ -155,6 +155,15 @@ impl Vm {
             return Ok(BlockStep::Value(Value::Nil));
         }
         self.invoke_block(block, args)?;
+        // TIER-2 wave 5 (ADR 0037): run the just-pushed block frame
+        // natively when compiled. DONE → the dispatch_until below no-ops;
+        // BAIL → it continues the frame at `ip` (mode switch, never a
+        // re-execution); a trap propagates exactly like a dispatch_until
+        // trap. The signal classification below is unchanged: a native
+        // run exits on any pending control signal, which dispatch_until
+        // then routes identically to the interpreted path.
+        #[cfg(feature = "jit-native")]
+        self.t2_enter_block(false)?;
         self.dispatch_until(pre_frames)?;
         if self.method_return.is_some() {
             // `method_return` itself stays set — the caller's
@@ -184,6 +193,9 @@ impl Vm {
             return Ok(BlockStep::Value(Value::Nil));
         }
         self.invoke_block2(block, a, b)?;
+        // TIER-2 wave 5: see `step_block`.
+        #[cfg(feature = "jit-native")]
+        self.t2_enter_block(false)?;
         self.dispatch_until(pre_frames)?;
         if self.method_return.is_some() {
             return Ok(BlockStep::MethodReturn);
@@ -219,6 +231,9 @@ impl Vm {
             return Ok(BlockStep::Value(Value::Int(r)));
         }
         self.invoke_block1(block, arg)?;
+        // TIER-2 wave 5: see `step_block`.
+        #[cfg(feature = "jit-native")]
+        self.t2_enter_block(false)?;
         self.dispatch_until(pre_frames)?;
         if self.method_return.is_some() {
             return Ok(BlockStep::MethodReturn);

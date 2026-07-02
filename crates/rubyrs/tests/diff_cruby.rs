@@ -1087,6 +1087,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn jit_stmt_if_merge() { run_diff("jit_stmt_if_merge"); }
 #[test] fn tier2_call_family() { run_diff("tier2_call_family"); }
 #[test] fn tier2_call_refined() { run_diff("tier2_call_refined"); }
+#[test] fn tier2_block_family() { run_diff("tier2_block_family"); }
 #[test] fn comparable_clamp_range() { run_diff("comparable_clamp_range"); }
 #[test] fn float_precision() { run_diff("float_precision"); }
 #[test] fn compact_filter_map() { run_diff("compact_filter_map"); }
