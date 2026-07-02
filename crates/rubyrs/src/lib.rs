@@ -37,6 +37,7 @@ mod bcrypt;
 #[cfg(feature = "_oj")]
 mod oj;
 mod bytecode;
+mod commdrv;
 mod compiler;
 mod const_marker;
 mod digest;
@@ -143,6 +144,12 @@ pub use prism_native::register_host_fns as register_prism_native_host_fns;
 /// (`__rubyrs_wqtrans_tokenize`) that runs `Prism::Translation::Parser#tokenize`
 /// in Rust for RuboCop's prism engine. See [`prism_wq::register_host_fns`].
 pub use prism_wq::register_host_fns as register_prism_wq_host_fns;
+/// Register the native Commissioner walk-driver host fns
+/// (`__rubyrs_commdrv_*`) that run RuboCop's cop-walk machinery
+/// (`Commissioner#walk` dispatch + callback triggering) natively.
+/// The hook rubyrs injects after `require "rubocop"` detects the
+/// registration via `defined?(...)`. See [`commdrv::register_host_fns`].
+pub use commdrv::register_host_fns as register_commdrv_host_fns;
 /// Register `_rouge_native` host fns (`__rubyrs_rouge_native_table`,
 /// `__rubyrs_rouge_native_lex_html`) onto a `Runtime`. The shim that
 /// rubyrs injects after `require "rouge"` detects the registration via

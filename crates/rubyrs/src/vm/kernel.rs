@@ -4335,6 +4335,21 @@ impl Vm {
             }
         };
         let result = self.load_ruby_source_from_canon(canon);
+        // commdrv accelerator hook: the TOP-LEVEL `require "rubocop"`
+        // just finished loading the real gem — RuboCop::Cop::Commissioner
+        // is defined, so layer the native cop-walk driver over #walk
+        // (native-first with per-walk fallback to the aliased interpreted
+        // walk). The hook is `defined?(...)`-guarded, so it is inert
+        // unless the host fns were registered. Inner `rubocop/...`
+        // requires don't match the bare name, and a repeat require
+        // returns Bool(false), so this fires exactly once per fresh load.
+        if path_str == "rubocop" && matches!(result, Ok(Value::Bool(true))) {
+            self.eval_string(
+                crate::commdrv::HOOK_RB,
+                "<rubyrs:commdrv_hook>",
+                false,
+            )?;
+        }
         // `_rouge_native` accelerator hook: the TOP-LEVEL
         // `require "rouge"` just finished loading the real gem —
         // inject the shim that patches RegexLexer#lex + the HTML

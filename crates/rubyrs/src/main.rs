@@ -404,6 +404,10 @@ fn main() {
     // Native whitequark translation (prism_wq): the Translation::Parser#tokenize
     // pipeline in Rust. Inert unless the prism translation hook calls it.
     rubyrs::register_prism_wq_host_fns(&mut rt);
+    // Native Commissioner walk driver (commdrv): RuboCop's cop-walk
+    // machinery (per-node callback triggering + traversal) in Rust.
+    // Inert unless the require("rubocop") hook calls it.
+    rubyrs::register_commdrv_host_fns(&mut rt);
     // `_rouge_native` accelerator: expose the carmine engine host fns;
     // the require("rouge") hook injects the shim that detects + uses
     // them. Without this registration the shim stays inert.
