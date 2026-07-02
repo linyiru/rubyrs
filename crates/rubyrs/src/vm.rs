@@ -1673,6 +1673,14 @@ pub(crate) struct Vm {
     /// file via the preamble's `Enumerable#any?/none?(pattern)` /
     /// `grep` — measured the DOMINANT `===` receiver shape.)
     pub(crate) fast_case_eq_prim_safe: bool,
+    /// TEMPORARY diagnostics (env-gated, `RUBYRS_CASCADE_STATS=1`):
+    /// per-(name, receiver-shape) counters of do_call sends that
+    /// reach the slow cascade (i.e. fell through every fast bucket
+    /// up to the `interner.resolve` point). `None` (the default)
+    /// costs one branch per slow-cascade send. Dumped to stderr by
+    /// the CLI at exit; used for per-phase attribution of the
+    /// RuboCop workload (parse vs cop-walk).
+    pub(crate) cascade_stats: Option<Box<FxHashMap<(SymId, u8), u64>>>,
     /// Reopen-precedence early gate (same `method_gen`-revalidated
     /// pass): bit per primitive class whose OWN method table holds
     /// at least one name a `primitive_call`-family arm claims
@@ -2346,6 +2354,11 @@ impl Vm {
             fast_case_eq_str_safe: false,
             fast_case_eq_class_safe: false,
             fast_case_eq_prim_safe: false,
+            cascade_stats: if std::env::var_os("RUBYRS_CASCADE_STATS").is_some() {
+                Some(Box::default())
+            } else {
+                None
+            },
             any_undefs: false,
             prim_reopen_mask: 0,
             inspect_stack: Vec::new(),

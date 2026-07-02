@@ -513,6 +513,15 @@ fn main() {
         let (total, built) = rt.regex_cache_stats();
         eprintln!("regex-stats\ttotal={}\tbuilt={}", total, built);
     }
+    // TEMPORARY diagnostics (`RUBYRS_CASCADE_STATS=1`): dump the
+    // slow-cascade send counters, one row per (name, receiver
+    // shape), count-descending. Same debug-knob shape as
+    // `RUBYRS_REGEX_STATS`.
+    if std::env::var_os("RUBYRS_CASCADE_STATS").is_some() {
+        for (name, shape, n) in rt.cascade_stats_rows() {
+            eprintln!("cascade-stats\t{}\t{}\t{}", name, shape, n);
+        }
+    }
     #[cfg(feature = "ic-stats")]
     if env_lookup("RUBYRS_IC_STATS").is_some() {
         let s = rt.ic_stats();

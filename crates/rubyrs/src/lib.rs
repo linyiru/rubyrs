@@ -3311,6 +3311,32 @@ self.eval_inner(
         (total, built)
     }
 
+    /// TEMPORARY diagnostics twin of `regex_cache_stats` (env-gated
+    /// by `RUBYRS_CASCADE_STATS=1`): the slow-cascade send counters,
+    /// as (method name, receiver-shape label, count) rows sorted by
+    /// count descending. Empty when the env var was not set.
+    pub fn cascade_stats_rows(&self) -> Vec<(String, &'static str, u64)> {
+        const SHAPES: [&str; 13] = [
+            "Int", "Float", "Str", "Sym", "Bool", "Nil", "Array", "Hash", "Class", "Object",
+            "Block", "Other", "NoRecv",
+        ];
+        let mut rows: Vec<(String, &'static str, u64)> = match &self.vm.cascade_stats {
+            Some(m) => m
+                .iter()
+                .map(|((name_id, shape), n)| {
+                    (
+                        self.vm.interner.resolve(*name_id).to_string(),
+                        SHAPES[*shape as usize],
+                        *n,
+                    )
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        rows.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+        rows
+    }
+
     /// Register a host function callable from Ruby code with `name(args)`.
     /// The function receives evaluated argument values and returns either
     /// a `Value` or a `Trap`.

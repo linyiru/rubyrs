@@ -7983,6 +7983,34 @@ impl Vm {
                 return Ok(());
             }
         }
+        // TEMPORARY diagnostics (env-gated): count sends that reach
+        // the slow cascade, keyed by (name, receiver shape). One
+        // `is_some()` branch when disabled. See `Vm::cascade_stats`.
+        if self.cascade_stats.is_some() {
+            let shape: u8 = if no_recv {
+                12
+            } else if argc < self.stack.len() {
+                match &self.stack[self.stack.len() - 1 - argc] {
+                    Value::Int(_) => 0,
+                    Value::Float(_) => 1,
+                    Value::Str(_) => 2,
+                    Value::Sym(_) => 3,
+                    Value::Bool(_) => 4,
+                    Value::Nil => 5,
+                    Value::Array(_) => 6,
+                    Value::Hash(_) => 7,
+                    Value::Class(_) => 8,
+                    Value::Object(_) => 9,
+                    Value::Block(_) => 10,
+                    _ => 11,
+                }
+            } else {
+                11
+            };
+            if let Some(m) = self.cascade_stats.as_mut() {
+                *m.entry((name_id, shape)).or_insert(0) += 1;
+            }
+        }
         let name = self.interner.resolve(name_id).clone();
         // Universal-Object bare-call routing. Several universal
         // `Object` methods are implemented only in the explicit-recv
