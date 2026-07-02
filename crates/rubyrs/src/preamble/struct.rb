@@ -78,6 +78,12 @@ class Struct
     # keeps the Array rooted via the Class ivars table.
     cls.instance_variable_set(:@__struct_attrs, attrs)
     cls.instance_variable_set(:@__struct_kw, kw_init)
+    # Precomputed `:@attr` symbols for the generated initialize: building
+    # `"@#{attr}".to_sym` per field per `new` made Struct#new ~8x the cost
+    # of a plain Class#new (rubocop builds 524 InvestigationReport structs
+    # per FILE). Stored as a class ivar (not a bare block capture) for the
+    # same GC-rooting reason as @__struct_attrs above.
+    cls.instance_variable_set(:@__struct_ivar_syms, attrs.map { |a| :"@#{a}" })
     # Both readers WALK the superclass chain: subclasses of the
     # generated class (rack's `class BufferPart < MimePart` where
     # MimePart = Struct.new(...)) don't inherit class-level ivars,
@@ -111,20 +117,29 @@ class Struct
     struct_methods_mod = Module.new
     cls.include(struct_methods_mod)
     struct_methods_mod.define_method(:initialize) do |*args|
-      kw = nil
+      # One superclass walk finds the class the factory populated; it
+      # carries all three tables (set together above), so @__struct_kw
+      # (legitimately nil) needs no walk of its own.
       k = self.class
-      while k && (kw = k.instance_variable_get(:@__struct_kw)).nil?
+      syms = nil
+      while k && (syms = k.instance_variable_get(:@__struct_ivar_syms)).nil?
         k = k.superclass
       end
-      mem = members
+      mem = k.instance_variable_get(:@__struct_attrs)
+      kw = k.instance_variable_get(:@__struct_kw)
+      n = syms.size
       if kw
         # `keyword_init: true` — `S.new(a: 1, b: 2)` passes the kwargs
         # as a trailing Hash (rubyrs routes them positionally to a
         # `*args` callee). Read each member out of it; absent → nil.
         h = args.first.is_a?(Hash) ? args.first : {}
-        mem.each { |attr| instance_variable_set("@#{attr}".to_sym, h[attr]) }
+        i = 0
+        while i < n
+          instance_variable_set(syms[i], h[mem[i]])
+          i += 1
+        end
       elsif args.size == 1 && args.first.is_a?(Hash) && !args.first.empty? &&
-            args.first.keys.all? { |k| mem.include?(k) }
+            args.first.keys.all? { |key| mem.include?(key) }
         # Ruby 3.2+: a DEFAULT (non-keyword_init) Struct ALSO accepts
         # keyword init — `S.new(a: 1, b: 2)`. The kwargs arrive as a
         # trailing Hash whose keys are all members; an explicit hash
@@ -133,10 +148,16 @@ class Struct
         # bridgetown's front-matter `Result.new(content:, front_matter:,
         # line_count:)` (was binding the whole kwargs hash to member 0).
         h = args.first
-        mem.each { |attr| instance_variable_set("@#{attr}".to_sym, h[attr]) }
+        i = 0
+        while i < n
+          instance_variable_set(syms[i], h[mem[i]])
+          i += 1
+        end
       else
-        mem.each_with_index do |attr, i|
-          instance_variable_set("@#{attr}".to_sym, args[i])
+        i = 0
+        while i < n
+          instance_variable_set(syms[i], args[i])
+          i += 1
         end
       end
     end
