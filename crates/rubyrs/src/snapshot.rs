@@ -57,6 +57,11 @@ pub(crate) struct CapturedGraph {
     /// See [`VmImage::loaded_features`].
     pub(crate) loaded_features: Vec<String>,
     pub(crate) loaded_stdlib_stubs: Vec<String>,
+    /// See [`VmImage::autoloads_toplevel`].
+    pub(crate) autoloads_toplevel: Vec<(u32, String)>,
+    pub(crate) autoloads_scoped: Vec<(u32, String)>,
+    pub(crate) consumed_autoloads: Vec<u32>,
+    pub(crate) autoload_paths: Vec<(String, Vec<u32>)>,
 }
 
 /// Borrow twin used at encode time so serialize doesn't clone the proto
@@ -74,6 +79,10 @@ struct VmImageRef<'a> {
     constants: &'a [(u32, ValueImage)],
     loaded_features: &'a [String],
     loaded_stdlib_stubs: &'a [String],
+    autoloads_toplevel: &'a [(u32, String)],
+    autoloads_scoped: &'a [(u32, String)],
+    consumed_autoloads: &'a [u32],
+    autoload_paths: &'a [(String, Vec<u32>)],
 }
 
 /// Owned (decode) shape of the full image.
@@ -109,6 +118,24 @@ pub(crate) struct VmImage {
     /// "Cop RuboCop::Cop::Cop could not be dismissed".
     pub(crate) loaded_features: Vec<String>,
     pub(crate) loaded_stdlib_stubs: Vec<String>,
+    /// PENDING `autoload` registrations (`vm.autoloads_toplevel` /
+    /// `vm.autoloads_scoped`): const-name SymId (qualified for scoped) →
+    /// require path. An unfired autoload's constant exists ONLY in these
+    /// VM-level tables — no class's `consts` holds it — yet it is listed in
+    /// `Module#constants` and defined on first reference. RuboCop registers
+    /// every formatter + corrector this way (lib/rubocop/formatter.rb,
+    /// lib/rubocop/cop/correctors.rb) and fires almost none during
+    /// `require "rubocop"`; without these the restored image silently
+    /// dropped them all ("uninitialized constant
+    /// RuboCop::Formatter::SimpleTextFormatter").
+    pub(crate) autoloads_toplevel: Vec<(u32, String)>,
+    pub(crate) autoloads_scoped: Vec<(u32, String)>,
+    /// `vm.consumed_autoloads` — fired-but-undefined keys (the removable
+    /// undef-slot zeitwerk's remove_const relies on).
+    pub(crate) consumed_autoloads: Vec<u32>,
+    /// `vm.autoload_paths` — reverse map (canonicalized target path → const
+    /// keys) so a post-restore `require` still SATISFIES pending autoloads.
+    pub(crate) autoload_paths: Vec<(String, Vec<u32>)>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
@@ -587,6 +614,33 @@ pub(crate) fn capture(vm: &crate::vm::Vm) -> CapturedGraph {
         .map(|p| p.to_string_lossy().into_owned())
         .collect();
     let loaded_stdlib_stubs = vm.loaded_stdlib_stubs.iter().cloned().collect();
+    // Pending autoloads (see VmImage::autoloads_toplevel). The tables are
+    // wasi-gated on the Vm (no `require` there), so image them as empty on
+    // that target.
+    #[cfg(not(target_os = "wasi"))]
+    let (autoloads_toplevel, autoloads_scoped) = (
+        vm.autoloads_toplevel
+            .iter()
+            .map(|(s, p)| (s.0, p.clone()))
+            .collect(),
+        vm.autoloads_scoped
+            .iter()
+            .map(|(s, p)| (s.0, p.clone()))
+            .collect(),
+    );
+    #[cfg(target_os = "wasi")]
+    let (autoloads_toplevel, autoloads_scoped) = (Vec::new(), Vec::new());
+    let consumed_autoloads = vm.consumed_autoloads.iter().map(|s| s.0).collect();
+    let autoload_paths = vm
+        .autoload_paths
+        .iter()
+        .map(|(p, ks)| {
+            (
+                p.to_string_lossy().into_owned(),
+                ks.iter().map(|k| k.0).collect(),
+            )
+        })
+        .collect();
     CapturedGraph {
         cache_counter: vm.cache_counter,
         classes,
@@ -597,6 +651,10 @@ pub(crate) fn capture(vm: &crate::vm::Vm) -> CapturedGraph {
         constants,
         loaded_features,
         loaded_stdlib_stubs,
+        autoloads_toplevel,
+        autoloads_scoped,
+        consumed_autoloads,
+        autoload_paths,
     }
 }
 
@@ -621,6 +679,10 @@ pub(crate) fn to_bytes(
         constants: &graph.constants,
         loaded_features: &graph.loaded_features,
         loaded_stdlib_stubs: &graph.loaded_stdlib_stubs,
+        autoloads_toplevel: &graph.autoloads_toplevel,
+        autoloads_scoped: &graph.autoloads_scoped,
+        consumed_autoloads: &graph.consumed_autoloads,
+        autoload_paths: &graph.autoload_paths,
     };
     postcard::to_allocvec(&img)
 }
@@ -632,7 +694,11 @@ pub(crate) fn from_bytes(bytes: &[u8]) -> Result<VmImage, postcard::Error> {
 
 const MAGIC: &[u8; 4] = b"RRS1";
 // v2: added loaded_features + loaded_stdlib_stubs (require-guard) to the image.
-const FORMAT_VERSION: u32 = 2;
+// v3: added the pending-autoload tables (autoloads_toplevel/scoped,
+//     consumed_autoloads, autoload_paths) — without them every unfired
+//     `autoload` constant (all of rubocop's formatters + correctors) was
+//     silently dropped across a restore.
+const FORMAT_VERSION: u32 = 3;
 
 /// Outcome of a validated load: either the image was restored, or it was
 /// rejected (with a reason) and the VM is UNTOUCHED so the caller can fall
@@ -1032,6 +1098,35 @@ pub(crate) fn restore(vm: &mut crate::vm::Vm, img: VmImage) {
         .map(|s| std::path::PathBuf::from(s.as_str()))
         .collect();
     vm.loaded_stdlib_stubs = img.loaded_stdlib_stubs.iter().cloned().collect();
+
+    // 2c. Pending autoloads (see VmImage::autoloads_toplevel): an unfired
+    //     `autoload` constant lives ONLY in these tables, so without them the
+    //     restored image loses the constant entirely (rubocop's formatters +
+    //     correctors). SymIds reference the image interner appended above.
+    #[cfg(not(target_os = "wasi"))]
+    {
+        vm.autoloads_toplevel = img
+            .autoloads_toplevel
+            .iter()
+            .map(|(s, p)| (SymId(*s), p.clone()))
+            .collect();
+        vm.autoloads_scoped = img
+            .autoloads_scoped
+            .iter()
+            .map(|(s, p)| (SymId(*s), p.clone()))
+            .collect();
+    }
+    vm.consumed_autoloads = img.consumed_autoloads.iter().map(|s| SymId(*s)).collect();
+    vm.autoload_paths = img
+        .autoload_paths
+        .iter()
+        .map(|(p, ks)| {
+            (
+                std::path::PathBuf::from(p.as_str()),
+                ks.iter().map(|k| SymId(*k)).collect(),
+            )
+        })
+        .collect();
 
     // 3. Resolve every image class-id to an Rc<Class>: reuse an existing
     //    (builtin) class by its registered name, else create a shell. Also
