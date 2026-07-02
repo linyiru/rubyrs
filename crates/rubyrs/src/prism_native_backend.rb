@@ -53,7 +53,9 @@ module Prism
     end
 
     def lex(source, **options)
-      Prism::Serialize.load_lex(source, __rubyrs_prism_serialize_parse_lex(source, dump_options(options)), options.fetch(:freeze, false))
+      # NB: load_lex expects pm_serialize_lex's wire layout (tokens first, NO header row)
+      # — the parse_lex blob is a different format and misparses here.
+      Prism::Serialize.load_lex(source, __rubyrs_prism_serialize_lex(source, dump_options(options)), options.fetch(:freeze, false))
     end
 
     def parse_file(filepath, **options)
