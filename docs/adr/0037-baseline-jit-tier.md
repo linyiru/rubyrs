@@ -338,7 +338,7 @@ native_yield_serves`.
 
 | measurement | baseline (tier2) | wave-5 (tier2) |
 |---|---:|---:|
-| walkonly big1 ×30 (adaptive; quiet-phase interleaved, best) | 266.1ms | **263.3ms (−1.1%)**; 10/11 interleaved pairs favour wave-5 (−3..−9ms per pair) |
+| walkonly big1 ×30 (adaptive; quiet-phase interleaved, best) | 266.1ms | **263.3ms (−1.1%)**; 14/15 interleaved pairs across three sessions favour wave-5 (typical pair delta −3..−8.5ms) |
 | walkonly, `NOBLOCK=1` on the wave-5 binary | — | 268.9ms best ≈ baseline (hook plumbing is free) |
 | `each`-driver block loop (ns/elem) | 104–107 | **79.5–81.8 (−22%)** |
 | nested `each` (ns/elem) | 114–115 | 97.5–99.5 (−13%) |
