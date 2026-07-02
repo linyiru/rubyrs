@@ -2565,6 +2565,34 @@ impl Vm {
                     };
                     return Ok(Some(self.str_bracket_regex(&s, re, idx)?));
                 }
+                // `String#[](substr)` / `slice(substr)` — the SUBSTRING-
+                // SEARCH form: returns a new String equal to `substr`
+                // when the receiver contains it, else nil. rubocop
+                // 1.88's Style/MagicCommentFormat probes separators
+                // with `text[wrong_separator]` on every file that
+                // carries a magic comment; without this arm the cop
+                // crashed (NoMethodError), which kept the runner's
+                // `errors.any?` true and silently blocked EVERY
+                // result-cache save.
+                if (name == "[]" || name == "slice") && args.len() == 1
+                    && let Value::Str(sub) = &args[0]
+                {
+                    let hay = s.content.borrow();
+                    let needle = sub.content.borrow();
+                    let found = needle.is_empty()
+                        || hay.windows(needle.len()).any(|w| w == &needle[..]);
+                    let bytes = needle.clone();
+                    drop(needle);
+                    drop(hay);
+                    return Ok(Some(if found {
+                        match String::from_utf8(bytes) {
+                            Ok(us) => Value::new_str(us),
+                            Err(e) => Value::new_str_bytes(e.into_bytes()),
+                        }
+                    } else {
+                        Value::Nil
+                    }));
+                }
                 // Float→Int coerce on the 1-arg index form. CRuby's
                 // `String#[]` treats Float via `to_int` (truncates
                 // toward zero); rubyrs's match arm only bound

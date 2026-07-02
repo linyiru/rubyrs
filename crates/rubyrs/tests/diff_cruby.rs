@@ -1998,3 +1998,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // supervisor (`ensure threads.each(&:kill)`) under rubocop's
 // default auto---parallel multi-file run.
 #[test] fn thread_kill() { run_diff("thread_kill"); }
+// String#[](substr) substring-search form. Surfaced by rubocop 1.88's
+// Style/MagicCommentFormat (`text[wrong_separator]`), where the missing
+// form crashed the cop and blocked every result-cache save.
+#[test] fn string_bracket_substring() { run_diff("string_bracket_substring"); }
