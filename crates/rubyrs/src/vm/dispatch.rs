@@ -7249,10 +7249,19 @@ impl Vm {
             // discarded — `new` yields the module itself.
             let init_id = self.sym_initialize;
             if let Some(m) = self.lookup_method_uncached(cls, init_id) {
+                let pre_frames = self.frames.len();
                 self.invoke_method(m, modv.clone(), args.into_vec())?;
-                self.frames.last_mut()
-                    .expect("ICE: frames empty after module-subclass new")
-                    .swap_return = Some(modv);
+                if self.frames.len() > pre_frames {
+                    self.frames.last_mut()
+                        .expect("ICE: frames empty after module-subclass new")
+                        .swap_return = Some(modv);
+                } else if let Some(top) = self.stack.last_mut() {
+                    // TIER-2 already ran initialize to completion (frame
+                    // pushed AND popped inside invoke_method); its return
+                    // value sits on the stack — replace it with the module,
+                    // the same discipline swap_return implements.
+                    *top = modv;
+                }
             } else {
                 self.stack.push(modv);
             }
@@ -7374,8 +7383,16 @@ impl Vm {
                 // point obj/args are already on Rust locals that
                 // invoke_method propagates.
                 drop(g);
+                let pre_frames = self.frames.len();
                 self.invoke_method(m, obj.clone(), args.into_vec())?;
-                self.frames.last_mut().expect("ICE: frames empty after new").swap_return = Some(obj);
+                if self.frames.len() > pre_frames {
+                    self.frames.last_mut().expect("ICE: frames empty after new").swap_return = Some(obj);
+                } else if let Some(top) = self.stack.last_mut() {
+                    // TIER-2 already ran initialize to completion; replace
+                    // its pushed return value with the new object (the
+                    // swap_return discipline, applied post-hoc).
+                    *top = obj;
+                }
             } else if let Value::Array(aid) = &obj
                 && !args.is_empty()
             {
@@ -16338,6 +16355,9 @@ impl Vm {
         });
         // $~ scoping is LAZY now — save_match_scope_on_write fires on
         // the first last_match write inside this method scope.
+        // TIER-2 (ADR 0037): run the just-pushed frame natively when compiled.
+        #[cfg(feature = "jit-native")]
+        self.t2_enter()?;
         Ok(true)
     }
 
@@ -16651,6 +16671,9 @@ impl Vm {
         });
         // $~ scoping is LAZY now — save_match_scope_on_write fires on
         // the first last_match write inside this method scope.
+        // TIER-2 (ADR 0037): run the just-pushed frame natively when compiled.
+        #[cfg(feature = "jit-native")]
+        self.t2_enter()?;
         Ok(true)
     }
 
@@ -16863,6 +16886,9 @@ impl Vm {
         });
         // $~ scoping is LAZY now — save_match_scope_on_write fires on
         // the first last_match write inside this method scope.
+        // TIER-2 (ADR 0037): run the just-pushed frame natively when compiled.
+        #[cfg(feature = "jit-native")]
+        self.t2_enter()?;
         Ok(true)
     }
 
@@ -16984,6 +17010,9 @@ impl Vm {
             block_writeback: None,
             captured_yield_block: None,
         });
+        // TIER-2 (ADR 0037): run the just-pushed frame natively when compiled.
+        #[cfg(feature = "jit-native")]
+        self.t2_enter()?;
         Ok(true)
     }
 
@@ -17220,6 +17249,9 @@ impl Vm {
         });
         // $~ scoping is LAZY now — save_match_scope_on_write fires on
         // the first last_match write inside this method scope.
+        // TIER-2 (ADR 0037): run the just-pushed frame natively when compiled.
+        #[cfg(feature = "jit-native")]
+        self.t2_enter()?;
         Ok(true)
     }
 
@@ -20701,6 +20733,9 @@ impl Vm {
             });
             // $~ scoping is LAZY now — save_match_scope_on_write fires on
             // the first last_match write inside this method scope.
+            // TIER-2 (ADR 0037): run the just-pushed frame natively when compiled.
+            #[cfg(feature = "jit-native")]
+            self.t2_enter()?;
             return Ok(());
         }
         // Default-argument support (literal defaults only): a Proto
@@ -21040,6 +21075,9 @@ impl Vm {
         });
         // $~ scoping is LAZY now — save_match_scope_on_write fires on
         // the first last_match write inside this method scope.
+        // TIER-2 (ADR 0037): run the just-pushed frame natively when compiled.
+        #[cfg(feature = "jit-native")]
+        self.t2_enter()?;
         Ok(())
     }
 
@@ -23887,6 +23925,7 @@ impl Vm {
                 let init_id = g.vm.sym_initialize;
                 let ruby_init = g.vm.lookup_method_uncached(cls, init_id);
                 if let Some(m) = ruby_init {
+                    let pre_frames = g.vm.frames.len();
                     g.vm.invoke_method_with_block(m, obj.clone(), args, Some(block))?;
                     // Drop the guard before mutating the new
                     // frame's swap_return — by this point the
@@ -23895,7 +23934,14 @@ impl Vm {
                     // block_arg) on its own, so the pin
                     // tracking is no longer load-bearing.
                     drop(g);
-                    self.frames.last_mut().expect("ICE: frames empty after new").swap_return = Some(obj);
+                    if self.frames.len() > pre_frames {
+                        self.frames.last_mut().expect("ICE: frames empty after new").swap_return = Some(obj);
+                    } else if let Some(top) = self.stack.last_mut() {
+                        // TIER-2 already ran initialize to completion;
+                        // replace its pushed return value with the new
+                        // object (the swap_return discipline, post-hoc).
+                        *top = obj;
+                    }
                 } else {
                     drop(g);
                     self.stack.push(obj);

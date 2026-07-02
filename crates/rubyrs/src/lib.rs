@@ -43,6 +43,8 @@ mod const_marker;
 mod digest;
 #[cfg(feature = "jit-native")]
 pub(crate) mod jit_native;
+#[cfg(feature = "jit-native")]
+pub(crate) mod jit_tier2;
 mod error;
 mod heap;
 #[cfg(feature = "_http_server")]

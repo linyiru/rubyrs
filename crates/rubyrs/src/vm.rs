@@ -883,15 +883,15 @@ pub(crate) type RefinementList = Vec<(std::rc::Rc<Class>, std::rc::Rc<Class>)>;
 #[derive(Default)]
 pub(crate) struct JitStats {
     /// Indexed by family: 0=int 1=poly 2=fparam 3=objparam 4=objparam2
-    /// 5=value 6=zeroarg. `[attempts, ok, pregate_declines]`.
-    pub(crate) compile: [[u64; 3]; 7],
+    /// 5=value 6=zeroarg 7=tier2. `[attempts, ok, pregate_declines]`.
+    pub(crate) compile: [[u64; 3]; 8],
     /// (proto_idx, family) → (native calls, deopts).
     pub(crate) exec: crate::intern::FxHashMap<(usize, u8), (u64, u64)>,
 }
 
 #[cfg(feature = "jit-native")]
-pub(crate) const JIT_FAM_NAMES: [&str; 7] =
-    ["int", "poly", "fparam", "objparam", "objparam2", "value", "zeroarg"];
+pub(crate) const JIT_FAM_NAMES: [&str; 8] =
+    ["int", "poly", "fparam", "objparam", "objparam2", "value", "zeroarg", "tier2"];
 
 /// Second-arg descriptor for the 2-arg (`objparam2`) native dispatch helper
 /// (`Vm::jit_run_objparam2`): the compiled param1 is either an Int value or a
@@ -917,6 +917,26 @@ pub(crate) const JFLAG_NO_ONEARG: u8 = 2;
 /// `Vm::jit_flags` bit: the 2-arg (`objparam2`) verdict is settled and dead.
 #[cfg(feature = "jit-native")]
 pub(crate) const JFLAG_NO_OBJP2: u8 = 4;
+/// `Vm::jit_flags` bit: the TIER-2 (frame-keeping direct-threaded, ADR 0037)
+/// verdict is settled and dead — declined at admission or filtered by the
+/// `RUBYRS_JIT_TIER2_ONLY` allowlist.
+#[cfg(feature = "jit-native")]
+pub(crate) const JFLAG_NO_TIER2: u8 = 8;
+/// `Vm::jit_flags` bit: a TIER-2 body is compiled and present in
+/// `Vm::t2_protos` — serve without probing the hotness map.
+#[cfg(feature = "jit-native")]
+pub(crate) const JFLAG_TIER2_HAS: u8 = 16;
+
+/// Tier-2 hotness threshold: a proto's frame must be entered this many times
+/// before it is compiled (keeps one-shot startup code interpretation-only).
+#[cfg(feature = "jit-native")]
+const T2_COMPILE_THRESHOLD: u32 = 8;
+/// Tier-2 native-nesting cap: each nested native body adds a Rust stack
+/// segment (native fn + helper + dispatch_until + step); deeper Ruby
+/// recursion falls back to the flat interpreter loop, which has no Rust-stack
+/// cost per Ruby frame.
+#[cfg(feature = "jit-native")]
+const T2_MAX_NATIVE_DEPTH: u32 = 96;
 
 pub(crate) struct Vm {
     pub(crate) protos: Vec<Proto>,
@@ -969,6 +989,34 @@ pub(crate) struct Vm {
     /// re-seeded per call) so the common path adds no heap allocation. GC-rooted below.
     #[cfg(feature = "jit-native")]
     pub(crate) jit_hash_scratch: Option<crate::value::ObjId>,
+    /// TIER-2 (ADR 0037): env-gated (`RUBYRS_JIT_TIER2`) frame-keeping
+    /// direct-threaded baseline tier. `t2_protos` holds compiled bodies keyed
+    /// by proto_idx (never removed — machine code addresses stay valid);
+    /// `t2_hot` counts frame entries until `T2_COMPILE_THRESHOLD`;
+    /// `t2_trap` carries a Trap across the C ABI (status 3); `t2_depth` is
+    /// the live native-nesting count (capped at `T2_MAX_NATIVE_DEPTH`).
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_tier2_on: bool,
+    /// Optional method-name allowlist (`RUBYRS_JIT_TIER2_ONLY=a,b,c`) for
+    /// controlled per-method A/B runs; `None` = admit everything eligible.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_tier2_only: Option<std::collections::HashSet<String>>,
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_protos: crate::intern::FxHashMap<usize, crate::jit_tier2::T2Proto>,
+    /// Dense proto_idx → compiled-entry table (parallel to `t2_protos`, which
+    /// OWNS the modules): the per-serve lookup is one bounds-checked Vec read
+    /// instead of an FxHashMap probe (~1M serves per rubocop walk).
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_ptrs: Vec<Option<extern "C" fn(*mut Vm) -> i64>>,
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_hot: crate::intern::FxHashMap<usize, u32>,
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_trap: Option<crate::error::Trap>,
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_depth: u32,
+    /// Total tier-2 Cranelift compile time (stats-gated; ns).
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_compile_ns: u64,
     /// FLOAT-param specialization of a 1-arg method (`def scale(n); n*1.5; end`
     /// called with a Float arg): the param binds as Float, the i64 arg carries f64
     /// bits. Leaf methods only (no cross-calls — those decline). Keyed by proto,
@@ -2380,6 +2428,27 @@ impl Vm {
             #[cfg(feature = "jit-native")]
             jit_hash_scratch: None,
             #[cfg(feature = "jit-native")]
+            jit_tier2_on: std::env::var_os("RUBYRS_JIT_TIER2").is_some(),
+            #[cfg(feature = "jit-native")]
+            jit_tier2_only: std::env::var("RUBYRS_JIT_TIER2_ONLY").ok().map(|s| {
+                s.split(',')
+                    .map(|n| n.trim().to_string())
+                    .filter(|n| !n.is_empty())
+                    .collect()
+            }),
+            #[cfg(feature = "jit-native")]
+            t2_protos: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            t2_ptrs: Vec::new(),
+            #[cfg(feature = "jit-native")]
+            t2_hot: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            t2_trap: None,
+            #[cfg(feature = "jit-native")]
+            t2_depth: 0,
+            #[cfg(feature = "jit-native")]
+            t2_compile_ns: 0,
+            #[cfg(feature = "jit-native")]
             jit_native_fparam: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_poly: crate::intern::FxHashMap::default(),
@@ -2794,6 +2863,101 @@ impl Vm {
         self.jit_flags[proto_idx] |= bit;
     }
 
+    /// TIER-2 serving hook (ADR 0037), called RIGHT AFTER a method frame is
+    /// pushed at the dispatch fast paths: run the just-pushed top frame's
+    /// body natively when a tier-2 compile exists (compiling it on the
+    /// `T2_COMPILE_THRESHOLD`-th entry). On return the VM state is exactly
+    /// what the interpreter would produce: either the frame completed (popped,
+    /// result on the operand stack), or it bailed with `frame.ip` at the
+    /// resume point (the master loop continues interpreting — a mode switch,
+    /// never a re-execution), or a Trap propagates. Precedence: the frameless
+    /// specialized tiers (int/value/objparam/zeroarg/getter) serve BEFORE any
+    /// frame is pushed, so tier-2 only ever sees what they declined.
+    #[cfg(feature = "jit-native")]
+    #[inline]
+    pub(crate) fn t2_enter(&mut self) -> Result<(), crate::error::Trap> {
+        if !self.jit_tier2_on {
+            return Ok(());
+        }
+        self.t2_enter_slow()
+    }
+
+    #[cfg(feature = "jit-native")]
+    fn t2_enter_slow(&mut self) -> Result<(), crate::error::Trap> {
+        let pidx = match self.frames.last() {
+            Some(f) => f.proto_idx,
+            None => return Ok(()),
+        };
+        let flags = self.jit_flags_get(pidx);
+        if flags & JFLAG_NO_TIER2 != 0 {
+            return Ok(());
+        }
+        if self.t2_depth >= T2_MAX_NATIVE_DEPTH {
+            return Ok(()); // deep recursion: interpret (flat loop, no Rust stack)
+        }
+        if flags & JFLAG_TIER2_HAS == 0 {
+            let c = self.t2_hot.entry(pidx).or_insert(0);
+            *c += 1;
+            if *c < T2_COMPILE_THRESHOLD {
+                return Ok(());
+            }
+            if let Some(only) = &self.jit_tier2_only
+                && !only.contains(&self.protos[pidx].name)
+            {
+                self.jit_flags_set(pidx, JFLAG_NO_TIER2);
+                return Ok(());
+            }
+            if self.jit_stats_on {
+                self.jit_stats.compile[7][0] += 1;
+            }
+            let compile_t0 = self
+                .jit_stats_on
+                .then(std::time::Instant::now);
+            match crate::jit_tier2::compile_tier2(&self.protos[pidx], pidx) {
+                Some(p) => {
+                    let entry = p.ptr;
+                    self.t2_protos.insert(pidx, p);
+                    if self.t2_ptrs.len() <= pidx {
+                        self.t2_ptrs.resize(pidx + 1, None);
+                    }
+                    self.t2_ptrs[pidx] = Some(entry);
+                    self.jit_flags_set(pidx, JFLAG_TIER2_HAS);
+                    if self.jit_stats_on {
+                        self.jit_stats.compile[7][1] += 1;
+                    }
+                }
+                None => {
+                    self.jit_flags_set(pidx, JFLAG_NO_TIER2);
+                    return Ok(());
+                }
+            }
+            if let Some(t0) = compile_t0 {
+                self.t2_compile_ns += t0.elapsed().as_nanos() as u64;
+            }
+        }
+        // The fn pointer is copied out BEFORE running (the machine code lives
+        // in the module's mmap and never moves; the dense table entry is a
+        // copy, so a nested compile growing `t2_ptrs` can't invalidate it —
+        // same discipline as `NpEntry`).
+        let f = match self.t2_ptrs.get(pidx).copied().flatten() {
+            Some(f) => f,
+            None => return Ok(()),
+        };
+        self.t2_depth += 1;
+        let status = f(self as *mut Vm);
+        self.t2_depth -= 1;
+        if self.jit_stats_on {
+            self.jstat_exec(pidx, 7, status == crate::jit_tier2::T2_BAIL);
+        }
+        if status == crate::jit_tier2::T2_TRAP {
+            return Err(self
+                .t2_trap
+                .take()
+                .expect("ICE: tier-2 trap status without a stored trap"));
+        }
+        Ok(())
+    }
+
     /// Settle-check for `JFLAG_NO_ONEARG`: set the bit iff all three 1-arg
     /// verdicts exist and none is alive. Called from the hook once per routed
     /// visit (after it filled all three) and from the deopt breaker after a
@@ -2903,6 +3067,9 @@ impl Vm {
                 "rest-pred serves={} declines={}",
                 self.rest_pred_stats.0, self.rest_pred_stats.1
             );
+        }
+        if self.t2_compile_ns > 0 {
+            eprintln!("tier2 compile time total={:.1}ms", self.t2_compile_ns as f64 / 1e6);
         }
         for (i, name) in JIT_FAM_NAMES.iter().enumerate() {
             let [att, ok, pre] = self.jit_stats.compile[i];
