@@ -14,7 +14,6 @@
 //!   for a matching `rescue` handler; runs the handler if found,
 //!   re-raises as Uncaught Trap otherwise.
 
-
 use std::hint::cold_path;
 use std::rc::Rc;
 
@@ -22,7 +21,7 @@ use crate::error::{RubyError, Trap};
 use crate::heap::HeapObj;
 use crate::value::{Class, Instance, Value};
 
-use super::{class_is_a, LoopTransfer, LoopTransferKind, RescueFilter, Vm};
+use super::{LoopTransfer, LoopTransferKind, RescueFilter, Vm, class_is_a};
 
 impl Vm {
     /// Convert a Ruby-level `raise` argument into an Exception instance.
@@ -41,7 +40,7 @@ impl Vm {
                         class: cls,
                         ivars: crate::value::IvarTable::default(),
                         singleton_class: None,
-            frozen: std::cell::Cell::new(false),
+                        frozen: std::cell::Cell::new(false),
                     }));
                     let msg_id = self.interner.intern("@message");
                     self.heap.instance_mut(id).ivars.insert(msg_id, v);
@@ -64,7 +63,8 @@ impl Vm {
                 self.stack.push(Value::Class(cls.clone()));
                 let new_id = self.interner.intern("new");
                 let pre = self.frames.len();
-                let built = match self.do_call(new_id, 0, false, u32::MAX)
+                let built = match self
+                    .do_call(new_id, 0, false, u32::MAX)
                     .and_then(|()| self.dispatch_until(pre))
                 {
                     Ok(()) => self.stack.pop(),
@@ -173,7 +173,13 @@ impl Vm {
         let wrong_const_name: Option<String> = (class_name == "NameError")
             .then(|| message.strip_prefix("wrong constant name "))
             .flatten()
-            .map(|rest| rest.split(['\n', ' ']).next().unwrap_or(rest).trim().to_string())
+            .map(|rest| {
+                rest.split(['\n', ' '])
+                    .next()
+                    .unwrap_or(rest)
+                    .trim()
+                    .to_string()
+            })
             .filter(|s| !s.is_empty());
         self.maybe_gc();
         let id = self.heap.alloc(HeapObj::Instance(Instance {
@@ -183,11 +189,17 @@ impl Vm {
             frozen: std::cell::Cell::new(false),
         }));
         let msg_sym = self.interner.intern("@message");
-        self.heap.instance_mut(id).ivars.insert(msg_sym, Value::new_str(message));
+        self.heap
+            .instance_mut(id)
+            .ivars
+            .insert(msg_sym, Value::new_str(message));
         if let Some(nm) = wrong_const_name {
             let name_sym = self.interner.intern(&nm);
             let name_ivar = self.interner.intern("@name");
-            self.heap.instance_mut(id).ivars.insert(name_ivar, Value::Sym(name_sym));
+            self.heap
+                .instance_mut(id)
+                .ivars
+                .insert(name_ivar, Value::Sym(name_sym));
         }
         // `@backtrace` is filled centrally by `unwind_with_exception`
         // from the live frame stack on the first unwind hop — same
@@ -244,10 +256,17 @@ impl Vm {
             && bang_id != *exc_id
         {
             let cause_sym = self.interner.intern("@cause");
-            let already = self.heap.instance(*exc_id).ivars.get(&cause_sym)
+            let already = self
+                .heap
+                .instance(*exc_id)
+                .ivars
+                .get(&cause_sym)
                 .is_some_and(|v| !matches!(v, Value::Nil));
             if !already {
-                self.heap.instance_mut(*exc_id).ivars.insert(cause_sym, Value::Object(bang_id));
+                self.heap
+                    .instance_mut(*exc_id)
+                    .ivars
+                    .insert(cause_sym, Value::Object(bang_id));
             }
         }
         // Populate `@backtrace` on the raised exception from the
@@ -270,32 +289,43 @@ impl Vm {
             if class_chain_has_name(&self.heap.real_class_of(*id), "RubyrsThrowSignal"));
         if let Value::Object(exc_id) = &exc {
             let bt_sym = self.interner.intern("@backtrace");
-            let already_set = self.heap.instance(*exc_id).ivars.get(&bt_sym)
+            let already_set = self
+                .heap
+                .instance(*exc_id)
+                .ivars
+                .get(&bt_sym)
                 .map(|v| !matches!(v, Value::Nil))
                 .unwrap_or(false);
             if !already_set && !exc_is_throw {
                 // Innermost frame first (the raise site), oldest
                 // last — CRuby `Exception#backtrace` ordering.
-                let bt_strings: Vec<Value> = self.frames.iter().rev().map(|f| {
-                    let proto = &self.protos[f.proto_idx];
-                    let filename = proto.filename.clone();
-                    let method = proto.name.clone();
-                    // `f.ip` points one past the current op; map
-                    // back through `op_spans` to a byte offset.
-                    // Fall back to `Span::ZERO` (line 0) on the
-                    // boundary case `ip == 0`, matching the
-                    // existing `Vm::trap` shape.
-                    let span = if f.ip > 0 && f.ip <= proto.op_spans.len() {
-                        proto.op_spans[f.ip - 1]
-                    } else {
-                        crate::error::Span::ZERO
-                    };
-                    let line = match self.sources.get(&filename) {
-                        Some(src) => crate::error::line_with_base(src, span.byte_offset, proto.line_base),
-                        None => 0,
-                    };
-                    Value::new_str(format!("{}:{}:in '{}'", filename, line, method))
-                }).collect();
+                let bt_strings: Vec<Value> = self
+                    .frames
+                    .iter()
+                    .rev()
+                    .map(|f| {
+                        let proto = &self.protos[f.proto_idx];
+                        let filename = proto.filename.clone();
+                        let method = proto.name.clone();
+                        // `f.ip` points one past the current op; map
+                        // back through `op_spans` to a byte offset.
+                        // Fall back to `Span::ZERO` (line 0) on the
+                        // boundary case `ip == 0`, matching the
+                        // existing `Vm::trap` shape.
+                        let span = if f.ip > 0 && f.ip <= proto.op_spans.len() {
+                            proto.op_spans[f.ip - 1]
+                        } else {
+                            crate::error::Span::ZERO
+                        };
+                        let line = match self.sources.get(&filename) {
+                            Some(src) => {
+                                crate::error::line_with_base(src, span.byte_offset, proto.line_base)
+                            }
+                            None => 0,
+                        };
+                        Value::new_str(format!("{}:{}:in '{}'", filename, line, method))
+                    })
+                    .collect();
                 if !bt_strings.is_empty() {
                     // GC root-hole guard: `exc` is a Rust local
                     // (not on `self.stack` / pinned), so the
@@ -305,7 +335,9 @@ impl Vm {
                     // bt_string (heap-backed Str) across the
                     // alloc, then drop the pins.
                     self.pinned.push(Value::Object(*exc_id));
-                    for s in &bt_strings { self.pinned.push(s.clone()); }
+                    for s in &bt_strings {
+                        self.pinned.push(s.clone());
+                    }
                     let n_pinned = bt_strings.len() + 1;
                     self.maybe_gc();
                     let bt_arr_id = self.heap.alloc(HeapObj::Array(bt_strings.into()));
@@ -322,13 +354,12 @@ impl Vm {
                     // (best-effort, never compounds the unwind).
                     let sbt_sym = self.interner.intern("set_backtrace");
                     let exc_cls = self.heap.real_class_of(*exc_id);
-                    let user_sbt = self.lookup_method_uncached(&exc_cls, sbt_sym)
-                        .filter(|m| {
-                            m.defining_class
-                                .as_ref()
-                                .and_then(std::rc::Weak::upgrade)
-                                .is_none_or(|dc| dc.name != "Exception")
-                        });
+                    let user_sbt = self.lookup_method_uncached(&exc_cls, sbt_sym).filter(|m| {
+                        m.defining_class
+                            .as_ref()
+                            .and_then(std::rc::Weak::upgrade)
+                            .is_none_or(|dc| dc.name != "Exception")
+                    });
                     let mut dispatched = false;
                     if let Some(m) = user_sbt {
                         self.pinned.push(Value::Array(bt_arr_id));
@@ -344,9 +375,13 @@ impl Vm {
                             self.frames.truncate(pre_frames);
                         }
                     }
-                    for _ in 0..n_pinned { self.pinned.pop(); }
+                    for _ in 0..n_pinned {
+                        self.pinned.pop();
+                    }
                     if !dispatched {
-                        self.heap.instance_mut(*exc_id).ivars
+                        self.heap
+                            .instance_mut(*exc_id)
+                            .ivars
                             .insert(bt_sym, Value::Array(bt_arr_id));
                     }
                 }
@@ -387,7 +422,10 @@ impl Vm {
             // clause was tied to *this* begin/end scope, which we're
             // unwinding past anyway.
             let chosen = {
-                let f = self.frames.last_mut().expect("ICE: unwind with empty frames");
+                let f = self
+                    .frames
+                    .last_mut()
+                    .expect("ICE: unwind with empty frames");
                 let mut chosen = None;
                 while let Some(h) = f.pop_rescue() {
                     let matches = if h.is_ensure {
@@ -418,7 +456,10 @@ impl Vm {
                         // Matches nothing — keep unwinding.
                         false
                     };
-                    if matches { chosen = Some(h); break; }
+                    if matches {
+                        chosen = Some(h);
+                        break;
+                    }
                 }
                 chosen
             };
@@ -435,7 +476,9 @@ impl Vm {
                 // entry and pops the wrong handler depth. Parallel
                 // truncate on `loop_stack_depths` keeps the two
                 // stacks in lock-step.
-                f.aux_mut().loop_rescue_depths.truncate(h.loop_depth_at_push);
+                f.aux_mut()
+                    .loop_rescue_depths
+                    .truncate(h.loop_depth_at_push);
                 f.aux_mut().loop_stack_depths.truncate(h.loop_depth_at_push);
                 // Same shape as loop_rescue_depths truncation but
                 // for the begin/rescue baseline stack: any inner
@@ -454,7 +497,9 @@ impl Vm {
                 // — captured at its `EnterBegin`; truncating by
                 // count is enough since outer entries are still
                 // valid).
-                f.aux_mut().begin_rescue_depths.truncate(h.begin_depth_at_push);
+                f.aux_mut()
+                    .begin_rescue_depths
+                    .truncate(h.begin_depth_at_push);
                 if h.is_ensure {
                     // ensure handler: push the exception onto the operand
                     // stack; the handler's compiled code ends in `Op::Raise`
@@ -531,7 +576,10 @@ impl Vm {
                     _ => exc.to_display(&self.heap, &self.interner),
                 };
                 self.last_uncaught_exception = Some(exc.clone());
-                return Err(self.trap(RubyError::Uncaught { class_name, message }));
+                return Err(self.trap(RubyError::Uncaught {
+                    class_name,
+                    message,
+                }));
             }
         }
     }
@@ -550,7 +598,10 @@ impl Vm {
         target_ip: usize,
         target_rescues_len: usize,
     ) -> Result<(), Trap> {
-        let f = self.frames.last().expect("ICE: begin_loop_transfer no frame");
+        let f = self
+            .frames
+            .last()
+            .expect("ICE: begin_loop_transfer no frame");
         // Target loop_depth is the slot that BreakLoop/NextLoop were
         // about to consume: the innermost EnterLoop entry. Save it
         // so the eventual landing can truncate `loop_rescue_depths`
@@ -564,11 +615,16 @@ impl Vm {
         // entering an ensure handler, in scenarios like
         // `while; begin; raise; ensure; break; end; end`) is
         // flushed before the break value lands.
-        let target_stack_depth = *f.aux.as_ref()
+        let target_stack_depth = *f
+            .aux
+            .as_ref()
             .and_then(|a| a.loop_stack_depths.last())
             .expect("ICE: loop_stack_depths empty at begin_loop_transfer");
         self.pending_loop_transfer = Some(LoopTransfer {
-            kind, target_ip, target_rescues_len, target_loop_depth,
+            kind,
+            target_ip,
+            target_rescues_len,
+            target_loop_depth,
             target_stack_depth,
         });
         self.continue_loop_transfer()
@@ -578,7 +634,9 @@ impl Vm {
     /// `Op::EndEnsure` at the tail of an ensure handler body, and
     /// directly by `begin_loop_transfer` to do the first hop.
     pub(crate) fn continue_loop_transfer(&mut self) -> Result<(), Trap> {
-        let target = self.pending_loop_transfer.as_ref()
+        let target = self
+            .pending_loop_transfer
+            .as_ref()
             .expect("ICE: continue_loop_transfer with no pending transfer");
         let target_rescues_len = target.target_rescues_len;
         let target_ip = target.target_ip;
@@ -589,9 +647,16 @@ impl Vm {
         // The first ensure we hit gets entered — the rest of the
         // walk happens on the next EndEnsure.
         loop {
-            let f = self.frames.last_mut().expect("ICE: continue_loop_transfer no frame");
-            if f.rescues_len() <= target_rescues_len { break; }
-            let h = f.pop_rescue().expect("ICE: rescues non-empty by length check");
+            let f = self
+                .frames
+                .last_mut()
+                .expect("ICE: continue_loop_transfer no frame");
+            if f.rescues_len() <= target_rescues_len {
+                break;
+            }
+            let h = f
+                .pop_rescue()
+                .expect("ICE: rescues non-empty by length check");
             if h.is_ensure {
                 // Suspend the transfer here. Restore the operand
                 // stack to PushEnsure depth (matching the
@@ -615,12 +680,19 @@ impl Vm {
         // that stranded exception. CRuby semantics: a control transfer
         // from an ensure cancels the exception that was being unwound.
         self.stack.truncate(target_stack_depth);
-        let f = self.frames.last_mut().expect("ICE: loop transfer landing no frame");
+        let f = self
+            .frames
+            .last_mut()
+            .expect("ICE: loop transfer landing no frame");
         // Truncate loop_rescue_depths (+ parallel loop_stack_depths)
         // to the entry we're targeting (drops EnterLoop entries from
         // nested whiles the transfer is escaping out of).
-        f.aux_mut().loop_rescue_depths.truncate(target_loop_depth + 1);
-        f.aux_mut().loop_stack_depths.truncate(target_loop_depth + 1);
+        f.aux_mut()
+            .loop_rescue_depths
+            .truncate(target_loop_depth + 1);
+        f.aux_mut()
+            .loop_stack_depths
+            .truncate(target_loop_depth + 1);
         f.ip = target_ip;
         if let LoopTransferKind::Break { value } = transfer.kind {
             // Push the break value so the loop's join sees it as
@@ -653,8 +725,16 @@ impl Vm {
     /// Returns Ok(()) on success. Caller must already have
     /// truncated the block frame off `self.frames` and ensured
     /// `self.frames.last()` IS the yielding method.
-    pub(crate) fn begin_method_break(&mut self, value: Value, target_frame_idx: usize) -> Result<(), Trap> {
-        self.pending_method_break = Some(crate::vm::MethodBreak { value, target_frame_idx, suspended: false });
+    pub(crate) fn begin_method_break(
+        &mut self,
+        value: Value,
+        target_frame_idx: usize,
+    ) -> Result<(), Trap> {
+        self.pending_method_break = Some(crate::vm::MethodBreak {
+            value,
+            target_frame_idx,
+            suspended: false,
+        });
         self.sync_control_signals();
         self.continue_method_break()
     }
@@ -674,13 +754,21 @@ impl Vm {
         }
         loop {
             let top_idx = self.frames.len() - 1;
-            let target = self.pending_method_break.as_ref()
+            let target = self
+                .pending_method_break
+                .as_ref()
                 .expect("ICE: continue_method_break with no pending break")
                 .target_frame_idx;
-            debug_assert!(top_idx >= target,
-                "ICE: continue_method_break: top frame {} below target {}", top_idx, target);
+            debug_assert!(
+                top_idx >= target,
+                "ICE: continue_method_break: top frame {} below target {}",
+                top_idx,
+                target
+            );
             // Walk this frame's rescues; first is_ensure suspends.
-            let f = self.frames.last_mut()
+            let f = self
+                .frames
+                .last_mut()
                 .expect("ICE: continue_method_break: empty frames");
             let mut found_ensure = None;
             while let Some(h) = f.pop_rescue() {
@@ -699,7 +787,8 @@ impl Vm {
                 // runs.
                 self.stack.truncate(h.stack_depth);
                 f.ip = h.handler_ip;
-                self.pending_method_break.as_mut()
+                self.pending_method_break
+                    .as_mut()
                     .expect("ICE: pending_method_break vanished mid-walk")
                     .suspended = true;
                 return Ok(());
@@ -719,10 +808,14 @@ impl Vm {
                 // pre-A.6 method_return arm in `dispatch()` and
                 // CRuby's class-body semantics ("class Foo; X;
                 // end" evaluates to X's class).
-                let mb = self.pending_method_break.take()
+                let mb = self
+                    .pending_method_break
+                    .take()
                     .expect("ICE: pending_method_break vanished mid-continue");
                 self.sync_control_signals();
-                let popped = self.frames.pop()
+                let popped = self
+                    .frames
+                    .pop()
                     .expect("ICE: continue_method_break landing with empty frames");
                 self.stack.truncate(popped.base_sp);
                 // Frame-local `$~`: restore the popped method frame's
@@ -734,7 +827,9 @@ impl Vm {
                     self.last_match = saved.map(|b| *b);
                 }
                 if popped.is_class_body {
-                    let cls = self.class_stack.pop()
+                    let cls = self
+                        .class_stack
+                        .pop()
                         .expect("ICE: class_stack empty unwinding class-body target");
                     self.class_visibility_stack.pop();
                     self.module_function_active_stack.pop();
@@ -753,7 +848,9 @@ impl Vm {
             // normally land in caller's stack but we're unwinding
             // past it). Truncate stack; do NOT push value. Loop
             // to walk the next frame's ensures.
-            let popped = self.frames.pop()
+            let popped = self
+                .frames
+                .pop()
                 .expect("ICE: continue_method_break intermediate pop with empty frames");
             self.stack.truncate(popped.base_sp);
             // Frame-local `$~`: restore each intermediate method
@@ -817,7 +914,7 @@ pub(crate) fn build_interrupt_exception(vm: &mut crate::vm::Vm) -> Option<crate:
         class: cls,
         ivars: crate::value::IvarTable::default(),
         singleton_class: None,
-            frozen: std::cell::Cell::new(false),
+        frozen: std::cell::Cell::new(false),
     }));
     let message_sym = vm.interner.intern("@message");
     let msg_val = Value::Str(std::rc::Rc::new(RStr::new("interrupt".to_string())));
@@ -828,9 +925,9 @@ pub(crate) fn build_interrupt_exception(vm: &mut crate::vm::Vm) -> Option<crate:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
     use crate::bytecode::Proto;
     use crate::intern::Interner;
+    use std::cell::RefCell;
 
     fn mk_vm() -> Vm {
         Vm::new(Vec::<Proto>::new(), Interner::new())
@@ -852,10 +949,11 @@ mod tests {
             superclass: RefCell::new(superclass),
             undefed: RefCell::new(crate::intern::FxHashSet::default()),
             anon_serial: std::cell::Cell::new(0),
-                    class_vars: RefCell::new(crate::intern::FxHashMap::default()),
+            class_vars: RefCell::new(crate::intern::FxHashMap::default()),
             consts: RefCell::new(crate::intern::FxHashMap::default()),
             assigned_name: RefCell::new(None),
             class_tag: None,
+            frozen: std::cell::Cell::new(false),
             #[cfg(feature = "cext")]
             cext_alloc_func: std::cell::Cell::new(None),
         })
@@ -908,7 +1006,12 @@ mod tests {
         assert_eq!(vm.heap.class_of(id).name, "RuntimeError");
         // `@message` is the original string.
         let msg_sym = vm.interner.intern("@message");
-        let stored = vm.heap.instance(id).ivars.get(&msg_sym).cloned()
+        let stored = vm
+            .heap
+            .instance(id)
+            .ivars
+            .get(&msg_sym)
+            .cloned()
             .expect("@message ivar should be set");
         assert!(matches!(stored, Value::Str(_)));
     }
@@ -985,7 +1088,9 @@ mod tests {
         let cls_id = vm.interner.intern("ArgumentError");
         vm.classes.insert(cls_id, cls.clone());
 
-        let trap = Trap::new(RubyError::ArgumentError { msg: "bad arg".into() });
+        let trap = Trap::new(RubyError::ArgumentError {
+            msg: "bad arg".into(),
+        });
         let out = vm.trap_to_exception(&trap).expect("class is registered");
         let id = match out {
             Value::Object(id) => id,
@@ -994,11 +1099,15 @@ mod tests {
         assert!(Rc::ptr_eq(&vm.heap.class_of(id), &cls));
 
         let msg_sym = vm.interner.intern("@message");
-        let stored = vm.heap.instance(id).ivars.get(&msg_sym).cloned()
+        let stored = vm
+            .heap
+            .instance(id)
+            .ivars
+            .get(&msg_sym)
+            .cloned()
             .expect("@message ivar should be set");
         // The message string carries the trap's message.
         let s = stored.to_display(&vm.heap, &vm.interner);
         assert_eq!(s, "bad arg");
     }
 }
-

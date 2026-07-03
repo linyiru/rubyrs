@@ -18,47 +18,6 @@ use crate::value::{ObjId, Value};
 
 use super::{value_cmp_v, PinGuard, Vm};
 
-/// Build a `LastMatch` from one native-regex hit so a `String#scan`
-/// block iteration can publish `$~` (and the English aliases
-/// `$LAST_MATCH_INFO` / `$&` / `` $` `` / `$'` / `$1`..). CRuby sets
-/// `$~` to each successive MatchData while a `scan` block runs;
-/// dotenv's parser reads `$LAST_MATCH_INFO[:key]` inside exactly such
-/// a block, so without this the global stays nil and indexing it
-/// raises NoMethodError.
-#[cfg(feature = "regex")]
-fn scan_last_match(re: &regex::Regex, caps: &regex::Captures, input: &str) -> crate::vm::LastMatch {
-    let whole_m = caps.get(0).expect("capture group 0 always present on a hit");
-    let caps_vec: Vec<Option<String>> = (1..caps.len())
-        .map(|i| caps.get(i).map(|m| m.as_str().to_string()))
-        .collect();
-    let named: Vec<(String, Option<String>)> = re
-        .capture_names()
-        .flatten()
-        .map(|n| (n.to_string(), caps.name(n).map(|m| m.as_str().to_string())))
-        .collect();
-    // Byte spans (full-`input` coords) + names for groups 1..N, so a
-    // `$~` materialised inside a scan block backs #begin/#end/#offset.
-    let group_spans: Vec<Option<(usize, usize)>> = (1..caps.len())
-        .map(|i| caps.get(i).map(|m| (m.start(), m.end())))
-        .collect();
-    let cap_names: Vec<Option<String>> = re
-        .capture_names()
-        .skip(1)
-        .map(|n| n.map(|s| s.to_string()))
-        .collect();
-    crate::vm::LastMatch {
-        whole: whole_m.as_str().to_string(),
-        caps: caps_vec,
-        input: input.to_string(),
-        m_start: whole_m.start(),
-        m_end: whole_m.end(),
-        named,
-        group_spans,
-        cap_names,
-        binary: None,
-    }
-}
-
 /// Outcome of a single `block.call(args)` step inside an
 /// iterator driver. Returned by `Vm::step_block`.
 ///
@@ -1243,18 +1202,16 @@ impl Vm {
             match &args[0] {
                 #[cfg(feature = "regex")]
                 Value::Regex(re) => {
-                    // Layer #17: scan with regex receiver
-                    // hasn't been migrated to the dual-engine
-                    // dispatcher yet. Native patterns take the
-                    // existing fast path; fancy patterns trap
-                    // clearly until the follow-up wires it.
-                    let native = re.as_native().ok_or_else(|| g.vm.trap(crate::error::RubyError::RuntimeError {
-                        msg: format!(
-                            "regex op 'String#scan' is not yet supported on patterns requiring the fancy-regex engine (pattern: /{}/)",
-                            re.as_str(),
-                        ),
-                    }))?;
-                    let has_groups = native.captures_len() > 1;
+                    // Engine-agnostic scan: the no-block arm and gsub/sub
+                    // already use OwnedCaptures so fancy-regex-backed
+                    // patterns can carry captures, names, and spans without
+                    // exposing backend-specific Captures lifetimes here.
+                    let owned_matches = re.captures_iter_owned(&source_str).map_err(|e| {
+                        g.vm.trap(crate::error::RubyError::RuntimeError {
+                            msg: format!("regex match failed: {} (pattern: /{}/)", e, re.as_str()),
+                        })
+                    })?;
+                    let has_groups = re.captures_len() > 1;
                     // CRuby publishes `$~` (and its English aliases) for
                     // each successive match while the scan block runs.
                     // Save the caller's match into the enclosing method
@@ -1270,14 +1227,17 @@ impl Vm {
                     // pops exactly once and classifies, fixing the
                     // double-pop bug as a side effect.
                     if has_groups {
-                        for caps in native.captures_iter(&source_str) {
-                            g.vm.last_match = Some(scan_last_match(native, &caps, &source_str));
-                            let mut group_vec: Vec<Value> = Vec::with_capacity(caps.len() - 1);
-                            for i in 1..caps.len() {
-                                let v = caps.get(i)
-                                    .map(|m| Value::new_str(m.as_str()))
-                                    .unwrap_or(Value::Nil);
-                                group_vec.push(v);
+                        for caps in &owned_matches {
+                            g.vm.last_match = Some(
+                                g.vm.last_match_from_owned_captures(re, &source_str, caps)
+                            );
+                            let mut group_vec: Vec<Value> = Vec::with_capacity(caps.groups.len());
+                            for grp in &caps.groups {
+                                group_vec.push(
+                                    grp.as_ref()
+                                        .map(|m| Value::new_str(m.clone()))
+                                        .unwrap_or(Value::Nil),
+                                );
                             }
                             g.vm.maybe_gc();
                             g.vm.check_alloc()?;
@@ -1321,15 +1281,20 @@ impl Vm {
                             }
                         }
                     } else {
-                        for caps in native.captures_iter(&source_str) {
-                            let whole = caps.get(0).expect("group 0 present on a hit").as_str().to_string();
-                            g.vm.last_match = Some(scan_last_match(native, &caps, &source_str));
+                        for caps in &owned_matches {
+                            let whole = caps.whole.clone();
+                            g.vm.last_match = Some(
+                                g.vm.last_match_from_owned_captures(re, &source_str, caps)
+                            );
                             match g.vm.step_block1(block, Value::new_str(&whole), pre_frames)? {
                                 BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
                                 BlockStep::Break(r) => { early = Some(r); break; }
                                 BlockStep::Value(_) => {}
                             }
                         }
+                    }
+                    if owned_matches.is_empty() {
+                        g.vm.last_match = None;
                     }
                 }
                 Value::Str(pat) => {

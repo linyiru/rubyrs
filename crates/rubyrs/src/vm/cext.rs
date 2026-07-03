@@ -47,10 +47,9 @@ unsafe extern "C" {
 // `CURRENT_VM_PTR` itself is only referenced in the test
 // module below — gate the import accordingly so non-test
 // builds don't trip `-D unused_imports`.
-pub(crate) use super::vm_ptr::{current_vm_ptr, with_vm_ptr_set};
 #[cfg(test)]
 pub(crate) use super::vm_ptr::CURRENT_VM_PTR;
-
+pub(crate) use super::vm_ptr::{current_vm_ptr, with_vm_ptr_set};
 
 /// RAII guard around `rubyrs_cext::enter()` / `leave()`. Normal path
 /// calls [`Self::into_state`] to consume the guard and receive the
@@ -139,11 +138,8 @@ impl Drop for TypedDataCallbackGuard {
     }
 }
 
-
 // CURRENT_VM_PTR / VmPtrGuard / with_vm_ptr_set definitions
 // moved to `super::vm_ptr` — see `pub(crate) use` above.
-
-
 
 /// Translate a C-side opaque handle back into a `Value`. Currently
 /// covers exactly the `CValue` variants the spike supports.
@@ -162,19 +158,12 @@ impl Drop for TypedDataCallbackGuard {
 const CEXT_TRANSLATE_MAX_DEPTH: usize = 256;
 
 #[cfg(not(target_os = "wasi"))]
-fn cext_handle_to_value(
-    vm: &mut Vm,
-    h: rubyrs_cext::Value,
-) -> Result<Value, Trap> {
+fn cext_handle_to_value(vm: &mut Vm, h: rubyrs_cext::Value) -> Result<Value, Trap> {
     cext_handle_to_value_d(vm, h, 0)
 }
 
 #[cfg(not(target_os = "wasi"))]
-fn cext_handle_to_value_d(
-    vm: &mut Vm,
-    h: rubyrs_cext::Value,
-    depth: usize,
-) -> Result<Value, Trap> {
+fn cext_handle_to_value_d(vm: &mut Vm, h: rubyrs_cext::Value, depth: usize) -> Result<Value, Trap> {
     if depth >= CEXT_TRANSLATE_MAX_DEPTH {
         // Pathological input — cycle or implausibly deep nesting in
         // the C-built Array/Hash. Surface as an ArgumentError Trap
@@ -276,7 +265,9 @@ fn cext_handle_to_value_d(
             g.vm.maybe_gc();
             // Review #27 — same Trap propagation as Array arm above.
             g.vm.check_alloc()?;
-            let id = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(entries)));
+            let id =
+                g.vm.heap
+                    .alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(entries)));
             Value::Hash(id)
         }
         // L3-B: an already-allocated Vm-heap Object. The wrap
@@ -468,14 +459,16 @@ pub(crate) fn cext_dispatch(
     // Any args.len() is permitted for -1. Fixed arity 0..=5 still
     // requires exact match.
     match arity {
-        -1 => {}  // variadic — no args.len() check
+        -1 => {} // variadic — no args.len() check
         0..=5 => {
             let expected_argc = arity as usize;
             if args.len() != expected_argc {
                 return Err(Trap::new(RubyError::ArgumentError {
                     msg: format!(
                         "C ext `{}': expected {} args, got {}",
-                        name, expected_argc, args.len()
+                        name,
+                        expected_argc,
+                        args.len()
                     ),
                 }));
             }
@@ -518,11 +511,10 @@ pub(crate) fn cext_dispatch(
         // pop both stacks in LIFO order, leaving thread-local state
         // exactly as we found it.
         let state_guard = CExtStateGuard::enter();
-        let _cb_guard = FuncallCallbackGuard::install(Box::new(
-            move |recv_h, method_name, arg_hs| {
+        let _cb_guard =
+            FuncallCallbackGuard::install(Box::new(move |recv_h, method_name, arg_hs| {
                 cext_funcall_to_vm(vm_ptr, recv_h, method_name, arg_hs)
-            },
-        ));
+            }));
         // L3-B: install the TypedData wrap + check callbacks for
         // the duration of this dispatch. The closures capture
         // `vm_ptr` and do raw heap allocation / lookup on it.
@@ -546,23 +538,22 @@ pub(crate) fn cext_dispatch(
                 // Lookup the rubyrs Class by joined name; if the
                 // cext registered it via rb_define_class_under,
                 // it's already in vm.classes.
-                let class_name = rubyrs_cext::with_state(|st| {
-                    match st.resolve(klass_h) {
-                        rubyrs_cext::CValue::Class(n) => n.clone(),
-                        other => panic!(
-                            "ICE: rb_data_typed_object_wrap: klass arg \
+                let class_name = rubyrs_cext::with_state(|st| match st.resolve(klass_h) {
+                    rubyrs_cext::CValue::Class(n) => n.clone(),
+                    other => panic!(
+                        "ICE: rb_data_typed_object_wrap: klass arg \
                              is not a Class handle: {:?}",
-                            other
-                        ),
-                    }
+                        other
+                    ),
                 });
                 let class_id_sym = vm.interner.intern(&class_name);
-                let class = vm.classes.get(&class_id_sym).cloned()
-                    .unwrap_or_else(|| panic!(
+                let class = vm.classes.get(&class_id_sym).cloned().unwrap_or_else(|| {
+                    panic!(
                         "ICE: rb_data_typed_object_wrap: class {:?} \
                          not registered (rb_define_class_under not called?)",
                         class_name
-                    ));
+                    )
+                });
                 vm.maybe_gc();
                 // Respect heap.max_live via the same maybe_gc +
                 // check_alloc pattern as every other allocator
@@ -572,12 +563,15 @@ pub(crate) fn cext_dispatch(
                 // lands in the sentinel set.
                 vm.check_alloc()
                     .expect("L3-B spike: heap cap exhausted during TypedData wrap");
-                let id = vm.heap.alloc(crate::heap::HeapObj::TypedData(
-                    crate::heap::TypedDataObj { class, data_ptr, type_ptr, dfree }
-                ));
-                rubyrs_cext::with_state(|st| {
-                    st.intern(rubyrs_cext::CValue::HeapRef(id.0))
-                })
+                let id =
+                    vm.heap
+                        .alloc(crate::heap::HeapObj::TypedData(crate::heap::TypedDataObj {
+                            class,
+                            data_ptr,
+                            type_ptr,
+                            dfree,
+                        }));
+                rubyrs_cext::with_state(|st| st.intern(rubyrs_cext::CValue::HeapRef(id.0)))
             }),
             std::rc::Rc::new(move |obj_h, expected_type| {
                 // SAFETY: same vm_ptr as above; immutable read here.
@@ -690,9 +684,9 @@ pub(crate) fn cext_dispatch(
             // L3-C: instance method dispatch — pass the receiver as
             // self via HeapRef. The cext typically extracts its
             // backing data with TypedData_Get_Struct(self, ...).
-            CextSelfHandle::Object(Value::Object(id)) => rubyrs_cext::with_state(|st| {
-                st.intern(rubyrs_cext::CValue::HeapRef(id.0))
-            }),
+            CextSelfHandle::Object(Value::Object(id)) => {
+                rubyrs_cext::with_state(|st| st.intern(rubyrs_cext::CValue::HeapRef(id.0)))
+            }
             CextSelfHandle::Object(other) => {
                 return Err(Trap::new(RubyError::TypeError {
                     msg: format!(
@@ -705,8 +699,7 @@ pub(crate) fn cext_dispatch(
         };
         // C helper expects [self, arg0, arg1, ...]; pre-allocate
         // with capacity to keep the hot path branch-free.
-        let mut invoke_args: Vec<rubyrs_cext::Value> =
-            Vec::with_capacity(arg_handles.len() + 1);
+        let mut invoke_args: Vec<rubyrs_cext::Value> = Vec::with_capacity(arg_handles.len() + 1);
         invoke_args.push(self_handle);
         invoke_args.extend_from_slice(&arg_handles);
         // ADR 0025 deferred follow-up: increment `cext_depth`
@@ -718,9 +711,7 @@ pub(crate) fn cext_dispatch(
         // pointer all the other cext_dispatch sites use; valid
         // for this dispatch's lifetime per ADR 0013.
         let _depth_guard = crate::vm::CextDepthGuard::enter(&mut *vm_ptr);
-        let raised = rubyrs_cext::raise::invoke_with_raise(
-            func, arity, &invoke_args,
-        );
+        let raised = rubyrs_cext::raise::invoke_with_raise(func, arity, &invoke_args);
         let ret_handle = match raised {
             rubyrs_cext::raise::Raised::Returned(v) => v,
             rubyrs_cext::raise::Raised::Raised { class, msg } => {
@@ -735,13 +726,13 @@ pub(crate) fn cext_dispatch(
                 // class_name() to cover the rest).
                 let class_name = rubyrs_cext::raise::exception_class_name_for_sentinel(class);
                 let err = match class_name {
-                    "ArgumentError"     => RubyError::ArgumentError { msg },
-                    "RuntimeError"      => RubyError::RuntimeError { msg },
-                    "TypeError"         => RubyError::TypeError { msg },
-                    "NameError"         => RubyError::NameError { msg },
+                    "ArgumentError" => RubyError::ArgumentError { msg },
+                    "RuntimeError" => RubyError::RuntimeError { msg },
+                    "TypeError" => RubyError::TypeError { msg },
+                    "NameError" => RubyError::NameError { msg },
                     "ZeroDivisionError" => RubyError::ZeroDivisionError { msg },
-                    "RangeError"        => RubyError::RangeError { msg },
-                    "FloatDomainError"  => RubyError::FloatDomainError { msg },
+                    "RangeError" => RubyError::RangeError { msg },
+                    "FloatDomainError" => RubyError::FloatDomainError { msg },
                     other => RubyError::RuntimeError {
                         msg: format!("{}: {}", other, msg),
                     },
@@ -866,7 +857,6 @@ fn cext_funcall_to_vm(
 }
 
 impl Vm {
-
     /// Load a C extension shared library, run its `Init_<stem>` symbol,
     /// and register every function it declared via
     /// `rb_define_global_function` into `self.host_fns`.
@@ -949,13 +939,15 @@ impl Vm {
         // matching require_ruby's "cannot find" failure shape.
         let canon_so = match std::fs::canonicalize(&so_path) {
             Ok(p) => p,
-            Err(e) => return Err(self.trap(RubyError::LoadError {
-                msg: format!(
-                    "cext_require: cannot canonicalize {} ({})",
-                    so_path.display(),
-                    e,
-                ),
-            })),
+            Err(e) => {
+                return Err(self.trap(RubyError::LoadError {
+                    msg: format!(
+                        "cext_require: cannot canonicalize {} ({})",
+                        so_path.display(),
+                        e,
+                    ),
+                }));
+            }
         };
         self.check_load_allowed("cext_require", Some(&canon_so))?;
 
@@ -1037,9 +1029,10 @@ impl Vm {
                     undefed: RefCell::new(crate::intern::FxHashSet::default()),
                     anon_serial: std::cell::Cell::new(0),
                     class_vars: RefCell::new(crate::intern::FxHashMap::default()),
-            consts: RefCell::new(crate::intern::FxHashMap::default()),
+                    consts: RefCell::new(crate::intern::FxHashMap::default()),
                     assigned_name: RefCell::new(None),
                     class_tag: None,
+                    frozen: std::cell::Cell::new(false),
                     cext_alloc_func: std::cell::Cell::new(None),
                 });
                 self.classes.insert(name_sym, new_class);
@@ -1086,7 +1079,13 @@ impl Vm {
                             // Singleton methods get the class itself
                             // as `self`, matching CRuby's
                             // `rb_define_singleton_method` contract.
-                            cext_dispatch(&qualified, func, arity, args, CextSelfHandle::Class(&class_name))
+                            cext_dispatch(
+                                &qualified,
+                                func,
+                                arity,
+                                args,
+                                CextSelfHandle::Class(&class_name),
+                            )
                         }),
                     );
             }
@@ -1128,7 +1127,6 @@ impl Vm {
 
         Ok(Value::Nil)
     }
-
 }
 
 #[cfg(test)]
@@ -1188,7 +1186,9 @@ mod miri_tests {
                 // in production: heap, classes, interner, stack,
                 // pinned. If any of these triggers Stacked
                 // Borrows UB it'll surface under Miri here.
-                let id = inner_vm.heap.alloc(HeapObj::Array(vec![Value::Int(1)].into()));
+                let id = inner_vm
+                    .heap
+                    .alloc(HeapObj::Array(vec![Value::Int(1)].into()));
                 let name = inner_vm.interner.intern("synthetic");
                 inner_vm.stack.push(Value::Array(id));
                 inner_vm.pinned.push(Value::Sym(name));
@@ -1245,9 +1245,7 @@ mod miri_tests {
             // Inner: same pointer (could in principle be a
             // different vm in a multi-Vm host, but our model
             // is single-Vm per thread).
-            let inner = with_vm_ptr_set(vm_ptr, || {
-                CURRENT_VM_PTR.with(|c| c.get())
-            });
+            let inner = with_vm_ptr_set(vm_ptr, || CURRENT_VM_PTR.with(|c| c.get()));
             assert_eq!(outer_ptr, inner);
 
             // After inner exits, outer pointer is restored.
@@ -1259,4 +1257,3 @@ mod miri_tests {
         assert!(CURRENT_VM_PTR.with(|c| c.get()).is_null());
     }
 }
-

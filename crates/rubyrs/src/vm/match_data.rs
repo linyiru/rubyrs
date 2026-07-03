@@ -43,6 +43,30 @@ pub(crate) struct MatchDataContext {
 }
 
 impl Vm {
+    /// Build the frame-scoped `$~` side-channel from engine-agnostic
+    /// owned captures. Used by `String#scan` (block and no-block) so
+    /// native-regex and fancy-regex matches publish identical MatchData
+    /// state: `$~`, `$1..`, `$&`, pre/post-match, named captures, and
+    /// group offsets.
+    pub(crate) fn last_match_from_owned_captures(
+        &self,
+        re: &std::rc::Rc<crate::regex_engine::CompiledRegex>,
+        input: &str,
+        oc: &crate::regex_engine::OwnedCaptures,
+    ) -> crate::vm::LastMatch {
+        crate::vm::LastMatch {
+            whole: oc.whole.clone(),
+            caps: oc.groups.clone(),
+            input: input.to_string(),
+            m_start: oc.m_start,
+            m_end: oc.m_end,
+            named: oc.named.clone(),
+            group_spans: oc.group_spans.clone(),
+            cap_names: re.capture_group_names(),
+            binary: None,
+        }
+    }
+
     pub(crate) fn materialize_match_data_with_context(
         &mut self,
         whole: String,

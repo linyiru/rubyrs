@@ -6,6 +6,57 @@ Bridgetown and most modern gems, so its own test suite is a bounded,
 quantifiable target for "does rubyrs run a real metaprogramming-heavy
 gem."
 
+## Status (2026-07-01b): full self-test = 520/520, DETERMINISTIC
+
+The zeitwerk 2.8.2 self-test now passes **520/520** (48/48 files
+fully green) deterministically — `run_all.sh` is a stable 520/520.
+
+The previously-noted "intermittent 518/520" was **NOT** minitest
+seed flakiness (the earlier diagnosis in this README was wrong —
+rubyrs runs minitest at a fixed `seed 0`, so the two failures were
+100% reproducible). They were two real, independent
+constant-resolution bugs, both fixed this round:
+
+1. **own-scope autoload lost to a superclass const**
+   (`test_explicit_namespace` "same cname in the superclass"). For
+   `Sub < Base` where `Base::X` is defined and `Sub::X` is autoloaded,
+   `Sub::X` wrongly resolved to `Base::X`. `resolve_const_path`'s
+   direct lookup for the start scope probed only *loaded* consts and
+   skipped the pending `Sub::X` autoload, so the ancestor walk fired
+   `Base`'s `X` first. Fix: fire the start scope's own pending scoped
+   autoload before the ancestor-chain fallback (the start-scope twin of
+   the existing nearer-ancestor firing). Also fixes `Sub.const_get(:X)`.
+
+2. **`const_defined?` accepted a malformed uppercase name**
+   (`test_cpath_expected_at` "does not yield a constant name", via
+   zeitwerk's `ConstantPathValidator#validate!` →
+   `Module.new.const_defined?(cname, false)`). The never-interned
+   fast-undefined path gated only on `starts_with(uppercase)`, so an
+   invalid name like `"Foo-bar"` returned `false` instead of raising
+   `NameError: wrong constant name`. Fix: gate that path on the full
+   `is_valid_const_name` check.
+
+Regression tests (both fail without the fix, verified):
+`crates/rubyrs/tests/diff/{autoload_own_scope_beats_superclass,const_defined_invalid_uppercase_name}.rb`.
+
+(Also fixed same turn, surfaced while debugging #2 but not on the
+zeitwerk path: `Module#freeze` / `Class#freeze` were a no-op — a
+Class/Module IS an object, so `mod.freeze` must make `mod.frozen?`
+report true. Added a `frozen: Cell<bool>` to `struct Class` and wired
+the freeze/frozen? dispatch arms (dup drops the flag, clone keeps it,
+matching CRuby). Regression test `crates/rubyrs/tests/diff/module_class_freeze.rb`.
+Mutation-guard — FrozenError on `def`/const-set to a frozen module —
+is deferred, matching the existing flag-only Object freeze.)
+
+## Status (2026-07-01): full self-test = 520/520 (per-file)
+
+The zeitwerk 2.8.2 self-test passes **520/520** when files are run
+independently. Two real rubyrs constant-resolution bugs were fixed this
+round (commit `5be79f47`): a subclass's own `autoload(:X)` being shadowed by
+a parent const propagated onto its flat `Sub::X` key, and `const_defined?`
+not raising `NameError` on syntactically-invalid names. Regression tests live
+in `crates/rubyrs/tests/diff/{autoload_subclass_same_cname,const_defined_invalid_name}.rb`.
+
 ## Status (2026-06-15)
 
 `require "zeitwerk"` loads end to end, and **basic file autoload works**

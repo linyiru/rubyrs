@@ -4044,16 +4044,26 @@ impl Vm {
                     }
                     #[cfg(feature = "regex")]
                     ("scan", [Value::Regex(re)]) => {
-                        // Dual-engine (regex + fancy-regex). Iterate
-                        // matches into OWNED capture data first — keeps
-                        // the two engines' incompatible `Captures` types
-                        // out of here and does no heap alloc during the
-                        // scan, so the GC pinning below only guards the
-                        // result-Array build. (binary input degrades to
-                        // lossy UTF-8; the engines only match UTF-8.)
+                        // Dual-engine (regex + fancy-regex). Iterate into
+                        // OwnedCaptures first so both the returned Array and
+                        // `$~` final-state come from the same match data.
+                        // (binary input degrades to lossy UTF-8; the engines
+                        // only match UTF-8.)
                         let s_owned = s.to_string_lossy();
                         let has_groups = re.captures_len() > 1;
-                        let matches = re.scan_captures(&s_owned);
+                        let matches = re.captures_iter_owned(&s_owned).map_err(|e| {
+                            self.trap(RubyError::RuntimeError {
+                                msg: format!("regex match failed: {} (pattern: /{}/)", e, re.as_str()),
+                            })
+                        })?;
+                        // CRuby updates `$~` for no-block scan too: final
+                        // match on success, nil on no match. Do this only
+                        // after the match walk succeeds so a fancy-regex
+                        // runtime error doesn't clobber the caller's `$~`.
+                        self.save_match_scope_on_write();
+                        self.last_match = matches
+                            .last()
+                            .map(|oc| self.last_match_from_owned_captures(re, &s_owned, oc));
                         // GC rooting: under STRESS_GC=1 each per-match
                         // sub-Array alloc'd in the has_groups branch is
                         // unreachable until the wrapping result Array is
@@ -4065,8 +4075,8 @@ impl Vm {
                         let mut out: Vec<Value> = Vec::with_capacity(matches.len());
                         if has_groups {
                             for caps in &matches {
-                                let mut group_vec: Vec<Value> = Vec::with_capacity(caps.len().saturating_sub(1));
-                                for grp in caps.iter().skip(1) {
+                                let mut group_vec: Vec<Value> = Vec::with_capacity(caps.groups.len());
+                                for grp in &caps.groups {
                                     group_vec.push(
                                         grp.as_ref()
                                             .map(|t| Value::new_str(t.clone()))
@@ -4082,10 +4092,7 @@ impl Vm {
                             }
                         } else {
                             for caps in &matches {
-                                // group 0 = whole match (always present
-                                // on a match).
-                                let whole = caps.first().and_then(|o| o.as_ref());
-                                out.push(Value::new_str(whole.cloned().unwrap_or_default()));
+                                out.push(Value::new_str(caps.whole.clone()));
                             }
                         }
                         g.vm.maybe_gc();

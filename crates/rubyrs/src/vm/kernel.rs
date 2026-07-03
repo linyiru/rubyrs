@@ -17,7 +17,11 @@ use super::{PinGuard, Vm};
 
 /// `(captured_self, lexical_class, named-local snapshot)` — the
 /// context `extract_binding_ctx` recovers from a `Binding` instance.
-type BindingCtx = (Value, Option<std::rc::Rc<crate::value::Class>>, Vec<(String, Value)>);
+type BindingCtx = (
+    Value,
+    Option<std::rc::Rc<crate::value::Class>>,
+    Vec<(String, Value)>,
+);
 /// `(body, leading-param names, slot seed, registered source)` — the
 /// compile inputs `prepare_eval_body` produces for `eval_string_full`.
 type EvalBody = (crate::ast::SExpr, Vec<String>, Vec<(String, Value)>, String);
@@ -180,14 +184,19 @@ impl Vm {
     /// Forward a Kernel-level IO call (`puts`/`print`/`write`) to a
     /// redirected `$stdout`/`$stderr` object via full dispatch, so
     /// StringIO (or any user object with the right methods) sees it.
-    fn forward_stdio_call(&mut self, target: Value, meth: &str, args: &[Value]) -> Result<Value, Trap> {
+    fn forward_stdio_call(
+        &mut self,
+        target: Value,
+        meth: &str,
+        args: &[Value],
+    ) -> Result<Value, Trap> {
         let m_id = self.interner.intern(meth);
         self.stack.push(target);
         for a in args {
             self.stack.push(a.clone());
         }
         let pre = self.frames.len();
-        self.do_call(m_id, args.len(), /*no_recv=*/false, u32::MAX)?;
+        self.do_call(m_id, args.len(), /*no_recv=*/ false, u32::MAX)?;
         self.dispatch_until(pre)?;
         Ok(self.stack.pop().unwrap_or(Value::Nil))
     }
@@ -225,7 +234,11 @@ impl Vm {
         }
     }
 
-    pub(crate) fn builtin_call(&mut self, name: &str, args: &[Value]) -> Option<Result<Value, Trap>> {
+    pub(crate) fn builtin_call(
+        &mut self,
+        name: &str,
+        args: &[Value],
+    ) -> Option<Result<Value, Trap>> {
         match name {
             // --- Zlib host primitives (stdlib_vendor/zlib.rb veneer).
             // Bytes in via Value::Str, level/mtime via Value::Int.
@@ -294,7 +307,9 @@ impl Vm {
                     _ => 0,
                 };
                 let data = s.content.borrow().to_vec();
-                Some(Ok(Value::Int(crate::zlib_native::crc32(&data, init) as i64)))
+                Some(Ok(
+                    Value::Int(crate::zlib_native::crc32(&data, init) as i64),
+                ))
             }
             #[cfg(feature = "stdlib")]
             "__zlib_gunzip" => {
@@ -324,8 +339,7 @@ impl Vm {
             // Zlib::Inflate's stateful inflate (rack Deflater :sync path).
             #[cfg(feature = "stdlib")]
             "__zlib_gz_deflate_new" => {
-                let (Some(Value::Int(lvl)), Some(Value::Int(mtime))) =
-                    (args.first(), args.get(1))
+                let (Some(Value::Int(lvl)), Some(Value::Int(mtime))) = (args.first(), args.get(1))
                 else {
                     return Some(Err(self.trap(RubyError::ArgumentError {
                         msg: "gz_deflate_new: expected (Integer, Integer)".into(),
@@ -366,13 +380,15 @@ impl Vm {
                     })));
                 };
                 let data = s.content.borrow().to_vec();
-                Some(match crate::zlib_native::inflate_stream_push(*id as u64, &data) {
-                    Ok(out) => Ok(Value::new_str_bytes_binary(out)),
-                    Err(e) => Err(self.trap(RubyError::HostException {
-                        class_name: "Zlib::DataError".into(),
-                        message: e,
-                    })),
-                })
+                Some(
+                    match crate::zlib_native::inflate_stream_push(*id as u64, &data) {
+                        Ok(out) => Ok(Value::new_str_bytes_binary(out)),
+                        Err(e) => Err(self.trap(RubyError::HostException {
+                            class_name: "Zlib::DataError".into(),
+                            message: e,
+                        })),
+                    },
+                )
             }
             #[cfg(feature = "stdlib")]
             "__zlib_stream_free" => {
@@ -454,8 +470,7 @@ impl Vm {
                     .map(|f| f.self_val.clone())
                     .unwrap_or(Value::Nil);
                 let lex = self.class_stack.last().cloned();
-                let Some(bcls) = self.classes.get(&self.interner.intern("Binding")).cloned()
-                else {
+                let Some(bcls) = self.classes.get(&self.interner.intern("Binding")).cloned() else {
                     return Some(Ok(Value::Nil));
                 };
                 // Snapshot the capturing frame's NAMED locals (slot →
@@ -535,8 +550,12 @@ impl Vm {
                             // to_s dispatch (user code → GC).
                             let mut g = PinGuard::new(vm);
                             g.pin(Value::Array(*id));
-                            for item in &snapshot { g.pin(item.clone()); }
-                            for item in &snapshot { puts_one(g.vm, item)?; }
+                            for item in &snapshot {
+                                g.pin(item.clone());
+                            }
+                            for item in &snapshot {
+                                puts_one(g.vm, item)?;
+                            }
                         }
                         _ => {
                             // Dispatch a user `to_s` override; native otherwise.
@@ -561,7 +580,9 @@ impl Vm {
                 } else {
                     let pinned: Vec<Value> = args.to_vec();
                     let mut g = PinGuard::new(self);
-                    for a in &pinned { g.pin(a.clone()); }
+                    for a in &pinned {
+                        g.pin(a.clone());
+                    }
                     for a in &pinned {
                         if let Err(t) = puts_one(g.vm, a) {
                             return Some(Err(t));
@@ -694,7 +715,9 @@ impl Vm {
                                     return Some(Ok(Value::Nil));
                                 }
                                 self.maybe_gc();
-                                if let Err(t) = self.check_alloc() { return Some(Err(t)); }
+                                if let Err(t) = self.check_alloc() {
+                                    return Some(Err(t));
+                                }
                                 let id = self.heap.alloc(HeapObj::Array(Vec::new().into()));
                                 return Some(Ok(Value::Array(id)));
                             }
@@ -740,9 +763,7 @@ impl Vm {
                         // `Vm::arity_error_arg1_int` (gc.rs:292).
                         // Code-review #342 round 2.
                         let msg = match a {
-                            Value::Nil => {
-                                "no implicit conversion from nil to integer".to_string()
-                            }
+                            Value::Nil => "no implicit conversion from nil to integer".to_string(),
                             other => {
                                 let type_name = match other {
                                     Value::Bool(true) => "true",
@@ -754,10 +775,7 @@ impl Vm {
                                     Value::Hash(_) => "Hash",
                                     o => o.type_name(),
                                 };
-                                format!(
-                                    "no implicit conversion of {} into Integer",
-                                    type_name,
-                                )
+                                format!("no implicit conversion of {} into Integer", type_name,)
                             }
                         };
                         return Some(Err(self.trap(RubyError::TypeError { msg })));
@@ -784,16 +802,14 @@ impl Vm {
                     let n = match a {
                         Value::Int(n) => *n,
                         #[cfg(feature = "bignum")]
-                        Value::BigInt(id) => {
-                            match self.heap.bigint(*id).to_i64() {
-                                Some(n) => n,
-                                None => {
-                                    return Some(Err(self.trap(RubyError::RangeError {
-                                        msg: "bignum too big to convert into 'long'".to_string(),
-                                    })));
-                                }
+                        Value::BigInt(id) => match self.heap.bigint(*id).to_i64() {
+                            Some(n) => n,
+                            None => {
+                                return Some(Err(self.trap(RubyError::RangeError {
+                                    msg: "bignum too big to convert into 'long'".to_string(),
+                                })));
                             }
-                        }
+                        },
                         _ => unreachable!("type-checked above"),
                     };
                     converted.push(n);
@@ -808,15 +824,11 @@ impl Vm {
                 // by the actual frame stack depth), preserving
                 // the "beyond depth → nil" behavior on every
                 // target. Code-review #342 round 5.
-                let to_usize_sat = |n: i64| -> usize {
-                    usize::try_from(n).unwrap_or(usize::MAX)
-                };
+                let to_usize_sat = |n: i64| -> usize { usize::try_from(n).unwrap_or(usize::MAX) };
                 let (skip, limit) = match converted.as_slice() {
                     [] => (1usize, usize::MAX),
                     [n] if *n >= 0 => (to_usize_sat(*n), usize::MAX),
-                    [n, l] if *n >= 0 && *l >= 0 => {
-                        (to_usize_sat(*n), to_usize_sat(*l))
-                    }
+                    [n, l] if *n >= 0 && *l >= 0 => (to_usize_sat(*n), to_usize_sat(*l)),
                     // At least one arg is negative.
                     _ => {
                         return Some(Err(self.trap(RubyError::ArgumentError {
@@ -841,8 +853,12 @@ impl Vm {
                 let cap = (total - skip).min(limit);
                 let mut out: Vec<Value> = Vec::with_capacity(cap);
                 for (i, f) in self.frames.iter().rev().enumerate() {
-                    if i < skip { continue; }
-                    if out.len() >= limit { break; }
+                    if i < skip {
+                        continue;
+                    }
+                    if out.len() >= limit {
+                        break;
+                    }
                     let proto = &self.protos[f.proto_idx];
                     let op_ip = if f.ip == 0 { 0 } else { f.ip - 1 };
                     let span = proto
@@ -876,7 +892,9 @@ impl Vm {
                 let name_opt: Option<String> = {
                     let mut found = None;
                     for f in self.frames.iter().rev() {
-                        if f.is_block || f.is_class_body { continue; }
+                        if f.is_block || f.is_class_body {
+                            continue;
+                        }
                         // define_method frames stamp their RUNTIME
                         // name in aux (the proto name is the block's
                         // lexical context, e.g. "<block>").
@@ -885,7 +903,9 @@ impl Vm {
                             break;
                         }
                         let n = &self.protos[f.proto_idx].name;
-                        if n == "<main>" { break; }
+                        if n == "<main>" {
+                            break;
+                        }
                         found = Some(n.clone());
                         break;
                     }
@@ -911,7 +931,10 @@ impl Vm {
                 // extras would hide caller bugs.
                 if !args.is_empty() {
                     return Some(Err(self.trap(RubyError::ArgumentError {
-                        msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 0)",
+                            args.len()
+                        ),
                     })));
                 }
                 // Resolve the SAME block `yield`/`super` resolve: in a
@@ -933,7 +956,13 @@ impl Vm {
                 let has_block = self
                     .frames
                     .last()
-                    .map(|f| if f.is_block { f.captured_yield_block.is_some() } else { f.block_arg.is_some() })
+                    .map(|f| {
+                        if f.is_block {
+                            f.captured_yield_block.is_some()
+                        } else {
+                            f.block_arg.is_some()
+                        }
+                    })
                     .unwrap_or(false);
                 Some(Ok(Value::Bool(has_block)))
             }
@@ -955,9 +984,19 @@ impl Vm {
                 let has_block = self
                     .frames
                     .last()
-                    .map(|f| if f.is_block { f.captured_yield_block.is_some() } else { f.block_arg.is_some() })
+                    .map(|f| {
+                        if f.is_block {
+                            f.captured_yield_block.is_some()
+                        } else {
+                            f.block_arg.is_some()
+                        }
+                    })
                     .unwrap_or(false);
-                Some(Ok(if has_block { Value::new_str("yield") } else { Value::Nil }))
+                Some(Ok(if has_block {
+                    Value::new_str("yield")
+                } else {
+                    Value::Nil
+                }))
             }
             "__defined_super?" => {
                 // `defined?(super)` — "super" iff the enclosing method
@@ -981,17 +1020,21 @@ impl Vm {
                     Some(nid) => self.super_lookup(nid).is_ok(),
                     None => false,
                 };
-                Some(Ok(if has { Value::new_str("super") } else { Value::Nil }))
+                Some(Ok(if has {
+                    Value::new_str("super")
+                } else {
+                    Value::Nil
+                }))
             }
             "__defined_ivar?" => {
                 if let Some(Value::Sym(sid)) = args.first() {
-                    let self_val = self.frames.last()
+                    let self_val = self
+                        .frames
+                        .last()
                         .map(|f| f.self_val.clone())
                         .unwrap_or(Value::Nil);
                     let hit = match &self_val {
-                        Value::Object(oid) => {
-                            self.heap.instance(*oid).ivars.contains_key(sid)
-                        }
+                        Value::Object(oid) => self.heap.instance(*oid).ivars.contains_key(sid),
                         // Class-level ivars: `defined?(@name)` inside
                         // `def self.x` reads the class object's own
                         // table — minitest Spec::DSL's
@@ -1000,7 +1043,11 @@ impl Vm {
                         Value::Class(cls) => cls.ivars.borrow().contains_key(sid),
                         _ => false,
                     };
-                    return Some(Ok(if hit { Value::new_str("instance-variable") } else { Value::Nil }));
+                    return Some(Ok(if hit {
+                        Value::new_str("instance-variable")
+                    } else {
+                        Value::Nil
+                    }));
                 }
                 Some(Ok(Value::Nil))
             }
@@ -1012,17 +1059,43 @@ impl Vm {
                     let name = self.interner.resolve(*sid).clone();
                     let is_builtin = matches!(
                         &*name,
-                        "puts" | "p" | "pp" | "print" | "require" | "load" |
-                        "sprintf" | "format" | "__time_now_raw" | "__rubyrs_time_parse_iso" | "sleep" |
-                        "exit" | "exit!" | "abort" | "warn" | "at_exit" | "__rubyrs_signal_trap" |
-                        "__rubyrs_stdout_write" | "__rubyrs_stderr_write" | "__rubyrs_exe_path" |
-                        "Integer" | "Float" | "String" | "Array" | "Rational" |
-                        "eval" | "caller" |
-                        "__defined_ivar?" | "__defined_method?" | "__defined_const?" |
-                        "autoload" | "autoload?"
+                        "puts"
+                            | "p"
+                            | "pp"
+                            | "print"
+                            | "require"
+                            | "load"
+                            | "sprintf"
+                            | "format"
+                            | "__time_now_raw"
+                            | "__rubyrs_time_parse_iso"
+                            | "sleep"
+                            | "exit"
+                            | "exit!"
+                            | "abort"
+                            | "warn"
+                            | "at_exit"
+                            | "__rubyrs_signal_trap"
+                            | "__rubyrs_stdout_write"
+                            | "__rubyrs_stderr_write"
+                            | "__rubyrs_exe_path"
+                            | "Integer"
+                            | "Float"
+                            | "String"
+                            | "Array"
+                            | "Rational"
+                            | "eval"
+                            | "caller"
+                            | "__defined_ivar?"
+                            | "__defined_method?"
+                            | "__defined_const?"
+                            | "autoload"
+                            | "autoload?"
                     );
                     let host_hit = self.host_fns.contains_key(sid);
-                    let self_val = self.frames.last()
+                    let self_val = self
+                        .frames
+                        .last()
                         .map(|f| f.self_val.clone())
                         .unwrap_or(Value::Nil);
                     let class_hit = match &self_val {
@@ -1046,7 +1119,11 @@ impl Vm {
                     };
                     let toplevel_hit = self.toplevel_methods.contains_key(sid);
                     let hit = is_builtin || host_hit || class_hit || toplevel_hit;
-                    return Some(Ok(if hit { Value::new_str("method") } else { Value::Nil }));
+                    return Some(Ok(if hit {
+                        Value::new_str("method")
+                    } else {
+                        Value::Nil
+                    }));
                 }
                 Some(Ok(Value::Nil))
             }
@@ -1061,7 +1138,11 @@ impl Vm {
             "__defined_recv_method?" => {
                 if let (Some(recv), Some(Value::Sym(sid))) = (args.first(), args.get(1)) {
                     let hit = self.responds_to(recv, *sid, false);
-                    return Some(Ok(if hit { Value::new_str("method") } else { Value::Nil }));
+                    return Some(Ok(if hit {
+                        Value::new_str("method")
+                    } else {
+                        Value::Nil
+                    }));
                 }
                 Some(Ok(Value::Nil))
             }
@@ -1115,9 +1196,12 @@ impl Vm {
                     // constant assignment reported "expression"
                     // for `defined?(Foo::Bar)` even though the
                     // value resolved through `Op::LoadConst`.
-                    let hit = self.classes.contains_key(sid)
-                        || self.constants.contains_key(sid);
-                    return Some(Ok(if hit { Value::new_str("constant") } else { Value::Nil }));
+                    let hit = self.classes.contains_key(sid) || self.constants.contains_key(sid);
+                    return Some(Ok(if hit {
+                        Value::new_str("constant")
+                    } else {
+                        Value::Nil
+                    }));
                 }
                 Some(Ok(Value::Nil))
             }
@@ -1158,7 +1242,10 @@ impl Vm {
                 }
                 if args.len() != 2 {
                     return Some(Err(self.trap(RubyError::ArgumentError {
-                        msg: format!("wrong number of arguments (given {}, expected 2)", args.len()),
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 2)",
+                            args.len()
+                        ),
                     })));
                 }
                 let name_sym = match &args[0] {
@@ -1180,9 +1267,14 @@ impl Vm {
                         }
                         self.interner.intern(&name)
                     }
-                    other => return Some(Err(self.trap(RubyError::TypeError {
-                        msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
-                    }))),
+                    other => {
+                        return Some(Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "no implicit conversion of {} into Symbol",
+                                other.type_name()
+                            ),
+                        })));
+                    }
                 };
                 // Validate constant-name shape (uppercase start +
                 // alnum/underscore body). CRuby raises NameError on
@@ -1195,9 +1287,14 @@ impl Vm {
                 }
                 let path_str = match &args[1] {
                     Value::Str(s) => s.to_string_lossy(),
-                    other => return Some(Err(self.trap(RubyError::TypeError {
-                        msg: format!("no implicit conversion of {} into String", other.type_name()),
-                    }))),
+                    other => {
+                        return Some(Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "no implicit conversion of {} into String",
+                                other.type_name()
+                            ),
+                        })));
+                    }
                 };
                 #[cfg(not(target_os = "wasi"))]
                 {
@@ -1228,7 +1325,10 @@ impl Vm {
                 }
                 if args.is_empty() || args.len() > 2 {
                     return Some(Err(self.trap(RubyError::ArgumentError {
-                        msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 1..2)",
+                            args.len()
+                        ),
                     })));
                 }
                 let name_sym = match &args[0] {
@@ -1249,9 +1349,14 @@ impl Vm {
                         }
                         self.interner.intern(&name)
                     }
-                    other => return Some(Err(self.trap(RubyError::TypeError {
-                        msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
-                    }))),
+                    other => {
+                        return Some(Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "no implicit conversion of {} into Symbol",
+                                other.type_name()
+                            ),
+                        })));
+                    }
                 };
                 let name_str = self.interner.resolve(name_sym).clone();
                 if !crate::vm::dispatch::is_valid_const_name(&name_str) {
@@ -1266,7 +1371,9 @@ impl Vm {
                     }
                 }
                 #[cfg(target_os = "wasi")]
-                { let _ = name_sym; }
+                {
+                    let _ = name_sym;
+                }
                 Some(Ok(Value::Nil))
             }
             "using" => {
@@ -1294,7 +1401,9 @@ impl Vm {
                     let mut redirected = redirect.as_ref().map(|_| String::new());
                     let pinned: Vec<Value> = args.to_vec();
                     let mut g = PinGuard::new(self);
-                    for a in &pinned { g.pin(a.clone()); }
+                    for a in &pinned {
+                        g.pin(a.clone());
+                    }
                     for a in &pinned {
                         let s = match g.vm.stringify_for_output(a, true) {
                             Ok(s) => s,
@@ -1309,7 +1418,8 @@ impl Vm {
                     }
                     drop(g);
                     if let (Some(target), Some(buf)) = (redirect, redirected)
-                        && let Err(t) = self.forward_stdio_call(target, "write", &[Value::new_str(buf)])
+                        && let Err(t) =
+                            self.forward_stdio_call(target, "write", &[Value::new_str(buf)])
                     {
                         return Some(Err(t));
                     }
@@ -1328,9 +1438,13 @@ impl Vm {
                         // seven sites from issue #90.
                         let mut g = PinGuard::new(self);
                         let elems: Vec<Value> = many.to_vec();
-                        for v in &elems { g.pin(v.clone()); }
+                        for v in &elems {
+                            g.pin(v.clone());
+                        }
                         g.vm.maybe_gc();
-                        if let Err(t) = g.vm.check_alloc() { return Some(Err(t)); }
+                        if let Err(t) = g.vm.check_alloc() {
+                            return Some(Err(t));
+                        }
                         let id = g.vm.heap.alloc(HeapObj::Array(elems.into()));
                         Some(Ok(Value::Array(id)))
                     }
@@ -1372,7 +1486,9 @@ impl Vm {
                             })));
                         }
                     }
-                } else { None };
+                } else {
+                    None
+                };
                 // Validate the radix early — `Integer(non-str, 16)`
                 // is a TypeError on the receiver and never reaches
                 // the parse path, but `Integer("ff", 1)` is an
@@ -1402,7 +1518,9 @@ impl Vm {
                             Err(RubyError::FloatDomainError {
                                 msg: crate::vm::numeric::float_domain_label(*f).to_string(),
                             })
-                        } else { Ok(Value::Int(*f as i64)) }
+                        } else {
+                            Ok(Value::Int(*f as i64))
+                        }
                     }
                     (Value::Str(s), None) => {
                         // Auto-detect base (radix 0): handles the
@@ -1452,7 +1570,10 @@ impl Vm {
             "Float" => {
                 if args.len() != 1 {
                     return Some(Err(self.trap(RubyError::ArgumentError {
-                        msg: format!("wrong number of arguments (given {}, expected 1)", args.len()),
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 1)",
+                            args.len()
+                        ),
                     })));
                 }
                 let result = match &args[0] {
@@ -1483,7 +1604,10 @@ impl Vm {
             "String" => {
                 if args.len() != 1 {
                     return Some(Err(self.trap(RubyError::ArgumentError {
-                        msg: format!("wrong number of arguments (given {}, expected 1)", args.len()),
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 1)",
+                            args.len()
+                        ),
                     })));
                 }
                 let v = args[0].clone();
@@ -1540,14 +1664,14 @@ impl Vm {
                 {
                     let f = *f;
                     if !f.is_finite() {
-                            return Some(Err(self.trap(RubyError::FloatDomainError {
-                                msg: crate::vm::numeric::float_domain_label(f).to_string(),
-                            })));
-                        }
-                        return Some(self.float_to_rational_value(
-                            f,
-                            crate::vm::dispatch::FloatToRationalMode::Lossless,
-                        ));
+                        return Some(Err(self.trap(RubyError::FloatDomainError {
+                            msg: crate::vm::numeric::float_domain_label(f).to_string(),
+                        })));
+                    }
+                    return Some(self.float_to_rational_value(
+                        f,
+                        crate::vm::dispatch::FloatToRationalMode::Lossless,
+                    ));
                 }
                 // Phase C.4.2: accept Int / BigInt / integer-valued
                 // Rational.
@@ -1555,25 +1679,29 @@ impl Vm {
                 {
                     use num_bigint::BigInt;
                     use num_traits::One;
-                    let to_bigint = |v: &Value, heap: &crate::heap::Heap| -> Result<BigInt, RubyError> {
-                        match v {
-                            Value::Int(n) => Ok(BigInt::from(*n)),
-                            Value::BigInt(id) => Ok(heap.bigint(*id).clone()),
-                            Value::Rational(id) => {
-                                let r = heap.rational(*id);
-                                if r.den.is_one() {
-                                    Ok(r.num.clone())
-                                } else {
-                                    Err(RubyError::TypeError {
-                                        msg: format!("can't convert {} into Rational", v.type_name()),
-                                    })
+                    let to_bigint =
+                        |v: &Value, heap: &crate::heap::Heap| -> Result<BigInt, RubyError> {
+                            match v {
+                                Value::Int(n) => Ok(BigInt::from(*n)),
+                                Value::BigInt(id) => Ok(heap.bigint(*id).clone()),
+                                Value::Rational(id) => {
+                                    let r = heap.rational(*id);
+                                    if r.den.is_one() {
+                                        Ok(r.num.clone())
+                                    } else {
+                                        Err(RubyError::TypeError {
+                                            msg: format!(
+                                                "can't convert {} into Rational",
+                                                v.type_name()
+                                            ),
+                                        })
+                                    }
                                 }
+                                _ => Err(RubyError::TypeError {
+                                    msg: format!("can't convert {} into Rational", v.type_name()),
+                                }),
                             }
-                            _ => Err(RubyError::TypeError {
-                                msg: format!("can't convert {} into Rational", v.type_name()),
-                            }),
-                        }
-                    };
+                        };
                     let num = match to_bigint(&args[0], &self.heap) {
                         Ok(n) => n,
                         Err(e) => return Some(Err(self.trap(e))),
@@ -1602,7 +1730,10 @@ impl Vm {
                                     Ok(r.num)
                                 } else {
                                     Err(RubyError::TypeError {
-                                        msg: format!("can't convert {} into Rational", v.type_name()),
+                                        msg: format!(
+                                            "can't convert {} into Rational",
+                                            v.type_name()
+                                        ),
                                     })
                                 }
                             }
@@ -1620,7 +1751,9 @@ impl Vm {
                             Ok(n) => n,
                             Err(e) => return Some(Err(self.trap(e))),
                         }
-                    } else { 1 };
+                    } else {
+                        1
+                    };
                     Some(self.make_rational(num_raw, den_raw))
                 }
             }
@@ -1635,14 +1768,21 @@ impl Vm {
             "Array" => {
                 if args.len() != 1 {
                     return Some(Err(self.trap(RubyError::ArgumentError {
-                        msg: format!("wrong number of arguments (given {}, expected 1)", args.len()),
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 1)",
+                            args.len()
+                        ),
                     })));
                 }
                 match &args[0] {
                     Value::Nil => {
                         self.maybe_gc(); // allow: gc-rooting — allocates an empty Array (`Vec::new()`); no Value held across the alloc window.
-                        if let Err(t) = self.check_alloc() { return Some(Err(t)); }
-                        let id = self.heap.alloc(crate::heap::HeapObj::Array(Vec::new().into()));
+                        if let Err(t) = self.check_alloc() {
+                            return Some(Err(t));
+                        }
+                        let id = self
+                            .heap
+                            .alloc(crate::heap::HeapObj::Array(Vec::new().into()));
                         Some(Ok(Value::Array(id)))
                     }
                     Value::Array(_) => Some(Ok(args[0].clone())),
@@ -1659,7 +1799,10 @@ impl Vm {
                         // sources are pinned up front; each new
                         // pair_id is pinned as it's built. Layer #25
                         // code-review follow-up.
-                        let pairs: Vec<(Value, Value)> = self.heap.hash(*hid).iter()
+                        let pairs: Vec<(Value, Value)> = self
+                            .heap
+                            .hash(*hid)
+                            .iter()
                             .map(|(k, v)| (k.clone(), v.clone()))
                             .collect();
                         let mut g = PinGuard::new(self);
@@ -1670,14 +1813,20 @@ impl Vm {
                         let mut entries: Vec<Value> = Vec::with_capacity(pairs.len());
                         for (k, v) in pairs {
                             g.vm.maybe_gc();
-                            if let Err(t) = g.vm.check_alloc() { return Some(Err(t)); }
-                            let pair_id = g.vm.heap.alloc(crate::heap::HeapObj::Array(vec![k, v].into()));
+                            if let Err(t) = g.vm.check_alloc() {
+                                return Some(Err(t));
+                            }
+                            let pair_id =
+                                g.vm.heap
+                                    .alloc(crate::heap::HeapObj::Array(vec![k, v].into()));
                             let pair_val = Value::Array(pair_id);
                             g.pin(pair_val.clone());
                             entries.push(pair_val);
                         }
                         g.vm.maybe_gc();
-                        if let Err(t) = g.vm.check_alloc() { return Some(Err(t)); }
+                        if let Err(t) = g.vm.check_alloc() {
+                            return Some(Err(t));
+                        }
                         let id = g.vm.heap.alloc(crate::heap::HeapObj::Array(entries.into()));
                         Some(Ok(Value::Array(id)))
                     }
@@ -1693,7 +1842,9 @@ impl Vm {
                         if let Err(t) = self.do_call(to_a_id, 0, false, u32::MAX) {
                             return Some(Err(t));
                         }
-                        if let Err(t) = self.dispatch_until(pre) { return Some(Err(t)); }
+                        if let Err(t) = self.dispatch_until(pre) {
+                            return Some(Err(t));
+                        }
                         Some(Ok(self.stack.pop().unwrap_or(Value::Nil)))
                     }
                     _ => {
@@ -1755,8 +1906,12 @@ impl Vm {
                         let elt = args[0].clone();
                         g.pin(elt.clone());
                         g.vm.maybe_gc();
-                        if let Err(t) = g.vm.check_alloc() { return Some(Err(t)); }
-                        let id = g.vm.heap.alloc(crate::heap::HeapObj::Array(vec![elt].into()));
+                        if let Err(t) = g.vm.check_alloc() {
+                            return Some(Err(t));
+                        }
+                        let id =
+                            g.vm.heap
+                                .alloc(crate::heap::HeapObj::Array(vec![elt].into()));
                         Some(Ok(Value::Array(id)))
                     }
                 }
@@ -1768,15 +1923,21 @@ impl Vm {
             "Hash" => {
                 if args.len() != 1 {
                     return Some(Err(self.trap(RubyError::ArgumentError {
-                        msg: format!("wrong number of arguments (given {}, expected 1)", args.len()),
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 1)",
+                            args.len()
+                        ),
                     })));
                 }
-                let empty_array = matches!(&args[0], Value::Array(aid) if self.heap.array(*aid).is_empty());
+                let empty_array =
+                    matches!(&args[0], Value::Array(aid) if self.heap.array(*aid).is_empty());
                 match &args[0] {
                     Value::Hash(_) => Some(Ok(args[0].clone())),
                     Value::Nil => {
                         self.maybe_gc(); // allow: gc-rooting — empty Hash holds no Value; args[0] (Nil) is not used across the alloc
-                        if let Err(t) = self.check_alloc() { return Some(Err(t)); }
+                        if let Err(t) = self.check_alloc() {
+                            return Some(Err(t));
+                        }
                         let id = self.heap.alloc(crate::heap::HeapObj::Hash(
                             crate::heap::HashObj::with_pairs(Vec::new()),
                         ));
@@ -1784,7 +1945,9 @@ impl Vm {
                     }
                     _ if empty_array => {
                         self.maybe_gc();
-                        if let Err(t) = self.check_alloc() { return Some(Err(t)); }
+                        if let Err(t) = self.check_alloc() {
+                            return Some(Err(t));
+                        }
                         let id = self.heap.alloc(crate::heap::HeapObj::Hash(
                             crate::heap::HashObj::with_pairs(Vec::new()),
                         ));
@@ -1805,7 +1968,9 @@ impl Vm {
                             if let Err(t) = g.vm.invoke_method(m, recv.clone(), vec![]) {
                                 return Some(Err(t));
                             }
-                            if let Err(t) = g.vm.dispatch_until(pre) { return Some(Err(t)); }
+                            if let Err(t) = g.vm.dispatch_until(pre) {
+                                return Some(Err(t));
+                            }
                             let r = g.vm.stack.pop().unwrap_or(Value::Nil);
                             if matches!(r, Value::Hash(_)) {
                                 return Some(Ok(r));
@@ -1823,7 +1988,9 @@ impl Vm {
                 }
                 let pinned: Vec<Value> = args.to_vec();
                 let mut g = PinGuard::new(self);
-                for a in &pinned { g.pin(a.clone()); }
+                for a in &pinned {
+                    g.pin(a.clone());
+                }
                 for a in &pinned {
                     let s = match g.vm.stringify_for_output(a, false) {
                         Ok(s) => s,
@@ -1862,7 +2029,8 @@ impl Vm {
                     return Some(Err(self.trap(RubyError::RuntimeError {
                         msg: "Time.now requires `Config::time_now` injection — \
                               the embedding host hasn't enabled the wall-clock \
-                              capability (Tier 1 deterministic default)".into(),
+                              capability (Tier 1 deterministic default)"
+                            .into(),
                     })));
                 };
                 let (sec, nsec) = src();
@@ -1933,7 +2101,9 @@ impl Vm {
                     if let Some(Value::Object(oid)) = &self_val {
                         let cls = self.heap.class_of(*oid);
                         if let Some(m) = self.lookup_method_uncached(&cls, sleep_sym)
-                            && !self.protos[m.proto_idx].name.starts_with("<kernel-alias-forwarder")
+                            && !self.protos[m.proto_idx]
+                                .name
+                                .starts_with("<kernel-alias-forwarder")
                         {
                             let self_val = self_val.expect("checked above");
                             let pre_frames = self.frames.len();
@@ -1971,18 +2141,22 @@ impl Vm {
                         let r = self.heap.rational(*id);
                         Some(crate::heap::rational_to_f64(r))
                     }
-                    [other] => return Some(Err(self.trap(RubyError::TypeError {
-                        msg: format!(
-                            "sleep duration must be Integer / Float / Rational, got {}",
-                            other.type_name(),
-                        ),
-                    }))),
-                    _ => return Some(Err(self.trap(RubyError::ArgumentError {
-                        msg: format!(
-                            "wrong number of arguments (given {}, expected 0..1)",
-                            args.len(),
-                        ),
-                    }))),
+                    [other] => {
+                        return Some(Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "sleep duration must be Integer / Float / Rational, got {}",
+                                other.type_name(),
+                            ),
+                        })));
+                    }
+                    _ => {
+                        return Some(Err(self.trap(RubyError::ArgumentError {
+                            msg: format!(
+                                "wrong number of arguments (given {}, expected 0..1)",
+                                args.len(),
+                            ),
+                        })));
+                    }
                 };
                 if let Some(s) = secs_opt
                     && s < 0.0
@@ -1995,7 +2169,8 @@ impl Vm {
                     return Some(Err(self.trap(RubyError::RuntimeError {
                         msg: "Kernel#sleep requires `Config::sleep_for` injection — \
                               the embedding host hasn't enabled the wall-clock \
-                              sleep capability (Tier 1 deterministic default)".into(),
+                              sleep capability (Tier 1 deterministic default)"
+                            .into(),
                     })));
                 };
                 let dur_opt = secs_opt.map(std::time::Duration::from_secs_f64);
@@ -2020,7 +2195,8 @@ impl Vm {
                         return Some(Err(self.trap(RubyError::ArgumentError {
                             msg: "sleep with no arguments requires \
                                   `Config::install_signal_handler: true` (otherwise the \
-                                  call would deadlock — nothing can wake it)".into(),
+                                  call would deadlock — nothing can wake it)"
+                                .into(),
                         })));
                     }
                 }
@@ -2033,13 +2209,19 @@ impl Vm {
                 // raising here keeps the trap site at the
                 // canonical CRuby location.
                 #[cfg(unix)]
-                if self.interrupt_pending.load(std::sync::atomic::Ordering::Relaxed) {
-                    self.interrupt_pending.store(false, std::sync::atomic::Ordering::Relaxed);
+                if self
+                    .interrupt_pending
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    self.interrupt_pending
+                        .store(false, std::sync::atomic::Ordering::Relaxed);
                     let exc = match crate::vm::raise::build_interrupt_exception(self) {
                         Some(v) => v,
-                        None => return Some(Err(self.trap(RubyError::Interrupt {
-                            msg: "interrupt".to_string(),
-                        }))),
+                        None => {
+                            return Some(Err(self.trap(RubyError::Interrupt {
+                                msg: "interrupt".to_string(),
+                            })));
+                        }
                     };
                     if let Err(trap) = self.unwind_with_exception(exc) {
                         return Some(Err(trap));
@@ -2052,7 +2234,8 @@ impl Vm {
                 // was set, but we just cleared+raised above) we
                 // fall through to here with elapsed; clamp to
                 // 0 to be defensive.
-                let returned = secs_opt.map(|s| s as i64)
+                let returned = secs_opt
+                    .map(|s| s as i64)
                     .unwrap_or_else(|| elapsed.as_secs() as i64);
                 Some(Ok(Value::Int(returned)))
             }
@@ -2102,12 +2285,14 @@ impl Vm {
                 }
                 let msg = match args.first() {
                     Some(Value::Str(s)) => Some(s.to_string_lossy()),
-                    Some(other) => return Some(Err(self.trap(RubyError::TypeError {
-                        msg: format!(
-                            "no implicit conversion of {} into String",
-                            other.type_name(),
-                        ),
-                    }))),
+                    Some(other) => {
+                        return Some(Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "no implicit conversion of {} into String",
+                                other.type_name(),
+                            ),
+                        })));
+                    }
                     None => {
                         // No-args: consult `$!`. If it's an
                         // Object with a class + message, format
@@ -2116,7 +2301,12 @@ impl Vm {
                             Some(Value::Object(id)) => {
                                 let cls_name = self.heap.real_class_of(id).name.clone();
                                 let msg_sym = self.interner.intern("@message");
-                                let inner = self.heap.instance(id).ivars.get(&msg_sym).cloned()
+                                let inner = self
+                                    .heap
+                                    .instance(id)
+                                    .ivars
+                                    .get(&msg_sym)
+                                    .cloned()
                                     .map(|v| v.to_display(&self.heap, &self.interner))
                                     .unwrap_or_default();
                                 Some(format!("{cls_name}: {inner}"))
@@ -2205,14 +2395,18 @@ impl Vm {
                 if let Some(Value::Hash(hid)) = args.last() {
                     let pairs = self.heap.hash(*hid).clone();
                     let all_kw = !pairs.is_empty()
-                        && pairs.iter().all(|(k, _)| matches!(k, Value::Sym(s)
-                            if matches!(&**self.interner.resolve(*s), "uplevel" | "category")));
+                        && pairs.iter().all(|(k, _)| {
+                            matches!(k, Value::Sym(s)
+                            if matches!(&**self.interner.resolve(*s), "uplevel" | "category"))
+                        });
                     if all_kw {
                         for (k, v) in &pairs {
                             if let Value::Sym(s) = k {
                                 match &**self.interner.resolve(*s) {
                                     "uplevel" => {
-                                        if let Value::Int(n) = v { uplevel = Some(*n); }
+                                        if let Value::Int(n) = v {
+                                            uplevel = Some(*n);
+                                        }
                                     }
                                     "category" => {
                                         if let Value::Sym(cs) = v {
@@ -2257,7 +2451,9 @@ impl Vm {
                 });
                 let mut buf = String::new();
                 for (i, arg) in msgs.iter().enumerate() {
-                    if i == 0 && let Some(p) = &prefix {
+                    if i == 0
+                        && let Some(p) = &prefix
+                    {
                         buf.push_str(p);
                     }
                     let s = arg.to_display(&self.heap, &self.interner);
@@ -2283,7 +2479,8 @@ impl Vm {
                     return Some(Err(self.trap(RubyError::RuntimeError {
                         msg: "Kernel#exit! requires `Config::process_exit` injection — \
                               the embedding host hasn't enabled immediate process \
-                              termination (Tier 1 deterministic default)".into(),
+                              termination (Tier 1 deterministic default)"
+                            .into(),
                     })));
                 };
                 // The closure typically calls std::process::exit
@@ -2354,7 +2551,10 @@ impl Vm {
                         let exc = self.normalize_exception(args[0].clone());
                         if let (Value::Object(id), Value::Str(_)) = (&exc, &args[1]) {
                             let msg_id = self.interner.intern("@message");
-                            self.heap.instance_mut(*id).ivars.insert(msg_id, args[1].clone());
+                            self.heap
+                                .instance_mut(*id)
+                                .ivars
+                                .insert(msg_id, args[1].clone());
                         }
                         exc
                     }
@@ -2401,14 +2601,17 @@ impl Vm {
                 if !self.allow_process_spawn {
                     return Some(Err(self.trap(RubyError::HostException {
                         class_name: "NotImplementedError".to_string(),
-                        message: "fork is not available (process spawn capability is off)".to_string(),
+                        message: "fork is not available (process spawn capability is off)"
+                            .to_string(),
                     })));
                 }
                 let blk = match args.first() {
                     Some(Value::Block(bid)) => *bid,
-                    _ => return Some(Err(self.trap(RubyError::ArgumentError {
-                        msg: "fork requires a block in rubyrs (Tier-1 subset)".into(),
-                    }))),
+                    _ => {
+                        return Some(Err(self.trap(RubyError::ArgumentError {
+                            msg: "fork requires a block in rubyrs (Tier-1 subset)".into(),
+                        })));
+                    }
                 };
                 // Flush BOTH host stdio buffers — the child is a
                 // process copy; unflushed bytes would print twice.
@@ -2445,9 +2648,12 @@ impl Vm {
                 self.pinned.clear();
                 self.clear_control_flow_signals();
                 let mut status: i32 = {
-                    let r = self.invoke_block(blk, Vec::new())
+                    let r = self
+                        .invoke_block(blk, Vec::new())
                         .and_then(|()| self.dispatch_until(0))
-                        .map(|()| { self.stack.pop(); });
+                        .map(|()| {
+                            self.stack.pop();
+                        });
                     match r {
                         Ok(()) => 0,
                         Err(t) => self.fork_child_status_from_trap(&t),
@@ -2463,9 +2669,12 @@ impl Vm {
                     self.clear_control_flow_signals();
                     self.frames.clear();
                     self.stack.clear();
-                    let r = self.invoke_block(h, Vec::new())
+                    let r = self
+                        .invoke_block(h, Vec::new())
                         .and_then(|()| self.dispatch_until(0))
-                        .map(|()| { self.stack.pop(); });
+                        .map(|()| {
+                            self.stack.pop();
+                        });
                     if let Err(t) = r {
                         status = self.fork_child_status_from_trap(&t);
                     }
@@ -2481,9 +2690,11 @@ impl Vm {
             "__rubyrs_waitpid" => {
                 let pid = match args.first() {
                     Some(Value::Int(n)) => *n as i32,
-                    _ => return Some(Err(self.trap(RubyError::TypeError {
-                        msg: "waitpid pid must be an Integer".into(),
-                    }))),
+                    _ => {
+                        return Some(Err(self.trap(RubyError::TypeError {
+                            msg: "waitpid pid must be an Integer".into(),
+                        })));
+                    }
                 };
                 let mut st: i32 = 0;
                 let r = unsafe { libc::waitpid(pid, &mut st, 0) };
@@ -2502,11 +2713,12 @@ impl Vm {
                     128 + libc::WTERMSIG(st) as i64
                 };
                 self.maybe_gc();
-                if let Err(e) = self.check_alloc() { return Some(Err(e)); }
-                let id = self.heap.alloc(HeapObj::Array(vec![
-                    Value::Int(r as i64),
-                    Value::Int(exitstatus),
-                ].into()));
+                if let Err(e) = self.check_alloc() {
+                    return Some(Err(e));
+                }
+                let id = self.heap.alloc(HeapObj::Array(
+                    vec![Value::Int(r as i64), Value::Int(exitstatus)].into(),
+                ));
                 Some(Ok(Value::Array(id)))
             }
             "system" => {
@@ -2532,9 +2744,31 @@ impl Vm {
                 // probe shape minitest's diff discovery relies on.
                 let needs_shell = argv.len() == 1
                     && argv[0].bytes().any(|b| {
-                        matches!(b, b' ' | b'\t' | b'*' | b'?' | b'{' | b'}' | b'[' | b']'
-                            | b'<' | b'>' | b'|' | b'&' | b';' | b'(' | b')' | b'$'
-                            | b'`' | b'\\' | b'"' | b'\'' | b'~' | b'#' | b'\n')
+                        matches!(
+                            b,
+                            b' ' | b'\t'
+                                | b'*'
+                                | b'?'
+                                | b'{'
+                                | b'}'
+                                | b'['
+                                | b']'
+                                | b'<'
+                                | b'>'
+                                | b'|'
+                                | b'&'
+                                | b';'
+                                | b'('
+                                | b')'
+                                | b'$'
+                                | b'`'
+                                | b'\\'
+                                | b'"'
+                                | b'\''
+                                | b'~'
+                                | b'#'
+                                | b'\n'
+                        )
                     });
                 let mut cmd = if argv.len() == 1 && needs_shell {
                     let mut c = std::process::Command::new("/bin/sh");
@@ -2569,7 +2803,9 @@ impl Vm {
                     let s = String::from_utf8_lossy(&out.stdout).into_owned();
                     match out_redirect {
                         Some(t) => {
-                            if let Err(e) = self.forward_stdio_call(t, "write", &[Value::new_str(s)]) {
+                            if let Err(e) =
+                                self.forward_stdio_call(t, "write", &[Value::new_str(s)])
+                            {
                                 return Some(Err(e));
                             }
                         }
@@ -2580,7 +2816,9 @@ impl Vm {
                     let s = String::from_utf8_lossy(&out.stderr).into_owned();
                     match err_redirect {
                         Some(t) => {
-                            if let Err(e) = self.forward_stdio_call(t, "write", &[Value::new_str(s)]) {
+                            if let Err(e) =
+                                self.forward_stdio_call(t, "write", &[Value::new_str(s)])
+                            {
                                 return Some(Err(e));
                             }
                         }
@@ -2601,9 +2839,11 @@ impl Vm {
                 }
                 let cmd = match args.first() {
                     Some(Value::Str(s)) => s.to_string_lossy(),
-                    _ => return Some(Err(self.trap(RubyError::TypeError {
-                        msg: "backtick command must be a String".into(),
-                    }))),
+                    _ => {
+                        return Some(Err(self.trap(RubyError::TypeError {
+                            msg: "backtick command must be a String".into(),
+                        })));
+                    }
                 };
                 // Same simple-command split as Kernel#system: a
                 // bare word execs directly so a missing command is
@@ -2613,9 +2853,31 @@ impl Vm {
                 // missing-command behavior (empty stdout, message
                 // on stderr) also matches CRuby.
                 let needs_shell = cmd.bytes().any(|b| {
-                    matches!(b, b' ' | b'\t' | b'*' | b'?' | b'{' | b'}' | b'[' | b']'
-                        | b'<' | b'>' | b'|' | b'&' | b';' | b'(' | b')' | b'$'
-                        | b'`' | b'\\' | b'"' | b'\'' | b'~' | b'#' | b'\n')
+                    matches!(
+                        b,
+                        b' ' | b'\t'
+                            | b'*'
+                            | b'?'
+                            | b'{'
+                            | b'}'
+                            | b'['
+                            | b']'
+                            | b'<'
+                            | b'>'
+                            | b'|'
+                            | b'&'
+                            | b';'
+                            | b'('
+                            | b')'
+                            | b'$'
+                            | b'`'
+                            | b'\\'
+                            | b'"'
+                            | b'\''
+                            | b'~'
+                            | b'#'
+                            | b'\n'
+                    )
                 });
                 let output = if needs_shell {
                     std::process::Command::new("/bin/sh")
@@ -2646,15 +2908,19 @@ impl Vm {
                 }
                 let op = match args.first() {
                     Some(Value::Sym(s)) => self.interner.resolve(*s).clone(),
-                    _ => return Some(Err(self.trap(RubyError::ArgumentError {
-                        msg: "__rubyrs_math: op symbol required".into(),
-                    }))),
+                    _ => {
+                        return Some(Err(self.trap(RubyError::ArgumentError {
+                            msg: "__rubyrs_math: op symbol required".into(),
+                        })));
+                    }
                 };
                 let x = match args.get(1).and_then(as_f64) {
                     Some(v) => v,
-                    None => return Some(Err(self.trap(RubyError::TypeError {
-                        msg: "can't convert into Float".into(),
-                    }))),
+                    None => {
+                        return Some(Err(self.trap(RubyError::TypeError {
+                            msg: "can't convert into Float".into(),
+                        })));
+                    }
                 };
                 let y = args.get(2).and_then(as_f64);
                 let r = match (&*op, y) {
@@ -2677,9 +2943,11 @@ impl Vm {
                     ("tanh", _) => x.tanh(),
                     ("hypot", Some(b)) => x.hypot(b),
                     ("pow", Some(b)) => x.powf(b),
-                    _ => return Some(Err(self.trap(RubyError::ArgumentError {
-                        msg: format!("__rubyrs_math: unknown op {op}"),
-                    }))),
+                    _ => {
+                        return Some(Err(self.trap(RubyError::ArgumentError {
+                            msg: format!("__rubyrs_math: unknown op {op}"),
+                        })));
+                    }
                 };
                 Some(Ok(Value::Float(r)))
             }
@@ -2698,35 +2966,35 @@ impl Vm {
             // File.read uses). Unknown name → CRuby's ArgumentError.
             // `Encoding.default_internal=` host half. nil clears
             // (CRuby's default); a name resolves strictly.
-            "__rubyrs_set_default_internal" => {
-                match args.first() {
-                    Some(Value::Nil) | None => {
-                        self.default_internal = None;
-                        Some(Ok(Value::Nil))
-                    }
-                    Some(Value::Str(s)) => {
-                        let name = s.to_string_lossy();
-                        match Self::encoding_tag_from_str(&name) {
-                            Some(tag) => {
-                                self.default_internal = Some(tag);
-                                Some(Ok(Value::Nil))
-                            }
-                            None => Some(Err(self.trap(RubyError::ArgumentError {
-                                msg: format!("unknown encoding name - {name}"),
-                            }))),
-                        }
-                    }
-                    _ => Some(Err(self.trap(RubyError::TypeError {
-                        msg: "encoding name must be a String or nil".into(),
-                    }))),
+            "__rubyrs_set_default_internal" => match args.first() {
+                Some(Value::Nil) | None => {
+                    self.default_internal = None;
+                    Some(Ok(Value::Nil))
                 }
-            }
+                Some(Value::Str(s)) => {
+                    let name = s.to_string_lossy();
+                    match Self::encoding_tag_from_str(&name) {
+                        Some(tag) => {
+                            self.default_internal = Some(tag);
+                            Some(Ok(Value::Nil))
+                        }
+                        None => Some(Err(self.trap(RubyError::ArgumentError {
+                            msg: format!("unknown encoding name - {name}"),
+                        }))),
+                    }
+                }
+                _ => Some(Err(self.trap(RubyError::TypeError {
+                    msg: "encoding name must be a String or nil".into(),
+                }))),
+            },
             "__rubyrs_set_default_external" => {
                 let name = match args.first() {
                     Some(Value::Str(s)) => s.to_string_lossy(),
-                    _ => return Some(Err(self.trap(RubyError::TypeError {
-                        msg: "encoding name must be a String".into(),
-                    }))),
+                    _ => {
+                        return Some(Err(self.trap(RubyError::TypeError {
+                            msg: "encoding name must be a String".into(),
+                        })));
+                    }
                 };
                 match Self::encoding_tag_from_str(&name) {
                     Some(tag) => {
@@ -2762,9 +3030,11 @@ impl Vm {
                         "nfd" => text.nfd().collect(),
                         "nfkc" => text.nfkc().collect(),
                         "nfkd" => text.nfkd().collect(),
-                        _ => return Some(Err(self.trap(RubyError::ArgumentError {
-                            msg: format!("invalid normalization form {form}"),
-                        }))),
+                        _ => {
+                            return Some(Err(self.trap(RubyError::ArgumentError {
+                                msg: format!("invalid normalization form {form}"),
+                            })));
+                        }
                     };
                     return Some(Ok(Value::new_str(out)));
                 }
@@ -2794,9 +3064,11 @@ impl Vm {
                         "nfd" => text.nfd().collect(),
                         "nfkc" => text.nfkc().collect(),
                         "nfkd" => text.nfkd().collect(),
-                        _ => return Some(Err(self.trap(RubyError::ArgumentError {
-                            msg: format!("invalid normalization form {form}"),
-                        }))),
+                        _ => {
+                            return Some(Err(self.trap(RubyError::ArgumentError {
+                                msg: format!("invalid normalization form {form}"),
+                            })));
+                        }
                     };
                     return Some(Ok(Value::Bool(norm == text)));
                 }
@@ -2840,9 +3112,11 @@ impl Vm {
             "__rubyrs_marshal_load_binary" => {
                 let bytes: Vec<u8> = match args.first() {
                     Some(Value::Str(s)) => s.content.borrow().clone(),
-                    _ => return Some(Err(self.trap(RubyError::TypeError {
-                        msg: "marshal data must be a String".into(),
-                    }))),
+                    _ => {
+                        return Some(Err(self.trap(RubyError::TypeError {
+                            msg: "marshal data must be a String".into(),
+                        })));
+                    }
                 };
                 if bytes.len() < 2 || bytes[0] != 0x04 || bytes[1] != 0x08 {
                     return Some(Err(self.trap(RubyError::TypeError {
@@ -2942,7 +3216,9 @@ impl Vm {
                 }
                 let idx = self.marshal_registry.len();
                 self.marshal_registry.push(obj);
-                Some(Ok(Value::new_str(format!("--- {{}}\n# rubyrs-marshal:{idx}\n"))))
+                Some(Ok(Value::new_str(format!(
+                    "--- {{}}\n# rubyrs-marshal:{idx}\n"
+                ))))
             }
             // `__rubyrs_marshal_fetch(str)` → one-element Array
             // [obj] on a token hit, nil otherwise (the wrapper
@@ -2970,11 +3246,9 @@ impl Vm {
                     None => Some(Ok(Value::Nil)),
                 }
             }
-            "at_exit" => {
-                Some(Err(self.trap(RubyError::LocalJumpError {
-                    msg: "no block given (at_exit)".into(),
-                })))
-            }
+            "at_exit" => Some(Err(self.trap(RubyError::LocalJumpError {
+                msg: "no block given (at_exit)".into(),
+            }))),
             "__rubyrs_signal_trap" => {
                 if args.len() != 2 {
                     return Some(Err(self.trap(RubyError::ArgumentError {
@@ -2986,11 +3260,14 @@ impl Vm {
                 }
                 let sig = match crate::signals::parse_signal_name(&args[0], &self.interner) {
                     Some(n) => n,
-                    None => return Some(Err(self.trap(RubyError::ArgumentError {
-                        msg: format!(
-                            "unsupported signal {:?}", args[0].to_display(&self.heap, &self.interner),
-                        ),
-                    }))),
+                    None => {
+                        return Some(Err(self.trap(RubyError::ArgumentError {
+                            msg: format!(
+                                "unsupported signal {:?}",
+                                args[0].to_display(&self.heap, &self.interner),
+                            ),
+                        })));
+                    }
                 };
                 // v7 round-3: reject SIGKILL (9) and SIGSTOP (19).
                 // CRuby raises ArgumentError for these because the
@@ -3020,7 +3297,8 @@ impl Vm {
                 } else if matches!(handler, Value::Nil) {
                     // Explicit nil = IGNORE per CRuby 3.x.
                     Some(crate::vm::SignalHandlerState::Ignore)
-                } else { match handler {
+                } else {
+                    match handler {
                     Value::Nil => unreachable!(),
                     Value::Str(s) => {
                         let raw = s.to_string_lossy();
@@ -3051,9 +3329,12 @@ impl Vm {
                             other.type_name(),
                         ),
                     }))),
-                } };
+                }
+                };
                 // Read previous (default to Default if none).
-                let previous = self.signal_traps.get(&sig)
+                let previous = self
+                    .signal_traps
+                    .get(&sig)
                     .cloned()
                     .unwrap_or(crate::vm::SignalHandlerState::Default);
                 if let Some(new) = new_state {
@@ -3087,7 +3368,11 @@ impl Vm {
                     Err(t) => return Some(Err(t)),
                 };
                 let out = match crate::vm::ruby_sprintf(
-                    &fmt, &fmt_args, &self.heap, &self.interner, self.max_value_bytes,
+                    &fmt,
+                    &fmt_args,
+                    &self.heap,
+                    &self.interner,
+                    self.max_value_bytes,
                     &p_overrides,
                 ) {
                     Ok(s) => s,
@@ -3149,332 +3434,349 @@ impl Vm {
                     None => args,
                 };
                 match args {
-                [Value::Str(path)] => {
-                    // ADR 0036: rubyrs can't dlopen the prism C extension (a CRuby-ABI
-                    // `.bundle`), but the prism C library is linked in + exposed via the
-                    // `__rubyrs_prism_serialize_parse*` host fns. When the prism gem's
-                    // prism.rb requires "prism/prism", inject rubyrs's pure-Ruby backend
-                    // (the gem supplies node/parse_result/serialize; we supply native parse)
-                    // so `require "prism"` works + RuboCop's parser_prism engine runs.
-                    // require-once via `loaded_stdlib_stubs`.
-                    {
-                        let p = path.to_string_lossy();
-                        if &*p == "prism/prism" {
-                            if self.loaded_stdlib_stubs.contains(&*p) {
-                                return Some(Ok(Value::Bool(false)));
-                            }
-                            self.loaded_stdlib_stubs.insert(p.to_string());
-                            if let Err(t) = self.compile_and_run_source(
-                                std::path::PathBuf::from("<rubyrs:prism>"),
-                                crate::prism_native::BACKEND_RB.to_string(),
-                            ) {
-                                return Some(Err(t));
-                            }
-                            return Some(Ok(Value::Bool(true)));
-                        }
-                    }
-                    #[cfg(not(target_os = "wasi"))]
-                    {
-                        let path_str = path.to_string_lossy();
-                        // Probe for a `.rb` candidate first, regardless
-                        // of cfg!("cext"). Walks the same candidate
-                        // list `require_ruby` consults — as-given +
-                        // each `$LOAD_PATH` entry + `name.rb` + raw-
-                        // input fallback. Pre-pass-10-layer-#6 this
-                        // also included the caller source file's
-                        // directory and its parent (the cross-package
-                        // "lib" hop), but those shadowed the stdlib-
-                        // stub fallback when a `require` inside an
-                        // already-loaded file resolved back to that
-                        // same file. Co-located trees opt in by
-                        // `$LOAD_PATH.unshift(__dir__)` (see the
-                        // require_xpkg fixture's loader.rb). The
-                        // routing here only DECIDES .rb vs cext —
-                        // `find_ruby_source_candidate` runs the
-                        // same probe `require_ruby` will run.
-                        //
-                        // Under the FS sandbox (`Config::allow_filesystem_io:
-                        // false`), skip the probe — it'd touch the host FS
-                        // before any Ruby-level resolution decides whether
-                        // the load is in-process (stub / constant-satisfied)
-                        // or actually wants disk. The downstream `cext_require`
-                        // fallback gates separately; the stub / satisfied
-                        // branches run unblocked because they don't touch FS.
-                        //
-                        // Scope pre-emption: when an allowlist is configured
-                        // and the script supplied an ABSOLUTE path that
-                        // lies outside every prefix, trap LoadError with the
-                        // scope-gate message immediately. Without this, an
-                        // out-of-scope absolute path would route to the cext
-                        // fallback when find_ruby_source_candidate skipped
-                        // the existence probe (closing the stat side-channel),
-                        // and the cext fallback's generic
-                        // `LoadError: cannot load such file -- <path>` would
-                        // overwrite the more revealing scope-gate diagnostic.
-                        // (Pre-LoadError this comment described the wrong
-                        // exception class — both branches now raise LoadError;
-                        // the pre-emption is about message clarity, not class.)
-                        let scope_violation: Option<std::path::PathBuf> = if self
-                            .allow_filesystem_io
-                            && let Some(prefixes) = self.allowed_paths.as_ref()
-                            && std::path::Path::new(&*path_str).is_absolute()
+                    [Value::Str(path)] => {
+                        // ADR 0036: rubyrs can't dlopen the prism C extension (a CRuby-ABI
+                        // `.bundle`), but the prism C library is linked in + exposed via the
+                        // `__rubyrs_prism_serialize_parse*` host fns. When the prism gem's
+                        // prism.rb requires "prism/prism", inject rubyrs's pure-Ruby backend
+                        // (the gem supplies node/parse_result/serialize; we supply native parse)
+                        // so `require "prism"` works + RuboCop's parser_prism engine runs.
+                        // require-once via `loaded_stdlib_stubs`.
                         {
-                            let resolved = crate::lexically_resolve_path(
-                                std::path::Path::new(&*path_str),
-                            );
-                            if prefixes.iter().any(|pfx| resolved.starts_with(pfx)) {
-                                None
-                            } else {
-                                Some(resolved)
-                            }
-                        } else {
-                            None
-                        };
-                        if let Some(resolved) = scope_violation {
-                            return Some(Err(self.trap(RubyError::LoadError {
-                                msg: format!(
-                                    "require blocked: path {:?} outside Config::allowed_paths",
-                                    resolved,
-                                ),
-                            })));
-                        }
-                        // Blessed-reimpl override (ADR 0026): for a few
-                        // names rubyrs ships a vendored implementation
-                        // that MUST win over any on-disk gem of the
-                        // same name, because the real gem can't run on
-                        // rubyrs (e.g. safe_yaml subclasses
-                        // Psych::Handler). Skip the LOAD_PATH probe so
-                        // the require routes to the stub/vendor path
-                        // below even when the gem is installed.
-                        let force_vendor = is_blessed_reimpl_name(&path_str);
-                        let rb_found = !force_vendor
-                            && self.allow_filesystem_io
-                            && self.find_ruby_source_candidate(&path_str);
-                        if rb_found {
-                            Some(self.require_ruby(&path_str))
-                        } else if is_stdlib_stub_name(&path_str) {
-                            // Tier 1 lenient stub for known pure-
-                            // Ruby stdlib names. Returns `true` on
-                            // first load and `false` on every
-                            // subsequent require (CRuby's
-                            // loaded-features dedup semantics).
-                            // The actual stdlib code isn't
-                            // loaded; scripts that only
-                            // `require 'uri'` for feature
-                            // detection proceed past the require
-                            // line. Use of the stubbed-out
-                            // stdlib fails later with a more
-                            // specific NameError / NoMethodError,
-                            // which is the right surface for
-                            // "feature absent" vs "load failed".
-                            // See ADR 0017 — stdlib is Tier 3;
-                            // this is the embeddable-host
-                            // lenient-mode bridge.
-                            let already_loaded = self.loaded_stdlib_stubs.contains(&*path_str);
-                            if already_loaded {
-                                return Some(Ok(Value::Bool(false)));
-                            }
-                            self.loaded_stdlib_stubs.insert(path_str.to_string());
-                            // Under `--features stdlib`, run the
-                            // embedded pure-Ruby implementation (if
-                            // any) on the current Vm. The default
-                            // build's lenient stub path stops at the
-                            // constant-shell loop below, preserving
-                            // ADR 0017's "feature-absent surface"
-                            // for stdlib names in Tier 1 core.
-                            #[cfg(feature = "stdlib")]
-                            if let Some(src) = crate::stdlib_vendor::stdlib_vendor_source(&path_str) {
-                                let vfs_path = std::path::PathBuf::from(
-                                    format!("<vendor>/{}.rb", &*path_str)
-                                );
-                                if let Err(t) = self.compile_and_run_source(vfs_path, src.to_string()) {
-                                    return Some(Err(t));
+                            let p = path.to_string_lossy();
+                            if &*p == "prism/prism" {
+                                if self.loaded_stdlib_stubs.contains(&*p) {
+                                    return Some(Ok(Value::Bool(false)));
                                 }
-                            }
-                            //
-                            // Materialise the constant shell(s)
-                            // each stdlib name conventionally
-                            // exposes (e.g. `URI`, `Logger`,
-                            // `JSON`) so `defined?(URI)` reports
-                            // "constant" and `URI.is_a?(Class)`
-                            // returns true. The shell has no
-                            // methods — calls into it still fail
-                            // with NoMethodError, but the surface
-                            // for "name exists" is now correct.
-                            for (cname, is_module) in stdlib_constant_names(&path_str) {
-                                let cid = self.interner.intern(cname);
-                                let is_module = *is_module;
-                                self.classes.entry(cid).or_insert_with(|| {
-                                    std::rc::Rc::new(crate::value::Class {
-                                        name: cname.to_string(),
-                                        is_module,
-                                        undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
-                                        anon_serial: std::cell::Cell::new(0),
-                                        methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
-                                        singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
-                                        superclass: std::cell::RefCell::new(None),
-                                        includes: std::cell::RefCell::new(Vec::new()),
-                                        prepends: std::cell::RefCell::new(Vec::new()),
-                                        singleton_prepends: std::cell::RefCell::new(Vec::new()),
-                                        singleton_includes: std::cell::RefCell::new(Vec::new()),
-                                        singleton_view: std::cell::RefCell::new(None),
-                                        singleton_target: std::cell::RefCell::new(None),
-                                        class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
-                                        consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
-                                        assigned_name: std::cell::RefCell::new(None),
-                                        class_tag: None,
-                                        ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
-                                        #[cfg(feature = "cext")]
-                                        cext_alloc_func: std::cell::Cell::new(None),
-                                    })
-                                });
-                            }
-                            // Stub-class registration can change what a
-                            // constant read resolves to.
-                            self.bump_const_gen();
-                            // CRuby's `YAML` is literally `Psych` (the
-                            // same object). Mirror that: after
-                            // `require "yaml"` / `"psych"`, point both
-                            // constants at one shared Class so
-                            // `defined?(Psych)` is true and
-                            // `YAML == Psych` holds. safe_yaml's engine
-                            // probe (`defined?(Psych) && YAML == Psych
-                            // ? "psych" : "syck"`) then selects the
-                            // modern psych branch instead of the legacy
-                            // syck path (which calls `YAML.tagged_classes`).
-                            if &*path_str == "yaml" || &*path_str == "psych" {
-                                let yaml_id = self.interner.intern("YAML");
-                                let psych_id = self.interner.intern("Psych");
-                                let shared = self
-                                    .classes
-                                    .get(&yaml_id)
-                                    .or_else(|| self.classes.get(&psych_id))
-                                    .cloned();
-                                if let Some(cls) = shared {
-                                    self.classes.entry(yaml_id).or_insert_with(|| cls.clone());
-                                    self.classes.entry(psych_id).or_insert(cls);
-                                    self.bump_const_gen();
-                                }
-                            }
-                            // Always-on extras: minimal pure-Ruby shims that
-                            // ecosystem code assumes at module-load time
-                            // (e.g. `URI::DEFAULT_PARSER` for rack/utils.rb).
-                            // Runs after the constant shells are materialised
-                            // so the shim's `module URI` reopens the same
-                            // class the shells installed. Not feature-gated
-                            // because Sinatra-on-rubyrs in the default build
-                            // relies on it; the broader stdlib body still
-                            // lives behind `--features stdlib` above.
-                            if let Some(src) =
-                                crate::stdlib_vendor::always_on_stub_extras(&path_str)
-                            {
-                                let vfs_path = std::path::PathBuf::from(
-                                    format!("<vendor-extras>/{}.rb", &*path_str)
-                                );
+                                self.loaded_stdlib_stubs.insert(p.to_string());
                                 if let Err(t) = self.compile_and_run_source(
-                                    vfs_path, src.to_string()
+                                    std::path::PathBuf::from("<rubyrs:prism>"),
+                                    crate::prism_native::BACKEND_RB.to_string(),
                                 ) {
                                     return Some(Err(t));
                                 }
-                            }
-                            Some(Ok(Value::Bool(true)))
-                        } else if self.require_satisfied_by_existing_constant(&path_str) {
-                            // Lenient fallback: if the namespace
-                            // constant the require asks for is
-                            // already defined on this Vm (either by
-                            // an embedder pre-registering it or by
-                            // earlier script code), treat the
-                            // require as satisfied instead of going
-                            // down the cext-lookup path. Lets a
-                            // host pre-register `module Rack` so
-                            // that `require 'rack'` (and
-                            // `require 'rack/show_exceptions'`)
-                            // inside a gem source no-op cleanly
-                            // instead of crashing on the C-ext
-                            // lookup — Rack is pure Ruby in modern
-                            // versions, so the cext path would
-                            // always fail for it. Mirrors the
-                            // loaded_stdlib_stubs dedup pattern
-                            // immediately above: Bool(true) on
-                            // first observation, Bool(false)
-                            // thereafter, matching CRuby's
-                            // loaded-features semantics.
-                            let already_loaded = self.loaded_stdlib_stubs.contains(&*path_str);
-                            if already_loaded {
-                                return Some(Ok(Value::Bool(false)));
-                            }
-                            self.loaded_stdlib_stubs.insert(path_str.to_string());
-                            Some(Ok(Value::Bool(true)))
-                        } else {
-                            // Reached the FS-touching cext fallback —
-                            // gate the sandbox here, not at the dispatch
-                            // entry. Stub / satisfied-by-constant branches
-                            // above are in-process and bypass the gate;
-                            // under sandbox-on they let scripts use
-                            // `require 'uri'`-style feature detection
-                            // without tripping LoadError. `cext_require`
-                            // also gates internally — this surface-level
-                            // check fires first with a clearer
-                            // `op = "require"` message.
-                            if let Err(t) = self.check_load_allowed("require", None) {
-                                return Some(Err(t));
-                            }
-                            #[cfg(feature = "cext")]
-                            { Some(self.cext_require(&path_str)) }
-                            #[cfg(not(feature = "cext"))]
-                            {
-                                // Match the cext-on branch's surface
-                                // contract: a require-time miss is
-                                // `LoadError: cannot load such file --
-                                // <name>` regardless of whether the cext
-                                // fallback is compiled in. Build-flag
-                                // detail belongs in `--features` docs,
-                                // not in a user-visible exception that
-                                // `rescue LoadError` should catch.
-                                Some(Err(self.trap(RubyError::LoadError {
-                                    msg: format!("cannot load such file -- {}", path_str),
-                                })))
+                                return Some(Ok(Value::Bool(true)));
                             }
                         }
-                    }
-                    #[cfg(target_os = "wasi")]
-                    {
-                        // Preserve the attempted path in the error so a
-                        // script with many `require`s pinpoints which
-                        // one tripped — matches the master non-wasi
-                        // branch's diagnostic shape.
-                        //
-                        // Class is `LoadError` (not `RuntimeError`) for
-                        // the same reason the native cext-on / cext-off
-                        // arms above raise LoadError: a portable Ruby
-                        // script using the canonical optional-require
-                        // pattern
-                        //
-                        //     begin; require 'foo'; rescue LoadError; end
-                        //
-                        // must catch the miss on every target rubyrs
-                        // builds for. The wasi-specific diagnostic
-                        // message survives — the *class* is the
-                        // load-bearing contract for `rescue`, not the
-                        // text.
-                        let path = path.to_string_lossy();
-                        Some(Err(self.trap(RubyError::LoadError {
-                            msg: format!(
-                                "require: file I/O not available on \
+                        #[cfg(not(target_os = "wasi"))]
+                        {
+                            let path_str = path.to_string_lossy();
+                            // Probe for a `.rb` candidate first, regardless
+                            // of cfg!("cext"). Walks the same candidate
+                            // list `require_ruby` consults — as-given +
+                            // each `$LOAD_PATH` entry + `name.rb` + raw-
+                            // input fallback. Pre-pass-10-layer-#6 this
+                            // also included the caller source file's
+                            // directory and its parent (the cross-package
+                            // "lib" hop), but those shadowed the stdlib-
+                            // stub fallback when a `require` inside an
+                            // already-loaded file resolved back to that
+                            // same file. Co-located trees opt in by
+                            // `$LOAD_PATH.unshift(__dir__)` (see the
+                            // require_xpkg fixture's loader.rb). The
+                            // routing here only DECIDES .rb vs cext —
+                            // `find_ruby_source_candidate` runs the
+                            // same probe `require_ruby` will run.
+                            //
+                            // Under the FS sandbox (`Config::allow_filesystem_io:
+                            // false`), skip the probe — it'd touch the host FS
+                            // before any Ruby-level resolution decides whether
+                            // the load is in-process (stub / constant-satisfied)
+                            // or actually wants disk. The downstream `cext_require`
+                            // fallback gates separately; the stub / satisfied
+                            // branches run unblocked because they don't touch FS.
+                            //
+                            // Scope pre-emption: when an allowlist is configured
+                            // and the script supplied an ABSOLUTE path that
+                            // lies outside every prefix, trap LoadError with the
+                            // scope-gate message immediately. Without this, an
+                            // out-of-scope absolute path would route to the cext
+                            // fallback when find_ruby_source_candidate skipped
+                            // the existence probe (closing the stat side-channel),
+                            // and the cext fallback's generic
+                            // `LoadError: cannot load such file -- <path>` would
+                            // overwrite the more revealing scope-gate diagnostic.
+                            // (Pre-LoadError this comment described the wrong
+                            // exception class — both branches now raise LoadError;
+                            // the pre-emption is about message clarity, not class.)
+                            let scope_violation: Option<std::path::PathBuf> = if self
+                                .allow_filesystem_io
+                                && let Some(prefixes) = self.allowed_paths.as_ref()
+                                && std::path::Path::new(&*path_str).is_absolute()
+                            {
+                                let resolved =
+                                    crate::lexically_resolve_path(std::path::Path::new(&*path_str));
+                                if prefixes.iter().any(|pfx| resolved.starts_with(pfx)) {
+                                    None
+                                } else {
+                                    Some(resolved)
+                                }
+                            } else {
+                                None
+                            };
+                            if let Some(resolved) = scope_violation {
+                                return Some(Err(self.trap(RubyError::LoadError {
+                                    msg: format!(
+                                        "require blocked: path {:?} outside Config::allowed_paths",
+                                        resolved,
+                                    ),
+                                })));
+                            }
+                            // Blessed-reimpl override (ADR 0026): for a few
+                            // names rubyrs ships a vendored implementation
+                            // that MUST win over any on-disk gem of the
+                            // same name, because the real gem can't run on
+                            // rubyrs (e.g. safe_yaml subclasses
+                            // Psych::Handler). Skip the LOAD_PATH probe so
+                            // the require routes to the stub/vendor path
+                            // below even when the gem is installed.
+                            let force_vendor = is_blessed_reimpl_name(&path_str);
+                            let rb_found = !force_vendor
+                                && self.allow_filesystem_io
+                                && self.find_ruby_source_candidate(&path_str);
+                            if rb_found {
+                                Some(self.require_ruby(&path_str))
+                            } else if is_stdlib_stub_name(&path_str) {
+                                // Tier 1 lenient stub for known pure-
+                                // Ruby stdlib names. Returns `true` on
+                                // first load and `false` on every
+                                // subsequent require (CRuby's
+                                // loaded-features dedup semantics).
+                                // The actual stdlib code isn't
+                                // loaded; scripts that only
+                                // `require 'uri'` for feature
+                                // detection proceed past the require
+                                // line. Use of the stubbed-out
+                                // stdlib fails later with a more
+                                // specific NameError / NoMethodError,
+                                // which is the right surface for
+                                // "feature absent" vs "load failed".
+                                // See ADR 0017 — stdlib is Tier 3;
+                                // this is the embeddable-host
+                                // lenient-mode bridge.
+                                let already_loaded = self.loaded_stdlib_stubs.contains(&*path_str);
+                                if already_loaded {
+                                    return Some(Ok(Value::Bool(false)));
+                                }
+                                self.loaded_stdlib_stubs.insert(path_str.to_string());
+                                // Under `--features stdlib`, run the
+                                // embedded pure-Ruby implementation (if
+                                // any) on the current Vm. The default
+                                // build's lenient stub path stops at the
+                                // constant-shell loop below, preserving
+                                // ADR 0017's "feature-absent surface"
+                                // for stdlib names in Tier 1 core.
+                                #[cfg(feature = "stdlib")]
+                                if let Some(src) =
+                                    crate::stdlib_vendor::stdlib_vendor_source(&path_str)
+                                {
+                                    let vfs_path = std::path::PathBuf::from(format!(
+                                        "<vendor>/{}.rb",
+                                        &*path_str
+                                    ));
+                                    if let Err(t) =
+                                        self.compile_and_run_source(vfs_path, src.to_string())
+                                    {
+                                        return Some(Err(t));
+                                    }
+                                }
+                                //
+                                // Materialise the constant shell(s)
+                                // each stdlib name conventionally
+                                // exposes (e.g. `URI`, `Logger`,
+                                // `JSON`) so `defined?(URI)` reports
+                                // "constant" and `URI.is_a?(Class)`
+                                // returns true. The shell has no
+                                // methods — calls into it still fail
+                                // with NoMethodError, but the surface
+                                // for "name exists" is now correct.
+                                for (cname, is_module) in stdlib_constant_names(&path_str) {
+                                    let cid = self.interner.intern(cname);
+                                    let is_module = *is_module;
+                                    self.classes.entry(cid).or_insert_with(|| {
+                                        std::rc::Rc::new(crate::value::Class {
+                                            name: cname.to_string(),
+                                            is_module,
+                                            undefed: std::cell::RefCell::new(
+                                                crate::intern::FxHashSet::default(),
+                                            ),
+                                            anon_serial: std::cell::Cell::new(0),
+                                            methods: std::cell::RefCell::new(
+                                                crate::intern::FxHashMap::default(),
+                                            ),
+                                            singleton_methods: std::cell::RefCell::new(
+                                                crate::intern::FxHashMap::default(),
+                                            ),
+                                            superclass: std::cell::RefCell::new(None),
+                                            includes: std::cell::RefCell::new(Vec::new()),
+                                            prepends: std::cell::RefCell::new(Vec::new()),
+                                            singleton_prepends: std::cell::RefCell::new(Vec::new()),
+                                            singleton_includes: std::cell::RefCell::new(Vec::new()),
+                                            singleton_view: std::cell::RefCell::new(None),
+                                            singleton_target: std::cell::RefCell::new(None),
+                                            class_vars: std::cell::RefCell::new(
+                                                crate::intern::FxHashMap::default(),
+                                            ),
+                                            consts: std::cell::RefCell::new(
+                                                crate::intern::FxHashMap::default(),
+                                            ),
+                                            assigned_name: std::cell::RefCell::new(None),
+                                            class_tag: None,
+                                            ivars: std::cell::RefCell::new(
+                                                crate::intern::FxHashMap::default(),
+                                            ),
+                                            frozen: std::cell::Cell::new(false),
+                                            #[cfg(feature = "cext")]
+                                            cext_alloc_func: std::cell::Cell::new(None),
+                                        })
+                                    });
+                                }
+                                // Stub-class registration can change what a
+                                // constant read resolves to.
+                                self.bump_const_gen();
+                                // CRuby's `YAML` is literally `Psych` (the
+                                // same object). Mirror that: after
+                                // `require "yaml"` / `"psych"`, point both
+                                // constants at one shared Class so
+                                // `defined?(Psych)` is true and
+                                // `YAML == Psych` holds. safe_yaml's engine
+                                // probe (`defined?(Psych) && YAML == Psych
+                                // ? "psych" : "syck"`) then selects the
+                                // modern psych branch instead of the legacy
+                                // syck path (which calls `YAML.tagged_classes`).
+                                if &*path_str == "yaml" || &*path_str == "psych" {
+                                    let yaml_id = self.interner.intern("YAML");
+                                    let psych_id = self.interner.intern("Psych");
+                                    let shared = self
+                                        .classes
+                                        .get(&yaml_id)
+                                        .or_else(|| self.classes.get(&psych_id))
+                                        .cloned();
+                                    if let Some(cls) = shared {
+                                        self.classes.entry(yaml_id).or_insert_with(|| cls.clone());
+                                        self.classes.entry(psych_id).or_insert(cls);
+                                        self.bump_const_gen();
+                                    }
+                                }
+                                // Always-on extras: minimal pure-Ruby shims that
+                                // ecosystem code assumes at module-load time
+                                // (e.g. `URI::DEFAULT_PARSER` for rack/utils.rb).
+                                // Runs after the constant shells are materialised
+                                // so the shim's `module URI` reopens the same
+                                // class the shells installed. Not feature-gated
+                                // because Sinatra-on-rubyrs in the default build
+                                // relies on it; the broader stdlib body still
+                                // lives behind `--features stdlib` above.
+                                if let Some(src) =
+                                    crate::stdlib_vendor::always_on_stub_extras(&path_str)
+                                {
+                                    let vfs_path = std::path::PathBuf::from(format!(
+                                        "<vendor-extras>/{}.rb",
+                                        &*path_str
+                                    ));
+                                    if let Err(t) =
+                                        self.compile_and_run_source(vfs_path, src.to_string())
+                                    {
+                                        return Some(Err(t));
+                                    }
+                                }
+                                Some(Ok(Value::Bool(true)))
+                            } else if self.require_satisfied_by_existing_constant(&path_str) {
+                                // Lenient fallback: if the namespace
+                                // constant the require asks for is
+                                // already defined on this Vm (either by
+                                // an embedder pre-registering it or by
+                                // earlier script code), treat the
+                                // require as satisfied instead of going
+                                // down the cext-lookup path. Lets a
+                                // host pre-register `module Rack` so
+                                // that `require 'rack'` (and
+                                // `require 'rack/show_exceptions'`)
+                                // inside a gem source no-op cleanly
+                                // instead of crashing on the C-ext
+                                // lookup — Rack is pure Ruby in modern
+                                // versions, so the cext path would
+                                // always fail for it. Mirrors the
+                                // loaded_stdlib_stubs dedup pattern
+                                // immediately above: Bool(true) on
+                                // first observation, Bool(false)
+                                // thereafter, matching CRuby's
+                                // loaded-features semantics.
+                                let already_loaded = self.loaded_stdlib_stubs.contains(&*path_str);
+                                if already_loaded {
+                                    return Some(Ok(Value::Bool(false)));
+                                }
+                                self.loaded_stdlib_stubs.insert(path_str.to_string());
+                                Some(Ok(Value::Bool(true)))
+                            } else {
+                                // Reached the FS-touching cext fallback —
+                                // gate the sandbox here, not at the dispatch
+                                // entry. Stub / satisfied-by-constant branches
+                                // above are in-process and bypass the gate;
+                                // under sandbox-on they let scripts use
+                                // `require 'uri'`-style feature detection
+                                // without tripping LoadError. `cext_require`
+                                // also gates internally — this surface-level
+                                // check fires first with a clearer
+                                // `op = "require"` message.
+                                if let Err(t) = self.check_load_allowed("require", None) {
+                                    return Some(Err(t));
+                                }
+                                #[cfg(feature = "cext")]
+                                {
+                                    Some(self.cext_require(&path_str))
+                                }
+                                #[cfg(not(feature = "cext"))]
+                                {
+                                    // Match the cext-on branch's surface
+                                    // contract: a require-time miss is
+                                    // `LoadError: cannot load such file --
+                                    // <name>` regardless of whether the cext
+                                    // fallback is compiled in. Build-flag
+                                    // detail belongs in `--features` docs,
+                                    // not in a user-visible exception that
+                                    // `rescue LoadError` should catch.
+                                    Some(Err(self.trap(RubyError::LoadError {
+                                        msg: format!("cannot load such file -- {}", path_str),
+                                    })))
+                                }
+                            }
+                        }
+                        #[cfg(target_os = "wasi")]
+                        {
+                            // Preserve the attempted path in the error so a
+                            // script with many `require`s pinpoints which
+                            // one tripped — matches the master non-wasi
+                            // branch's diagnostic shape.
+                            //
+                            // Class is `LoadError` (not `RuntimeError`) for
+                            // the same reason the native cext-on / cext-off
+                            // arms above raise LoadError: a portable Ruby
+                            // script using the canonical optional-require
+                            // pattern
+                            //
+                            //     begin; require 'foo'; rescue LoadError; end
+                            //
+                            // must catch the miss on every target rubyrs
+                            // builds for. The wasi-specific diagnostic
+                            // message survives — the *class* is the
+                            // load-bearing contract for `rescue`, not the
+                            // text.
+                            let path = path.to_string_lossy();
+                            Some(Err(self.trap(RubyError::LoadError {
+                                msg: format!(
+                                    "require: file I/O not available on \
                                  wasm32-wasi (attempted to load {})",
-                                path
-                            ),
-                        })))
+                                    path
+                                ),
+                            })))
+                        }
                     }
+                    _ => Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("require: expected 1 String arg, got {}", args.len()),
+                    }))),
                 }
-                _ => Some(Err(self.trap(RubyError::ArgumentError {
-                    msg: format!(
-                        "require: expected 1 String arg, got {}",
-                        args.len()
-                    ),
-                }))),
-                }
-            },
+            }
             // `require_relative "name"` — resolve relative to the
             // CURRENTLY-EXECUTING file's directory (not cwd), auto-
             // append `.rb`, parse + compile + dispatch the body in
@@ -3573,125 +3875,130 @@ impl Vm {
                 // falling through to builtin, so the two paths
                 // agree across the user-override / built-in split.
                 match args {
-                [Value::Str(path)] | [Value::Str(path), _] => {
-                    let path_str = path.to_string_lossy().to_string();
-                    // Lazy-lexer gate (`_rouge_native`): while raised,
-                    // rouge.rb's eager per-lexer `Kernel::load` walk is
-                    // skipped wholesale; the rouge shim demand-loads
-                    // lexer files later with the gate lowered. Only the
-                    // kramdown shim raises it, after verifying the
-                    // on-disk rouge version matches the embedded
-                    // static tables.
-                    #[cfg(feature = "_rouge_native")]
-                    if path_str.contains("/rouge/lexers/")
-                        && crate::rouge_native::lexer_gate_active()
-                    {
-                        return Some(Ok(Value::Bool(true)));
-                    }
-                    if let Err(t) = self.check_load_allowed("load", None) {
-                        return Some(Err(t));
-                    }
-                    // Reuse the require candidate search but drop the
-                    // auto-.rb-extension candidate — `load` doesn't
-                    // perform that transformation. We pass the
-                    // raw `path_str` through and walk candidates;
-                    // if the user wanted `.rb` resolution they
-                    // included it themselves (e.g. `load "boot.rb"`
-                    // is what real apps write). Absolute paths
-                    // shortcut the search exactly as in require.
-                    let candidates = self.ruby_source_candidates(&path_str);
-                    let mut tried: Vec<String> = Vec::with_capacity(candidates.len());
-                    let mut canon: Option<std::path::PathBuf> = None;
-                    for c in &candidates {
-                        // Skip the implicit `.rb`-appended candidate —
-                        // ruby_source_candidates returns both the
-                        // as-given form and a `<stem>.rb` form; load
-                        // wants only the as-given matches. The .rb form
-                        // is distinguishable because it has a `.rb`
-                        // extension while `path_str` didn't.
-                        let original_has_rb = std::path::Path::new(&path_str)
-                            .extension()
-                            .map(|e| e == "rb")
-                            .unwrap_or(false);
-                        let candidate_has_rb = c.extension().map(|e| e == "rb").unwrap_or(false);
-                        if !original_has_rb && candidate_has_rb {
-                            continue;
+                    [Value::Str(path)] | [Value::Str(path), _] => {
+                        let path_str = path.to_string_lossy().to_string();
+                        // Lazy-lexer gate (`_rouge_native`): while raised,
+                        // rouge.rb's eager per-lexer `Kernel::load` walk is
+                        // skipped wholesale; the rouge shim demand-loads
+                        // lexer files later with the gate lowered. Only the
+                        // kramdown shim raises it, after verifying the
+                        // on-disk rouge version matches the embedded
+                        // static tables.
+                        #[cfg(feature = "_rouge_native")]
+                        if path_str.contains("/rouge/lexers/")
+                            && crate::rouge_native::lexer_gate_active()
+                        {
+                            return Some(Ok(Value::Bool(true)));
                         }
-                        tried.push(c.display().to_string());
-                        let Ok(resolved) = std::fs::canonicalize(c) else { continue };
-                        if self.check_load_allowed("load", Some(&resolved)).is_ok() {
-                            // Key by expand_path (CRuby), scope by realpath.
-                            canon = Some(Self::expand_load_path(c));
-                            break;
+                        if let Err(t) = self.check_load_allowed("load", None) {
+                            return Some(Err(t));
                         }
-                    }
-                    let canon = match canon {
-                        Some(c) => c,
-                        None => {
-                            // `tried` is intentionally NOT in the message:
-                            // CRuby's LoadError surface is just
-                            // `cannot load such file -- <name>` so a
-                            // `rescue LoadError => e; e.message` round-trip
-                            // matches byte-for-byte. The candidate list
-                            // was useful while debugging the
-                            // `ruby_source_candidates` shape but it's
-                            // diagnostic noise in steady state.
-                            let _ = tried;
-                            return Some(Err(self.trap(RubyError::LoadError {
-                                msg: format!("cannot load such file -- {}", path_str),
-                            })));
+                        // Reuse the require candidate search but drop the
+                        // auto-.rb-extension candidate — `load` doesn't
+                        // perform that transformation. We pass the
+                        // raw `path_str` through and walk candidates;
+                        // if the user wanted `.rb` resolution they
+                        // included it themselves (e.g. `load "boot.rb"`
+                        // is what real apps write). Absolute paths
+                        // shortcut the search exactly as in require.
+                        let candidates = self.ruby_source_candidates(&path_str);
+                        let mut tried: Vec<String> = Vec::with_capacity(candidates.len());
+                        let mut canon: Option<std::path::PathBuf> = None;
+                        for c in &candidates {
+                            // Skip the implicit `.rb`-appended candidate —
+                            // ruby_source_candidates returns both the
+                            // as-given form and a `<stem>.rb` form; load
+                            // wants only the as-given matches. The .rb form
+                            // is distinguishable because it has a `.rb`
+                            // extension while `path_str` didn't.
+                            let original_has_rb = std::path::Path::new(&path_str)
+                                .extension()
+                                .map(|e| e == "rb")
+                                .unwrap_or(false);
+                            let candidate_has_rb =
+                                c.extension().map(|e| e == "rb").unwrap_or(false);
+                            if !original_has_rb && candidate_has_rb {
+                                continue;
+                            }
+                            tried.push(c.display().to_string());
+                            let Ok(resolved) = std::fs::canonicalize(c) else {
+                                continue;
+                            };
+                            if self.check_load_allowed("load", Some(&resolved)).is_ok() {
+                                // Key by expand_path (CRuby), scope by realpath.
+                                canon = Some(Self::expand_load_path(c));
+                                break;
+                            }
                         }
-                    };
-                    // Bypass the `loaded_features` dedup table —
-                    // `load` re-executes unconditionally. We
-                    // intentionally don't insert into
-                    // `loaded_features` either, so a subsequent
-                    // `require` on the same file would still run.
-                    // That's CRuby semantics: `load` and `require`
-                    // have separate cache disciplines.
-                    let source = match std::fs::read_to_string(&canon) {
-                        Ok(s) => s,
-                        Err(e) => return Some(Err(self.trap(RubyError::LoadError {
-                            msg: format!("load: read {} failed: {}", canon.display(), e),
-                        }))),
-                    };
-                    // Drop the prior loaded_features entry (if any)
-                    // so compile_and_run_source — which marks the
-                    // path loaded — doesn't no-op on a re-load. The
-                    // `load` contract is "always run"; the insert
-                    // below temporarily marks for circular-require
-                    // safety during compile, then we remove on
-                    // success so the next call runs again too.
-                    let was_loaded = self.loaded_features.remove(&canon);
-                    let res = self.compile_and_run_source(canon.clone(), source);
-                    // Always rewind the features-set state: on
-                    // success we want subsequent `load` calls to
-                    // re-run; on failure we shouldn't add a fake
-                    // "this was loaded" entry that would silence
-                    // a future require.
-                    self.loaded_features.remove(&canon);
-                    if was_loaded {
-                        // Preserve prior require's bookkeeping so
-                        // a subsequent `require` of the same path
-                        // still no-ops. Without this re-insert,
-                        // load + require interleave would cause
-                        // require to re-execute too.
-                        self.loaded_features.insert(canon);
+                        let canon = match canon {
+                            Some(c) => c,
+                            None => {
+                                // `tried` is intentionally NOT in the message:
+                                // CRuby's LoadError surface is just
+                                // `cannot load such file -- <name>` so a
+                                // `rescue LoadError => e; e.message` round-trip
+                                // matches byte-for-byte. The candidate list
+                                // was useful while debugging the
+                                // `ruby_source_candidates` shape but it's
+                                // diagnostic noise in steady state.
+                                let _ = tried;
+                                return Some(Err(self.trap(RubyError::LoadError {
+                                    msg: format!("cannot load such file -- {}", path_str),
+                                })));
+                            }
+                        };
+                        // Bypass the `loaded_features` dedup table —
+                        // `load` re-executes unconditionally. We
+                        // intentionally don't insert into
+                        // `loaded_features` either, so a subsequent
+                        // `require` on the same file would still run.
+                        // That's CRuby semantics: `load` and `require`
+                        // have separate cache disciplines.
+                        let source = match std::fs::read_to_string(&canon) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                return Some(Err(self.trap(RubyError::LoadError {
+                                    msg: format!("load: read {} failed: {}", canon.display(), e),
+                                })));
+                            }
+                        };
+                        // Drop the prior loaded_features entry (if any)
+                        // so compile_and_run_source — which marks the
+                        // path loaded — doesn't no-op on a re-load. The
+                        // `load` contract is "always run"; the insert
+                        // below temporarily marks for circular-require
+                        // safety during compile, then we remove on
+                        // success so the next call runs again too.
+                        let was_loaded = self.loaded_features.remove(&canon);
+                        let res = self.compile_and_run_source(canon.clone(), source);
+                        // Always rewind the features-set state: on
+                        // success we want subsequent `load` calls to
+                        // re-run; on failure we shouldn't add a fake
+                        // "this was loaded" entry that would silence
+                        // a future require.
+                        self.loaded_features.remove(&canon);
+                        if was_loaded {
+                            // Preserve prior require's bookkeeping so
+                            // a subsequent `require` of the same path
+                            // still no-ops. Without this re-insert,
+                            // load + require interleave would cause
+                            // require to re-execute too.
+                            self.loaded_features.insert(canon);
+                        }
+                        Some(res.map(|_| Value::Bool(true)))
                     }
-                    Some(res.map(|_| Value::Bool(true)))
-                }
-                [other] | [other, _] => Some(Err(self.trap(RubyError::TypeError {
-                    msg: format!(
-                        "no implicit conversion of {} into String",
-                        other.type_name()
-                    ),
-                }))),
-                _ => Some(Err(self.trap(RubyError::ArgumentError {
-                    msg: format!(
-                        "wrong number of arguments (given {}, expected 1..2)",
-                        args.len()
-                    ),
-                }))),
+                    [other] | [other, _] => Some(Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "no implicit conversion of {} into String",
+                            other.type_name()
+                        ),
+                    }))),
+                    _ => Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 1..2)",
+                            args.len()
+                        ),
+                    }))),
                 }
             }
             #[cfg(target_os = "wasi")]
@@ -3717,14 +4024,12 @@ impl Vm {
                 // "file", 1, :extra)` would TypeError on the
                 // first-arg check below even though the call is
                 // out of the 1..4 signature.
-                _ if args.len() > 4 => {
-                    Some(Err(self.trap(RubyError::ArgumentError {
-                        msg: format!(
-                            "wrong number of arguments (given {}, expected 1..4)",
-                            args.len()
-                        ),
-                    })))
-                }
+                _ if args.len() > 4 => Some(Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 1..4)",
+                        args.len()
+                    ),
+                }))),
                 // Validate source arg type after the arity check.
                 // Non-String first arg surfaces as TypeError.
                 [other, ..] if !matches!(other, Value::Str(_)) => {
@@ -3737,7 +4042,7 @@ impl Vm {
                 }
                 [Value::Str(src)] => {
                     let owned = src.to_string_lossy();
-                    Some(self.eval_string(&owned, "(eval)", /*synthetic=*/true))
+                    Some(self.eval_string(&owned, "(eval)", /*synthetic=*/ true))
                 }
                 // 2-arg `eval(src, binding)`: when the 2nd arg is a
                 // Binding, run with its captured self (else drop it,
@@ -3746,7 +4051,13 @@ impl Vm {
                     let owned = src.to_string_lossy();
                     match self.extract_binding_ctx(binding) {
                         Some((self_o, cctx, locals)) => Some(self.eval_string_full(
-                            &owned, "(eval)", true, cctx, Some(self_o), locals, None,
+                            &owned,
+                            "(eval)",
+                            true,
+                            cctx,
+                            Some(self_o),
+                            locals,
+                            None,
                             None,
                         )),
                         None => Some(self.eval_string(&owned, "(eval)", true)),
@@ -3758,8 +4069,7 @@ impl Vm {
                 // it for source registration so backtraces point
                 // at the right place (tilt passes its template
                 // path here).
-                [Value::Str(_), _binding, file_arg, ..]
-                    if !matches!(file_arg, Value::Str(_)) => {
+                [Value::Str(_), _binding, file_arg, ..] if !matches!(file_arg, Value::Str(_)) => {
                     Some(Err(self.trap(RubyError::TypeError {
                         msg: format!(
                             "no implicit conversion of {} into String",
@@ -3774,7 +4084,8 @@ impl Vm {
                 // though we ultimately ignore the line offset.
                 // Silent acceptance would mask caller bugs.
                 [Value::Str(_), _binding, Value::Str(_), line_arg]
-                    if !matches!(line_arg, Value::Int(_) | Value::Float(_)) => {
+                    if !matches!(line_arg, Value::Int(_) | Value::Float(_)) =>
+                {
                     Some(Err(self.trap(RubyError::TypeError {
                         msg: format!(
                             "no implicit conversion of {} into Integer",
@@ -3801,7 +4112,14 @@ impl Vm {
                     // builder_binding, path)`).
                     match self.extract_binding_ctx(binding) {
                         Some((self_o, cctx, locals)) => Some(self.eval_string_full(
-                            &owned, &fname, false, cctx, Some(self_o), locals, line_base, None,
+                            &owned,
+                            &fname,
+                            false,
+                            cctx,
+                            Some(self_o),
+                            locals,
+                            line_base,
+                            None,
                         )),
                         None => Some(self.eval_string_with_line(&owned, &fname, false, line_base)),
                     }
@@ -3856,10 +4174,14 @@ impl Vm {
         // `require_relative` lexically inside that block. Methods
         // called from a different file via `define_method` /
         // `instance_eval` would otherwise mis-anchor.)
-        let anchor_filename: Option<String> = self.frames.last()
+        let anchor_filename: Option<String> = self
+            .frames
+            .last()
             .map(|f| self.protos[f.proto_idx].filename.to_string());
         let base_dir: PathBuf = match anchor_filename {
-            Some(f) => Path::new(&f).parent().map(Path::to_path_buf)
+            Some(f) => Path::new(&f)
+                .parent()
+                .map(Path::to_path_buf)
                 .unwrap_or_else(|| PathBuf::from(".")),
             None => PathBuf::from("."),
         };
@@ -3887,9 +4209,11 @@ impl Vm {
         // /private/tmp).
         let real = match std::fs::canonicalize(&target) {
             Ok(p) => p,
-            Err(e) => return Err(self.trap(RubyError::RuntimeError {
-                msg: format!("require_relative: cannot find {} ({})", target.display(), e),
-            })),
+            Err(e) => {
+                return Err(self.trap(RubyError::RuntimeError {
+                    msg: format!("require_relative: cannot find {} ({})", target.display(), e),
+                }));
+            }
         };
         let canon = Self::expand_load_path(&target);
         // Allowlist scope: bool gate already fired at the dispatch
@@ -4017,7 +4341,11 @@ impl Vm {
         // constant. Bail out so the require falls through to
         // cext_require, which will produce the same diagnostic
         // shape it would for any path with no .rb / cext sibling.
-        if !first_seg.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+        if !first_seg
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic())
+        {
             return false;
         }
         // Empty-snake-segment guard. The alphabetic check above
@@ -4141,7 +4469,9 @@ impl Vm {
         let mut canon: Option<std::path::PathBuf> = None;
         for c in &candidates {
             tried.push(c.display().to_string());
-            let Ok(resolved) = std::fs::canonicalize(c) else { continue };
+            let Ok(resolved) = std::fs::canonicalize(c) else {
+                continue;
+            };
             if self.check_load_allowed("require", Some(&resolved)).is_ok() {
                 // Key by expand_path (CRuby), scope-check by realpath.
                 canon = Some(Self::expand_load_path(c));
@@ -4157,14 +4487,21 @@ impl Vm {
                 // descriptive LoadError when the failure is scope
                 // (not "cannot find") — preserves the diagnostic
                 // shape the test suite relies on.
-                if let Some(resolved) = candidates.iter().find_map(|c| std::fs::canonicalize(c).ok()) {
+                if let Some(resolved) = candidates
+                    .iter()
+                    .find_map(|c| std::fs::canonicalize(c).ok())
+                {
                     self.check_load_allowed("require", Some(&resolved))?;
                     // Unreachable: check above returned Err in
                     // the loop, must return Err here too.
                     unreachable!("scope re-check changed verdict")
                 }
                 return Err(self.trap(RubyError::RuntimeError {
-                    msg: format!("require: cannot find {} (tried: {})", path_str, tried.join(", ")),
+                    msg: format!(
+                        "require: cannot find {} (tried: {})",
+                        path_str,
+                        tried.join(", ")
+                    ),
                 }));
             }
         };
@@ -4329,7 +4666,8 @@ impl Vm {
         // suffixes.
         let p = std::path::Path::new(path_str);
         if let Some(ext) = p.extension().and_then(|e| e.to_str())
-            && matches!(ext, "so" | "bundle" | "dylib" | "dll" | "o") {
+            && matches!(ext, "so" | "bundle" | "dylib" | "dll" | "o")
+        {
             return false;
         }
         // When `allowed_paths` is configured, skip the `.exists()`
@@ -4389,9 +4727,11 @@ impl Vm {
         }
         let source = match std::fs::read_to_string(&canon) {
             Ok(s) => s,
-            Err(e) => return Err(self.trap(RubyError::RuntimeError {
-                msg: format!("require: read {} failed: {}", canon.display(), e),
-            })),
+            Err(e) => {
+                return Err(self.trap(RubyError::RuntimeError {
+                    msg: format!("require: read {} failed: {}", canon.display(), e),
+                }));
+            }
         };
         self.compile_and_run_source(canon, source)
     }
@@ -4416,10 +4756,8 @@ impl Vm {
             let msg = crate::error::format_prism_errors(&source, parse_errors);
             return Err(self.trap(RubyError::SyntaxError { msg }));
         }
-        let (prog, ast_errors) = crate::ast::tr_with_errors_on_source(
-            &parse_result.node(),
-            parse_result.source(),
-        );
+        let (prog, ast_errors) =
+            crate::ast::tr_with_errors_on_source(&parse_result.node(), parse_result.source());
         if !ast_errors.is_empty() {
             return Err(self.trap(RubyError::SyntaxError {
                 msg: ast_errors.join("; "),
@@ -4451,10 +4789,7 @@ impl Vm {
             for k in keys {
                 let removed = self.autoloads_scoped.remove(&k).is_some()
                     | self.autoloads_toplevel.remove(&k).is_some();
-                if removed
-                    && !self.classes.contains_key(&k)
-                    && !self.constants.contains_key(&k)
-                {
+                if removed && !self.classes.contains_key(&k) && !self.constants.contains_key(&k) {
                     self.consumed_autoloads.insert(k);
                 }
             }
@@ -4472,8 +4807,13 @@ impl Vm {
         // semantics unchanged).
         let fsl_start = self.protos.len();
         let entry = crate::compiler::compile_proto(
-            "<require>".into(), vec![], &[prog], filename_rc,
-            &mut self.protos, &mut self.interner, &mut self.cache_counter,
+            "<require>".into(),
+            vec![],
+            &[prog],
+            filename_rc,
+            &mut self.protos,
+            &mut self.interner,
+            &mut self.cache_counter,
         );
         if crate::compiler::detect_frozen_string_literal(&source) {
             crate::compiler::mark_frozen_string_literal(&mut self.protos, fsl_start);
@@ -4516,7 +4856,7 @@ impl Vm {
             proto_idx: entry,
             ip: 0,
             locals: crate::vm::Locals::Shared(std::rc::Rc::new(std::cell::RefCell::new(
-                super::vec_nil(self.protos[entry].n_locals as usize)
+                super::vec_nil(self.protos[entry].n_locals as usize),
             ))),
             self_val: main_self,
             base_sp: self.stack.len(),
@@ -4525,8 +4865,10 @@ impl Vm {
             block_arg: None,
             defining_class: None,
             lexical_cvar_class: None,
-            #[cfg(feature = "regex")] saved_last_match: None,
-            is_block: false, is_lambda: false,
+            #[cfg(feature = "regex")]
+            saved_last_match: None,
+            is_block: false,
+            is_lambda: false,
             n_given_positional: 0,
             kw_given_mask: 0,
             aux: None,
@@ -4598,18 +4940,20 @@ impl Vm {
                     break;
                 }
                 let f_ref = self.frames.last().unwrap();
-                let is_owner = !f_ref.is_block && match &owner_rc {
-                    Some(rc) => f_ref
-                        .locals
-                        .as_shared()
-                        .is_some_and(|l| std::rc::Rc::ptr_eq(l, rc)),
-                    None => true,  // legacy fallback
-                };
+                let is_owner = !f_ref.is_block
+                    && match &owner_rc {
+                        Some(rc) => f_ref
+                            .locals
+                            .as_shared()
+                            .is_some_and(|l| std::rc::Rc::ptr_eq(l, rc)),
+                        None => true, // legacy fallback
+                    };
                 let f = self.frames.pop().unwrap();
                 self.stack.truncate(f.base_sp);
                 if f.is_class_body {
-                    let cls = self.class_stack.pop()
-                        .expect("ICE: class_stack empty unwinding through class_eval (require/_relative)");
+                    let cls = self.class_stack.pop().expect(
+                        "ICE: class_stack empty unwinding through class_eval (require/_relative)",
+                    );
                     self.class_visibility_stack.pop();
                     self.module_function_active_stack.pop();
                     if is_owner {
@@ -4623,7 +4967,9 @@ impl Vm {
                     }
                 }
                 self.release_frame_locals(f.locals);
-                if is_owner { break; }
+                if is_owner {
+                    break;
+                }
             }
             if escaped {
                 self.method_return = Some(val);
@@ -4714,7 +5060,9 @@ impl Vm {
     #[cfg(not(target_os = "wasi"))]
     fn script_loaded_features_contains(&mut self, canon: &std::path::Path) -> bool {
         let path_str = canon.to_string_lossy();
-        let Ok(lf_id) = self.ensure_loaded_features_list() else { return true };
+        let Ok(lf_id) = self.ensure_loaded_features_list() else {
+            return true;
+        };
         matches!(self.heap.get(lf_id), HeapObj::Array(arr)
             if arr.iter().any(|v| matches!(v, Value::Str(s)
                 if s.borrow().as_slice() == path_str.as_bytes())))
@@ -4810,7 +5158,10 @@ impl Vm {
                 let val = if let Some(rc) = &shared {
                     rc.borrow().get(slot).cloned().unwrap_or(Value::Nil)
                 } else if let Some(base) = stack_base {
-                    self.locals_arena.get(base + slot).cloned().unwrap_or(Value::Nil)
+                    self.locals_arena
+                        .get(base + slot)
+                        .cloned()
+                        .unwrap_or(Value::Nil)
                 } else {
                     Value::Nil
                 };
@@ -4845,7 +5196,16 @@ impl Vm {
         synthetic: bool,
         class_ctx: Option<std::rc::Rc<crate::value::Class>>,
     ) -> Result<Value, Trap> {
-        self.eval_string_full(source, filename, synthetic, class_ctx, None, vec![], None, None)
+        self.eval_string_full(
+            source,
+            filename,
+            synthetic,
+            class_ctx,
+            None,
+            vec![],
+            None,
+            None,
+        )
     }
 
     /// `eval_string` carrying an explicit backtrace line base (the
@@ -4858,7 +5218,16 @@ impl Vm {
         synthetic: bool,
         line_base: Option<i32>,
     ) -> Result<Value, Trap> {
-        self.eval_string_full(source, filename, synthetic, None, None, vec![], line_base, None)
+        self.eval_string_full(
+            source,
+            filename,
+            synthetic,
+            None,
+            None,
+            vec![],
+            line_base,
+            None,
+        )
     }
 
     /// `eval_string_with_class_ctx` plus a `self_override` — the eval'd
@@ -4882,18 +5251,14 @@ impl Vm {
     ///
     /// `Err(msg)` is a hard SyntaxError from the UNSEEDED parse; a
     /// failed wrap silently degrades to the unseeded path.
-    fn prepare_eval_body(
-        source: &str,
-        local_seed: &[(String, Value)],
-    ) -> Result<EvalBody, String> {
+    fn prepare_eval_body(source: &str, local_seed: &[(String, Value)]) -> Result<EvalBody, String> {
         fn parse_tr(src: &str) -> Result<crate::ast::SExpr, String> {
             let pr = ruby_prism::parse(src.as_bytes());
             let mut errs = pr.errors().peekable();
             if errs.peek().is_some() {
                 return Err(crate::error::format_prism_errors(src, errs));
             }
-            let (prog, ast_errors) =
-                crate::ast::tr_with_errors_on_source(&pr.node(), pr.source());
+            let (prog, ast_errors) = crate::ast::tr_with_errors_on_source(&pr.node(), pr.source());
             if !ast_errors.is_empty() {
                 return Err(ast_errors.join("; "));
             }
@@ -4906,9 +5271,12 @@ impl Vm {
             use crate::ast::Expr;
             match &prog.node {
                 Expr::Lambda { body, .. } => Some(body.clone()),
-                Expr::Call { receiver: None, name, args, .. }
-                    if name == "__seq__" && args.len() == 1 =>
-                {
+                Expr::Call {
+                    receiver: None,
+                    name,
+                    args,
+                    ..
+                } if name == "__seq__" && args.len() == 1 => {
                     if let Expr::Lambda { body, .. } = &args[0].node {
                         Some(body.clone())
                     } else {
@@ -5013,7 +5381,8 @@ impl Vm {
         // don't roll back interns themselves).
         let cap_at_entry = self.max_symbols;
         if let Some(max) = cap_at_entry
-            && self.interner.len() >= max {
+            && self.interner.len() >= max
+        {
             return Err(self.trap(RubyError::ResourceExhausted {
                 msg: format!("interner exhausted before eval: {} symbols", max),
             }));
@@ -5066,8 +5435,13 @@ impl Vm {
             .map(|n| n.split("::").map(|s| s.to_string()).collect())
             .unwrap_or_default();
         let entry = crate::compiler::compile_proto_at(
-            "<eval>".into(), compile_params, &[prog], filename_rc.clone(),
-            &mut self.protos, &mut self.interner, &mut self.cache_counter,
+            "<eval>".into(),
+            compile_params,
+            &[prog],
+            filename_rc.clone(),
+            &mut self.protos,
+            &mut self.interner,
+            &mut self.cache_counter,
             eval_class_path,
         );
         if fsl {
@@ -5088,7 +5462,8 @@ impl Vm {
             crate::compiler::mark_source_encoding(&mut self.protos, fsl_start, enc);
         }
         if let Some(max) = cap_at_entry
-            && self.interner.len() > max {
+            && self.interner.len() > max
+        {
             // Don't leave the orphan source entry behind when we
             // refuse the eval — the compiled proto won't be
             // executed and nothing else will consult its source.
@@ -5116,7 +5491,8 @@ impl Vm {
         let vis_depth_at_entry = self.class_visibility_stack.len();
         if let Some(cls) = &class_ctx {
             self.class_stack.push(cls.clone());
-            self.class_visibility_stack.push(crate::value::Visibility::Public);
+            self.class_visibility_stack
+                .push(crate::value::Visibility::Public);
         }
         // Seed the eval frame's locals from the Binding snapshot. The
         // seeded names were compiled as the leading params (slots
@@ -5138,9 +5514,7 @@ impl Vm {
         self.frames.push(super::Frame {
             proto_idx: entry,
             ip: 0,
-            locals: crate::vm::Locals::Shared(std::rc::Rc::new(std::cell::RefCell::new(
-                seeded
-            ))),
+            locals: crate::vm::Locals::Shared(std::rc::Rc::new(std::cell::RefCell::new(seeded))),
             self_val: match (&self_override, &class_ctx) {
                 (Some(s), _) => s.clone(),
                 (None, Some(cls)) => Value::Class(cls.clone()),
@@ -5159,8 +5533,10 @@ impl Vm {
             block_arg: None,
             defining_class: None,
             lexical_cvar_class: None,
-            #[cfg(feature = "regex")] saved_last_match: None,
-            is_block: false, is_lambda: false,
+            #[cfg(feature = "regex")]
+            saved_last_match: None,
+            is_block: false,
+            is_lambda: false,
             n_given_positional: 0,
             kw_given_mask: 0,
             aux: None,
@@ -5217,15 +5593,18 @@ impl Vm {
             // invariant the helper enforces is what makes this
             // legacy path safe to leave alone.)
             while let Some(f) = self.frames.last() {
-                if !f.is_block { break; }
+                if !f.is_block {
+                    break;
+                }
                 if self.frames.len() <= depth_before + 1 {
                     break;
                 }
                 let f = self.frames.pop().unwrap();
                 self.stack.truncate(f.base_sp);
                 if f.is_class_body {
-                    let _cls = self.class_stack.pop()
-                        .expect("ICE: class_stack empty unwinding through class_eval (eval_string)");
+                    let _cls = self.class_stack.pop().expect(
+                        "ICE: class_stack empty unwinding through class_eval (eval_string)",
+                    );
                     self.class_visibility_stack.pop();
                     self.module_function_active_stack.pop();
                 }
@@ -5239,7 +5618,9 @@ impl Vm {
             let f = self.frames.pop().unwrap();
             self.stack.truncate(f.base_sp);
             if f.is_class_body {
-                let cls = self.class_stack.pop()
+                let cls = self
+                    .class_stack
+                    .pop()
                     .expect("ICE: class_stack empty on method-return (eval_string)");
                 self.class_visibility_stack.pop();
                 self.module_function_active_stack.pop();
@@ -5270,7 +5651,6 @@ impl Vm {
         // (CRuby semantics: `eval("1+2")` → 3).
         Ok(self.stack.pop().unwrap_or(Value::Nil))
     }
-
 }
 
 /// Top-level constant name(s) each stdlib require conventionally
@@ -5481,7 +5861,6 @@ impl Vm {
         Ok(())
     }
 }
-
 
 /// Known stdlib-shaped require names that rubyrs Tier 1 stubs to
 /// `true` rather than load. Whitelist is conservative: only the
@@ -5789,15 +6168,16 @@ fn strict_parse_integer(raw: &str, radix: i64) -> Option<i64> {
         if c == '_' {
             // Two underscores in a row, or right after the
             // boundary, isn't legal in a Ruby integer literal.
-            if prev_was_underscore { return None; }
+            if prev_was_underscore {
+                return None;
+            }
             prev_was_underscore = true;
             continue;
         }
         prev_was_underscore = false;
         match c.to_digit(effective_r) {
             Some(d) => {
-                n = n.wrapping_mul(effective_r as i64)
-                    .wrapping_add(d as i64);
+                n = n.wrapping_mul(effective_r as i64).wrapping_add(d as i64);
             }
             None => return None, // any non-digit tail is a hard error
         }
@@ -5962,7 +6342,10 @@ impl MarshalReader<'_> {
     /// zeitwerk's reload re-arms class autoloads, then Marshal.load
     /// re-materialises the dumped instances. Shared by marshal_lookup_class and
     /// the inline object/struct/data readers below.
-    fn marshal_resolve_cname(vm: &mut Vm, cname: &str) -> Result<std::rc::Rc<crate::value::Class>, String> {
+    fn marshal_resolve_cname(
+        vm: &mut Vm,
+        cname: &str,
+    ) -> Result<std::rc::Rc<crate::value::Class>, String> {
         let cid = vm.interner.intern(cname);
         if let Some(Value::Class(c)) = vm.constants.get(&cid).cloned() {
             return Ok(c);
@@ -6000,7 +6383,9 @@ impl MarshalReader<'_> {
                     "inf" => f64::INFINITY,
                     "-inf" => f64::NEG_INFINITY,
                     "nan" => f64::NAN,
-                    _ => txt.parse::<f64>().map_err(|_| "bad float text".to_string())?,
+                    _ => txt
+                        .parse::<f64>()
+                        .map_err(|_| "bad float text".to_string())?,
                 };
                 let v = Value::Float(f);
                 self.objects.push(v.clone());
@@ -6083,8 +6468,11 @@ impl MarshalReader<'_> {
             b'[' => {
                 let n = self.long()?;
                 vm.maybe_gc();
-                vm.check_alloc().map_err(|_| "allocation limit".to_string())?;
-                let id = vm.heap.alloc(crate::heap::HeapObj::Array(Vec::new().into()));
+                vm.check_alloc()
+                    .map_err(|_| "allocation limit".to_string())?;
+                let id = vm
+                    .heap
+                    .alloc(crate::heap::HeapObj::Array(Vec::new().into()));
                 // Register BEFORE children (CRuby's link order) and
                 // pin via the registration itself — `objects` is
                 // walked by nothing, so pin explicitly around child
@@ -6111,10 +6499,11 @@ impl MarshalReader<'_> {
                 let with_default = tag == b'}';
                 let n = self.long()?;
                 vm.maybe_gc();
-                vm.check_alloc().map_err(|_| "allocation limit".to_string())?;
-                let id = vm
-                    .heap
-                    .alloc(crate::heap::HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::new())));
+                vm.check_alloc()
+                    .map_err(|_| "allocation limit".to_string())?;
+                let id = vm.heap.alloc(crate::heap::HeapObj::Hash(
+                    crate::heap::HashObj::with_pairs(Vec::new()),
+                ));
                 self.objects.push(Value::Hash(id));
                 vm.pinned.push(Value::Hash(id));
                 let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(n.max(0) as usize);
@@ -6160,7 +6549,11 @@ impl MarshalReader<'_> {
                             h.class_tag = Some(cls);
                         }
                     }
-                    _ => return Err("unsupported `C` subclass payload (rubyrs: Array/Hash only)".into()),
+                    _ => {
+                        return Err(
+                            "unsupported `C` subclass payload (rubyrs: Array/Hash only)".into()
+                        );
+                    }
                 }
                 Ok(inner)
             }
@@ -6201,13 +6594,16 @@ impl MarshalReader<'_> {
                 let class_val = self.read_value(vm)?;
                 let cls = self.marshal_lookup_class(vm, &class_val)?;
                 vm.maybe_gc();
-                vm.check_alloc().map_err(|_| "allocation limit".to_string())?;
-                let id = vm.heap.alloc(crate::heap::HeapObj::Instance(crate::value::Instance {
-                    class: cls,
-                    ivars: crate::value::IvarTable::default(),
-                    singleton_class: None,
-                    frozen: std::cell::Cell::new(false),
-                }));
+                vm.check_alloc()
+                    .map_err(|_| "allocation limit".to_string())?;
+                let id = vm
+                    .heap
+                    .alloc(crate::heap::HeapObj::Instance(crate::value::Instance {
+                        class: cls,
+                        ivars: crate::value::IvarTable::default(),
+                        singleton_class: None,
+                        frozen: std::cell::Cell::new(false),
+                    }));
                 self.objects.push(Value::Object(id));
                 vm.pinned.push(Value::Object(id));
                 let payload = self.read_value(vm)?;
@@ -6238,13 +6634,16 @@ impl MarshalReader<'_> {
                 let cls = Self::marshal_resolve_cname(vm, &cname)?;
                 let is_exc = marshal_is_exception(&cls);
                 vm.maybe_gc();
-                vm.check_alloc().map_err(|_| "allocation limit".to_string())?;
-                let id = vm.heap.alloc(crate::heap::HeapObj::Instance(crate::value::Instance {
-                    class: cls,
-                    ivars: crate::value::IvarTable::default(),
-                    singleton_class: None,
-                    frozen: std::cell::Cell::new(false),
-                }));
+                vm.check_alloc()
+                    .map_err(|_| "allocation limit".to_string())?;
+                let id = vm
+                    .heap
+                    .alloc(crate::heap::HeapObj::Instance(crate::value::Instance {
+                        class: cls,
+                        ivars: crate::value::IvarTable::default(),
+                        singleton_class: None,
+                        frozen: std::cell::Cell::new(false),
+                    }));
                 self.objects.push(Value::Object(id));
                 vm.pinned.push(Value::Object(id));
                 let n = self.long()?;
@@ -6303,13 +6702,16 @@ impl MarshalReader<'_> {
                         .ok_or_else(|| format!("undefined class/module {cname}"))?,
                 };
                 vm.maybe_gc();
-                vm.check_alloc().map_err(|_| "allocation limit".to_string())?;
-                let id = vm.heap.alloc(crate::heap::HeapObj::Instance(crate::value::Instance {
-                    class: cls,
-                    ivars: crate::value::IvarTable::default(),
-                    singleton_class: None,
-                    frozen: std::cell::Cell::new(false),
-                }));
+                vm.check_alloc()
+                    .map_err(|_| "allocation limit".to_string())?;
+                let id = vm
+                    .heap
+                    .alloc(crate::heap::HeapObj::Instance(crate::value::Instance {
+                        class: cls,
+                        ivars: crate::value::IvarTable::default(),
+                        singleton_class: None,
+                        frozen: std::cell::Cell::new(false),
+                    }));
                 self.objects.push(Value::Object(id));
                 vm.pinned.push(Value::Object(id));
                 let n = self.long()?;
@@ -6534,9 +6936,11 @@ impl MarshalWriter {
                     return Ok(());
                 }
                 let (has_block, default, sub) = match vm.heap.get(*id) {
-                    crate::heap::HeapObj::Hash(h) => {
-                        (h.default_block.is_some(), h.default_value.clone(), h.class_tag.clone())
-                    }
+                    crate::heap::HeapObj::Hash(h) => (
+                        h.default_block.is_some(),
+                        h.default_value.clone(),
+                        h.class_tag.clone(),
+                    ),
                     _ => (false, None, None),
                 };
                 // A block default (`Hash.new { ... }`) wraps a Proc — not
@@ -6618,14 +7022,18 @@ impl MarshalWriter {
                     // US-ASCII), exactly like a plain String; a binary
                     // dump string needs no wrapper. `_load(str)` rebuilds.
                     self.objects.push(ObjKey::Heap(*id));
-                    let dumped = match marshal_invoke(vm, Value::Object(*id), dump_id, Some(Value::Int(-1))) {
-                        Ok(v) => v,
-                        Err(t) => {
-                            self.trap = Some(t);
-                            return Err(());
-                        }
+                    let dumped =
+                        match marshal_invoke(vm, Value::Object(*id), dump_id, Some(Value::Int(-1)))
+                        {
+                            Ok(v) => v,
+                            Err(t) => {
+                                self.trap = Some(t);
+                                return Err(());
+                            }
+                        };
+                    let Value::Str(rs) = &dumped else {
+                        return Err(());
                     };
-                    let Value::Str(rs) = &dumped else { return Err(()) };
                     let bytes = rs.content.borrow().clone();
                     use crate::value::EncodingTag;
                     match rs.encoding.get() {
@@ -6699,8 +7107,11 @@ impl MarshalWriter {
                     let msg_ivar = vm.interner.intern("@message");
                     let bt_ivar = vm.interner.intern("@backtrace");
                     let cause_ivar = vm.interner.intern("@cause");
-                    let mut msg = ivars.iter().find(|(k, _)| *k == msg_ivar)
-                        .map(|(_, v)| v.clone()).unwrap_or(Value::Nil);
+                    let mut msg = ivars
+                        .iter()
+                        .find(|(k, _)| *k == msg_ivar)
+                        .map(|(_, v)| v.clone())
+                        .unwrap_or(Value::Nil);
                     // CRuby lazily defaults a no-arg exception's message to
                     // the class name and dumps `:mesg nil`; rubyrs stores
                     // it eagerly in @message. Emit nil when @message just
@@ -6708,11 +7119,15 @@ impl MarshalWriter {
                     // reader maps a nil :mesg back to the class name, so
                     // round-trips stay correct either way).
                     if let Value::Str(s) = &msg
-                        && *s.content.borrow() == *cname.as_bytes() {
-                            msg = Value::Nil;
-                        }
-                    let bt = ivars.iter().find(|(k, _)| *k == bt_ivar)
-                        .map(|(_, v)| v.clone()).unwrap_or(Value::Nil);
+                        && *s.content.borrow() == *cname.as_bytes()
+                    {
+                        msg = Value::Nil;
+                    }
+                    let bt = ivars
+                        .iter()
+                        .find(|(k, _)| *k == bt_ivar)
+                        .map(|(_, v)| v.clone())
+                        .unwrap_or(Value::Nil);
                     ivars.retain(|(k, _)| *k != msg_ivar && *k != bt_ivar && *k != cause_ivar);
                     ivars.sort_by(|a, b| vm.interner.resolve(a.0).cmp(vm.interner.resolve(b.0)));
                     let mesg_sym = vm.interner.intern("mesg");
@@ -6749,7 +7164,10 @@ impl MarshalWriter {
 /// plain object whose class isn't a Struct. Mirrors the chain walk the
 /// preamble `Struct#members` does, so a Struct SUBCLASS instance still
 /// finds the members on whichever ancestor `Struct.new` built.
-fn marshal_struct_members(vm: &Vm, class: &std::rc::Rc<crate::value::Class>) -> Option<Vec<crate::intern::SymId>> {
+fn marshal_struct_members(
+    vm: &Vm,
+    class: &std::rc::Rc<crate::value::Class>,
+) -> Option<Vec<crate::intern::SymId>> {
     let attrs_id = vm.interner.get_id("@__struct_attrs")?;
     let mut cur = Some(class.clone());
     while let Some(c) = cur {
@@ -6785,7 +7203,10 @@ fn marshal_is_exception(class: &std::rc::Rc<crate::value::Class>) -> bool {
 /// The interned symbol for a class's effective name, or `None` for an
 /// anonymous class (no constant name) — the marshal writer's signal to
 /// fall back to the registry token.
-fn marshal_class_sym(vm: &Vm, cls: &std::rc::Rc<crate::value::Class>) -> Option<crate::intern::SymId> {
+fn marshal_class_sym(
+    vm: &Vm,
+    cls: &std::rc::Rc<crate::value::Class>,
+) -> Option<crate::intern::SymId> {
     let name = cls.effective_name()?;
     if name.is_empty() {
         return None;
@@ -6803,7 +7224,11 @@ fn marshal_float_text(f: f64) -> String {
     if f.is_nan() {
         "nan".to_string()
     } else if f.is_infinite() {
-        if f < 0.0 { "-inf".to_string() } else { "inf".to_string() }
+        if f < 0.0 {
+            "-inf".to_string()
+        } else {
+            "inf".to_string()
+        }
     } else {
         format!("{f}")
     }
@@ -6816,9 +7241,11 @@ fn raise_system_exit(vm: &mut Vm, status: i32, message: &str) -> Option<Result<V
     let cls_id = vm.interner.intern("SystemExit");
     let cls = match vm.classes.get(&cls_id).cloned() {
         Some(c) => c,
-        None => return Some(Err(vm.trap(RubyError::RuntimeError {
-            msg: "SystemExit class missing — preamble Phase 0.5a not loaded".into(),
-        }))),
+        None => {
+            return Some(Err(vm.trap(RubyError::RuntimeError {
+                msg: "SystemExit class missing — preamble Phase 0.5a not loaded".into(),
+            })));
+        }
     };
     vm.maybe_gc();
     if let Err(e) = vm.check_alloc() {
@@ -6831,12 +7258,17 @@ fn raise_system_exit(vm: &mut Vm, status: i32, message: &str) -> Option<Result<V
         class: cls,
         ivars: crate::value::IvarTable::default(),
         singleton_class: None,
-            frozen: std::cell::Cell::new(false),
+        frozen: std::cell::Cell::new(false),
     }));
     let status_sym = vm.interner.intern("@status");
     let message_sym = vm.interner.intern("@message");
-    let msg_val = Value::Str(std::rc::Rc::new(crate::value::RStr::new(message.to_string())));
-    vm.heap.instance_mut(id).ivars.insert(status_sym, Value::Int(status as i64));
+    let msg_val = Value::Str(std::rc::Rc::new(crate::value::RStr::new(
+        message.to_string(),
+    )));
+    vm.heap
+        .instance_mut(id)
+        .ivars
+        .insert(status_sym, Value::Int(status as i64));
     vm.heap.instance_mut(id).ivars.insert(message_sym, msg_val);
     // Route through the same unwind path Op::Raise uses.
     if let Err(trap) = vm.unwind_with_exception(Value::Object(id)) {
@@ -6851,10 +7283,7 @@ fn raise_system_exit(vm: &mut Vm, status: i32, message: &str) -> Option<Result<V
 /// a Ruby Value for `Signal.trap`'s previous-handler return.
 /// Default → "DEFAULT" String; Ignore → "IGNORE" String;
 /// Block(id) → Value::Block(id).
-fn signal_handler_state_to_value(
-    vm: &mut Vm,
-    state: crate::vm::SignalHandlerState,
-) -> Value {
+fn signal_handler_state_to_value(vm: &mut Vm, state: crate::vm::SignalHandlerState) -> Value {
     use crate::value::RStr;
     match state {
         crate::vm::SignalHandlerState::Default => {

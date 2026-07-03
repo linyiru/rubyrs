@@ -156,9 +156,7 @@ impl EncodingTag {
             EncodingTag::UsAscii => "US-ASCII",
             EncodingTag::Binary => "BINARY (ASCII-8BIT)",
             #[cfg(feature = "_encoding_full")]
-            EncodingTag::Other(idx) => {
-                crate::encoding_full::name(idx).unwrap_or("OTHER")
-            }
+            EncodingTag::Other(idx) => crate::encoding_full::name(idx).unwrap_or("OTHER"),
             #[cfg(not(feature = "_encoding_full"))]
             EncodingTag::Other(_) => "OTHER",
         }
@@ -290,9 +288,10 @@ impl RStr {
 
 impl std::ops::Deref for RStr {
     type Target = StrCell;
-    fn deref(&self) -> &Self::Target { &self.content }
+    fn deref(&self) -> &Self::Target {
+        &self.content
+    }
 }
-
 
 /// Display form for a Class value: the effective name when one
 /// exists, otherwise CRuby's `#<Class:0xADDR>` placeholder — with
@@ -454,8 +453,14 @@ pub enum Value {
 // ADR 0035 Phase 1 — the layout contract the native JIT will rely on. A change that grows
 // `Value` past 16 bytes, or moves the payload off offset 8, breaks inline object access and
 // must be a deliberate decision (re-derive the JIT's offsets), not a silent regression.
-const _: () = assert!(std::mem::size_of::<Value>() == 16, "Value must stay 16 bytes (ADR 0035)");
-const _: () = assert!(std::mem::align_of::<Value>() == 8, "Value must stay 8-aligned (ADR 0035)");
+const _: () = assert!(
+    std::mem::size_of::<Value>() == 16,
+    "Value must stay 16 bytes (ADR 0035)"
+);
+const _: () = assert!(
+    std::mem::align_of::<Value>() == 8,
+    "Value must stay 8-aligned (ADR 0035)"
+);
 
 #[derive(Debug)]
 pub struct BlockHandle {
@@ -728,6 +733,14 @@ pub struct Class {
     /// once at allocation (`Tagged.new`); read by `class_of` and the
     /// Class-receiver dispatch path.
     pub(crate) class_tag: Option<Rc<Class>>,
+    /// One-way frozen flag for `Module#freeze` / `Class#freeze`
+    /// (a Class/Module IS an object; `mod.freeze` must make
+    /// `mod.frozen?` report true — CRuby). Defaults `false`;
+    /// flipped once by `freeze` and never cleared. Parallel to the
+    /// per-Instance `frozen` Cell used for plain objects. NOT
+    /// persisted across snapshot restore (boot-cache classes come
+    /// back unfrozen — pathological to freeze a module pre-snapshot).
+    pub(crate) frozen: Cell<bool>,
     /// L3-F: optional cext-side allocator. When `Klass.new(args)` is
     /// dispatched and this is `Some(fn)`, the host calls `fn(klass)`
     /// to produce the instance handle (typically a
@@ -797,6 +810,9 @@ impl Class {
             consts: RefCell::new(self.consts.borrow().clone()),
             assigned_name: RefCell::new(self.assigned_name.borrow().clone()),
             class_tag: self.class_tag.clone(),
+            // `clone` copies the frozen flag (CRuby); `dup` drops it,
+            // but dup goes through a different (object) path.
+            frozen: Cell::new(self.frozen.get()),
             #[cfg(feature = "cext")]
             cext_alloc_func: Cell::new(self.cext_alloc_func.get()),
         }
@@ -843,6 +859,7 @@ impl Class {
             consts: RefCell::new(crate::intern::FxHashMap::default()),
             assigned_name: RefCell::new(None),
             class_tag: None,
+            frozen: Cell::new(false),
             #[cfg(feature = "cext")]
             cext_alloc_func: Cell::new(None),
         });
@@ -966,7 +983,10 @@ impl IvarTable {
         None
     }
     pub(crate) fn remove(&mut self, k: &crate::intern::SymId) -> Option<Value> {
-        self.0.iter().position(|p| &p.sym == k).map(|i| self.0.remove(i).val)
+        self.0
+            .iter()
+            .position(|p| &p.sym == k)
+            .map(|i| self.0.remove(i).val)
     }
     pub(crate) fn contains_key(&self, k: &crate::intern::SymId) -> bool {
         self.0.iter().any(|p| &p.sym == k)
@@ -1201,15 +1221,22 @@ mod preamble_cache_serde_tests {
         assert!(matches!(roundtrip(&Value::Bool(true)), Value::Bool(true)));
         assert!(matches!(roundtrip(&Value::Bool(false)), Value::Bool(false)));
         assert!(matches!(roundtrip(&Value::Int(-42)), Value::Int(-42)));
-        assert!(matches!(roundtrip(&Value::Float(1.5)), Value::Float(f) if (f - 1.5).abs() < 1e-12));
+        assert!(
+            matches!(roundtrip(&Value::Float(1.5)), Value::Float(f) if (f - 1.5).abs() < 1e-12)
+        );
         let sym = Value::Sym(crate::intern::SymId(7));
-        assert!(matches!(roundtrip(&sym), Value::Sym(crate::intern::SymId(7))));
+        assert!(matches!(
+            roundtrip(&sym),
+            Value::Sym(crate::intern::SymId(7))
+        ));
     }
 
     #[test]
     fn utf8_string_rebuilds_via_new_str() {
         let v = Value::new_str("héllo");
-        assert!(matches!(roundtrip(&v), Value::Str(s) if s.borrow().as_slice() == "héllo".as_bytes()));
+        assert!(
+            matches!(roundtrip(&v), Value::Str(s) if s.borrow().as_slice() == "héllo".as_bytes())
+        );
     }
 
     #[test]
@@ -1263,7 +1290,10 @@ mod value_layout_contract {
             Value::Hash(ObjId(MAGIC)),
         ] {
             let got = unsafe { *((&v as *const Value as *const u8).add(OID_OFFSET) as *const u32) };
-            assert_eq!(got, MAGIC, "ObjId payload not at offset 4 — JIT contract broken");
+            assert_eq!(
+                got, MAGIC,
+                "ObjId payload not at offset 4 — JIT contract broken"
+            );
         }
         let iv = Value::Int(0x0123_4567_89AB_CDEF);
         let got = unsafe { *((&iv as *const Value as *const u8).add(8) as *const i64) };

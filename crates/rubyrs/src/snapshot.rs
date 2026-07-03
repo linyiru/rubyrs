@@ -733,6 +733,7 @@ fn new_class_shell(name: String, is_module: bool) -> Rc<Class> {
         consts: RefCell::new(crate::intern::FxHashMap::default()),
         assigned_name: RefCell::new(None),
         class_tag: None,
+        frozen: std::cell::Cell::new(false),
         #[cfg(feature = "cext")]
         cext_alloc_func: Cell::new(None),
     })

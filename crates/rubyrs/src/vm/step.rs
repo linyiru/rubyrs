@@ -18,7 +18,7 @@ use crate::error::{RubyError, Trap};
 use crate::heap::HeapObj;
 use crate::value::{BlockHandle, Class, Method, ObjId, Value, Visibility};
 
-use super::{primitive_call, vec_nil, Frame, LoopTransferKind, RescueFilter, RescueHandler, Vm};
+use super::{Frame, LoopTransferKind, RescueFilter, RescueHandler, Vm, primitive_call, vec_nil};
 
 /// Translate Onigmo-specific regex constructs into something the
 /// Rust `regex` crate accepts. The crate is by design less
@@ -80,9 +80,7 @@ fn pattern_has_named_group(src: &str) -> bool {
             match b[i + 2] {
                 b'\'' => return true, // (?'name'…)
                 // (?<name>…) — but not lookbehind (?<= / (?<!
-                b'<' if i + 3 < b.len() && b[i + 3] != b'=' && b[i + 3] != b'!' => {
-                    return true
-                }
+                b'<' if i + 3 < b.len() && b[i + 3] != b'=' && b[i + 3] != b'!' => return true,
                 _ => {}
             }
         }
@@ -377,7 +375,7 @@ fn preprocess_regex_glg(src: &str) -> std::borrow::Cow<'_, str> {
     // operation above either copies an input run verbatim or
     // pushes ASCII (`G`). No way to produce invalid UTF-8.
     std::borrow::Cow::Owned(
-        String::from_utf8(out).expect("ICE: preprocess_regex_pattern produced invalid UTF-8")
+        String::from_utf8(out).expect("ICE: preprocess_regex_pattern produced invalid UTF-8"),
     )
 }
 
@@ -394,7 +392,7 @@ fn preprocess_regex_glg(src: &str) -> std::borrow::Cow<'_, str> {
 /// the prefix and the prefix never lands inside the `\G` scan.
 #[cfg(feature = "regex")]
 pub(crate) fn apply_ruby_flags(pattern: &str, flags: u8) -> std::borrow::Cow<'_, str> {
-    use crate::regex_engine::{RB_IGNORECASE, RB_EXTENDED, RB_MULTILINE};
+    use crate::regex_engine::{RB_EXTENDED, RB_IGNORECASE, RB_MULTILINE};
     // Only the three matcher-relevant bits build inline flags.
     // Encoding bits (FIXEDENCODING=16 / NOENCODING=32 — rack's
     // URLMap passes the latter to Regexp.new) carry no matching
@@ -406,9 +404,15 @@ pub(crate) fn apply_ruby_flags(pattern: &str, flags: u8) -> std::borrow::Cow<'_,
     }
     let mut prefix = String::with_capacity(6 + pattern.len());
     prefix.push_str("(?");
-    if flags & RB_IGNORECASE != 0 { prefix.push('i'); }
-    if flags & RB_MULTILINE != 0 { prefix.push('s'); } // Ruby /m == engine (?s)
-    if flags & RB_EXTENDED != 0 { prefix.push('x'); }
+    if flags & RB_IGNORECASE != 0 {
+        prefix.push('i');
+    }
+    if flags & RB_MULTILINE != 0 {
+        prefix.push('s');
+    } // Ruby /m == engine (?s)
+    if flags & RB_EXTENDED != 0 {
+        prefix.push('x');
+    }
     prefix.push(')');
     prefix.push_str(pattern);
     std::borrow::Cow::Owned(prefix)
@@ -534,7 +538,9 @@ impl Vm {
         }
         // Look up the SIGINT trap state. Missing entry =
         // Default behavior.
-        let state = self.signal_traps.get(&signal_hook::consts::SIGINT)
+        let state = self
+            .signal_traps
+            .get(&signal_hook::consts::SIGINT)
             .cloned()
             .unwrap_or(crate::vm::SignalHandlerState::Default);
         Some(match state {
@@ -626,8 +632,11 @@ impl Vm {
             && !frame.is_class_body
             && let Some(dc) = &frame.defining_class
         {
-            if let Some(attached) =
-                dc.singleton_target.borrow().as_ref().and_then(|w| w.upgrade())
+            if let Some(attached) = dc
+                .singleton_target
+                .borrow()
+                .as_ref()
+                .and_then(|w| w.upgrade())
             {
                 return Some(attached);
             }
@@ -643,7 +652,12 @@ impl Vm {
         // class (`M.class_variables` includes it), and a singleton method reading
         // `@@x` resolves it there. Map a metaclass scope to its base class so the
         // set and the read agree.
-        if let Some(attached) = cls.singleton_target.borrow().as_ref().and_then(|w| w.upgrade()) {
+        if let Some(attached) = cls
+            .singleton_target
+            .borrow()
+            .as_ref()
+            .and_then(|w| w.upgrade())
+        {
             return Some(attached);
         }
         Some(cls)
@@ -700,15 +714,16 @@ impl Vm {
                     && self.frames.len() > mb.target_frame_idx
                 {
                     self.continue_method_break()?;
-                    if self.frames.is_empty() { return Ok(()); }
+                    if self.frames.is_empty() {
+                        return Ok(());
+                    }
                     continue;
                 }
                 // ADR 0024 Phase A.8: break-after-Fiber-resume
                 // recovery (see dispatch_until_inner for full
                 // rationale).
-                if self.break_signaled && self.frames.last()
-                    .map(|f| f.pending_yield)
-                    .unwrap_or(false)
+                if self.break_signaled
+                    && self.frames.last().map(|f| f.pending_yield).unwrap_or(false)
                 {
                     self.break_signaled = false;
                     self.sync_control_signals();
@@ -716,7 +731,9 @@ impl Vm {
                     self.frames[target_idx].pending_yield = false;
                     let value = self.stack.pop().unwrap_or(Value::Nil);
                     self.begin_method_break(value, target_idx)?;
-                    if self.frames.is_empty() { return Ok(()); }
+                    if self.frames.is_empty() {
+                        return Ok(());
+                    }
                     continue;
                 }
                 // Non-local return unwind. `Op::ReturnMethod` sets
@@ -785,7 +802,9 @@ impl Vm {
                         // }; ensure; cleanup; end; end` left
                         // `cleanup` un-run.
                         self.begin_method_break(val.clone(), owner_idx)?;
-                        if self.frames.is_empty() { return Ok(()); }
+                        if self.frames.is_empty() {
+                            return Ok(());
+                        }
                     } else {
                         // ADR 0024 Phase A.6 round 2: stored Proc
                         // tried to `return` after its lexical owner
@@ -808,13 +827,15 @@ impl Vm {
                         let original_msg = trap.err.message();
                         match self.unwind_with_exception(exc) {
                             Ok(()) => continue,
-                            Err(_) => return Err(Trap {
-                                err: RubyError::Uncaught {
-                                    class_name: original_class,
-                                    message: original_msg,
-                                },
-                                backtrace: original_bt,
-                            }),
+                            Err(_) => {
+                                return Err(Trap {
+                                    err: RubyError::Uncaught {
+                                        class_name: original_class,
+                                        message: original_msg,
+                                    },
+                                    backtrace: original_bt,
+                                });
+                            }
                         }
                     }
                     continue;
@@ -833,7 +854,9 @@ impl Vm {
             // is still read every op; only the function call (which would
             // re-check the same flag and return None) is elided.
             #[cfg(unix)]
-            if self.interrupt_pending.load(std::sync::atomic::Ordering::Relaxed)
+            if self
+                .interrupt_pending
+                .load(std::sync::atomic::Ordering::Relaxed)
                 && let Some(action) = self.safe_point_interrupt_action()
             {
                 action.deliver(self)?;
@@ -841,7 +864,10 @@ impl Vm {
             }
             // Single frames.last_mut() fetch — see dispatch_until_inner.
             let (proto_idx, ip) = {
-                let f = self.frames.last_mut().expect("ICE: dispatch with empty frame stack");
+                let f = self
+                    .frames
+                    .last_mut()
+                    .expect("ICE: dispatch with empty frame stack");
                 let pair = (f.proto_idx, f.ip);
                 f.ip += 1;
                 pair
@@ -876,13 +902,15 @@ impl Vm {
                         let original_msg = trap.err.message();
                         match self.unwind_with_exception(exc) {
                             Ok(()) => continue, // handler set up, resume dispatch
-                            Err(_) => return Err(Trap {
-                                err: RubyError::Uncaught {
-                                    class_name: original_class,
-                                    message: original_msg,
-                                },
-                                backtrace: original_bt,
-                            }),
+                            Err(_) => {
+                                return Err(Trap {
+                                    err: RubyError::Uncaught {
+                                        class_name: original_class,
+                                        message: original_msg,
+                                    },
+                                    backtrace: original_bt,
+                                });
+                            }
                         }
                     }
                     return Err(trap);
@@ -891,8 +919,6 @@ impl Vm {
         }
         Ok(())
     }
-
-
 
     /// Run dispatch loop until the frame stack returns to `until_depth`.
     pub(crate) fn dispatch_until(&mut self, until_depth: usize) -> Result<(), Trap> {
@@ -918,7 +944,8 @@ impl Vm {
             "dispatch_until_depths nesting mismatch",
         );
         debug_assert_eq!(
-            popped, Some(until_depth),
+            popped,
+            Some(until_depth),
             "dispatch_until_depths top mismatch on pop",
         );
         r
@@ -975,7 +1002,9 @@ impl Vm {
                         Some(idx) if idx >= until_depth => {
                             let val = self.take_method_return().unwrap();
                             self.begin_method_break(val, idx)?;
-                            if self.frames.len() <= until_depth { return Ok(()); }
+                            if self.frames.len() <= until_depth {
+                                return Ok(());
+                            }
                             continue;
                         }
                         _ => return Ok(()),
@@ -1000,7 +1029,9 @@ impl Vm {
                     && self.frames.len() > mb.target_frame_idx
                 {
                     self.continue_method_break()?;
-                    if self.frames.len() <= until_depth { return Ok(()); }
+                    if self.frames.len() <= until_depth {
+                        return Ok(());
+                    }
                     continue;
                 }
                 // ADR 0024 Phase A.8: break-after-Fiber-resume
@@ -1016,9 +1047,8 @@ impl Vm {
                 // operand stack (Op::Return pushed it as the
                 // block's return), clear the marker, and fire
                 // the Phase A.4/A.5 unwind walk.
-                if self.break_signaled && self.frames.last()
-                    .map(|f| f.pending_yield)
-                    .unwrap_or(false)
+                if self.break_signaled
+                    && self.frames.last().map(|f| f.pending_yield).unwrap_or(false)
                 {
                     self.break_signaled = false;
                     self.sync_control_signals();
@@ -1026,7 +1056,9 @@ impl Vm {
                     self.frames[target_idx].pending_yield = false;
                     let value = self.stack.pop().unwrap_or(Value::Nil);
                     self.begin_method_break(value, target_idx)?;
-                    if self.frames.len() <= until_depth { return Ok(()); }
+                    if self.frames.len() <= until_depth {
+                        return Ok(());
+                    }
                     continue;
                 }
             }
@@ -1041,7 +1073,9 @@ impl Vm {
             // suspension. NOT part of the folded control_signals
             // mask — it must run on every iteration regardless.
             #[cfg(feature = "_fiber")]
-            if self.fiber_yield_pending.is_some() { return Ok(()); }
+            if self.fiber_yield_pending.is_some() {
+                return Ok(());
+            }
             // ADR 0025 Phase 2 + Phase 4b: SIGINT safe-point check.
             // The POSIX handler (signal-hook, registered in Phase 1)
             // sets `interrupt_pending`; the safe point reads it
@@ -1104,7 +1138,9 @@ impl Vm {
             // the per-op `safe_point_interrupt_action` call when no
             // interrupt is pending. SIGINT latency unchanged.
             #[cfg(unix)]
-            if self.interrupt_pending.load(std::sync::atomic::Ordering::Relaxed)
+            if self
+                .interrupt_pending
+                .load(std::sync::atomic::Ordering::Relaxed)
                 && let Some(action) = self.safe_point_interrupt_action()
             {
                 action.deliver(self)?;
@@ -1116,7 +1152,10 @@ impl Vm {
             // shape did a second bounds-check + deref chain just to
             // bump ip (visible per-op in the tight-loop profile).
             let (proto_idx, ip) = {
-                let f = self.frames.last_mut().expect("ICE: dispatch_until no frame");
+                let f = self
+                    .frames
+                    .last_mut()
+                    .expect("ICE: dispatch_until no frame");
                 let pair = (f.proto_idx, f.ip);
                 f.ip += 1;
                 pair
@@ -1189,13 +1228,15 @@ impl Vm {
                                 }
                                 continue;
                             }
-                            Err(_) => return Err(Trap {
-                                err: RubyError::Uncaught {
-                                    class_name: original_class,
-                                    message: original_msg,
-                                },
-                                backtrace: original_bt,
-                            }),
+                            Err(_) => {
+                                return Err(Trap {
+                                    err: RubyError::Uncaught {
+                                        class_name: original_class,
+                                        message: original_msg,
+                                    },
+                                    backtrace: original_bt,
+                                });
+                            }
                         }
                     }
                     return Err(trap);
@@ -1204,8 +1245,6 @@ impl Vm {
         }
         Ok(())
     }
-
-
 
     /// Raise FrozenError if `self_val` is a frozen object — CRuby's
     /// guard on every instance-variable write. Shared by the
@@ -1312,20 +1351,21 @@ impl Vm {
                     // `LoadBigInt`. Each load allocates a fresh
                     // heap `RationalRepr` so ObjId identity stays
                     // per-Value; only the parse work is amortised.
-                    let mut parse_or_cached = |id: crate::SymId| -> Result<num_bigint::BigInt, Trap> {
-                        if let Some(b) = self.bigint_lit_cache.get(&id) {
-                            return Ok((**b).clone());
-                        }
-                        let src = self.interner.resolve(id).clone();
-                        let parsed = num_bigint::BigInt::from_str(&src).map_err(|e| {
-                            self.trap(RubyError::SyntaxError {
-                                msg: format!("invalid rational component {:?}: {}", src, e),
-                            })
-                        })?;
-                        let rc = Rc::new(parsed);
-                        self.bigint_lit_cache.insert(id, rc.clone());
-                        Ok((*rc).clone())
-                    };
+                    let mut parse_or_cached =
+                        |id: crate::SymId| -> Result<num_bigint::BigInt, Trap> {
+                            if let Some(b) = self.bigint_lit_cache.get(&id) {
+                                return Ok((**b).clone());
+                            }
+                            let src = self.interner.resolve(id).clone();
+                            let parsed = num_bigint::BigInt::from_str(&src).map_err(|e| {
+                                self.trap(RubyError::SyntaxError {
+                                    msg: format!("invalid rational component {:?}: {}", src, e),
+                                })
+                            })?;
+                            let rc = Rc::new(parsed);
+                            self.bigint_lit_cache.insert(id, rc.clone());
+                            Ok((*rc).clone())
+                        };
                     let num = parse_or_cached(num_id)?;
                     let den = parse_or_cached(den_id)?;
                     let v = self.make_rational_bigint(num, den)?;
@@ -1366,12 +1406,14 @@ impl Vm {
                     // the regexp's `#source`.
                     let translated = preprocess_regex_pattern(&src);
                     let prefixed = apply_ruby_flags(&translated, flags);
-                    let mut compiled = crate::regex_engine::compile_with_flags(&prefixed, flags, &translated).map_err(|e| {
-                        self.trap(RubyError::HostException {
-                            class_name: "RegexpError".into(),
-                            message: format!("invalid regex /{}/: {}", src, e),
-                        })
-                    })?;
+                    let mut compiled =
+                        crate::regex_engine::compile_with_flags(&prefixed, flags, &translated)
+                            .map_err(|e| {
+                                self.trap(RubyError::HostException {
+                                    class_name: "RegexpError".into(),
+                                    message: format!("invalid regex /{}/: {}", src, e),
+                                })
+                            })?;
                     compiled.set_g_anchored(leading_g_anchor(&src));
                     let rc = Rc::new(compiled);
                     self.regex_cache.insert(key, rc.clone());
@@ -1414,39 +1456,49 @@ impl Vm {
                 // materialise an owned String (interner takes one
                 // anyway). Error formatting is also rare and reads
                 // through the same borrow.
-                let regex_rc = s.with_str_lossy::<Result<Rc<crate::regex_engine::CompiledRegex>, Trap>>(|pat| {
-                    // ResourceCap: respect `Config::max_symbols` the
-                    // same way `String#to_sym` does. Dynamic patterns
-                    // generated in a hot loop (e.g.
-                    // `1000.times { |i| /#{i}/ }`) would otherwise
-                    // grow the interner — and the SymId-keyed
-                    // `regex_cache` — without bound. Skip the check
-                    // when the pattern is already interned; a cache
-                    // hit costs no new symbol.
-                    if let Some(max) = self.max_symbols
-                        && !self.interner.contains(pat) && self.interner.len() >= max {
-                            return Err(self.trap(RubyError::ResourceExhausted {
-                                msg: format!("interner exhausted: {} symbols", max),
-                            }));
-                        }
-                    let id = self.interner.intern(pat);
-                    let key = (id, flags);
-                    if let Some(r) = self.regex_cache.get(&key) {
-                        return Ok(r.clone());
-                    }
-                    let translated = preprocess_regex_pattern(pat);
-                    let prefixed = apply_ruby_flags(&translated, flags);
-                    let mut compiled = crate::regex_engine::compile_with_flags(&prefixed, flags, &translated).map_err(|e| {
-                        self.trap(RubyError::HostException {
-                            class_name: "RegexpError".into(),
-                            message: format!("invalid regex /{}/: {}", pat, e),
-                        })
-                    })?;
-                    compiled.set_g_anchored(leading_g_anchor(pat));
-                    let rc = Rc::new(compiled);
-                    self.regex_cache.insert(key, rc.clone());
-                    Ok(rc)
-                })?;
+                let regex_rc = s
+                    .with_str_lossy::<Result<Rc<crate::regex_engine::CompiledRegex>, Trap>>(
+                        |pat| {
+                            // ResourceCap: respect `Config::max_symbols` the
+                            // same way `String#to_sym` does. Dynamic patterns
+                            // generated in a hot loop (e.g.
+                            // `1000.times { |i| /#{i}/ }`) would otherwise
+                            // grow the interner — and the SymId-keyed
+                            // `regex_cache` — without bound. Skip the check
+                            // when the pattern is already interned; a cache
+                            // hit costs no new symbol.
+                            if let Some(max) = self.max_symbols
+                                && !self.interner.contains(pat)
+                                && self.interner.len() >= max
+                            {
+                                return Err(self.trap(RubyError::ResourceExhausted {
+                                    msg: format!("interner exhausted: {} symbols", max),
+                                }));
+                            }
+                            let id = self.interner.intern(pat);
+                            let key = (id, flags);
+                            if let Some(r) = self.regex_cache.get(&key) {
+                                return Ok(r.clone());
+                            }
+                            let translated = preprocess_regex_pattern(pat);
+                            let prefixed = apply_ruby_flags(&translated, flags);
+                            let mut compiled = crate::regex_engine::compile_with_flags(
+                                &prefixed,
+                                flags,
+                                &translated,
+                            )
+                            .map_err(|e| {
+                                self.trap(RubyError::HostException {
+                                    class_name: "RegexpError".into(),
+                                    message: format!("invalid regex /{}/: {}", pat, e),
+                                })
+                            })?;
+                            compiled.set_g_anchored(leading_g_anchor(pat));
+                            let rc = Rc::new(compiled);
+                            self.regex_cache.insert(key, rc.clone());
+                            Ok(rc)
+                        },
+                    )?;
                 self.stack.push(Value::Regex(regex_rc));
             }
             Op::LoadSymbol(id) => {
@@ -1456,7 +1508,12 @@ impl Vm {
             Op::LoadTrue => self.stack.push(Value::Bool(true)),
             Op::LoadFalse => self.stack.push(Value::Bool(false)),
             Op::LoadSelf => {
-                let v = self.frames.last().expect("ICE: LoadSelf no frame").self_val.clone();
+                let v = self
+                    .frames
+                    .last()
+                    .expect("ICE: LoadSelf no frame")
+                    .self_val
+                    .clone();
                 self.stack.push(v);
             }
             Op::LoadLocal(s) => {
@@ -1590,7 +1647,11 @@ impl Vm {
                     self.stack.push(Value::Int(1));
                     let plus_id = self.interner.intern("+");
                     self.do_call(plus_id, 1, false, u32::MAX)?;
-                    let new_val = self.stack.last().expect("ICE: IncLocal slow path no result").clone();
+                    let new_val = self
+                        .stack
+                        .last()
+                        .expect("ICE: IncLocal slow path no result")
+                        .clone();
                     self.set_local_top(slot, new_val);
                 }
                 // Per-invocation block-locals propagation — see
@@ -1609,7 +1670,9 @@ impl Vm {
                 let v = self.stack.last().expect("ICE: Dup stack underflow").clone();
                 self.stack.push(v);
             }
-            Op::Pop => { self.stack.pop(); }
+            Op::Pop => {
+                self.stack.pop();
+            }
             Op::Swap => {
                 let n = self.stack.len();
                 self.stack.swap(n - 1, n - 2);
@@ -1627,14 +1690,32 @@ impl Vm {
                 // by `module Tilt; @default = ...` patterns).
                 // Anything else returns nil — matches CRuby's
                 // "uninitialized ivar reads as nil" rule.
-                let self_val = self.frames.last().expect("ICE: LoadIvar no frame").self_val.clone();
+                let self_val = self
+                    .frames
+                    .last()
+                    .expect("ICE: LoadIvar no frame")
+                    .self_val
+                    .clone();
                 let v = match &self_val {
-                    Value::Object(id) => self.heap.instance(*id).ivars.get(&name_id).cloned().unwrap_or(Value::Nil),
-                    Value::Class(c) => c.ivars.borrow().get(&name_id).cloned().unwrap_or(Value::Nil),
+                    Value::Object(id) => self
+                        .heap
+                        .instance(*id)
+                        .ivars
+                        .get(&name_id)
+                        .cloned()
+                        .unwrap_or(Value::Nil),
+                    Value::Class(c) => c
+                        .ivars
+                        .borrow()
+                        .get(&name_id)
+                        .cloned()
+                        .unwrap_or(Value::Nil),
                     // Hash-subclass instances carry their own ivar table.
                     Value::Hash(id) => self.heap.hash_ivar_get(*id, name_id).unwrap_or(Value::Nil),
                     // Array-subclass instances likewise.
-                    Value::Array(id) => self.heap.array_ivar_get(*id, name_id).unwrap_or(Value::Nil),
+                    Value::Array(id) => {
+                        self.heap.array_ivar_get(*id, name_id).unwrap_or(Value::Nil)
+                    }
                     // String-subclass instances keep ivars in the
                     // `str_ivars` side table (keyed by Rc identity) — the
                     // same table `instance_variable_get/set` use.
@@ -1651,15 +1732,28 @@ impl Vm {
             }
             Op::StoreIvar(name_id) => {
                 let v = self.stack.pop().expect("ICE: StoreIvar stack underflow");
-                let self_val = self.frames.last().expect("ICE: StoreIvar no frame").self_val.clone();
+                let self_val = self
+                    .frames
+                    .last()
+                    .expect("ICE: StoreIvar no frame")
+                    .self_val
+                    .clone();
                 self.frozen_ivar_guard(&self_val)?;
                 match &self_val {
-                    Value::Object(id) => { self.heap.instance_mut(*id).ivars.insert(name_id, v); }
-                    Value::Class(c) => { c.ivars.borrow_mut().insert(name_id, v); }
+                    Value::Object(id) => {
+                        self.heap.instance_mut(*id).ivars.insert(name_id, v);
+                    }
+                    Value::Class(c) => {
+                        c.ivars.borrow_mut().insert(name_id, v);
+                    }
                     // Hash-subclass instances carry their own ivar table.
-                    Value::Hash(id) => { self.heap.hash_ivar_set(*id, name_id, v); }
+                    Value::Hash(id) => {
+                        self.heap.hash_ivar_set(*id, name_id, v);
+                    }
                     // Array-subclass instances likewise.
-                    Value::Array(id) => { self.heap.array_ivar_set(*id, name_id, v); }
+                    Value::Array(id) => {
+                        self.heap.array_ivar_set(*id, name_id, v);
+                    }
                     // String-subclass instances → `str_ivars` side table
                     // (the frozen guard above already handled a frozen
                     // receiver). Keyed by Rc identity; the strong Rc keeps
@@ -1692,10 +1786,19 @@ impl Vm {
                 let cls_opt = self.surrounding_class();
                 let v = match cls_opt {
                     Some(cls) => match self.cvar_owner_class(&cls, name_id) {
-                        Some(owner) => owner.class_vars.borrow().get(&name_id).cloned().unwrap_or(Value::Nil),
+                        Some(owner) => owner
+                            .class_vars
+                            .borrow()
+                            .get(&name_id)
+                            .cloned()
+                            .unwrap_or(Value::Nil),
                         None => Value::Nil,
                     },
-                    None => self.toplevel_cvars.get(&name_id).cloned().unwrap_or(Value::Nil),
+                    None => self
+                        .toplevel_cvars
+                        .get(&name_id)
+                        .cloned()
+                        .unwrap_or(Value::Nil),
                 };
                 self.stack.push(v);
             }
@@ -1710,7 +1813,9 @@ impl Vm {
                         let owner = self.cvar_owner_class(&cls, name_id).unwrap_or(cls);
                         owner.class_vars.borrow_mut().insert(name_id, v);
                     }
-                    None => { self.toplevel_cvars.insert(name_id, v); }
+                    None => {
+                        self.toplevel_cvars.insert(name_id, v);
+                    }
                 }
             }
             Op::IncIvarNoPush(name_id) => {
@@ -1718,7 +1823,12 @@ impl Vm {
                 // Op::IncIvar but discards the result. Class-level
                 // ivars routed via `Value::Class` so the same
                 // pattern in a class method bumps the right table.
-                let self_val = self.frames.last().expect("ICE: IncIvarNoPush no frame").self_val.clone();
+                let self_val = self
+                    .frames
+                    .last()
+                    .expect("ICE: IncIvarNoPush no frame")
+                    .self_val
+                    .clone();
                 self.frozen_ivar_guard(&self_val)?;
                 let cur = match &self_val {
                     Value::Object(id) => self.heap.instance(*id).ivars.get(&name_id).cloned(),
@@ -1739,8 +1849,12 @@ impl Vm {
                 };
                 if let Some(v) = new_v {
                     match &self_val {
-                        Value::Object(id) => { self.heap.instance_mut(*id).ivars.insert(name_id, v); }
-                        Value::Class(c) => { c.ivars.borrow_mut().insert(name_id, v); }
+                        Value::Object(id) => {
+                            self.heap.instance_mut(*id).ivars.insert(name_id, v);
+                        }
+                        Value::Class(c) => {
+                            c.ivars.borrow_mut().insert(name_id, v);
+                        }
                         _ => { /* drop */ }
                     }
                 }
@@ -1748,7 +1862,12 @@ impl Vm {
             Op::IncIvar(name_id) => {
                 // `@x = @x + 1` fast path, expression form. Same as
                 // IncIvarNoPush but leaves the new value on stack.
-                let self_val = self.frames.last().expect("ICE: IncIvar no frame").self_val.clone();
+                let self_val = self
+                    .frames
+                    .last()
+                    .expect("ICE: IncIvar no frame")
+                    .self_val
+                    .clone();
                 self.frozen_ivar_guard(&self_val)?;
                 let cur = match &self_val {
                     Value::Object(id) => self.heap.instance(*id).ivars.get(&name_id).cloned(),
@@ -1759,8 +1878,15 @@ impl Vm {
                     Some(Value::Int(n)) => {
                         let nv = Value::Int(n.wrapping_add(1));
                         match &self_val {
-                            Value::Object(id) => { self.heap.instance_mut(*id).ivars.insert(name_id, nv.clone()); }
-                            Value::Class(c) => { c.ivars.borrow_mut().insert(name_id, nv.clone()); }
+                            Value::Object(id) => {
+                                self.heap
+                                    .instance_mut(*id)
+                                    .ivars
+                                    .insert(name_id, nv.clone());
+                            }
+                            Value::Class(c) => {
+                                c.ivars.borrow_mut().insert(name_id, nv.clone());
+                            }
                             _ => {}
                         }
                         nv
@@ -1772,10 +1898,18 @@ impl Vm {
                         self.stack.push(Value::Int(1));
                         let plus_id = self.interner.intern("+");
                         self.do_call(plus_id, 1, false, u32::MAX)?;
-                        let v = self.stack.last().expect("ICE: IncIvar slow path no result").clone();
+                        let v = self
+                            .stack
+                            .last()
+                            .expect("ICE: IncIvar slow path no result")
+                            .clone();
                         match &self_val {
-                            Value::Object(id) => { self.heap.instance_mut(*id).ivars.insert(name_id, v.clone()); }
-                            Value::Class(c) => { c.ivars.borrow_mut().insert(name_id, v.clone()); }
+                            Value::Object(id) => {
+                                self.heap.instance_mut(*id).ivars.insert(name_id, v.clone());
+                            }
+                            Value::Class(c) => {
+                                c.ivars.borrow_mut().insert(name_id, v.clone());
+                            }
                             _ => {}
                         }
                         // Slow path already left value on stack via do_call result.
@@ -1791,8 +1925,8 @@ impl Vm {
                 let v = self.stack.pop().expect("ICE: StoreConst stack underflow");
                 // Whether this is the FIRST definition of this key — gates the
                 // Module#const_added hook below (CRuby fires it only once).
-                let store_was_fresh = !self.constants.contains_key(&name_id)
-                    && !self.classes.contains_key(&name_id);
+                let store_was_fresh =
+                    !self.constants.contains_key(&name_id) && !self.classes.contains_key(&name_id);
                 // CRuby names an anonymous class/module on its first
                 // const-assignment (`C = Class.new` ⇒ `C.name ==
                 // "C"`). `name_id` is the constant's key — bare at
@@ -1823,12 +1957,10 @@ impl Vm {
                     // Skip when name_id is already qualified (compiler-
                     // emitted `Foo::Bar = …`) or at top level (no scope).
                     let qualified = match self.class_stack.last() {
-                        Some(scope) if !bare.contains("::") => {
-                            match scope.effective_name() {
-                                Some(sn) if !sn.is_empty() => format!("{}::{}", sn, bare),
-                                _ => bare.clone(),
-                            }
-                        }
+                        Some(scope) if !bare.contains("::") => match scope.effective_name() {
+                            Some(sn) if !sn.is_empty() => format!("{}::{}", sn, bare),
+                            _ => bare.clone(),
+                        },
                         _ => bare.clone(),
                     };
                     self.name_anon_class(cls, &qualified);
@@ -2025,7 +2157,9 @@ impl Vm {
                                     // (the trigger is), so on wasi the `_`
                                     // arm below covers the remaining cases.
                                     #[cfg(not(target_os = "wasi"))]
-                                    crate::vm::dispatch::ConstPathOutcome::Trap(t) => return Err(t),
+                                    crate::vm::dispatch::ConstPathOutcome::Trap(t) => {
+                                        return Err(t);
+                                    }
                                     // Miss / WrongName / NotClass: fall
                                     // through to the NameError below so
                                     // the message keeps the original
@@ -2047,7 +2181,9 @@ impl Vm {
                     {
                         let name_str = self.interner.resolve(name_id).to_string();
                         let (recv_cls, missing) = match name_str.rsplit_once("::") {
-                            Some((head, last)) if !head.is_empty() && self.interner.contains(head) => {
+                            Some((head, last))
+                                if !head.is_empty() && self.interner.contains(head) =>
+                            {
                                 let head_id = self.interner.intern(head);
                                 (self.classes.get(&head_id).cloned(), last.to_string())
                             }
@@ -2082,7 +2218,8 @@ impl Vm {
                 // constants / ENV hits). Autoload + qualified-path
                 // successes return early above and are one-shot — their
                 // NEXT read lands in the fast tables and caches here.
-                self.const_cache_flat.insert(name_id, (v.clone(), self.const_gen));
+                self.const_cache_flat
+                    .insert(name_id, (v.clone(), self.const_gen));
                 self.stack.push(v);
             }
             Op::LoadConstOrNil(name_id) => {
@@ -2110,7 +2247,11 @@ impl Vm {
                 // non-empty class/module scope so `Bar` inside
                 // `module Foo` resolves to `Foo::Bar` before falling
                 // through to the top-level `Bar`.
-                let proto_idx = self.frames.last().expect("ICE: LoadConstChain no frame").proto_idx;
+                let proto_idx = self
+                    .frames
+                    .last()
+                    .expect("ICE: LoadConstChain no frame")
+                    .proto_idx;
                 // Inline constant cache — the chain (and thus the
                 // resolution) is static per (proto, chain slot), so the
                 // pair keys an entry tagged with `const_gen`. Skips the
@@ -2214,13 +2355,23 @@ impl Vm {
                     // the innermost cref was tried, so the outer-scope head
                     // was missed.
                     for &lex_qid in &chain[..lex_split] {
-                        if found.is_some() { break; }
-                        if lex_qid == bare_sym { continue; }
+                        if found.is_some() {
+                            break;
+                        }
+                        if lex_qid == bare_sym {
+                            continue;
+                        }
                         let lex_full = self.interner.resolve(lex_qid).to_string();
-                        let Some(scope_name) = lex_full.strip_suffix(&suffix) else { continue; };
-                        if scope_name.is_empty() || !self.interner.contains(scope_name) { continue; }
+                        let Some(scope_name) = lex_full.strip_suffix(&suffix) else {
+                            continue;
+                        };
+                        if scope_name.is_empty() || !self.interner.contains(scope_name) {
+                            continue;
+                        }
                         let scope_id = self.interner.intern(scope_name);
-                        let Some(cref) = self.classes.get(&scope_id).cloned() else { continue; };
+                        let Some(cref) = self.classes.get(&scope_id).cloned() else {
+                            continue;
+                        };
                         if let Some((head, rest)) = bare_str.split_once("::") {
                             // Multi-segment bare (`Str::Double`, `Entity::NAME`):
                             // resolve the head through this scope's ancestry,
@@ -2260,12 +2411,18 @@ impl Vm {
                                 // flat LoadConst path. Bare lexical reads take
                                 // the `else` branch below and are unaffected.
                                 if !self.private_consts.is_empty() && !rest.contains("::") {
-                                    let pk = format!("{}::{}", head_cls.effective_name().unwrap_or_default(), rest);
+                                    let pk = format!(
+                                        "{}::{}",
+                                        head_cls.effective_name().unwrap_or_default(),
+                                        rest
+                                    );
                                     let pkid = self.interner.intern(&pk);
                                     if self.private_consts.contains(&pkid) {
-                                        return Err(self.trap(crate::error::RubyError::NameError {
-                                            msg: format!("private constant {} referenced", pk),
-                                        }));
+                                        return Err(self.trap(
+                                            crate::error::RubyError::NameError {
+                                                msg: format!("private constant {} referenced", pk),
+                                            },
+                                        ));
                                     }
                                 }
                                 found = Some(v);
@@ -2285,15 +2442,23 @@ impl Vm {
                                 for anc in super::flatten_ancestors(&cref) {
                                     // effective_name: autovivified zeitwerk
                                     // namespaces have an empty structural name.
-                                    let Some(anc_name) = anc.effective_name() else { continue };
-                                    if anc_name.is_empty() { continue; }
+                                    let Some(anc_name) = anc.effective_name() else {
+                                        continue;
+                                    };
+                                    if anc_name.is_empty() {
+                                        continue;
+                                    }
                                     let key = format!("{}::{}", anc_name, bare_str);
-                                    if !self.interner.contains(&key) { continue; }
+                                    if !self.interner.contains(&key) {
+                                        continue;
+                                    }
                                     let kid = self.interner.intern(&key);
                                     if let Some(p) = self.autoloads_scoped.remove(&kid) {
                                         self.consumed_autoloads.insert(kid);
                                         self.invoke_require_for_autoload(Value::new_str(p))?;
-                                        if self.classes.contains_key(&kid) || self.constants.contains_key(&kid) {
+                                        if self.classes.contains_key(&kid)
+                                            || self.constants.contains_key(&kid)
+                                        {
                                             self.consumed_autoloads.remove(&kid);
                                         }
                                         fired = true;
@@ -2481,11 +2646,16 @@ impl Vm {
                 // `const_gen` mid-op (its require defines constants) —
                 // storing with the CURRENT gen is correct: resolution
                 // is stable from this point until the next mutation.
-                self.const_cache_chain.insert(cache_key, (v.clone(), self.const_gen));
+                self.const_cache_chain
+                    .insert(cache_key, (v.clone(), self.const_gen));
                 self.stack.push(v);
             }
             Op::LoadConstChainOrNil(chain_idx) => {
-                let proto_idx = self.frames.last().expect("ICE: LoadConstChainOrNil no frame").proto_idx;
+                let proto_idx = self
+                    .frames
+                    .last()
+                    .expect("ICE: LoadConstChainOrNil no frame")
+                    .proto_idx;
                 let chain = self.protos[proto_idx].const_chains[chain_idx as usize].clone();
                 let mut found: Option<Value> = None;
                 for sym in &chain {
@@ -2610,9 +2780,15 @@ impl Vm {
                                     .iter()
                                     .rev()
                                     .find_map(|s| *s)
-                                    .map(|(a, b)| Value::new_str_bytes_binary(bc.input[a..b].to_vec()))
+                                    .map(|(a, b)| {
+                                        Value::new_str_bytes_binary(bc.input[a..b].to_vec())
+                                    })
                                     .unwrap_or(Value::Nil),
-                                None => m.caps.iter().rev().find_map(|c| c.as_ref())
+                                None => m
+                                    .caps
+                                    .iter()
+                                    .rev()
+                                    .find_map(|c| c.as_ref())
                                     .map(|s| Value::new_str(s.clone()))
                                     .unwrap_or(Value::Nil),
                             },
@@ -2664,7 +2840,9 @@ impl Vm {
                         // Bottommost frame = script entry; its
                         // proto's filename is the script's top-level
                         // filename (or "<inline>" for eval calls).
-                        let name = self.frames.first()
+                        let name = self
+                            .frames
+                            .first()
                             .map(|f| self.protos[f.proto_idx].filename.to_string())
                             .unwrap_or_else(|| "-".to_string());
                         Value::new_str(name)
@@ -2716,13 +2894,19 @@ impl Vm {
                 }
             }
             Op::JumpIfArgGiven(slot, off) => {
-                let f = self.frames.last_mut().expect("ICE: JumpIfArgGiven no frame");
+                let f = self
+                    .frames
+                    .last_mut()
+                    .expect("ICE: JumpIfArgGiven no frame");
                 if slot < f.n_given_positional {
                     f.ip = (f.ip as i32 + off) as usize;
                 }
             }
             Op::JumpIfKwArgGiven(kw_idx, off) => {
-                let f = self.frames.last_mut().expect("ICE: JumpIfKwArgGiven no frame");
+                let f = self
+                    .frames
+                    .last_mut()
+                    .expect("ICE: JumpIfKwArgGiven no frame");
                 if kw_idx < 64 && (f.kw_given_mask & (1u64 << kw_idx)) != 0 {
                     f.ip = (f.ip as i32 + off) as usize;
                 }
@@ -2802,8 +2986,7 @@ impl Vm {
             // off into a dedicated channel before invoking the
             // method so primitive arms can consume `:foo` keys
             // instead of inspecting the positional Hash heuristically.
-            Op::CallKw(name_id, argc, cache_id)
-            | Op::CallKwNoRecv(name_id, argc, cache_id) => {
+            Op::CallKw(name_id, argc, cache_id) | Op::CallKwNoRecv(name_id, argc, cache_id) => {
                 let no_recv = matches!(op, Op::CallKwNoRecv(_, _, _));
                 let mut argc = argc as usize;
                 // An EMPTY (or nil) trailing kwsplat contributes nothing —
@@ -2816,11 +2999,12 @@ impl Vm {
                 // (`create_message(value, **options)` with empty options).
                 // Mirrors the CallKwBlock arm; a non-empty kwargs Hash
                 // keeps the do_call_kw path below.
-                let drop_trailing = argc > 0 && match self.stack.last() {
-                    Some(crate::value::Value::Hash(hid)) => self.heap.hash(*hid).is_empty(),
-                    Some(crate::value::Value::Nil) => true,
-                    _ => false,
-                };
+                let drop_trailing = argc > 0
+                    && match self.stack.last() {
+                        Some(crate::value::Value::Hash(hid)) => self.heap.hash(*hid).is_empty(),
+                        Some(crate::value::Value::Nil) => true,
+                        _ => false,
+                    };
                 if drop_trailing {
                     self.stack.pop();
                     argc -= 1;
@@ -2880,20 +3064,26 @@ impl Vm {
                 let arr_val = self.stack.pop().expect("ICE: ApplyCall without arg array");
                 let arr_id = match arr_val {
                     Value::Array(id) => id,
-                    other => return Err(self.trap(RubyError::TypeError {
-                        msg: format!("no implicit conversion of {} into Array (splat arg)", other.type_name()),
-                    })),
+                    other => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "no implicit conversion of {} into Array (splat arg)",
+                                other.type_name()
+                            ),
+                        }));
+                    }
                 };
                 let mut g = crate::vm::PinGuard::new(self);
                 g.pin(Value::Array(arr_id));
                 let elems: Vec<Value> = g.vm.heap.array(arr_id).clone();
                 let argc = elems.len();
-                for v in elems { g.vm.stack.push(v); }
+                for v in elems {
+                    g.vm.stack.push(v);
+                }
                 drop(g);
                 self.do_call(name_id, argc, no_recv, cache_id)?;
             }
-            Op::ApplyCallKw(name_id, cache_id)
-            | Op::ApplyCallKwNoRecv(name_id, cache_id) => {
+            Op::ApplyCallKw(name_id, cache_id) | Op::ApplyCallKwNoRecv(name_id, cache_id) => {
                 // `foo(*args, **kw)` — the kwsplat Hash is carried
                 // SEPARATELY on top of the positional array. Stack
                 // (bottom→top): `[recv?, array, kwsplat]`. Expand the
@@ -2904,12 +3094,20 @@ impl Vm {
                 // false → the binder peels it, not the array's tail).
                 let no_recv = matches!(op, Op::ApplyCallKwNoRecv(_, _));
                 let kw_val = self.stack.pop().expect("ICE: ApplyCallKw without kwsplat");
-                let arr_val = self.stack.pop().expect("ICE: ApplyCallKw without arg array");
+                let arr_val = self
+                    .stack
+                    .pop()
+                    .expect("ICE: ApplyCallKw without arg array");
                 let arr_id = match arr_val {
                     Value::Array(id) => id,
-                    other => return Err(self.trap(RubyError::TypeError {
-                        msg: format!("no implicit conversion of {} into Array (splat arg)", other.type_name()),
-                    })),
+                    other => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "no implicit conversion of {} into Array (splat arg)",
+                                other.type_name()
+                            ),
+                        }));
+                    }
                 };
                 let kw_empty = match &kw_val {
                     Value::Hash(hid) => self.heap.hash(*hid).is_empty(),
@@ -2921,7 +3119,9 @@ impl Vm {
                 g.pin(kw_val.clone());
                 let elems: Vec<Value> = g.vm.heap.array(arr_id).clone();
                 let mut argc = elems.len();
-                for v in elems { g.vm.stack.push(v); }
+                for v in elems {
+                    g.vm.stack.push(v);
+                }
                 if !kw_empty {
                     g.vm.stack.push(kw_val);
                     argc += 1;
@@ -2946,12 +3146,20 @@ impl Vm {
                 // must reach the original implementation without
                 // re-entering a redefined `require`. Pin the Array so
                 // heap-shaped args survive a load-triggered GC.
-                let arr_val = self.stack.pop().expect("ICE: CallBuiltinDirect without arg array");
+                let arr_val = self
+                    .stack
+                    .pop()
+                    .expect("ICE: CallBuiltinDirect without arg array");
                 let arr_id = match arr_val {
                     Value::Array(id) => id,
-                    other => return Err(self.trap(RubyError::TypeError {
-                        msg: format!("no implicit conversion of {} into Array (splat arg)", other.type_name()),
-                    })),
+                    other => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "no implicit conversion of {} into Array (splat arg)",
+                                other.type_name()
+                            ),
+                        }));
+                    }
                 };
                 let name = self.interner.resolve(name_id).to_string();
                 let mut g = crate::vm::PinGuard::new(self);
@@ -2962,11 +3170,13 @@ impl Vm {
                 match res {
                     Some(Ok(v)) => self.stack.push(v),
                     Some(Err(t)) => return Err(t),
-                    None => return Err(self.trap(RubyError::NoMethodError {
-                        kind: crate::error::NoMethodErrorKind::Missing,
-                        method: name,
-                        recv_type: std::borrow::Cow::Borrowed("Object"),
-                    })),
+                    None => {
+                        return Err(self.trap(RubyError::NoMethodError {
+                            kind: crate::error::NoMethodErrorKind::Missing,
+                            method: name,
+                            recv_type: std::borrow::Cow::Borrowed("Object"),
+                        }));
+                    }
                 }
             }
             Op::CallBlock(name_id, argc, cache_id) => {
@@ -3030,18 +3240,28 @@ impl Vm {
                 // Array (and its heap-shaped elements) has no stack
                 // root between pop and re-push. Pin via PinGuard.
                 let no_recv = matches!(op, Op::ApplyCallNoRecvBlock(_, _));
-                let arr_val = self.stack.pop().expect("ICE: ApplyCallBlock without arg array");
+                let arr_val = self
+                    .stack
+                    .pop()
+                    .expect("ICE: ApplyCallBlock without arg array");
                 let arr_id = match arr_val {
                     Value::Array(id) => id,
-                    other => return Err(self.trap(RubyError::TypeError {
-                        msg: format!("no implicit conversion of {} into Array (splat arg)", other.type_name()),
-                    })),
+                    other => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "no implicit conversion of {} into Array (splat arg)",
+                                other.type_name()
+                            ),
+                        }));
+                    }
                 };
                 let mut g = crate::vm::PinGuard::new(self);
                 g.pin(Value::Array(arr_id));
                 let elems: Vec<Value> = g.vm.heap.array(arr_id).clone();
                 let argc = elems.len();
-                for v in elems { g.vm.stack.push(v); }
+                for v in elems {
+                    g.vm.stack.push(v);
+                }
                 drop(g);
                 self.do_call_block(name_id, argc, no_recv, cache_id)?;
             }
@@ -3054,13 +3274,24 @@ impl Vm {
                 // or ride a non-empty one as the trailing kwargs arg, then
                 // dispatch through the block path so the block installs.
                 let no_recv = matches!(op, Op::ApplyCallKwNoRecvBlock(_, _));
-                let kw_val = self.stack.pop().expect("ICE: ApplyCallKwBlock without kwsplat");
-                let arr_val = self.stack.pop().expect("ICE: ApplyCallKwBlock without arg array");
+                let kw_val = self
+                    .stack
+                    .pop()
+                    .expect("ICE: ApplyCallKwBlock without kwsplat");
+                let arr_val = self
+                    .stack
+                    .pop()
+                    .expect("ICE: ApplyCallKwBlock without arg array");
                 let arr_id = match arr_val {
                     Value::Array(id) => id,
-                    other => return Err(self.trap(RubyError::TypeError {
-                        msg: format!("no implicit conversion of {} into Array (splat arg)", other.type_name()),
-                    })),
+                    other => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "no implicit conversion of {} into Array (splat arg)",
+                                other.type_name()
+                            ),
+                        }));
+                    }
                 };
                 let kw_empty = match &kw_val {
                     Value::Hash(hid) => self.heap.hash(*hid).is_empty(),
@@ -3072,7 +3303,9 @@ impl Vm {
                 g.pin(kw_val.clone());
                 let elems: Vec<Value> = g.vm.heap.array(arr_id).clone();
                 let mut argc = elems.len();
-                for v in elems { g.vm.stack.push(v); }
+                for v in elems {
+                    g.vm.stack.push(v);
+                }
                 if !kw_empty {
                     g.vm.stack.push(kw_val);
                     argc += 1;
@@ -3093,9 +3326,14 @@ impl Vm {
                 let args_val = self.stack.pop().expect("ICE: ApplySuper without args slot");
                 let args: Vec<Value> = match args_val {
                     Value::Array(aid) => self.heap.array(aid).clone(),
-                    other => return Err(self.trap(RubyError::TypeError {
-                        msg: format!("ApplySuper expected Array args, got {}", other.type_name()),
-                    })),
+                    other => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "ApplySuper expected Array args, got {}",
+                                other.type_name()
+                            ),
+                        }));
+                    }
                 };
                 self.super_call_with_lifecycle_noop(name_id, args)?;
             }
@@ -3108,14 +3346,25 @@ impl Vm {
                 // would for `do ... end`. Used by
                 // `def foo(*a, &b); super(*a, &b); end` forwarders
                 // — sinatra-contrib/MultiRoute's per-verb methods.
-                let args_val = self.stack.pop().expect("ICE: ApplySuperBlock without args slot");
+                let args_val = self
+                    .stack
+                    .pop()
+                    .expect("ICE: ApplySuperBlock without args slot");
                 let args: Vec<Value> = match args_val {
                     Value::Array(aid) => self.heap.array(aid).clone(),
-                    other => return Err(self.trap(RubyError::TypeError {
-                        msg: format!("ApplySuperBlock expected Array args, got {}", other.type_name()),
-                    })),
+                    other => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "ApplySuperBlock expected Array args, got {}",
+                                other.type_name()
+                            ),
+                        }));
+                    }
                 };
-                let block_val = self.stack.pop().expect("ICE: ApplySuperBlock without block slot");
+                let block_val = self
+                    .stack
+                    .pop()
+                    .expect("ICE: ApplySuperBlock without block slot");
                 // `&nil` is the legitimate "no block" shape; map it
                 // to a None block slot. A real block forwards as-is; a
                 // `&method(:x)` / `&curried_proc` (BoundMethod /
@@ -3129,12 +3378,14 @@ impl Vm {
                     Value::BoundMethod(_) | Value::CurriedProc(_) => {
                         Some(self.coerce_callable_to_block(block_val)?)
                     }
-                    other => return Err(self.trap(RubyError::TypeError {
-                        msg: format!(
-                            "wrong argument type {} (expected Proc)",
-                            other.type_name()
-                        ),
-                    })),
+                    other => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "wrong argument type {} (expected Proc)",
+                                other.type_name()
+                            ),
+                        }));
+                    }
                 };
                 let name_id = self.super_runtime_name(name_id);
                 match self.super_lookup(name_id) {
@@ -3216,14 +3467,24 @@ impl Vm {
                                         for a in args {
                                             self.stack.push(a);
                                         }
-                                        self.do_call_block(target_id, argc, /*no_recv=*/ false, u32::MAX)?;
+                                        self.do_call_block(
+                                            target_id,
+                                            argc,
+                                            /*no_recv=*/ false,
+                                            u32::MAX,
+                                        )?;
                                     }
                                     None => {
                                         self.stack.push(obj);
                                         for a in args {
                                             self.stack.push(a);
                                         }
-                                        self.do_call(target_id, argc, /*no_recv=*/ false, u32::MAX)?;
+                                        self.do_call(
+                                            target_id,
+                                            argc,
+                                            /*no_recv=*/ false,
+                                            u32::MAX,
+                                        )?;
                                     }
                                 }
                             }
@@ -3249,7 +3510,9 @@ impl Vm {
                             // there — collection_call has no block
                             // plumbing; documented divergence, no
                             // known consumer).
-                            (_, Some(Value::Hash(id))) if self.heap.hash_class_tag(id).is_some() => {
+                            (_, Some(Value::Hash(id)))
+                                if self.heap.hash_class_tag(id).is_some() =>
+                            {
                                 if &*nm == "initialize" {
                                     self.heap.hash_set_default_block(id, block_id);
                                     if let Some(d) = args.first() {
@@ -3270,11 +3533,13 @@ impl Vm {
                                     // land here. bypass the subclass-override
                                     // deferral (no user super method).
                                     if let Some(bid) = block_id
-                                        && let Some(v) =
-                                            self.collection_call_block(&recv, &nm, &args, bid, true)?
+                                        && let Some(v) = self
+                                            .collection_call_block(&recv, &nm, &args, bid, true)?
                                     {
                                         self.stack.push(v);
-                                    } else if let Some(v) = self.collection_call(&recv, &nm, &args)? {
+                                    } else if let Some(v) =
+                                        self.collection_call(&recv, &nm, &args)?
+                                    {
                                         self.stack.push(v);
                                     } else {
                                         return Err(trap);
@@ -3296,7 +3561,9 @@ impl Vm {
                                     Some(Value::Str(s)) => s.to_string_lossy(),
                                     _ => self.interner.resolve(name_id).to_string(),
                                 };
-                                let recv_desc = self.frames.last()
+                                let recv_desc = self
+                                    .frames
+                                    .last()
                                     .map(|f| self.recv_desc_for_error(&f.self_val))
                                     .unwrap_or_else(|| "Object".into());
                                 return Err(self.trap(RubyError::NoMethodError {
@@ -3316,10 +3583,17 @@ impl Vm {
                             // here. Twin of the plain-super lifecycle no-op
                             // in super_call_with_lifecycle_noop.
                             (
-                                "included" | "extended" | "prepended" | "inherited"
-                                | "method_added" | "method_removed" | "method_undefined"
-                                | "singleton_method_added" | "singleton_method_removed"
-                                | "singleton_method_undefined" | "const_added",
+                                "included"
+                                | "extended"
+                                | "prepended"
+                                | "inherited"
+                                | "method_added"
+                                | "method_removed"
+                                | "method_undefined"
+                                | "singleton_method_added"
+                                | "singleton_method_removed"
+                                | "singleton_method_undefined"
+                                | "const_added",
                                 Some(Value::Class(_)),
                             ) => {
                                 self.stack.push(Value::Nil);
@@ -3402,7 +3676,12 @@ impl Vm {
                     // A non-block creating frame (method / class body /
                     // toplevel) means `captured` is a real outer scope
                     // → the block's outer-write share path is sound.
-                    (captured, f.self_val.clone(), !f.is_block, captured_yield_block)
+                    (
+                        captured,
+                        f.self_val.clone(),
+                        !f.is_block,
+                        captured_yield_block,
+                    )
                 };
                 // Capture the lexical class for `@@cvar` resolution. For
                 // a block created inside another block this returns the
@@ -3411,8 +3690,16 @@ impl Vm {
                 // it derives from that frame's self. Computed before the
                 // alloc's mutable borrow.
                 let lexical_cvar_class = self.surrounding_class();
-                let rest_slot = if rest_slot_raw == u16::MAX { None } else { Some(rest_slot_raw) };
-                let kw_rest_slot = if kw_rest_slot_raw == u16::MAX { None } else { Some(kw_rest_slot_raw) };
+                let rest_slot = if rest_slot_raw == u16::MAX {
+                    None
+                } else {
+                    Some(rest_slot_raw)
+                };
+                let kw_rest_slot = if kw_rest_slot_raw == u16::MAX {
+                    None
+                } else {
+                    Some(kw_rest_slot_raw)
+                };
                 self.maybe_gc();
                 self.check_alloc()?;
                 let id = self.heap.alloc(HeapObj::Block(BlockHandle {
@@ -3521,17 +3808,18 @@ impl Vm {
                 // method, the yield site for break / Fiber-resume
                 // bookkeeping is the top (block) frame itself.
                 let owner = self.lexical_owner_of_top();
-                let (block, yielding_idx) = match owner
-                    .and_then(|idx| self.frames[idx].block_arg.map(|b| (b, idx)))
-                {
-                    Some(pair) => pair,
-                    None => match self.frames.last().and_then(|f| f.captured_yield_block) {
-                        Some(b) => (b, self.frames.len() - 1),
-                        None => return Err(self.trap(RubyError::RuntimeError {
-                            msg: "no block given (yield)".to_string(),
-                        })),
-                    },
-                };
+                let (block, yielding_idx) =
+                    match owner.and_then(|idx| self.frames[idx].block_arg.map(|b| (b, idx))) {
+                        Some(pair) => pair,
+                        None => match self.frames.last().and_then(|f| f.captured_yield_block) {
+                            Some(b) => (b, self.frames.len() - 1),
+                            None => {
+                                return Err(self.trap(RubyError::RuntimeError {
+                                    msg: "no block given (yield)".to_string(),
+                                }));
+                            }
+                        },
+                    };
                 // Static argc for `Op::Yield(n)`; for `Op::ApplyYield`
                 // (`yield(*x)`), pop the combined args Array and expand
                 // its elements onto the stack (mirrors `Op::ApplyCall`),
@@ -3702,7 +3990,9 @@ impl Vm {
                         // recursion counter decrements before we
                         // bail.
                         let was_toplevel = yielding_idx == 0;
-                        yguard.vm.begin_method_break(block_return_value, yielding_idx)?;
+                        yguard
+                            .vm
+                            .begin_method_break(block_return_value, yielding_idx)?;
                         drop(yguard);
                         if was_toplevel && self.frames.is_empty() {
                             return Ok(false);
@@ -3776,8 +4066,15 @@ impl Vm {
                 // the right ancestor chain — using the shell would
                 // miss every node in the receiver's superclass
                 // chain. (Code-review #253 round 1 #1.)
-                let defining_class = self.class_stack.last().map(|c| Rc::downgrade(&c.effective_install_class()));
-                let vis = self.class_visibility_stack.last().copied().unwrap_or(Visibility::Public);
+                let defining_class = self
+                    .class_stack
+                    .last()
+                    .map(|c| Rc::downgrade(&c.effective_install_class()));
+                let vis = self
+                    .class_visibility_stack
+                    .last()
+                    .copied()
+                    .unwrap_or(Visibility::Public);
                 let params = proto.params.clone();
                 let fixed_arity = Self::fixed_arity_for_proto(proto, params.len());
                 let m = Rc::new(Method {
@@ -3787,8 +4084,8 @@ impl Vm {
                     defining_class,
                     visibility: std::cell::Cell::new(vis),
                     closure: None,
-                builtin: None,
-                original_name: Some(name_id),
+                    builtin: None,
+                    original_name: Some(name_id),
                 });
                 // `instance_eval { def name; end }` on a Class/Module
                 // receiver installs a SINGLETON (class) method on it, NOT a
@@ -3802,11 +4099,18 @@ impl Vm {
                     .last()
                     .and_then(|f| f.aux.as_ref())
                     .and_then(|a| a.instance_eval_definee.as_ref())
-                    .and_then(|v| if let Value::Class(c) = v { Some(c.clone()) } else { None });
+                    .and_then(|v| {
+                        if let Value::Class(c) = v {
+                            Some(c.clone())
+                        } else {
+                            None
+                        }
+                    });
                 if let Some(cls) = &ieval_class {
-                    cls.singleton_methods.borrow_mut().insert(name_id, m.clone());
-                }
-                else if let Some(cls) = self.class_stack.last() {
+                    cls.singleton_methods
+                        .borrow_mut()
+                        .insert(name_id, m.clone());
+                } else if let Some(cls) = self.class_stack.last() {
                     cls.install_method(name_id, m.clone());
                     // `module_function` (bare-form) dual-install:
                     // after `M.module_function` in a body, every
@@ -3822,7 +4126,8 @@ impl Vm {
                     // arm's per-Method clone in vm/dispatch.rs).
                     // Anchored at the class itself for `super` /
                     // `Method#owner` consistency.
-                    let mf_active = self.module_function_active_stack
+                    let mf_active = self
+                        .module_function_active_stack
                         .last()
                         .copied()
                         .unwrap_or(false);
@@ -3837,10 +4142,13 @@ impl Vm {
                             original_name: m.original_name,
                             builtin: m.builtin.clone(),
                         });
-                        cls.singleton_methods.borrow_mut().insert(name_id, singleton_copy);
+                        cls.singleton_methods
+                            .borrow_mut()
+                            .insert(name_id, singleton_copy);
                     }
+                } else {
+                    self.toplevel_methods.insert(name_id, m);
                 }
-                else { self.toplevel_methods.insert(name_id, m); }
                 // Conservatively invalidate the inline cache — any previous
                 // cache entry could in theory be made stale by this definition.
                 self.method_gen = self.method_gen.wrapping_add(1);
@@ -3908,12 +4216,18 @@ impl Vm {
                 //     method landed on the eigenclass, so `super` from
                 //     the singleton method couldn't locate its start
                 //     point → spurious "no superclass method".
-                enum SingInstall { Singleton(Rc<Class>), Eigen(Rc<Class>), Toplevel }
+                enum SingInstall {
+                    Singleton(Rc<Class>),
+                    Eigen(Rc<Class>),
+                    Toplevel,
+                }
                 let install = if let Some(cls) = self.class_stack.last().cloned() {
                     SingInstall::Singleton(cls)
                 } else {
                     match self.frames.last().map(|f| f.self_val.clone()) {
-                        Some(Value::Class(c)) => SingInstall::Singleton(c.effective_install_class()),
+                        Some(Value::Class(c)) => {
+                            SingInstall::Singleton(c.effective_install_class())
+                        }
                         Some(Value::Object(oid)) => {
                             SingInstall::Eigen(self.heap.ensure_singleton_class(oid))
                         }
@@ -3931,8 +4245,8 @@ impl Vm {
                     defining_class,
                     visibility: std::cell::Cell::new(vis),
                     closure: None,
-                builtin: None,
-                original_name: Some(name_id),
+                    builtin: None,
+                    original_name: Some(name_id),
                 });
                 match &install {
                     SingInstall::Singleton(c) => {
@@ -3967,7 +4281,9 @@ impl Vm {
                 // — instance-level singleton install. Receiver
                 // was pushed by the compiler immediately before
                 // this op (see `compile_expr`'s Def arm).
-                let recv = self.stack.pop()
+                let recv = self
+                    .stack
+                    .pop()
                     .expect("ICE: DefObjectSingletonMethod stack underflow");
                 // `def Foo.bar` / `def Foo::bar` where the receiver is
                 // a Class constant — define a CLASS method (singleton
@@ -4106,8 +4422,8 @@ impl Vm {
                     defining_class: Some(Rc::downgrade(&sc)),
                     visibility: std::cell::Cell::new(Visibility::Public),
                     closure: None,
-                builtin: None,
-                original_name: Some(name_id),
+                    builtin: None,
+                    original_name: Some(name_id),
                 });
                 sc.methods.borrow_mut().insert(name_id, m);
                 self.method_gen = self.method_gen.wrapping_add(1);
@@ -4146,7 +4462,12 @@ impl Vm {
                 // `singleton_class.class_eval` would miss and
                 // raise NameError. (Code-review #253 round 2 #1.)
                 let existing = if let Some(cls) = self.class_stack.last() {
-                    if let Some(real) = cls.singleton_target.borrow().as_ref().and_then(std::rc::Weak::upgrade) {
+                    if let Some(real) = cls
+                        .singleton_target
+                        .borrow()
+                        .as_ref()
+                        .and_then(std::rc::Weak::upgrade)
+                    {
                         self.lookup_class_singleton_method(&real, old_id)
                     } else if let Some(t) = self
                         .refinement_targets
@@ -4235,9 +4556,9 @@ impl Vm {
                             let old_name_str = self.interner.resolve(old_id).to_string();
                             let mut primitive_hit =
                                 crate::vm::Vm::universal_arm_name(&old_name_str)
-                                || crate::vm::Vm::universal_kernel_private(&old_name_str)
-                                || crate::vm::Vm::UNIVERSAL_OBJECT_METHODS
-                                    .contains(&old_name_str.as_str());
+                                    || crate::vm::Vm::universal_kernel_private(&old_name_str)
+                                    || crate::vm::Vm::UNIVERSAL_OBJECT_METHODS
+                                        .contains(&old_name_str.as_str());
                             // Rc-pointer visited set defends the
                             // walker against an adversarial cyclic
                             // superclass graph (`A.superclass = B;
@@ -4255,7 +4576,9 @@ impl Vm {
                                 std::collections::HashSet::new();
                             let mut walker: Option<Rc<Class>> = Some(resolution.clone());
                             while let Some(c) = walker {
-                                if !visited.insert(Rc::as_ptr(&c)) { break; }
+                                if !visited.insert(Rc::as_ptr(&c)) {
+                                    break;
+                                }
                                 if self.primitive_class_responds_to(&c.name, old_id) {
                                     primitive_hit = true;
                                     break;
@@ -4282,11 +4605,18 @@ impl Vm {
                             // the default's behavior. minitest's
                             // with_overridden_include saves/restores
                             // Class#inherited this way.
-                            if matches!(self.interner.resolve(old_id).as_ref(),
-                                "inherited" | "included" | "extended" | "prepended"
-                                | "method_added" | "method_removed" | "method_undefined"
-                                | "singleton_method_added"
-                            ) && matches!(cls.name.as_str(), "Class" | "Module" | "Object") {
+                            if matches!(
+                                self.interner.resolve(old_id).as_ref(),
+                                "inherited"
+                                    | "included"
+                                    | "extended"
+                                    | "prepended"
+                                    | "method_added"
+                                    | "method_removed"
+                                    | "method_undefined"
+                                    | "singleton_method_added"
+                            ) && matches!(cls.name.as_str(), "Class" | "Module" | "Object")
+                            {
                                 let synth = self.synth_noop_method(cls, old_id);
                                 cls.install_method(new_id, synth);
                                 self.method_gen = self.method_gen.wrapping_add(1);
@@ -4304,7 +4634,9 @@ impl Vm {
                         // so the previous `NoMethodError { recv_type:
                         // "Class" }` was misleading.
                         let name = self.interner.resolve(old_id).to_string();
-                        let ctx = self.class_stack.last()
+                        let ctx = self
+                            .class_stack
+                            .last()
                             .map(|c| format!("class `{}'", c.name))
                             .unwrap_or_else(|| "main".to_string());
                         return Err(self.trap(RubyError::NameError {
@@ -4393,7 +4725,8 @@ impl Vm {
                         // someone needs it. PR #229 code-review #3.
                         let cls_ref = self.class_stack.last().cloned();
                         if let Some(cls) = &cls_ref
-                            && self.responds_to(&Value::Class(cls.clone()), old_id, true) {
+                            && self.responds_to(&Value::Class(cls.clone()), old_id, true)
+                        {
                             // Module fence on Class-only builtins.
                             // `responds_to(Value::Class(_), :new)`
                             // returns true unconditionally (lookup.rs
@@ -4414,13 +4747,15 @@ impl Vm {
                             // diverge this way — `:name`, `:to_s`,
                             // `:ancestors`, etc. work on Modules in
                             // CRuby. PR #229 code-review #1.)
-                            if cls.is_module
-                                && self.interner.resolve(old_id).as_ref() == "new"
-                            {
+                            if cls.is_module && self.interner.resolve(old_id).as_ref() == "new" {
                                 return Err(self.trap(RubyError::NameError {
                                     msg: format!(
                                         "undefined method `new' for class `{}'",
-                                        if cls.name.is_empty() { "Module" } else { &cls.name }
+                                        if cls.name.is_empty() {
+                                            "Module"
+                                        } else {
+                                            &cls.name
+                                        }
                                     ),
                                 }));
                             }
@@ -4443,7 +4778,9 @@ impl Vm {
                         // these differently in some cases but the
                         // singleton/instance distinction is rarely
                         // load-bearing in real error logs.)
-                        let ctx = self.class_stack.last()
+                        let ctx = self
+                            .class_stack
+                            .last()
                             .map(|c| format!("class `{}'", c.name))
                             .unwrap_or_else(|| "main".to_string());
                         return Err(self.trap(RubyError::NameError {
@@ -4480,18 +4817,25 @@ impl Vm {
                 //    chain), the explicit `prepend M` is a no-op.
                 //    Without this, the chain would reorder and
                 //    method resolution would diverge from CRuby.
-                let arg = self.stack.pop().expect("ICE: SingletonChainPrepend with empty stack");
+                let arg = self
+                    .stack
+                    .pop()
+                    .expect("ICE: SingletonChainPrepend with empty stack");
                 let src = match arg {
                     Value::Class(c) if c.is_module => c,
-                    Value::Class(_) => return Err(self.trap(RubyError::TypeError {
-                        msg: "wrong argument type Class (expected Module)".into(),
-                    })),
-                    other => return Err(self.trap(RubyError::TypeError {
-                        msg: format!(
-                            "wrong argument type {} (expected Module)",
-                            other.type_name(),
-                        ),
-                    })),
+                    Value::Class(_) => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: "wrong argument type Class (expected Module)".into(),
+                        }));
+                    }
+                    other => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "wrong argument type {} (expected Module)",
+                                other.type_name(),
+                            ),
+                        }));
+                    }
                 };
                 // Install target resolution: prefer the lexical
                 // class body on `class_stack` (the common case —
@@ -4593,13 +4937,24 @@ impl Vm {
                 // table and add closure-captured slots to the root
                 // set, so Objects/Arrays reachable through the
                 // closure survive collections.
-                let bv = self.stack.pop().expect("ICE: DefMethodBlock no block on stack");
-                let id = if let Value::Block(id) = bv { id } else {
+                let bv = self
+                    .stack
+                    .pop()
+                    .expect("ICE: DefMethodBlock no block on stack");
+                let id = if let Value::Block(id) = bv {
+                    id
+                } else {
                     panic!("ICE: DefMethodBlock without Block on stack");
                 };
                 let (proto_idx, captured, param_start, n_params, captured_yield_block) = {
                     let bh = self.heap.block(id);
-                    (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params, bh.captured_yield_block)
+                    (
+                        bh.proto_idx,
+                        bh.captured.clone(),
+                        bh.param_start,
+                        bh.n_params,
+                        bh.captured_yield_block,
+                    )
                 };
                 let proto = &self.protos[proto_idx];
                 let params = proto.params.clone();
@@ -4611,20 +4966,35 @@ impl Vm {
                 // the right ancestor chain — using the shell would
                 // miss every node in the receiver's superclass
                 // chain. (Code-review #253 round 1 #1.)
-                let defining_class = self.class_stack.last().map(|c| Rc::downgrade(&c.effective_install_class()));
-                let vis = self.class_visibility_stack.last().copied().unwrap_or(crate::value::Visibility::Public);
+                let defining_class = self
+                    .class_stack
+                    .last()
+                    .map(|c| Rc::downgrade(&c.effective_install_class()));
+                let vis = self
+                    .class_visibility_stack
+                    .last()
+                    .copied()
+                    .unwrap_or(crate::value::Visibility::Public);
                 let m = Rc::new(Method {
                     params,
                     proto_idx,
                     fixed_arity: None,
                     defining_class,
                     visibility: std::cell::Cell::new(vis),
-                    closure: Some(crate::value::MethodClosure { captured, param_start, n_params, captured_yield_block }),
-                builtin: None,
-                original_name: Some(name_id),
+                    closure: Some(crate::value::MethodClosure {
+                        captured,
+                        param_start,
+                        n_params,
+                        captured_yield_block,
+                    }),
+                    builtin: None,
+                    original_name: Some(name_id),
                 });
-                if let Some(cls) = self.class_stack.last() { cls.install_method(name_id, m); }
-                else { self.toplevel_methods.insert(name_id, m); }
+                if let Some(cls) = self.class_stack.last() {
+                    cls.install_method(name_id, m);
+                } else {
+                    self.toplevel_methods.insert(name_id, m);
+                }
                 self.method_gen = self.method_gen.wrapping_add(1);
                 // `method_added(name_id)` fires for the compile-
                 // time `define_method(:literal) { … }` intercept too
@@ -4654,16 +5024,28 @@ impl Vm {
                 // eigenclass. Compiler pushed `recv` first then
                 // the `CreateBlock`-produced block, so pop in
                 // that reverse order.
-                let bv = self.stack.pop()
+                let bv = self
+                    .stack
+                    .pop()
                     .expect("ICE: DefObjectSingletonMethodBlock no block on stack");
-                let block_id = if let Value::Block(id) = bv { id } else {
+                let block_id = if let Value::Block(id) = bv {
+                    id
+                } else {
                     panic!("ICE: DefObjectSingletonMethodBlock without Block on stack");
                 };
-                let recv = self.stack.pop()
+                let recv = self
+                    .stack
+                    .pop()
                     .expect("ICE: DefObjectSingletonMethodBlock no receiver on stack");
                 let (proto_idx, captured, param_start, n_params, captured_yield_block) = {
                     let bh = self.heap.block(block_id);
-                    (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params, bh.captured_yield_block)
+                    (
+                        bh.proto_idx,
+                        bh.captured.clone(),
+                        bh.param_start,
+                        bh.n_params,
+                        bh.captured_yield_block,
+                    )
                 };
                 let proto = &self.protos[proto_idx];
                 let params = proto.params.clone();
@@ -4685,7 +5067,12 @@ impl Vm {
                             fixed_arity: None,
                             defining_class: Some(Rc::downgrade(&sc)),
                             visibility: std::cell::Cell::new(Visibility::Public),
-                            closure: Some(crate::value::MethodClosure { captured, param_start, n_params, captured_yield_block }),
+                            closure: Some(crate::value::MethodClosure {
+                                captured,
+                                param_start,
+                                n_params,
+                                captured_yield_block,
+                            }),
                             builtin: None,
                             original_name: Some(name_id),
                         });
@@ -4699,7 +5086,12 @@ impl Vm {
                             fixed_arity: None,
                             defining_class: Some(Rc::downgrade(cls)),
                             visibility: std::cell::Cell::new(Visibility::Public),
-                            closure: Some(crate::value::MethodClosure { captured, param_start, n_params, captured_yield_block }),
+                            closure: Some(crate::value::MethodClosure {
+                                captured,
+                                param_start,
+                                n_params,
+                                captured_yield_block,
+                            }),
                             builtin: None,
                             original_name: Some(name_id),
                         });
@@ -4719,7 +5111,12 @@ impl Vm {
                             fixed_arity: None,
                             defining_class: Some(Rc::downgrade(&sc)),
                             visibility: std::cell::Cell::new(Visibility::Public),
-                            closure: Some(crate::value::MethodClosure { captured, param_start, n_params, captured_yield_block }),
+                            closure: Some(crate::value::MethodClosure {
+                                captured,
+                                param_start,
+                                n_params,
+                                captured_yield_block,
+                            }),
                             builtin: None,
                             original_name: Some(name_id),
                         });
@@ -4762,7 +5159,10 @@ impl Vm {
                 // alias plumbing.
                 let is_module = matches!(op, Op::DefModule(..));
                 // Pop superclass (Nil for "default to Object", a Class for `class Foo < Bar`).
-                let parent_val = self.stack.pop().expect("ICE: DefClass without superclass slot");
+                let parent_val = self
+                    .stack
+                    .pop()
+                    .expect("ICE: DefClass without superclass slot");
                 let explicit_parent = match parent_val {
                     Value::Class(c) => Some(c),
                     _ => None,
@@ -4785,7 +5185,14 @@ impl Vm {
                 //     reopen path below already preserves the
                 //     existing chain)
                 let object_sym = self.interner.intern("Object");
-                let name_str_check = self.interner.resolve(if qual_id.0 == u32::MAX { name_id } else { qual_id }).to_string();
+                let name_str_check = self
+                    .interner
+                    .resolve(if qual_id.0 == u32::MAX {
+                        name_id
+                    } else {
+                        qual_id
+                    })
+                    .to_string();
                 // CRuby: `class BasicObject < Anything` raises
                 // `TypeError: superclass mismatch for class BasicObject`.
                 // Without rejecting, `class BasicObject < Object` would
@@ -4802,9 +5209,7 @@ impl Vm {
                 }
                 let parent = if explicit_parent.is_some() {
                     explicit_parent
-                } else if is_module
-                    || name_str_check == "Object"
-                    || name_str_check == "BasicObject"
+                } else if is_module || name_str_check == "Object" || name_str_check == "BasicObject"
                 {
                     // Modules don't have a superclass; Object and
                     // BasicObject sit at/near the root of the chain
@@ -4852,7 +5257,9 @@ impl Vm {
                     if qual_id.0 == u32::MAX
                         && let Some((head, rest)) = bare.split_once("::")
                     {
-                        let lex = self.frames.last()
+                        let lex = self
+                            .frames
+                            .last()
                             .map(|f| self.protos[f.proto_idx].lexical_scope.clone())
                             .unwrap_or_default();
                         let mut resolved = None;
@@ -4862,7 +5269,8 @@ impl Vm {
                             if self.interner.contains(&cand) {
                                 let cand_id = self.interner.intern(&cand);
                                 if self.classes.contains_key(&cand_id) {
-                                    resolved = Some(self.interner.intern(&format!("{cand}::{rest}")));
+                                    resolved =
+                                        Some(self.interner.intern(&format!("{cand}::{rest}")));
                                     break;
                                 }
                             }
@@ -4874,7 +5282,13 @@ impl Vm {
                 };
                 let table_key = match resolved_path_key {
                     Some(k) => k,
-                    None => if qual_id.0 == u32::MAX { name_id } else { qual_id },
+                    None => {
+                        if qual_id.0 == u32::MAX {
+                            name_id
+                        } else {
+                            qual_id
+                        }
+                    }
                 };
                 let name_str = self.interner.resolve(table_key).to_string();
                 // Reopening a constant that has a PENDING AUTOLOAD must
@@ -4919,28 +5333,35 @@ impl Vm {
                 // can still change what nested bare names resolve to via
                 // its body) invalidates the constant ICs.
                 self.bump_const_gen();
-                let cls = self.classes.entry(table_key).or_insert_with(|| Rc::new(Class {
-                    name: name_str,
-                    is_module,
-                    ivars: RefCell::new(crate::intern::FxHashMap::default()),
-                    methods: RefCell::new(crate::intern::FxHashMap::default()),
-                    singleton_methods: RefCell::new(crate::intern::FxHashMap::default()),
-                    superclass: RefCell::new(parent.clone()),
-                    includes: RefCell::new(Vec::new()),
-                    prepends: RefCell::new(Vec::new()),
-                    singleton_prepends: RefCell::new(Vec::new()),
-                    singleton_includes: RefCell::new(Vec::new()),
-                    singleton_view: RefCell::new(None),
-                    singleton_target: RefCell::new(None),
-                    undefed: RefCell::new(crate::intern::FxHashSet::default()),
-                    anon_serial: std::cell::Cell::new(0),
-                    class_vars: RefCell::new(crate::intern::FxHashMap::default()),
-            consts: RefCell::new(crate::intern::FxHashMap::default()),
-                    assigned_name: RefCell::new(None),
-                    class_tag: None,
-                    #[cfg(feature = "cext")]
-                    cext_alloc_func: std::cell::Cell::new(None),
-                })).clone();
+                let cls = self
+                    .classes
+                    .entry(table_key)
+                    .or_insert_with(|| {
+                        Rc::new(Class {
+                            name: name_str,
+                            is_module,
+                            ivars: RefCell::new(crate::intern::FxHashMap::default()),
+                            methods: RefCell::new(crate::intern::FxHashMap::default()),
+                            singleton_methods: RefCell::new(crate::intern::FxHashMap::default()),
+                            superclass: RefCell::new(parent.clone()),
+                            includes: RefCell::new(Vec::new()),
+                            prepends: RefCell::new(Vec::new()),
+                            singleton_prepends: RefCell::new(Vec::new()),
+                            singleton_includes: RefCell::new(Vec::new()),
+                            singleton_view: RefCell::new(None),
+                            singleton_target: RefCell::new(None),
+                            undefed: RefCell::new(crate::intern::FxHashSet::default()),
+                            anon_serial: std::cell::Cell::new(0),
+                            class_vars: RefCell::new(crate::intern::FxHashMap::default()),
+                            consts: RefCell::new(crate::intern::FxHashMap::default()),
+                            assigned_name: RefCell::new(None),
+                            class_tag: None,
+                            frozen: std::cell::Cell::new(false),
+                            #[cfg(feature = "cext")]
+                            cext_alloc_func: std::cell::Cell::new(None),
+                        })
+                    })
+                    .clone();
                 // If the class already existed (reopened) and the user specified a parent
                 // this time, update it (only if it wasn't already set to something else).
                 if let Some(p) = &parent {
@@ -4997,7 +5418,8 @@ impl Vm {
                     // we don't grow the symbol table — and the
                     // `Config::max_symbols`-guarded paths stay
                     // authoritative. Code-review #337 round 2.
-                    && self.interner.contains("inherited") {
+                    && self.interner.contains("inherited")
+                {
                     let inh_id = self.interner.intern("inherited");
                     if let Some(m) = self.lookup_class_singleton_method(parent_cls, inh_id) {
                         let pre_frames = self.frames.len();
@@ -5031,7 +5453,10 @@ impl Vm {
                     let short = self.interner.resolve(name_id);
                     let short = short.rsplit("::").next().unwrap_or(short).to_string();
                     let short_id = self.interner.intern(&short);
-                    scope.consts.borrow_mut().insert(short_id, Value::Class(cls.clone()));
+                    scope
+                        .consts
+                        .borrow_mut()
+                        .insert(short_id, Value::Class(cls.clone()));
                     self.bump_const_gen();
                 }
                 // `Module#const_added` (CRuby 3.2+): fire on the enclosing
@@ -5078,11 +5503,24 @@ impl Vm {
                 let proto = &self.protos[p_idx as usize];
                 let n_locals = proto.n_locals as usize;
                 self.frames.push(Frame {
-                    proto_idx: p_idx as usize, ip: 0,
+                    proto_idx: p_idx as usize,
+                    ip: 0,
                     locals: crate::vm::Locals::Shared(Rc::new(RefCell::new(vec_nil(n_locals)))),
                     self_val: Value::Class(cls.clone()),
                     base_sp: self.stack.len(),
-                    is_class_body: true, swap_return: None, block_arg: None, defining_class: None, lexical_cvar_class: None, #[cfg(feature = "regex")] saved_last_match: None, is_block: false, is_lambda: false, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
+                    is_class_body: true,
+                    swap_return: None,
+                    block_arg: None,
+                    defining_class: None,
+                    lexical_cvar_class: None,
+                    #[cfg(feature = "regex")]
+                    saved_last_match: None,
+                    is_block: false,
+                    is_lambda: false,
+                    n_given_positional: 0,
+                    kw_given_mask: 0,
+                    aux: None,
+                    pending_yield: false,
                     block_writeback: None,
                     captured_yield_block: None,
                 });
@@ -5098,7 +5536,9 @@ impl Vm {
                 // the metaclass (= the real class's singleton tables
                 // via `singleton_target` redirect). See
                 // `Op::OpenSingletonClass` in bytecode.rs.
-                let recv = self.stack.pop()
+                let recv = self
+                    .stack
+                    .pop()
                     .expect("ICE: OpenSingletonClass without receiver slot");
                 let eigen: Rc<Class> = match &recv {
                     Value::Class(cls) => cls.ensure_singleton_view(),
@@ -5118,11 +5558,24 @@ impl Vm {
                 let proto = &self.protos[p_idx as usize];
                 let n_locals = proto.n_locals as usize;
                 self.frames.push(Frame {
-                    proto_idx: p_idx as usize, ip: 0,
+                    proto_idx: p_idx as usize,
+                    ip: 0,
                     locals: crate::vm::Locals::Shared(Rc::new(RefCell::new(vec_nil(n_locals)))),
                     self_val: Value::Class(eigen),
                     base_sp: self.stack.len(),
-                    is_class_body: true, swap_return: None, block_arg: None, defining_class: None, lexical_cvar_class: None, #[cfg(feature = "regex")] saved_last_match: None, is_block: false, is_lambda: false, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
+                    is_class_body: true,
+                    swap_return: None,
+                    block_arg: None,
+                    defining_class: None,
+                    lexical_cvar_class: None,
+                    #[cfg(feature = "regex")]
+                    saved_last_match: None,
+                    is_block: false,
+                    is_lambda: false,
+                    n_given_positional: 0,
+                    kw_given_mask: 0,
+                    aux: None,
+                    pending_yield: false,
                     block_writeback: None,
                     captured_yield_block: None,
                 });
@@ -5142,7 +5595,9 @@ impl Vm {
                 let end = self.stack.pop().expect("ICE: NewRange end underflow");
                 let begin = self.stack.pop().expect("ICE: NewRange begin underflow");
                 let id = self.heap.alloc(HeapObj::Range(crate::heap::RangeObj {
-                    begin, end, exclusive: excl != 0,
+                    begin,
+                    end,
+                    exclusive: excl != 0,
                 }));
                 self.stack.push(Value::Range(id));
             }
@@ -5208,30 +5663,38 @@ impl Vm {
                     // StandardError (minitest's passthrough arm then
                     // re-raised every test error and killed the run).
                     if let Some(splat_inner) = crate::const_marker::strip_splat(&bare_name) {
-                        let val: Option<Value> = if let Some(abs) = crate::const_marker::strip_absolute(splat_inner) {
-                            let abs_sym = self.interner.intern(abs);
-                            self.constants.get(&abs_sym).cloned()
-                        } else {
-                            let proto_idx = self.frames.last().expect("ICE: PushRescue no frame").proto_idx;
-                            let lex = self.protos[proto_idx].lexical_scope.clone();
-                            let mut found = None;
-                            for scope_sym in &lex {
-                                let scope_name = self.interner.resolve(*scope_sym).clone();
-                                let qualified = format!("{}::{}", scope_name, splat_inner);
-                                let qsym = self.interner.intern(&qualified);
-                                if let Some(v) = self.constants.get(&qsym) {
-                                    found = Some(v.clone());
-                                    break;
+                        let val: Option<Value> =
+                            if let Some(abs) = crate::const_marker::strip_absolute(splat_inner) {
+                                let abs_sym = self.interner.intern(abs);
+                                self.constants.get(&abs_sym).cloned()
+                            } else {
+                                let proto_idx = self
+                                    .frames
+                                    .last()
+                                    .expect("ICE: PushRescue no frame")
+                                    .proto_idx;
+                                let lex = self.protos[proto_idx].lexical_scope.clone();
+                                let mut found = None;
+                                for scope_sym in &lex {
+                                    let scope_name = self.interner.resolve(*scope_sym).clone();
+                                    let qualified = format!("{}::{}", scope_name, splat_inner);
+                                    let qsym = self.interner.intern(&qualified);
+                                    if let Some(v) = self.constants.get(&qsym) {
+                                        found = Some(v.clone());
+                                        break;
+                                    }
                                 }
-                            }
-                            found.or_else(|| {
-                                let inner_sym = self.interner.intern(splat_inner);
-                                self.constants.get(&inner_sym).cloned()
-                            })
-                        };
+                                found.or_else(|| {
+                                    let inner_sym = self.interner.intern(splat_inner);
+                                    self.constants.get(&inner_sym).cloned()
+                                })
+                            };
                         match val {
                             Some(Value::Array(id)) => {
-                                let list: Vec<std::rc::Rc<Class>> = self.heap.array(id).iter()
+                                let list: Vec<std::rc::Rc<Class>> = self
+                                    .heap
+                                    .array(id)
+                                    .iter()
                                     .filter_map(|v| match v {
                                         Value::Class(c) => Some(c.clone()),
                                         _ => None,
@@ -5250,16 +5713,24 @@ impl Vm {
                     // leading `::` marker from the AST lowering.
                     // CRuby semantics: skip the lex-walk and look up
                     // the joined name at top level only.
-                    else if let Some(absolute_bare) = crate::const_marker::strip_absolute(&bare_name) {
+                    else if let Some(absolute_bare) =
+                        crate::const_marker::strip_absolute(&bare_name)
+                    {
                         let abs_sym = self.interner.intern(absolute_bare);
-                        self.classes.get(&abs_sym).cloned()
+                        self.classes
+                            .get(&abs_sym)
+                            .cloned()
                             .or_else(|| match self.constants.get(&abs_sym) {
                                 Some(Value::Class(c)) => Some(c.clone()),
                                 _ => None,
                             })
                             .map(RescueFilter::Class)
                     } else {
-                        let proto_idx = self.frames.last().expect("ICE: PushRescue no frame").proto_idx;
+                        let proto_idx = self
+                            .frames
+                            .last()
+                            .expect("ICE: PushRescue no frame")
+                            .proto_idx;
                         let lex = self.protos[proto_idx].lexical_scope.clone();
                         let mut found = None;
                         if !lex.is_empty() {
@@ -5286,11 +5757,20 @@ impl Vm {
                             .map(RescueFilter::Class)
                     }
                 };
-                self.frames.last_mut().expect("ICE: PushRescue no frame").aux_mut().rescues.push(RescueHandler {
-                    handler_ip: target, stack_depth: depth, bind_slot, is_ensure: false,
-                    filter_class: filter, loop_depth_at_push: loop_depth,
-                    begin_depth_at_push: begin_depth,
-                });
+                self.frames
+                    .last_mut()
+                    .expect("ICE: PushRescue no frame")
+                    .aux_mut()
+                    .rescues
+                    .push(RescueHandler {
+                        handler_ip: target,
+                        stack_depth: depth,
+                        bind_slot,
+                        is_ensure: false,
+                        filter_class: filter,
+                        loop_depth_at_push: loop_depth,
+                        begin_depth_at_push: begin_depth,
+                    });
             }
             Op::PushRescueSplatLocal(off, slot, bind, src_slot) => {
                 // `rescue *exp` on a local — read the slot NOW (push
@@ -5299,7 +5779,10 @@ impl Vm {
                 // filter; Nil/other values match nothing
                 // (fail-closed). See Op::PushRescue for the shared
                 // handler bookkeeping.
-                let f = self.frames.last().expect("ICE: PushRescueSplatLocal no frame");
+                let f = self
+                    .frames
+                    .last()
+                    .expect("ICE: PushRescueSplatLocal no frame");
                 let ip = f.ip;
                 let loop_depth = f.loop_depth();
                 let begin_depth = f.begin_depth();
@@ -5314,7 +5797,10 @@ impl Vm {
                 };
                 let filter = match src {
                     Value::Array(id) => {
-                        let list: Vec<std::rc::Rc<Class>> = self.heap.array(id).iter()
+                        let list: Vec<std::rc::Rc<Class>> = self
+                            .heap
+                            .array(id)
+                            .iter()
                             .filter_map(|v| match v {
                                 Value::Class(c) => Some(c.clone()),
                                 _ => None,
@@ -5325,22 +5811,37 @@ impl Vm {
                     Value::Class(c) => Some(RescueFilter::Class(c)),
                     _ => None,
                 };
-                self.frames.last_mut().expect("ICE: PushRescueSplatLocal no frame").aux_mut().rescues.push(RescueHandler {
-                    handler_ip: target, stack_depth: depth, bind_slot, is_ensure: false,
-                    filter_class: filter, loop_depth_at_push: loop_depth,
-                    begin_depth_at_push: begin_depth,
-                });
+                self.frames
+                    .last_mut()
+                    .expect("ICE: PushRescueSplatLocal no frame")
+                    .aux_mut()
+                    .rescues
+                    .push(RescueHandler {
+                        handler_ip: target,
+                        stack_depth: depth,
+                        bind_slot,
+                        is_ensure: false,
+                        filter_class: filter,
+                        loop_depth_at_push: loop_depth,
+                        begin_depth_at_push: begin_depth,
+                    });
             }
             Op::PopRescue => {
-                self.frames.last_mut().expect("ICE: PopRescue no frame").pop_rescue();
+                self.frames
+                    .last_mut()
+                    .expect("ICE: PopRescue no frame")
+                    .pop_rescue();
             }
             Op::EnterBegin => {
                 // Snapshot `$!` so `ExitBegin` (or a `return` out of a
                 // rescue body) can revert it — CRuby's errinfo is
                 // dynamically scoped to the rescue/ensure body, not the
                 // whole program. (See `BeginBaseline::saved_dollar_bang`.)
-                let saved_dollar_bang =
-                    self.globals.get(&self.sym_bang).cloned().unwrap_or(Value::Nil);
+                let saved_dollar_bang = self
+                    .globals
+                    .get(&self.sym_bang)
+                    .cloned()
+                    .unwrap_or(Value::Nil);
                 let f = self.frames.last_mut().expect("ICE: EnterBegin no frame");
                 let aux = f.aux_mut();
                 let baseline = crate::vm::BeginBaseline {
@@ -5364,10 +5865,14 @@ impl Vm {
                 // region's rescue/ensure body has completed. A handled
                 // exception is no longer "in flight", so a subsequent
                 // bare `raise` must not resurface it.
-                self.globals.insert(self.sym_bang, baseline.saved_dollar_bang);
+                self.globals
+                    .insert(self.sym_bang, baseline.saved_dollar_bang);
             }
             Op::TruncateRescuesToBeginBaseline => {
-                let f = self.frames.last_mut().expect("ICE: TruncateRescues no frame");
+                let f = self
+                    .frames
+                    .last_mut()
+                    .expect("ICE: TruncateRescues no frame");
                 let aux = f.aux_mut();
                 let baseline = aux
                     .begin_rescue_depths
@@ -5380,8 +5885,10 @@ impl Vm {
                 // loop in the rescue body (loop depths
                 // truncation). (Code-review #306 round 3.)
                 aux.rescues.truncate(baseline.rescues_len);
-                aux.loop_rescue_depths.truncate(baseline.loop_rescue_depths_len);
-                aux.loop_stack_depths.truncate(baseline.loop_stack_depths_len);
+                aux.loop_rescue_depths
+                    .truncate(baseline.loop_rescue_depths_len);
+                aux.loop_stack_depths
+                    .truncate(baseline.loop_stack_depths_len);
             }
             Op::PushEnsure(off) => {
                 let f = self.frames.last().expect("ICE: PushEnsure no frame");
@@ -5390,15 +5897,26 @@ impl Vm {
                 let begin_depth = f.begin_depth();
                 let target = (ip as i32 + off) as usize;
                 let depth = self.stack.len();
-                self.frames.last_mut().expect("ICE: PushEnsure no frame").aux_mut().rescues.push(RescueHandler {
-                    handler_ip: target, stack_depth: depth, bind_slot: None, is_ensure: true,
-                    filter_class: None, // ensure is unconditional
-                    loop_depth_at_push: loop_depth,
-                    begin_depth_at_push: begin_depth,
-                });
+                self.frames
+                    .last_mut()
+                    .expect("ICE: PushEnsure no frame")
+                    .aux_mut()
+                    .rescues
+                    .push(RescueHandler {
+                        handler_ip: target,
+                        stack_depth: depth,
+                        bind_slot: None,
+                        is_ensure: true,
+                        filter_class: None, // ensure is unconditional
+                        loop_depth_at_push: loop_depth,
+                        begin_depth_at_push: begin_depth,
+                    });
             }
             Op::PopEnsure => {
-                self.frames.last_mut().expect("ICE: PopEnsure no frame").pop_rescue();
+                self.frames
+                    .last_mut()
+                    .expect("ICE: PopEnsure no frame")
+                    .pop_rescue();
             }
             Op::Raise => {
                 let v = self.stack.pop().unwrap_or(Value::Nil);
@@ -5413,7 +5931,11 @@ impl Vm {
                 // cycle would loop.
                 {
                     let raise_sym = self.interner.intern("raise");
-                    let self_val = self.frames.last().map(|f| f.self_val.clone()).unwrap_or(Value::Nil);
+                    let self_val = self
+                        .frames
+                        .last()
+                        .map(|f| f.self_val.clone())
+                        .unwrap_or(Value::Nil);
                     let user_override = match &self_val {
                         Value::Object(id) => {
                             let cls = self.heap.class_of(*id);
@@ -5422,14 +5944,20 @@ impl Vm {
                         _ => None,
                     };
                     if let Some(m) = user_override
-                        && !self.protos[m.proto_idx].name.starts_with("<kernel-alias-forwarder")
+                        && !self.protos[m.proto_idx]
+                            .name
+                            .starts_with("<kernel-alias-forwarder")
                     {
                         // Run the override SYNCHRONOUSLY (raise is
                         // cold; stub bodies are tiny) and discard
                         // its return — the compiler emits
                         // `Raise; LoadNil`, and the LoadNil is the
                         // expression value on the no-unwind path.
-                        let argv = if matches!(v, Value::Nil) { vec![] } else { vec![v] };
+                        let argv = if matches!(v, Value::Nil) {
+                            vec![]
+                        } else {
+                            vec![v]
+                        };
                         let pre_frames = self.frames.len();
                         self.invoke_method(m, self_val, argv)?;
                         self.dispatch_until(pre_frames)?;
@@ -5456,10 +5984,16 @@ impl Vm {
                 aux.loop_stack_depths.push(stack_depth);
             }
             Op::ExitLoop => {
-                let aux = self.frames.last_mut().expect("ICE: ExitLoop no frame").aux_mut();
-                aux.loop_rescue_depths.pop()
+                let aux = self
+                    .frames
+                    .last_mut()
+                    .expect("ICE: ExitLoop no frame")
+                    .aux_mut();
+                aux.loop_rescue_depths
+                    .pop()
                     .expect("ICE: ExitLoop with empty loop_rescue_depths");
-                aux.loop_stack_depths.pop()
+                aux.loop_stack_depths
+                    .pop()
                     .expect("ICE: ExitLoop with empty loop_stack_depths");
             }
             Op::BreakLoop(off) => {
@@ -5467,7 +6001,9 @@ impl Vm {
                 // dispatcher has already advanced f.ip past this op,
                 // so the patched offset lands on the loop's join).
                 let f = self.frames.last().expect("ICE: BreakLoop no frame");
-                let target_depth = *f.aux.as_ref()
+                let target_depth = *f
+                    .aux
+                    .as_ref()
                     .and_then(|a| a.loop_rescue_depths.last())
                     .expect("ICE: BreakLoop outside a while loop");
                 let target_ip = (f.ip as i32 + off) as usize;
@@ -5475,15 +6011,24 @@ impl Vm {
                 // before this op. Take it off so it doesn't pollute
                 // the ensure-body stack we may be about to enter,
                 // and so we can re-push it once the transfer lands.
-                let value = self.stack.pop().expect("ICE: BreakLoop with no value on stack");
-                self.begin_loop_transfer(LoopTransferKind::Break { value }, target_ip, target_depth)?;
+                let value = self
+                    .stack
+                    .pop()
+                    .expect("ICE: BreakLoop with no value on stack");
+                self.begin_loop_transfer(
+                    LoopTransferKind::Break { value },
+                    target_ip,
+                    target_depth,
+                )?;
             }
             Op::NextLoop(off) => {
                 // Symmetric to BreakLoop: jumps to iter-check instead
                 // of join; no value to carry (while has no iteration
                 // value).
                 let f = self.frames.last().expect("ICE: NextLoop no frame");
-                let target_depth = *f.aux.as_ref()
+                let target_depth = *f
+                    .aux
+                    .as_ref()
                     .and_then(|a| a.loop_rescue_depths.last())
                     .expect("ICE: NextLoop outside a while loop");
                 let target_ip = (f.ip as i32 + off) as usize;
@@ -5516,7 +6061,9 @@ impl Vm {
                     // here means stack-balance regression — surface
                     // it loudly rather than silently materialising
                     // a Nil exception.
-                    let v = self.stack.pop()
+                    let v = self
+                        .stack
+                        .pop()
                         .expect("ICE: EndEnsure with empty stack on exception path");
                     let exc = self.normalize_exception(v);
                     self.unwind_with_exception(exc)?;
@@ -5559,7 +6106,8 @@ impl Vm {
                         // With bignum off, `apply_int` never returns
                         // None (the arms fall back to wrapping_*).
                         #[cfg(feature = "bignum")]
-                        None => self.bigint_arith(kind, &Value::Int(x), &Value::Int(rhs))
+                        None => self
+                            .bigint_arith(kind, &Value::Int(x), &Value::Int(rhs))
                             .expect("ICE: bigint_arith None for Int operands")?,
                         #[cfg(not(feature = "bignum"))]
                         None => unreachable!("apply_int returns None only when bignum is on"),
@@ -5575,9 +6123,18 @@ impl Vm {
                     } else if let Some(v) = self.try_rational_binop(kind, &a, &b_val)? {
                         // Rational LHS + Int RHS — Phase C.2.
                         self.stack.push(v);
-                    } else if let Some(v) = primitive_call(&a, kind.name(), std::slice::from_ref(&b_val), self.max_value_bytes).map_err(|e| self.trap(e))? {
+                    } else if let Some(v) = primitive_call(
+                        &a,
+                        kind.name(),
+                        std::slice::from_ref(&b_val),
+                        self.max_value_bytes,
+                    )
+                    .map_err(|e| self.trap(e))?
+                    {
                         self.stack.push(v);
-                    } else if let Some(v) = self.sym_primitive(&a, kind.name(), std::slice::from_ref(&b_val))? {
+                    } else if let Some(v) =
+                        self.sym_primitive(&a, kind.name(), std::slice::from_ref(&b_val))?
+                    {
                         self.stack.push(v);
                     } else {
                         self.stack.push(a);
@@ -5631,7 +6188,8 @@ impl Vm {
                     let v = match kind.apply_int(*x, *y) {
                         Some(v) => v,
                         #[cfg(feature = "bignum")]
-                        None => self.bigint_arith(kind, &a, &b)
+                        None => self
+                            .bigint_arith(kind, &a, &b)
                             .expect("ICE: bigint_arith None for Int operands")?,
                         #[cfg(not(feature = "bignum"))]
                         None => unreachable!("apply_int returns None only when bignum is on"),
@@ -5645,7 +6203,14 @@ impl Vm {
                     // Rational × {Int,Rational,Float} (or reverse) —
                     // Phase C.2.
                     self.stack.push(v);
-                } else if let Some(v) = primitive_call(&a, kind.name(), std::slice::from_ref(&b), self.max_value_bytes).map_err(|e| self.trap(e))? {
+                } else if let Some(v) = primitive_call(
+                    &a,
+                    kind.name(),
+                    std::slice::from_ref(&b),
+                    self.max_value_bytes,
+                )
+                .map_err(|e| self.trap(e))?
+                {
                     self.stack.push(v);
                 } else {
                     self.stack.push(a);
@@ -5677,7 +6242,10 @@ impl Vm {
                         }
                         crate::vm::Locals::Shared(rc) => {
                             let locals = rc.borrow();
-                            (locals[a_slot as usize].clone(), locals[b_slot as usize].clone())
+                            (
+                                locals[a_slot as usize].clone(),
+                                locals[b_slot as usize].clone(),
+                            )
                         }
                     },
                     None => unreachable!("BinOpLocalLocal with empty frame stack"),
@@ -5736,7 +6304,14 @@ impl Vm {
                     self.stack.push(v);
                 } else if let Some(v) = self.try_rational_binop(kind, &a, &b)? {
                     self.stack.push(v);
-                } else if let Some(v) = primitive_call(&a, kind.name(), std::slice::from_ref(&b), self.max_value_bytes).map_err(|e| self.trap(e))? {
+                } else if let Some(v) = primitive_call(
+                    &a,
+                    kind.name(),
+                    std::slice::from_ref(&b),
+                    self.max_value_bytes,
+                )
+                .map_err(|e| self.trap(e))?
+                {
                     self.stack.push(v);
                 } else {
                     self.stack.push(a);
@@ -5756,7 +6331,9 @@ impl Vm {
                 // then pops the frame, pushing the return value. Plain
                 // returns (no ensure — the overwhelming majority) keep
                 // the fast direct-pop path below.
-                let has_ensure = self.frames.last()
+                let has_ensure = self
+                    .frames
+                    .last()
                     .and_then(|fr| fr.aux.as_ref())
                     .is_some_and(|a| a.rescues.iter().any(|h| h.is_ensure));
                 if has_ensure {
@@ -5817,7 +6394,10 @@ impl Vm {
                 let ret = self.stack.pop().unwrap_or(Value::Nil);
                 self.stack.truncate(f.base_sp);
                 if f.is_class_body {
-                    let cls = self.class_stack.pop().expect("ICE: class_stack empty on class-body return");
+                    let cls = self
+                        .class_stack
+                        .pop()
+                        .expect("ICE: class_stack empty on class-body return");
                     self.class_visibility_stack.pop();
                     self.module_function_active_stack.pop();
                     // A REAL eigenclass body (`class << obj; …; end` run via
@@ -5828,9 +6408,7 @@ impl Vm {
                     // (heap.ensure_singleton_class) doesn't, but its name is
                     // the `#<Class:…>` form. A regular `class`/`module` body
                     // keeps rubyrs's return-the-class behaviour.
-                    if cls.singleton_target.borrow().is_some()
-                        || cls.name.starts_with("#<Class:")
-                    {
+                    if cls.singleton_target.borrow().is_some() || cls.name.starts_with("#<Class:") {
                         self.stack.push(ret);
                     } else {
                         self.stack.push(Value::Class(cls));
@@ -5979,7 +6557,9 @@ impl Vm {
             }
             None => Vec::new(),
         };
-        let id = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
+        let id = self
+            .heap
+            .alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
         self.env_hash = Some(id);
         Ok(id)
     }
@@ -6003,8 +6583,8 @@ impl Vm {
         // (so a wrong-arity `hash` raises here) and `key.eql?` for collisions.
         let hash_sym = self.interner.intern("hash");
         let eql_sym = self.interner.intern("eql?");
-        let has_user = (0..n)
-            .any(|i| self.key_needs_ruby_hash(&self.stack[split + i * 2], hash_sym, eql_sym));
+        let has_user =
+            (0..n).any(|i| self.key_needs_ruby_hash(&self.stack[split + i * 2], hash_sym, eql_sym));
         if has_user {
             // Keys are still on the stack (GC-rooted) for these dispatches.
             for i in 0..n {
@@ -6058,7 +6638,9 @@ impl Vm {
                 i += 1;
             }
         }
-        let id = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
+        let id = self
+            .heap
+            .alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
         self.stack.push(Value::Hash(id));
         Ok(())
     }

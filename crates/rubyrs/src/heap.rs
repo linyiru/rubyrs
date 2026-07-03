@@ -839,6 +839,7 @@ impl Heap {
             consts: RefCell::new(crate::intern::FxHashMap::default()),
             assigned_name: RefCell::new(None),
             class_tag: None,
+            frozen: std::cell::Cell::new(false),
             #[cfg(feature = "cext")]
             cext_alloc_func: std::cell::Cell::new(None),
         });
@@ -2720,6 +2721,7 @@ mod tests {
             consts: RefCell::new(crate::intern::FxHashMap::default()),
             assigned_name: RefCell::new(None),
             class_tag: None,
+            frozen: std::cell::Cell::new(false),
             #[cfg(feature = "cext")]
             cext_alloc_func: Cell::new(None),
         });

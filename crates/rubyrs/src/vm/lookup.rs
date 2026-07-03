@@ -171,7 +171,6 @@ pub(crate) struct CallCache {
     pub(crate) next_way: u8,
 }
 
-
 impl Vm {
     /// Make sure `call_caches` has at least `n` entries (one per
     /// emitted call op). Called by the host (`Runtime::eval`) after a
@@ -189,7 +188,12 @@ impl Vm {
     /// was stored. A miss does an uncached walk and inserts at the
     /// `next_way` slot (round-robin eviction).
     #[inline]
-    pub(crate) fn lookup_method_cached(&mut self, cls: &Rc<Class>, name_id: SymId, cache_id: u32) -> Option<Rc<Method>> {
+    pub(crate) fn lookup_method_cached(
+        &mut self,
+        cls: &Rc<Class>,
+        name_id: SymId,
+        cache_id: u32,
+    ) -> Option<Rc<Method>> {
         let class_ptr = Rc::as_ptr(cls) as usize;
         let idx = cache_id as usize;
         // Fast path: scan ways for a match.
@@ -349,7 +353,11 @@ impl Vm {
     /// HashSets, one for the superclass chain and one fresh per
     /// step for the singleton-prepends graph.
     #[inline]
-    pub(crate) fn lookup_class_singleton_method(&self, cls: &Rc<Class>, name_id: SymId) -> Option<Rc<Method>> {
+    pub(crate) fn lookup_class_singleton_method(
+        &self,
+        cls: &Rc<Class>,
+        name_id: SymId,
+    ) -> Option<Rc<Method>> {
         // Walk a prepended module (and its own prepends/includes
         // transitively) looking for an *instance* method named
         // `name_id`. Methods on a prepended-to-singleton module
@@ -361,7 +369,9 @@ impl Vm {
             name_id: SymId,
             visited: &mut crate::intern::FxHashSet<*const Class>,
         ) -> Option<Rc<Method>> {
-            if !visited.insert(Rc::as_ptr(m)) { return None; }
+            if !visited.insert(Rc::as_ptr(m)) {
+                return None;
+            }
             for pre in m.prepends.borrow().iter() {
                 if let Some(found) = walk_module(pre, name_id, visited) {
                     return Some(found);
@@ -443,7 +453,11 @@ impl Vm {
     /// `module M; include N; end; class C; include M; end` resolves
     /// `N`'s methods on a `C` instance.
     #[inline]
-    pub(crate) fn lookup_method_uncached(&self, cls: &Rc<Class>, name_id: SymId) -> Option<Rc<Method>> {
+    pub(crate) fn lookup_method_uncached(
+        &self,
+        cls: &Rc<Class>,
+        name_id: SymId,
+    ) -> Option<Rc<Method>> {
         // Recursive helper that walks one node's prepends, own
         // methods, then includes (transitively, in dispatch order).
         // Returns `Some` on the first hit. `visited` carries an
@@ -501,8 +515,8 @@ impl Vm {
             if depth > 4096 {
                 return None;
             }
-            let has_modules = !current.prepends.borrow().is_empty()
-                || !current.includes.borrow().is_empty();
+            let has_modules =
+                !current.prepends.borrow().is_empty() || !current.includes.borrow().is_empty();
             let found = if has_modules {
                 let mut inc_visited: crate::intern::FxHashSet<*const Class> =
                     crate::intern::FxHashSet::default();
@@ -565,9 +579,7 @@ impl Vm {
             }
             if Rc::as_ptr(m) == anchor {
                 *past_anchor = true;
-            } else if *past_anchor
-                && let Some(found) = m.methods.borrow().get(&name_id).cloned()
-            {
+            } else if *past_anchor && let Some(found) = m.methods.borrow().get(&name_id).cloned() {
                 return Some((m.clone(), found));
             }
             for inc in m.includes.borrow().iter() {
@@ -595,7 +607,13 @@ impl Vm {
                 return None; // cyclic superclass chain — unreachable in a sane VM
             }
             inc_visited.clear();
-            if let Some(r) = walk_module(&current, name_id, anchor, &mut past_anchor, &mut inc_visited) {
+            if let Some(r) = walk_module(
+                &current,
+                name_id,
+                anchor,
+                &mut past_anchor,
+                &mut inc_visited,
+            ) {
                 return Some(r);
             }
             let parent = current.superclass.borrow().clone();
@@ -633,18 +651,55 @@ impl Vm {
     /// minus the `__`-prefixed reserved pair (which Mock skips
     /// anyway) and minus pp/gem-injected extras.
     pub(crate) const UNIVERSAL_OBJECT_METHODS: &'static [&'static str] = &[
-        "!", "!=", "!~", "<=>", "==", "===", "=~",
-        "class", "clone", "define_singleton_method", "display",
-        "dup", "enum_for", "eql?", "equal?", "extend", "freeze",
-        "frozen?", "hash", "inspect", "instance_eval",
-        "instance_exec", "instance_of?", "instance_variable_defined?",
-        "instance_variable_get", "instance_variable_set",
-        "instance_variables", "is_a?", "itself", "kind_of?",
-        "method", "methods", "nil?", "object_id", "private_methods",
-        "protected_methods", "public_method", "public_methods",
-        "public_send", "remove_instance_variable", "respond_to?",
-        "send", "singleton_class", "singleton_method",
-        "singleton_methods", "tap", "then", "to_enum", "to_s",
+        "!",
+        "!=",
+        "!~",
+        "<=>",
+        "==",
+        "===",
+        "=~",
+        "class",
+        "clone",
+        "define_singleton_method",
+        "display",
+        "dup",
+        "enum_for",
+        "eql?",
+        "equal?",
+        "extend",
+        "freeze",
+        "frozen?",
+        "hash",
+        "inspect",
+        "instance_eval",
+        "instance_exec",
+        "instance_of?",
+        "instance_variable_defined?",
+        "instance_variable_get",
+        "instance_variable_set",
+        "instance_variables",
+        "is_a?",
+        "itself",
+        "kind_of?",
+        "method",
+        "methods",
+        "nil?",
+        "object_id",
+        "private_methods",
+        "protected_methods",
+        "public_method",
+        "public_methods",
+        "public_send",
+        "remove_instance_variable",
+        "respond_to?",
+        "send",
+        "singleton_class",
+        "singleton_method",
+        "singleton_methods",
+        "tap",
+        "then",
+        "to_enum",
+        "to_s",
         "yield_self",
     ];
 
@@ -656,20 +711,79 @@ impl Vm {
     /// rack's `Rack::Headers` test asserts its override set is a subset
     /// of `Hash.public_instance_methods` (spec_headers#test_public_interface).
     pub(crate) const NATIVE_HASH_METHODS: &'static [&'static str] = &[
-        "<", "<=", "==", ">", ">=", "[]", "[]=", "any?", "assoc",
-        "clear", "compact", "compact!", "compare_by_identity",
-        "compare_by_identity?", "deconstruct_keys", "default",
-        "default=", "default_proc", "default_proc=", "delete",
-        "delete_if", "dig", "each", "each_key", "each_pair",
-        "each_value", "empty?", "eql?", "except", "fetch",
-        "fetch_values", "filter", "filter!", "flatten", "freeze",
-        "has_key?", "has_value?", "hash", "include?", "inspect",
-        "invert", "keep_if", "key", "key?", "keys", "length", "member?",
-        "merge", "merge!", "rassoc", "rehash", "reject", "reject!",
-        "replace", "select", "select!", "shift", "size", "slice",
-        "store", "to_a", "to_h", "to_hash", "to_proc", "to_s",
-        "transform_keys", "transform_keys!", "transform_values",
-        "transform_values!", "update", "value?", "values", "values_at",
+        "<",
+        "<=",
+        "==",
+        ">",
+        ">=",
+        "[]",
+        "[]=",
+        "any?",
+        "assoc",
+        "clear",
+        "compact",
+        "compact!",
+        "compare_by_identity",
+        "compare_by_identity?",
+        "deconstruct_keys",
+        "default",
+        "default=",
+        "default_proc",
+        "default_proc=",
+        "delete",
+        "delete_if",
+        "dig",
+        "each",
+        "each_key",
+        "each_pair",
+        "each_value",
+        "empty?",
+        "eql?",
+        "except",
+        "fetch",
+        "fetch_values",
+        "filter",
+        "filter!",
+        "flatten",
+        "freeze",
+        "has_key?",
+        "has_value?",
+        "hash",
+        "include?",
+        "inspect",
+        "invert",
+        "keep_if",
+        "key",
+        "key?",
+        "keys",
+        "length",
+        "member?",
+        "merge",
+        "merge!",
+        "rassoc",
+        "rehash",
+        "reject",
+        "reject!",
+        "replace",
+        "select",
+        "select!",
+        "shift",
+        "size",
+        "slice",
+        "store",
+        "to_a",
+        "to_h",
+        "to_hash",
+        "to_proc",
+        "to_s",
+        "transform_keys",
+        "transform_keys!",
+        "transform_values",
+        "transform_values!",
+        "update",
+        "value?",
+        "values",
+        "values_at",
     ];
 
     /// Array's own native instance methods. Like Hash, most of Array's
@@ -678,32 +792,137 @@ impl Vm {
     /// and subclasses. RuboCop's `CollectionNode` builds delegators from
     /// `Array.instance_methods - Object.instance_methods`.
     pub(crate) const NATIVE_ARRAY_METHODS: &'static [&'static str] = &[
-        "freeze", "frozen?", "length", "size", "push", "<<", "[]", "[]=",
-        "unshift", "prepend", "insert", "shift", "pop", "delete",
-        "reverse_each", "first", "last", "empty?", "include?", "member?",
-        "count", "sum", "min", "max", "sort", "tally", "combination",
-        "permutation", "assoc", "rassoc", "pack", "inject", "reduce",
-        "to_a", "to_ary", "reverse", "uniq", "compact", "flatten", "join",
-        "+", "-", "concat", "replace", "clear", "take", "drop",
-        "find_index", "index", "each", "map", "collect", "select",
-        "filter", "reject", "find", "detect", "any?", "all?", "none?",
-        "each_with_index", "each_index", "sort_by", "min_by", "max_by",
-        "group_by", "each_with_object", "partition", "chunk_while",
-        "slice_when", "bsearch", "take_while", "drop_while", "zip",
-        "sort!", "uniq!", "compact!", "flatten!", "reverse!", "rotate",
-        "rotate!", "map!", "collect!", "sort_by!", "delete_if", "reject!",
-        "keep_if", "select!", "filter!", "flat_map", "collect_concat",
-        "chunk", "filter_map", "each_slice", "each_cons", "cycle",
-        "transpose", "inspect", "dup", "clone",
+        "freeze",
+        "frozen?",
+        "length",
+        "size",
+        "push",
+        "<<",
+        "[]",
+        "[]=",
+        "unshift",
+        "prepend",
+        "insert",
+        "shift",
+        "pop",
+        "delete",
+        "reverse_each",
+        "first",
+        "last",
+        "empty?",
+        "include?",
+        "member?",
+        "count",
+        "sum",
+        "min",
+        "max",
+        "sort",
+        "tally",
+        "combination",
+        "permutation",
+        "assoc",
+        "rassoc",
+        "pack",
+        "inject",
+        "reduce",
+        "to_a",
+        "to_ary",
+        "reverse",
+        "uniq",
+        "compact",
+        "flatten",
+        "join",
+        "+",
+        "-",
+        "concat",
+        "replace",
+        "clear",
+        "take",
+        "drop",
+        "find_index",
+        "index",
+        "each",
+        "map",
+        "collect",
+        "select",
+        "filter",
+        "reject",
+        "find",
+        "detect",
+        "any?",
+        "all?",
+        "none?",
+        "each_with_index",
+        "each_index",
+        "sort_by",
+        "min_by",
+        "max_by",
+        "group_by",
+        "each_with_object",
+        "partition",
+        "chunk_while",
+        "slice_when",
+        "bsearch",
+        "take_while",
+        "drop_while",
+        "zip",
+        "sort!",
+        "uniq!",
+        "compact!",
+        "flatten!",
+        "reverse!",
+        "rotate",
+        "rotate!",
+        "map!",
+        "collect!",
+        "sort_by!",
+        "delete_if",
+        "reject!",
+        "keep_if",
+        "select!",
+        "filter!",
+        "flat_map",
+        "collect_concat",
+        "chunk",
+        "filter_map",
+        "each_slice",
+        "each_cons",
+        "cycle",
+        "transpose",
+        "inspect",
+        "dup",
+        "clone",
     ];
 
     pub(crate) fn universal_arm_name(name: &str) -> bool {
-        matches!(name,
-            "nil?" | "to_s" | "respond_to?" | "class" | "==" | "!=" | "!" | "!@" | "<=>" | "equal?" | "eql?"
-            | "send" | "__send__" | "object_id" | "__id__" | "hash" | "frozen?" | "inspect"
-            | "instance_variables" | "instance_variable_get" | "instance_variable_set"
-            | "instance_variable_defined?" | "instance_exec"
-            | "method" | "singleton_method" | "public_method"
+        matches!(
+            name,
+            "nil?"
+                | "to_s"
+                | "respond_to?"
+                | "class"
+                | "=="
+                | "!="
+                | "!"
+                | "!@"
+                | "<=>"
+                | "equal?"
+                | "eql?"
+                | "send"
+                | "__send__"
+                | "object_id"
+                | "__id__"
+                | "hash"
+                | "frozen?"
+                | "inspect"
+                | "instance_variables"
+                | "instance_variable_get"
+                | "instance_variable_set"
+                | "instance_variable_defined?"
+                | "instance_exec"
+                | "method"
+                | "singleton_method"
+                | "public_method"
         )
     }
 
@@ -713,13 +932,29 @@ impl Vm {
     /// true)` AND `alias_method`'s source-resolution must both recognise them.
     /// Single source of truth for the two consumers.
     pub(crate) fn universal_kernel_private(name: &str) -> bool {
-        matches!(name,
-            "exit" | "exit!" | "abort" | "at_exit"
-            | "puts" | "print" | "p" | "pp" | "warn"
-            | "require" | "require_relative" | "load"
-            | "sprintf" | "format" | "caller"
-            | "rand" | "srand" | "raise" | "fail"
-            | "block_given?" | "iterator?"
+        matches!(
+            name,
+            "exit"
+                | "exit!"
+                | "abort"
+                | "at_exit"
+                | "puts"
+                | "print"
+                | "p"
+                | "pp"
+                | "warn"
+                | "require"
+                | "require_relative"
+                | "load"
+                | "sprintf"
+                | "format"
+                | "caller"
+                | "rand"
+                | "srand"
+                | "raise"
+                | "fail"
+                | "block_given?"
+                | "iterator?"
         )
     }
 
@@ -730,9 +965,14 @@ impl Vm {
     /// (`undef_method :dup, :clone, :initialize_copy, :initialize_clone,
     /// :initialize_dup` to disallow copying a Database).
     pub(crate) fn universal_object_private(name: &str) -> bool {
-        matches!(name,
-            "initialize" | "initialize_copy" | "initialize_clone" | "initialize_dup"
-            | "respond_to_missing?" | "method_missing"
+        matches!(
+            name,
+            "initialize"
+                | "initialize_copy"
+                | "initialize_clone"
+                | "initialize_dup"
+                | "respond_to_missing?"
+                | "method_missing"
         )
     }
 
@@ -757,91 +997,276 @@ impl Vm {
     }
 
     pub(crate) fn int_primitive_arm(name: &str) -> bool {
-        matches!(name,
-            "+" | "-" | "*" | "/" | "%" | "**" | "pow" |
-            "<" | "<=" | ">" | ">=" |
-            "&" | "|" | "^" | "<<" | ">>" | "~" |
-            "to_s" | "inspect" |
-            "to_i" | "to_int" | "to_f" | "abs" | "even?" | "odd?" |
-            "zero?" | "nonzero?" | "positive?" | "negative?" |
-            "succ" | "next" | "pred" | "-@" | "+@" |
-            "times" | "upto" | "downto" | "step" |
-            "digits" | "bit_length" | "size" | "[]" |
-            "allbits?" | "anybits?" | "nobits?" |
-            "gcd" | "lcm" | "gcdlcm" | "fdiv" | "div" | "divmod" |
-            "ceil" | "floor" | "round" | "truncate" |
-            "chr" | "coerce" |
-            "to_r" | "rationalize" |
-            "eql?" | "hash" |
-            "dup" | "clone"
+        matches!(
+            name,
+            "+" | "-"
+                | "*"
+                | "/"
+                | "%"
+                | "**"
+                | "pow"
+                | "<"
+                | "<="
+                | ">"
+                | ">="
+                | "&"
+                | "|"
+                | "^"
+                | "<<"
+                | ">>"
+                | "~"
+                | "to_s"
+                | "inspect"
+                | "to_i"
+                | "to_int"
+                | "to_f"
+                | "abs"
+                | "even?"
+                | "odd?"
+                | "zero?"
+                | "nonzero?"
+                | "positive?"
+                | "negative?"
+                | "succ"
+                | "next"
+                | "pred"
+                | "-@"
+                | "+@"
+                | "times"
+                | "upto"
+                | "downto"
+                | "step"
+                | "digits"
+                | "bit_length"
+                | "size"
+                | "[]"
+                | "allbits?"
+                | "anybits?"
+                | "nobits?"
+                | "gcd"
+                | "lcm"
+                | "gcdlcm"
+                | "fdiv"
+                | "div"
+                | "divmod"
+                | "ceil"
+                | "floor"
+                | "round"
+                | "truncate"
+                | "chr"
+                | "coerce"
+                | "to_r"
+                | "rationalize"
+                | "eql?"
+                | "hash"
+                | "dup"
+                | "clone"
         )
     }
     pub(crate) fn float_primitive_arm(name: &str) -> bool {
-        matches!(name,
-            "+" | "-" | "*" | "/" | "%" | "**" |
-            "<" | "<=" | ">" | ">=" |
-            "to_s" | "inspect" |
-            "to_i" | "to_int" | "to_f" | "abs" |
-            "zero?" | "nonzero?" | "positive?" | "negative?" |
-            "nan?" | "infinite?" | "finite?" |
-            "next_float" | "prev_float" |
-            "eql?" | "hash" |
-            "floor" | "ceil" | "round" | "truncate" | "divmod" | "step" |
-            "-@" | "+@" |
-            "to_r" | "rationalize" |
-            "coerce" |
-            "dup" | "clone"
+        matches!(
+            name,
+            "+" | "-"
+                | "*"
+                | "/"
+                | "%"
+                | "**"
+                | "<"
+                | "<="
+                | ">"
+                | ">="
+                | "to_s"
+                | "inspect"
+                | "to_i"
+                | "to_int"
+                | "to_f"
+                | "abs"
+                | "zero?"
+                | "nonzero?"
+                | "positive?"
+                | "negative?"
+                | "nan?"
+                | "infinite?"
+                | "finite?"
+                | "next_float"
+                | "prev_float"
+                | "eql?"
+                | "hash"
+                | "floor"
+                | "ceil"
+                | "round"
+                | "truncate"
+                | "divmod"
+                | "step"
+                | "-@"
+                | "+@"
+                | "to_r"
+                | "rationalize"
+                | "coerce"
+                | "dup"
+                | "clone"
         )
     }
     pub(crate) fn str_primitive_arm(name: &str) -> bool {
-        matches!(name,
-            "+" | "*" | "%" | "<" | "<=" | ">" | ">=" |
-            "length" | "size" | "empty?" |
-            "upcase" | "downcase" | "reverse" |
-            "capitalize" | "swapcase" |
-            "upcase!" | "downcase!" | "reverse!" |
-            "capitalize!" | "swapcase!" |
-            "strip" | "lstrip" | "rstrip" |
-            "strip!" | "lstrip!" | "rstrip!" |
-            "chomp" | "chomp!" | "chop" |
-            "tr!" | "squeeze!" | "delete" | "delete!" |
-            "center" | "ljust" | "rjust" |
-            "include?" | "start_with?" | "end_with?" |
-            "delete_prefix" | "delete_suffix" | "delete_prefix!" | "delete_suffix!" |
-            "to_i" | "to_f" | "chars" | "split" | "lines" | "each_line" | "to_sym" | "intern" |
-            "to_s" | "to_str" | "inspect" |
-            "sub" | "sub!" | "gsub" | "gsub!" |
-            "tr" | "tr_s" | "squeeze" | "sum" |
-            "encode" | "force_encoding" | "valid_encoding?" | "encoding" | "b" |
-            "unpack" | "unpack1" | "bytes" | "getbyte" | "each_byte" |
-            "match?" | "match" | "scan" | "index" | "rindex" | "=~" |
-            "[]" | "slice" |
-            "<<" | "concat" | "prepend" | "replace" | "clear" |
-            "freeze" | "frozen?" | "dup" | "+@" | "-@" | "dump" | "count" |
-            "hash"
+        matches!(
+            name,
+            "+" | "*"
+                | "%"
+                | "<"
+                | "<="
+                | ">"
+                | ">="
+                | "length"
+                | "size"
+                | "empty?"
+                | "upcase"
+                | "downcase"
+                | "reverse"
+                | "capitalize"
+                | "swapcase"
+                | "upcase!"
+                | "downcase!"
+                | "reverse!"
+                | "capitalize!"
+                | "swapcase!"
+                | "strip"
+                | "lstrip"
+                | "rstrip"
+                | "strip!"
+                | "lstrip!"
+                | "rstrip!"
+                | "chomp"
+                | "chomp!"
+                | "chop"
+                | "tr!"
+                | "squeeze!"
+                | "delete"
+                | "delete!"
+                | "center"
+                | "ljust"
+                | "rjust"
+                | "include?"
+                | "start_with?"
+                | "end_with?"
+                | "delete_prefix"
+                | "delete_suffix"
+                | "delete_prefix!"
+                | "delete_suffix!"
+                | "to_i"
+                | "to_f"
+                | "chars"
+                | "split"
+                | "lines"
+                | "each_line"
+                | "to_sym"
+                | "intern"
+                | "to_s"
+                | "to_str"
+                | "inspect"
+                | "sub"
+                | "sub!"
+                | "gsub"
+                | "gsub!"
+                | "tr"
+                | "tr_s"
+                | "squeeze"
+                | "sum"
+                | "encode"
+                | "force_encoding"
+                | "valid_encoding?"
+                | "encoding"
+                | "b"
+                | "unpack"
+                | "unpack1"
+                | "bytes"
+                | "getbyte"
+                | "each_byte"
+                | "match?"
+                | "match"
+                | "scan"
+                | "index"
+                | "rindex"
+                | "=~"
+                | "[]"
+                | "slice"
+                | "<<"
+                | "concat"
+                | "prepend"
+                | "replace"
+                | "clear"
+                | "freeze"
+                | "frozen?"
+                | "dup"
+                | "+@"
+                | "-@"
+                | "dump"
+                | "count"
+                | "hash"
         )
     }
     pub(crate) fn sym_primitive_arm(name: &str) -> bool {
-        matches!(name, "to_sym" | "to_s" | "inspect" | "name" | "succ" | "next" | "dup" | "clone"
-            | "empty?" | "length" | "size" | "upcase" | "downcase" | "capitalize" | "swapcase")
+        matches!(
+            name,
+            "to_sym"
+                | "to_s"
+                | "inspect"
+                | "name"
+                | "succ"
+                | "next"
+                | "dup"
+                | "clone"
+                | "empty?"
+                | "length"
+                | "size"
+                | "upcase"
+                | "downcase"
+                | "capitalize"
+                | "swapcase"
+        )
     }
     pub(crate) fn nil_primitive_arm(name: &str) -> bool {
-        matches!(name, "to_s" | "inspect" | "dup" | "clone" | "to_a" | "to_h" | "&" | "|" | "^")
+        matches!(
+            name,
+            "to_s" | "inspect" | "dup" | "clone" | "to_a" | "to_h" | "&" | "|" | "^"
+        )
     }
     pub(crate) fn bool_primitive_arm(name: &str) -> bool {
         matches!(name, "to_s" | "inspect" | "dup" | "clone" | "&" | "|" | "^")
     }
     pub(crate) fn rational_primitive_arm(name: &str) -> bool {
-        matches!(name,
-            "numerator" | "denominator" |
-            "to_s" | "inspect" | "to_r" |
-            "to_i" | "to_f" |
-            "+" | "-" | "*" | "/" | "**" |
-            "<" | "<=" | ">" | ">=" | "<=>" |
-            "abs" | "magnitude" | "abs2" | "-@" | "+@" |
-            "zero?" | "nonzero?" | "positive?" | "negative?" |
-            "floor" | "ceil" | "round" | "truncate" |
-            "coerce"
+        matches!(
+            name,
+            "numerator"
+                | "denominator"
+                | "to_s"
+                | "inspect"
+                | "to_r"
+                | "to_i"
+                | "to_f"
+                | "+"
+                | "-"
+                | "*"
+                | "/"
+                | "**"
+                | "<"
+                | "<="
+                | ">"
+                | ">="
+                | "<=>"
+                | "abs"
+                | "magnitude"
+                | "abs2"
+                | "-@"
+                | "+@"
+                | "zero?"
+                | "nonzero?"
+                | "positive?"
+                | "negative?"
+                | "floor"
+                | "ceil"
+                | "round"
+                | "truncate"
+                | "coerce"
         )
     }
 
@@ -868,9 +1293,21 @@ impl Vm {
         match class_name {
             "Dir" => matches!(
                 method,
-                "children" | "entries" | "glob" | "[]" | "exist?" | "exists?"
-                    | "directory?" | "pwd" | "getwd" | "mkdir" | "rmdir"
-                    | "delete" | "unlink" | "chdir" | "home"
+                "children"
+                    | "entries"
+                    | "glob"
+                    | "[]"
+                    | "exist?"
+                    | "exists?"
+                    | "directory?"
+                    | "pwd"
+                    | "getwd"
+                    | "mkdir"
+                    | "rmdir"
+                    | "delete"
+                    | "unlink"
+                    | "chdir"
+                    | "home"
             ),
             _ => false,
         }
@@ -964,7 +1401,8 @@ impl Vm {
         // or user-defined), so `obj.respond_to?(:send)` should
         // be true for every value — feature-detection has to
         // agree with what dispatch will actually accept.
-        if matches!(name,
+        if matches!(
+            name,
             "nil?" | "to_s" | "respond_to?" | "class" | "==" | "!=" | "!" | "!@" | "<=>" | "equal?" | "eql?"
             | "send" | "__send__"
             // Universal dispatch arms wired by the
@@ -1034,30 +1472,70 @@ impl Vm {
             // compute a Bool/Int, so they fit cleanly in the
             // existing bigint_primitive shape.
             #[cfg(feature = "bignum")]
-            Value::BigInt(_) => matches!(name,
-                "+" | "-" | "*" | "/" | "%" | "**" | "pow" |
-                "-@" | "+@" | "abs" | "~" |
-                "&" | "|" | "^" | "<<" | ">>" |
-                "<" | "<=" | ">" | ">=" |
-                "to_s" | "inspect" |
-                "to_i" | "to_f" |
-                "zero?" | "positive?" | "negative?" |
-                "even?" | "odd?" |
-                "bit_length" | "digits" | "size" |
-                "allbits?" | "anybits?" | "nobits?" |
-                "gcd" | "lcm" | "fdiv" | "divmod" |
-                "ceil" | "floor" | "round" | "truncate" |
-                "times" | "upto" | "downto" |
-                "succ" | "next" | "pred" |
-                "chr" | "coerce" |
-                "to_r" | "rationalize" |
-                "eql?" | "hash" |
-                "dup" | "clone"
+            Value::BigInt(_) => matches!(
+                name,
+                "+" | "-"
+                    | "*"
+                    | "/"
+                    | "%"
+                    | "**"
+                    | "pow"
+                    | "-@"
+                    | "+@"
+                    | "abs"
+                    | "~"
+                    | "&"
+                    | "|"
+                    | "^"
+                    | "<<"
+                    | ">>"
+                    | "<"
+                    | "<="
+                    | ">"
+                    | ">="
+                    | "to_s"
+                    | "inspect"
+                    | "to_i"
+                    | "to_f"
+                    | "zero?"
+                    | "positive?"
+                    | "negative?"
+                    | "even?"
+                    | "odd?"
+                    | "bit_length"
+                    | "digits"
+                    | "size"
+                    | "allbits?"
+                    | "anybits?"
+                    | "nobits?"
+                    | "gcd"
+                    | "lcm"
+                    | "fdiv"
+                    | "divmod"
+                    | "ceil"
+                    | "floor"
+                    | "round"
+                    | "truncate"
+                    | "times"
+                    | "upto"
+                    | "downto"
+                    | "succ"
+                    | "next"
+                    | "pred"
+                    | "chr"
+                    | "coerce"
+                    | "to_r"
+                    | "rationalize"
+                    | "eql?"
+                    | "hash"
+                    | "dup"
+                    | "clone"
             ),
             Value::Float(_) => Self::float_primitive_arm(name),
             Value::Str(_) => Self::str_primitive_arm(name),
             Value::Sym(_) => Self::sym_primitive_arm(name),
-            Value::Array(_) => matches!(name,
+            Value::Array(_) => matches!(
+                name,
                 "freeze" | "frozen?" |
                 "length" | "size" | "push" | "<<" | "[]" | "[]=" |
                 "unshift" | "prepend" | "insert" |
@@ -1090,43 +1568,146 @@ impl Vm {
                 // are indistinguishable. (TRY_RUNS layer #26.)
                 "dup" | "clone"
             ),
-            Value::Hash(_) => matches!(name,
-                "freeze" | "frozen?" |
-                "length" | "size" | "[]" | "[]=" | "empty?" |
-                "include?" | "has_key?" | "key?" | "member?" |
-                "keys" | "values" | "values_at" | "to_h" | "to_hash" | "to_a" |
-                "each_key" | "each_value" |
-                "merge" | "merge!" | "update" | "replace" | "clear" | "delete" | "invert" | "key" | "store" | "except" | "slice" | "dup" | "clone" |
-                "each" | "each_pair" |
-                "select" | "filter" | "reject" | "find" | "detect" |
-                "select!" | "filter!" | "reject!" | "keep_if" | "delete_if" |
-                "any?" | "all?" | "none?" |
-                "each_with_index" | "map" | "collect" | "fetch" |
-                "fetch_values" | "dig" | "assoc" | "rassoc" |
-                "sort" | "sort_by" | "min_by" | "max_by" | "group_by" |
-                "transform_keys" | "transform_values" |
-                "transform_keys!" | "transform_values!" |
-                "compact" | "compact!" | "filter_map" |
-                "default" | "default_proc" | "default_proc=" | "count" | "each_with_object" |
-                "flat_map" | "collect_concat" | "reduce" | "inject" | "sum" |
-                "first" | "min" | "max" | "one?" | "partition" |
-                "take" | "drop" | "take_while" | "drop_while" | "find_index" |
-                "tally" | "uniq" | "zip" |
-                "each_slice" | "each_cons" | "chunk_while" | "slice_when" |
-                "inspect"
+            Value::Hash(_) => matches!(
+                name,
+                "freeze"
+                    | "frozen?"
+                    | "length"
+                    | "size"
+                    | "[]"
+                    | "[]="
+                    | "empty?"
+                    | "include?"
+                    | "has_key?"
+                    | "key?"
+                    | "member?"
+                    | "keys"
+                    | "values"
+                    | "values_at"
+                    | "to_h"
+                    | "to_hash"
+                    | "to_a"
+                    | "each_key"
+                    | "each_value"
+                    | "merge"
+                    | "merge!"
+                    | "update"
+                    | "replace"
+                    | "clear"
+                    | "delete"
+                    | "invert"
+                    | "key"
+                    | "store"
+                    | "except"
+                    | "slice"
+                    | "dup"
+                    | "clone"
+                    | "each"
+                    | "each_pair"
+                    | "select"
+                    | "filter"
+                    | "reject"
+                    | "find"
+                    | "detect"
+                    | "select!"
+                    | "filter!"
+                    | "reject!"
+                    | "keep_if"
+                    | "delete_if"
+                    | "any?"
+                    | "all?"
+                    | "none?"
+                    | "each_with_index"
+                    | "map"
+                    | "collect"
+                    | "fetch"
+                    | "fetch_values"
+                    | "dig"
+                    | "assoc"
+                    | "rassoc"
+                    | "sort"
+                    | "sort_by"
+                    | "min_by"
+                    | "max_by"
+                    | "group_by"
+                    | "transform_keys"
+                    | "transform_values"
+                    | "transform_keys!"
+                    | "transform_values!"
+                    | "compact"
+                    | "compact!"
+                    | "filter_map"
+                    | "default"
+                    | "default_proc"
+                    | "default_proc="
+                    | "count"
+                    | "each_with_object"
+                    | "flat_map"
+                    | "collect_concat"
+                    | "reduce"
+                    | "inject"
+                    | "sum"
+                    | "first"
+                    | "min"
+                    | "max"
+                    | "one?"
+                    | "partition"
+                    | "take"
+                    | "drop"
+                    | "take_while"
+                    | "drop_while"
+                    | "find_index"
+                    | "tally"
+                    | "uniq"
+                    | "zip"
+                    | "each_slice"
+                    | "each_cons"
+                    | "chunk_while"
+                    | "slice_when"
+                    | "inspect"
             ),
-            Value::Range(_) => matches!(name,
-                "begin" | "end" | "first" | "last" | "min" | "max" |
-                "size" | "length" | "count" |
-                "exclude_end?" | "include?" | "member?" | "cover?" | "step" | "to_a" |
-                "sum" | "inject" | "reduce" |
-                "each" | "map" | "select" | "filter" |
-                "reject" | "find" | "detect" |
-                "any?" | "all?" | "none?" |
-                "each_with_index" | "each_with_object" |
-                "partition" | "min_by" | "max_by" |
-                "group_by" | "sort_by" | "sort" |
-                "each_slice" | "each_cons" | "chunk_while" | "slice_when"
+            Value::Range(_) => matches!(
+                name,
+                "begin"
+                    | "end"
+                    | "first"
+                    | "last"
+                    | "min"
+                    | "max"
+                    | "size"
+                    | "length"
+                    | "count"
+                    | "exclude_end?"
+                    | "include?"
+                    | "member?"
+                    | "cover?"
+                    | "step"
+                    | "to_a"
+                    | "sum"
+                    | "inject"
+                    | "reduce"
+                    | "each"
+                    | "map"
+                    | "select"
+                    | "filter"
+                    | "reject"
+                    | "find"
+                    | "detect"
+                    | "any?"
+                    | "all?"
+                    | "none?"
+                    | "each_with_index"
+                    | "each_with_object"
+                    | "partition"
+                    | "min_by"
+                    | "max_by"
+                    | "group_by"
+                    | "sort_by"
+                    | "sort"
+                    | "each_slice"
+                    | "each_cons"
+                    | "chunk_while"
+                    | "slice_when"
             ),
             Value::Nil => Self::nil_primitive_arm(name),
             Value::Bool(_) => Self::bool_primitive_arm(name),
@@ -1153,7 +1734,8 @@ impl Vm {
                 // dispatch.rs); they're in the whitelist so
                 // feature-detection (`C.respond_to?(:autoload)`)
                 // agrees with what dispatch will accept.
-                if matches!(name,
+                if matches!(
+                    name,
                     "new" | "name" | "to_s" | "inspect"
                     | "method_defined?" | "instance_method" | "undef_method" | "remove_method"
                     | "ancestors" | "included_modules" | "include?"
@@ -1219,10 +1801,7 @@ impl Vm {
                 if name == "superclass" && !cls.is_module {
                     return true;
                 }
-                if name == "allocate"
-                    && !cls.is_module
-                    && cls.name != "Module"
-                {
+                if name == "allocate" && !cls.is_module && cls.name != "Module" {
                     return true;
                 }
                 // `Kernel.respond_to?(:load)` and the other Kernel
@@ -1241,9 +1820,10 @@ impl Vm {
                     return true;
                 }
                 self.lookup_class_singleton_method(cls, name_id)
-                    .is_some_and(|m| include_private
-                        || m.visibility.get() == crate::value::Visibility::Public)
-            },
+                    .is_some_and(|m| {
+                        include_private || m.visibility.get() == crate::value::Visibility::Public
+                    })
+            }
             Value::Object(id) => {
                 // The universal `dup`/`clone` arm in
                 // `Vm::do_call` handles plain Value::Object via
@@ -1253,13 +1833,29 @@ impl Vm {
                     return true;
                 }
                 let cls = self.heap.class_of(*id);
-                self.lookup_method_uncached(&cls, name_id)
-                    .is_some_and(|m| include_private
-                        || m.visibility.get() == crate::value::Visibility::Public)
+                self.lookup_method_uncached(&cls, name_id).is_some_and(|m| {
+                    include_private || m.visibility.get() == crate::value::Visibility::Public
+                })
             }
-            Value::Block(_) => matches!(name, "call" | "[]" | "()" | "yield" | "arity" | "curry" | ">>" | "<<" | "lambda?" | "to_proc" | "===" | "source_location" | "binding"),
+            Value::Block(_) => matches!(
+                name,
+                "call"
+                    | "[]"
+                    | "()"
+                    | "yield"
+                    | "arity"
+                    | "curry"
+                    | ">>"
+                    | "<<"
+                    | "lambda?"
+                    | "to_proc"
+                    | "==="
+                    | "source_location"
+                    | "binding"
+            ),
             #[cfg(feature = "regex")]
-            Value::Regex(_) => matches!(name,
+            Value::Regex(_) => matches!(
+                name,
                 "match" | "match?" | "===" | "=~" | "source" | "to_s" | "inspect" | "options" | "names" | "named_captures" | "casefold?"
                 // `freeze` / `frozen?` are compatibility shims:
                 // Regexp is immutable by construction so freezing
@@ -1274,8 +1870,42 @@ impl Vm {
             // whitelist at the top of this fn — don't list them
             // again here. (Keeping `==` historically muddied the
             // story; dropping all four for consistency.)
-            Value::BoundMethod(_) => matches!(name, "call" | "[]" | "()" | "unbind" | "bind_call" | "arity" | "parameters" | ">>" | "<<" | "curry" | "to_proc" | "owner" | "receiver" | "name" | "original_name" | "source_location" | "super_method" | "dup" | "clone"),
-            Value::UnboundMethod(_) => matches!(name, "bind" | "bind_call" | "arity" | "parameters" | "owner" | "name" | "original_name" | "source_location" | "super_method" | "dup" | "clone"),
+            Value::BoundMethod(_) => matches!(
+                name,
+                "call"
+                    | "[]"
+                    | "()"
+                    | "unbind"
+                    | "bind_call"
+                    | "arity"
+                    | "parameters"
+                    | ">>"
+                    | "<<"
+                    | "curry"
+                    | "to_proc"
+                    | "owner"
+                    | "receiver"
+                    | "name"
+                    | "original_name"
+                    | "source_location"
+                    | "super_method"
+                    | "dup"
+                    | "clone"
+            ),
+            Value::UnboundMethod(_) => matches!(
+                name,
+                "bind"
+                    | "bind_call"
+                    | "arity"
+                    | "parameters"
+                    | "owner"
+                    | "name"
+                    | "original_name"
+                    | "source_location"
+                    | "super_method"
+                    | "dup"
+                    | "clone"
+            ),
             Value::CurriedProc(_) => matches!(name, "call" | "[]" | "()" | "arity"),
         };
         if yes {
@@ -1314,9 +1944,9 @@ impl Vm {
             };
             if let Some(sym) = self.interner.get_id(cname)
                 && let Some(cls) = self.classes.get(&sym).cloned()
-                && self.lookup_method_uncached(&cls, name_id)
-                    .is_some_and(|m| include_private
-                        || m.visibility.get() == crate::value::Visibility::Public)
+                && self.lookup_method_uncached(&cls, name_id).is_some_and(|m| {
+                    include_private || m.visibility.get() == crate::value::Visibility::Public
+                })
             {
                 return true;
             }
@@ -1335,18 +1965,21 @@ impl Vm {
         // A Hash-subclass instance carries its real class as a tag;
         // report that (so `obj.class` / `is_a?` see the subclass).
         if let Value::Hash(id) = recv
-            && let Some(c) = self.heap.hash_class_tag(*id) {
+            && let Some(c) = self.heap.hash_class_tag(*id)
+        {
             return Value::Class(c);
         }
         // Array twin (`class StringRegister < Array` — rouge's
         // python lexer).
         if let Value::Array(id) = recv
-            && let Some(c) = self.heap.array_class_tag(*id) {
+            && let Some(c) = self.heap.array_class_tag(*id)
+        {
             return Value::Class(c);
         }
         // String twin (`class Password < String` — bcrypt).
         if let Value::Str(s) = recv
-            && let Some(c) = s.class_tag.borrow().clone() {
+            && let Some(c) = s.class_tag.borrow().clone()
+        {
             return Value::Class(c);
         }
         // A module/class VALUE that is an instance of a user `Module`/
@@ -1354,7 +1987,8 @@ impl Vm {
         // reports that subclass as its class (CRuby), not the generic
         // `Module`/`Class`.
         if let Value::Class(c) = recv
-            && let Some(t) = &c.class_tag {
+            && let Some(t) = &c.class_tag
+        {
             return Value::Class(t.clone());
         }
         // Builtin receivers resolve through a per-type Rc<Class> cache
@@ -1381,7 +2015,13 @@ impl Vm {
             Value::Bool(false) => 8,
             Value::Nil => 9,
             Value::Block(_) | Value::CurriedProc(_) => 10,
-            Value::Class(c) => if c.is_module { 11 } else { 12 },
+            Value::Class(c) => {
+                if c.is_module {
+                    11
+                } else {
+                    12
+                }
+            }
             #[cfg(feature = "regex")]
             Value::Regex(_) => 13,
             Value::BoundMethod(_) => 14,
@@ -1399,9 +2039,23 @@ impl Vm {
             return Value::Class(c.clone());
         }
         const NAMES: [&str; 17] = [
-            "Integer", "Float", "String", "Symbol", "Array", "Hash", "Range",
-            "TrueClass", "FalseClass", "NilClass", "Proc", "Module", "Class",
-            "Regexp", "Method", "UnboundMethod", "Rational",
+            "Integer",
+            "Float",
+            "String",
+            "Symbol",
+            "Array",
+            "Hash",
+            "Range",
+            "TrueClass",
+            "FalseClass",
+            "NilClass",
+            "Proc",
+            "Module",
+            "Class",
+            "Regexp",
+            "Method",
+            "UnboundMethod",
+            "Rational",
         ];
         let sym = self.interner.intern(NAMES[idx]);
         match self.classes.get(&sym) {
@@ -1448,13 +2102,21 @@ pub(crate) fn class_reaches_via_chain(
         target: &Rc<Class>,
         visited: &mut crate::intern::FxHashSet<*const Class>,
     ) -> bool {
-        if Rc::ptr_eq(node, target) { return true; }
-        if !visited.insert(Rc::as_ptr(node)) { return false; }
+        if Rc::ptr_eq(node, target) {
+            return true;
+        }
+        if !visited.insert(Rc::as_ptr(node)) {
+            return false;
+        }
         for pre in node.prepends.borrow().iter() {
-            if walks_through(pre, target, visited) { return true; }
+            if walks_through(pre, target, visited) {
+                return true;
+            }
         }
         for inc in node.includes.borrow().iter() {
-            if walks_through(inc, target, visited) { return true; }
+            if walks_through(inc, target, visited) {
+                return true;
+            }
         }
         false
     }
@@ -1465,16 +2127,24 @@ pub(crate) fn class_reaches_via_chain(
     // walk would stack-overflow on (despite each walker's visited
     // set — the first iteration sets up the cycle before visited
     // sees the node).
-    if Rc::ptr_eq(child, target) { return true; }
-    let mut sc_visited: crate::intern::FxHashSet<*const Class> = crate::intern::FxHashSet::default();
+    if Rc::ptr_eq(child, target) {
+        return true;
+    }
+    let mut sc_visited: crate::intern::FxHashSet<*const Class> =
+        crate::intern::FxHashSet::default();
     let mut current = child.clone();
     loop {
-        if !sc_visited.insert(Rc::as_ptr(&current)) { return false; }
+        if !sc_visited.insert(Rc::as_ptr(&current)) {
+            return false;
+        }
         // `current == target` along the superclass walk also
         // counts as reachable — same consistency rule as
         // `class_is_a` enforces inside its inner walker.
-        if Rc::ptr_eq(&current, target) { return true; }
-        let mut inc_visited: crate::intern::FxHashSet<*const Class> = crate::intern::FxHashSet::default();
+        if Rc::ptr_eq(&current, target) {
+            return true;
+        }
+        let mut inc_visited: crate::intern::FxHashSet<*const Class> =
+            crate::intern::FxHashSet::default();
         // Seed visited with `current` so any cyclic include/prepend
         // graph (`A includes B; B includes A`) that walks back into
         // `current` short-circuits instead of re-borrowing
@@ -1517,7 +2187,9 @@ pub(crate) fn class_is_a(child: &Rc<Class>, ancestor: &Rc<Class>) -> bool {
         target: &Rc<Class>,
         visited: &mut crate::intern::FxHashSet<*const Class>,
     ) -> bool {
-        if Rc::ptr_eq(node, target) { return true; }
+        if Rc::ptr_eq(node, target) {
+            return true;
+        }
         if !visited.insert(Rc::as_ptr(node)) {
             // Cycle — same defensiveness as `walk_module` /
             // `flatten_ancestors`. Without it, a cyclic
@@ -1531,10 +2203,14 @@ pub(crate) fn class_is_a(child: &Rc<Class>, ancestor: &Rc<Class>) -> bool {
         // would report `c.is_a?(N) == false` even though
         // dispatch finds N's methods.
         for pre in node.prepends.borrow().iter() {
-            if walks_through(pre, target, visited) { return true; }
+            if walks_through(pre, target, visited) {
+                return true;
+            }
         }
         for inc in node.includes.borrow().iter() {
-            if walks_through(inc, target, visited) { return true; }
+            if walks_through(inc, target, visited) {
+                return true;
+            }
         }
         false
     }
@@ -1781,19 +2457,29 @@ pub(crate) fn singleton_chain_contains(cls: &Rc<Class>, target: &Rc<Class>) -> b
         target: &Rc<Class>,
         visited: &mut crate::intern::FxHashSet<*const Class>,
     ) -> bool {
-        if Rc::ptr_eq(node, target) { return true; }
-        if !visited.insert(Rc::as_ptr(node)) { return false; }
+        if Rc::ptr_eq(node, target) {
+            return true;
+        }
+        if !visited.insert(Rc::as_ptr(node)) {
+            return false;
+        }
         for pre in node.prepends.borrow().iter() {
-            if walks_through(pre, target, visited) { return true; }
+            if walks_through(pre, target, visited) {
+                return true;
+            }
         }
         for inc in node.includes.borrow().iter() {
-            if walks_through(inc, target, visited) { return true; }
+            if walks_through(inc, target, visited) {
+                return true;
+            }
         }
         false
     }
     let mut visited: crate::intern::FxHashSet<*const Class> = crate::intern::FxHashSet::default();
     for pre in cls.singleton_prepends.borrow().iter() {
-        if walks_through(pre, target, &mut visited) { return true; }
+        if walks_through(pre, target, &mut visited) {
+            return true;
+        }
     }
     false
 }
@@ -1859,8 +2545,11 @@ pub(crate) fn flatten_ancestors(cls: &Rc<Class>) -> Vec<Rc<Class>> {
         // `singleton_includes` via `lookup_class_singleton_method`) finds
         // its methods. Only shells have a `singleton_target`, so this is
         // a no-op for ordinary classes/modules.
-        if let Some(target) =
-            current.singleton_target.borrow().as_ref().and_then(|w| w.upgrade())
+        if let Some(target) = current
+            .singleton_target
+            .borrow()
+            .as_ref()
+            .and_then(|w| w.upgrade())
         {
             for inc in target.singleton_includes.borrow().iter() {
                 flatten_module(inc, &mut out, &mut visited);
@@ -1901,11 +2590,7 @@ impl Vm {
     /// keep their constants in the per-class `consts` table, which we
     /// probe directly. Returns `None` if no ancestor defines it (the
     /// caller then falls through to its NameError / nil path).
-    pub(crate) fn const_via_ancestors(
-        &mut self,
-        start: &Rc<Class>,
-        bare: SymId,
-    ) -> Option<Value> {
+    pub(crate) fn const_via_ancestors(&mut self, start: &Rc<Class>, bare: SymId) -> Option<Value> {
         // Own table first (CRuby checks the class before its
         // prepends for constants), then the flattened ancestry.
         let mut chain: Vec<Rc<Class>> = Vec::new();
@@ -2023,8 +2708,12 @@ impl Vm {
         // no-leak guarantee explicit at the type level so a
         // future edit can't accidentally introduce a non-static
         // label that BuiltinMeta would have to leak to store.
-        type KernelEntry =
-            (&'static str, i64, &'static [(&'static str, Option<&'static str>)], &'static str);
+        type KernelEntry = (
+            &'static str,
+            i64,
+            &'static [(&'static str, Option<&'static str>)],
+            &'static str,
+        );
         let entries: &[KernelEntry] = &[
             // Zero-arg metadata accessors
             ("class", 0, &[], "<internal:kernel>"),
@@ -2051,7 +2740,16 @@ impl Vm {
             // matters: prism's `polyfill/warn.rb` only prepends its category-adding wrapper
             // (which calls `super`) when `instance_method(:warn).parameters` shows NO
             // `:category` — reporting it makes that polyfill correctly skip.
-            ("warn", -1, &[("rest", Some("msgs")), ("key", Some("uplevel")), ("key", Some("category"))], "<internal:kernel>"),
+            (
+                "warn",
+                -1,
+                &[
+                    ("rest", Some("msgs")),
+                    ("key", Some("uplevel")),
+                    ("key", Some("category")),
+                ],
+                "<internal:kernel>",
+            ),
             // `method` / `public_method` — single required arg (the
             // method name); return a (bound) Method. sorbet does
             // `Object.instance_method(:method).bind_call(mod, :new)` to
@@ -2062,11 +2760,31 @@ impl Vm {
             // UnboundMethods via `Object.instance_method(:X)`; rspec-mocks
             // captures `Object.instance_method(:instance_variable_get)`
             // to read doubles' ivars past any override.
-            ("instance_variable_get", 1, &[("req", None)], "<internal:kernel>"),
-            ("instance_variable_set", 2, &[("req", None), ("req", None)], "<internal:kernel>"),
-            ("instance_variable_defined?", 1, &[("req", None)], "<internal:kernel>"),
+            (
+                "instance_variable_get",
+                1,
+                &[("req", None)],
+                "<internal:kernel>",
+            ),
+            (
+                "instance_variable_set",
+                2,
+                &[("req", None), ("req", None)],
+                "<internal:kernel>",
+            ),
+            (
+                "instance_variable_defined?",
+                1,
+                &[("req", None)],
+                "<internal:kernel>",
+            ),
             ("instance_variables", 0, &[], "<internal:kernel>"),
-            ("remove_instance_variable", 1, &[("req", None)], "<internal:kernel>"),
+            (
+                "remove_instance_variable",
+                1,
+                &[("req", None)],
+                "<internal:kernel>",
+            ),
             ("freeze", 0, &[], "<internal:kernel>"),
             ("dup", 0, &[], "<internal:kernel>"),
             ("clone", -1, &[("key", Some("freeze"))], "<internal:kernel>"),
@@ -2123,8 +2841,11 @@ impl Vm {
         // (BasicObject methods uniformly report `nil` for
         // source_location). Alias keeps clippy's type_complexity
         // lint quiet for symmetry with KernelEntry.
-        type BasicObjectEntry =
-            (&'static str, i64, &'static [(&'static str, Option<&'static str>)]);
+        type BasicObjectEntry = (
+            &'static str,
+            i64,
+            &'static [(&'static str, Option<&'static str>)],
+        );
         let entries: &[BasicObjectEntry] = &[
             ("__id__", 0, &[]),
             ("!", 0, &[]),
@@ -2170,11 +2891,12 @@ impl Vm {
         self.module_class_sym = Some(mod_sym);
         // `Module#name` — CRuby arity 0, no params, source_location nil
         // (C-defined). Mirror the nil source by passing `None`.
-        type ModuleEntry =
-            (&'static str, i64, &'static [(&'static str, Option<&'static str>)]);
-        let entries: &[ModuleEntry] = &[
-            ("name", 0, &[]),
-        ];
+        type ModuleEntry = (
+            &'static str,
+            i64,
+            &'static [(&'static str, Option<&'static str>)],
+        );
+        let entries: &[ModuleEntry] = &[("name", 0, &[])];
         for (name, arity, params) in entries {
             let name_id = self.interner.intern(name);
             let parameters: Vec<(&'static str, Option<String>)> = params
@@ -2329,9 +3051,10 @@ impl Vm {
     /// At each ancestor we scan only `methods.borrow()` because the
     /// ancestor list is already fully flattened (`include`d /
     /// `prepend`ed modules appear as their own entries).
-    pub(crate) fn super_lookup(&mut self, name_id: SymId)
-        -> Result<(Rc<crate::value::Method>, Value), crate::error::Trap>
-    {
+    pub(crate) fn super_lookup(
+        &mut self,
+        name_id: SymId,
+    ) -> Result<(Rc<crate::value::Method>, Value), crate::error::Trap> {
         let frame = self.frames.last().expect("ICE: super with empty frames");
         let self_val = frame.self_val.clone();
         // CRuby allows `super` inside a block — it forwards to the
@@ -2363,9 +3086,12 @@ impl Vm {
         let lexical_defining = self
             .lexical_owner_of_top()
             .and_then(|idx| self.frames[idx].defining_class.clone());
-        let defining = match lexical_defining
-            .or_else(|| self.frames.iter().rev().find_map(|f| f.defining_class.clone()))
-        {
+        let defining = match lexical_defining.or_else(|| {
+            self.frames
+                .iter()
+                .rev()
+                .find_map(|f| f.defining_class.clone())
+        }) {
             Some(c) => c,
             None => {
                 return Err(self.trap(crate::error::RubyError::NoMethodError {
@@ -2400,7 +3126,8 @@ impl Vm {
             // stores singleton methods in `singleton_methods`.
             // Cycle defensiveness mirrors `flatten_ancestors`.
             let mut chain: Vec<(Rc<Class>, bool /* is_module */)> = Vec::new();
-            let mut sc_visited: crate::intern::FxHashSet<*const Class> = crate::intern::FxHashSet::default();
+            let mut sc_visited: crate::intern::FxHashSet<*const Class> =
+                crate::intern::FxHashSet::default();
             // Flatten a singleton-prepended module into the chain,
             // walking its own prepends/includes transitively (so a
             // module's own `prepend`/`include` ancestry is honoured).
@@ -2409,7 +3136,9 @@ impl Vm {
                 out: &mut Vec<(Rc<Class>, bool)>,
                 visited: &mut crate::intern::FxHashSet<*const Class>,
             ) {
-                if !visited.insert(Rc::as_ptr(m)) { return; }
+                if !visited.insert(Rc::as_ptr(m)) {
+                    return;
+                }
                 for pre in m.prepends.borrow().iter() {
                     flatten_prepended_module(pre, out, visited);
                 }
@@ -2432,7 +3161,9 @@ impl Vm {
             let mut inc_visited = crate::intern::FxHashSet::default();
             let mut cur = cls.clone();
             loop {
-                if !sc_visited.insert(Rc::as_ptr(&cur)) { break; }
+                if !sc_visited.insert(Rc::as_ptr(&cur)) {
+                    break;
+                }
                 for pre in cur.singleton_prepends.borrow().iter() {
                     flatten_prepended_module(pre, &mut chain, &mut inc_visited);
                 }
@@ -2470,17 +3201,20 @@ impl Vm {
                     chain.push((anc, true));
                 }
             }
-            let m = chain.iter()
+            let m = chain
+                .iter()
                 .position(|(c, _)| Rc::ptr_eq(c, &defining))
                 .map(|i| i + 1)
                 .and_then(|i| chain.get(i..))
-                .and_then(|tail| tail.iter().find_map(|(c, is_module)| {
-                    if *is_module {
-                        c.methods.borrow().get(&name_id).cloned()
-                    } else {
-                        c.singleton_methods.borrow().get(&name_id).cloned()
-                    }
-                }));
+                .and_then(|tail| {
+                    tail.iter().find_map(|(c, is_module)| {
+                        if *is_module {
+                            c.methods.borrow().get(&name_id).cloned()
+                        } else {
+                            c.singleton_methods.borrow().get(&name_id).cloned()
+                        }
+                    })
+                });
             return match m {
                 Some(m) => Ok((m, self_val)),
                 None => Err(self.trap(crate::error::RubyError::NoMethodError {
@@ -2504,13 +3238,15 @@ impl Vm {
             },
         };
         let ancs = self.ancestors_cached(&recv_cls);
-        let m = ancs.iter()
+        let m = ancs
+            .iter()
             .position(|a| Rc::ptr_eq(a, &defining))
             .map(|i| i + 1)
             .and_then(|i| ancs.get(i..))
-            .and_then(|tail| tail.iter().find_map(|a| {
-                a.methods.borrow().get(&name_id).cloned()
-            }));
+            .and_then(|tail| {
+                tail.iter()
+                    .find_map(|a| a.methods.borrow().get(&name_id).cloned())
+            });
         match m {
             Some(m) => Ok((m, self_val)),
             None => Err(self.trap(crate::error::RubyError::NoMethodError {
@@ -2591,11 +3327,18 @@ impl Vm {
         // mustermann's `def self.new(s, **o); super(s, **o) { o };
         // end` (Sinatra `provides:` / error routes).
         let pin_start = self.pinned.len();
-        for a in &args { self.pinned.push(a.clone()); }
-        if let Some(bid) = block { self.pinned.push(Value::Block(bid)); }
+        for a in &args {
+            self.pinned.push(a.clone());
+        }
+        if let Some(bid) = block {
+            self.pinned.push(Value::Block(bid));
+        }
         let obj = match self.alloc_default_instance(cls) {
             Ok(o) => o,
-            Err(t) => { self.pinned.truncate(pin_start); return Err(t); }
+            Err(t) => {
+                self.pinned.truncate(pin_start);
+                return Err(t);
+            }
         };
         self.pinned.push(obj.clone());
         let init_id = self.interner.intern("initialize");
@@ -2646,7 +3389,11 @@ impl Vm {
                 // `compute_if_absent(key) { @lock.synchronize { super } }` over
                 // a `yield`ing base is the forcing case.
                 let block = self.frames.last().and_then(|f| {
-                    if f.is_block { f.captured_yield_block } else { f.block_arg }
+                    if f.is_block {
+                        f.captured_yield_block
+                    } else {
+                        f.block_arg
+                    }
                 });
                 self.invoke_method_with_block(m, self_val, args, block)
             }
@@ -2858,7 +3605,10 @@ impl Vm {
                         // primitive of the same name.
                         (_, Some(sv @ Value::Str(_))) => {
                             if let Some(v) = crate::vm::primitive::primitive_call(
-                                &sv, &nm, &args, self.max_value_bytes,
+                                &sv,
+                                &nm,
+                                &args,
+                                self.max_value_bytes,
                             )
                             .map_err(|e| self.trap(e))?
                             {
@@ -2936,7 +3686,12 @@ impl Vm {
                             for a in args {
                                 self.stack.push(a);
                             }
-                            return self.do_call(target_id, argc, /*no_recv=*/ false, u32::MAX);
+                            return self.do_call(
+                                target_id,
+                                argc,
+                                /*no_recv=*/ false,
+                                u32::MAX,
+                            );
                         }
                         ("===", Some(obj @ Value::Object(_))) => {
                             let same = match (&obj, args.first()) {
@@ -2959,7 +3714,10 @@ impl Vm {
                         // `Foo.name` semantics.
                         (_, Some(cv @ Value::Class(_))) => {
                             if let Some(v) = crate::vm::primitive::primitive_call(
-                                &cv, &nm, &args, self.max_value_bytes,
+                                &cv,
+                                &nm,
+                                &args,
+                                self.max_value_bytes,
                             )
                             .map_err(|e| self.trap(e))?
                             {
@@ -2992,10 +3750,16 @@ impl Vm {
                 let resolved = self.interner.resolve(name_id);
                 let is_lifecycle_hook = matches!(
                     &**resolved,
-                    "inherited" | "included" | "prepended" | "extended"
-                        | "method_added" | "singleton_method_added"
-                        | "method_removed" | "singleton_method_removed"
-                        | "method_undefined" | "singleton_method_undefined"
+                    "inherited"
+                        | "included"
+                        | "prepended"
+                        | "extended"
+                        | "method_added"
+                        | "singleton_method_added"
+                        | "method_removed"
+                        | "singleton_method_removed"
+                        | "method_undefined"
+                        | "singleton_method_undefined"
                         | "const_added",
                 );
                 // Restrict the no-op to Class/Module singleton-hook
@@ -3030,7 +3794,8 @@ impl Vm {
                 // gate on do_call's user-dispatch fast path makes this
                 // terminate instead of recursing). sequel's `Dataset#freeze`
                 // does exactly this.
-                if is_no_super && !is_lifecycle_hook
+                if is_no_super
+                    && !is_lifecycle_hook
                     && let Some(sv) = self.frames.last().map(|f| f.self_val.clone())
                 {
                     let nm = self.interner.resolve(name_id).clone();
@@ -3056,7 +3821,9 @@ impl Vm {
                         self.force_primitive_dispatch = true;
                         let argc = args.len();
                         self.stack.push(sv);
-                        for a in args { self.stack.push(a); }
+                        for a in args {
+                            self.stack.push(a);
+                        }
                         return self.do_call(name_id, argc, false, u32::MAX);
                     }
                 }
@@ -3099,14 +3866,19 @@ impl Vm {
                     // must reach the hack. Same O(1) gate as
                     // invoke_inherited_hook: Class's instance table
                     // stays empty unless user code reopens it.
-                    let class_class = self.classes
+                    let class_class = self
+                        .classes
                         .get(&self.interner.intern("Class"))
                         .filter(|cc| !cc.methods.borrow().is_empty())
                         .cloned();
                     if let Some(cc) = class_class
                         && let Some(m) = cc.methods.borrow().get(&name_id).cloned()
                     {
-                        let self_val = self.frames.last().map(|f| f.self_val.clone()).unwrap_or(Value::Nil);
+                        let self_val = self
+                            .frames
+                            .last()
+                            .map(|f| f.self_val.clone())
+                            .unwrap_or(Value::Nil);
                         return self.invoke_method(m, self_val, args);
                     }
                     self.stack.push(Value::Nil);
@@ -3122,13 +3894,22 @@ impl Vm {
 /// `Symbol#to_s` / `to_sym` need the Interner to resolve the underlying name,
 /// so they live as a method on Vm rather than in the pure `primitive_call`.
 impl Vm {
-    pub(crate) fn sym_primitive(&mut self, recv: &Value, name: &str, args: &[Value]) -> Result<Option<Value>, Trap> {
+    pub(crate) fn sym_primitive(
+        &mut self,
+        recv: &Value,
+        name: &str,
+        args: &[Value],
+    ) -> Result<Option<Value>, Trap> {
         Ok(match (recv, name, args) {
             // Symbol#to_s — US-ASCII when the name is ASCII-only (CRuby
             // tags an ascii symbol's string US-ASCII), else UTF-8.
             (Value::Sym(id), "to_s", []) => {
                 let n = self.interner.resolve(*id).to_string();
-                Some(if n.is_ascii() { Value::new_str_us_ascii(n) } else { Value::new_str(n) })
+                Some(if n.is_ascii() {
+                    Value::new_str_us_ascii(n)
+                } else {
+                    Value::new_str(n)
+                })
             }
             // Symbol#name (Ruby 3.0+) returns the same content as
             // #to_s. CRuby distinguishes by returning a frozen
@@ -3140,7 +3921,11 @@ impl Vm {
             // on the modern branch.
             (Value::Sym(id), "name", []) => {
                 let n = self.interner.resolve(*id).to_string();
-                Some(if n.is_ascii() { Value::new_str_us_ascii(n) } else { Value::new_str(n) })
+                Some(if n.is_ascii() {
+                    Value::new_str_us_ascii(n)
+                } else {
+                    Value::new_str(n)
+                })
             }
             // Symbol#inspect — `:name` for symbols whose name is a
             // bare identifier / operator, else the quoted `:"..."`
@@ -3156,7 +3941,11 @@ impl Vm {
                 let name = self.interner.resolve(*id);
                 let simple = crate::heap::symbol_name_is_simple(name);
                 let s = crate::heap::symbol_inspect(name);
-                Some(if simple { Value::new_str_us_ascii(s) } else { Value::new_str(s) })
+                Some(if simple {
+                    Value::new_str_us_ascii(s)
+                } else {
+                    Value::new_str(s)
+                })
             }
             (Value::Sym(id), "to_sym", []) => Some(Value::Sym(*id)),
             // Symbol#empty? / #length / #size operate on the
@@ -3194,11 +3983,13 @@ impl Vm {
                     }
                 };
                 if let Some(max) = self.max_symbols
-                    && !self.interner.contains(&transformed) && self.interner.len() >= max {
-                        return Err(self.trap(RubyError::ResourceExhausted {
-                            msg: format!("interner exhausted: {} symbols", max),
-                        }));
-                    }
+                    && !self.interner.contains(&transformed)
+                    && self.interner.len() >= max
+                {
+                    return Err(self.trap(RubyError::ResourceExhausted {
+                        msg: format!("interner exhausted: {} symbols", max),
+                    }));
+                }
                 Some(Value::Sym(self.interner.intern(&transformed)))
             }
             // Symbol#succ / Symbol#next — alphanumeric successor of
@@ -3217,11 +4008,13 @@ impl Vm {
             (Value::Sym(id), "succ", []) | (Value::Sym(id), "next", []) => {
                 let next_name = crate::vm::string::str_succ(self.interner.resolve(*id));
                 if let Some(max) = self.max_symbols
-                    && !self.interner.contains(&next_name) && self.interner.len() >= max {
-                        return Err(self.trap(RubyError::ResourceExhausted {
-                            msg: format!("interner exhausted: {} symbols", max),
-                        }));
-                    }
+                    && !self.interner.contains(&next_name)
+                    && self.interner.len() >= max
+                {
+                    return Err(self.trap(RubyError::ResourceExhausted {
+                        msg: format!("interner exhausted: {} symbols", max),
+                    }));
+                }
                 Some(Value::Sym(self.interner.intern(&next_name)))
             }
             // Symbol <=> Symbol compares the interned names
@@ -3241,10 +4034,10 @@ impl Vm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::{Cell, RefCell};
     use crate::bytecode::Proto;
     use crate::intern::Interner;
     use crate::value::Visibility;
+    use std::cell::{Cell, RefCell};
 
     /// Minimal Method for tests — no params, no closure, proto_idx 0.
     /// Tests below only compare by Rc identity, so the field contents
@@ -3278,10 +4071,11 @@ mod tests {
             superclass: RefCell::new(superclass),
             undefed: RefCell::new(crate::intern::FxHashSet::default()),
             anon_serial: std::cell::Cell::new(0),
-                    class_vars: RefCell::new(crate::intern::FxHashMap::default()),
+            class_vars: RefCell::new(crate::intern::FxHashMap::default()),
             consts: RefCell::new(crate::intern::FxHashMap::default()),
             assigned_name: RefCell::new(None),
             class_tag: None,
+            frozen: std::cell::Cell::new(false),
             #[cfg(feature = "cext")]
             cext_alloc_func: std::cell::Cell::new(None),
         })
@@ -3394,7 +4188,10 @@ mod tests {
         // First call: miss, walks the chain, fills way 0.
         let first = vm.lookup_method_cached(&cls, name, 0).unwrap();
         assert!(Rc::ptr_eq(&first, &method));
-        assert_eq!(vm.call_caches[0].ways[0].class_ptr, Rc::as_ptr(&cls) as usize);
+        assert_eq!(
+            vm.call_caches[0].ways[0].class_ptr,
+            Rc::as_ptr(&cls) as usize
+        );
         assert_eq!(vm.call_caches[0].ways[0].generation, vm.method_gen);
 
         // Remove the method from the class so an uncached walk would
@@ -3402,7 +4199,10 @@ mod tests {
         // (invalidation happens on method_gen bump, not class mutation).
         cls.methods.borrow_mut().remove(&name);
         let second = vm.lookup_method_cached(&cls, name, 0);
-        assert!(second.is_some(), "cached entry should serve until method_gen bump");
+        assert!(
+            second.is_some(),
+            "cached entry should serve until method_gen bump"
+        );
     }
 
     #[test]
@@ -3434,7 +4234,10 @@ mod tests {
         // All IC_WAYS classes still hit the cache.
         for (cls, m) in &classes {
             let got = vm.lookup_method_cached(cls, name, 0);
-            assert!(got.is_some(), "polymorphic IC should keep all {IC_WAYS} ways");
+            assert!(
+                got.is_some(),
+                "polymorphic IC should keep all {IC_WAYS} ways"
+            );
             assert!(Rc::ptr_eq(&got.unwrap(), m));
         }
     }
@@ -3477,7 +4280,10 @@ mod tests {
         // cache miss + uncached walk = None now that the method is
         // stripped.
         let first_after = vm.lookup_method_cached(&classes[0].0, name, 0);
-        assert!(first_after.is_none(), "oldest entry should have been evicted");
+        assert!(
+            first_after.is_none(),
+            "oldest entry should have been evicted"
+        );
     }
 
     #[test]

@@ -34,7 +34,8 @@ use crate::value::{Class, Instance, Method, ObjId, Value, Visibility};
 ))]
 use super::with_vm_ptr_set;
 use super::{
-    primitive_call, value_cmp_v_heap, vec_nil, visibility_from_name, Frame, HostFnSlot, PinGuard, Vm,
+    Frame, HostFnSlot, PinGuard, Vm, primitive_call, value_cmp_v_heap, vec_nil,
+    visibility_from_name,
 };
 use crate::HostCtx;
 
@@ -87,7 +88,10 @@ enum ArgsBuf {
     /// `len` valid args in `buf[..len]`; `buf[len..]` is `Value::Nil`
     /// filler (never read — `Deref` slices to `..len`). `len <=
     /// ARGS_INLINE` always.
-    Inline { buf: [Value; ARGS_INLINE], len: usize },
+    Inline {
+        buf: [Value; ARGS_INLINE],
+        len: usize,
+    },
     Heap(Vec<Value>),
 }
 
@@ -204,10 +208,7 @@ enum SendBypass {
 /// the caller continues with the rest of dispatch.
 enum CallableOutcome {
     Handled,
-    NotHandled {
-        args: ArgsBuf,
-        recv: Value,
-    },
+    NotHandled { args: ArgsBuf, recv: Value },
 }
 
 /// Outcome of [`Vm::try_dispatch_class_intrinsics`].
@@ -220,10 +221,7 @@ enum CallableOutcome {
 /// caller continues with the rest of dispatch.
 enum ClassOutcome {
     Handled,
-    NotHandled {
-        args: ArgsBuf,
-        recv: Value,
-    },
+    NotHandled { args: ArgsBuf, recv: Value },
 }
 
 /// Mode selector for `Vm::float_to_rational_value` — distinguishes the
@@ -290,14 +288,20 @@ impl Vm {
                 }));
             }
             let (mut num, mut den) = (num, den);
-            if den < 0 { num = -num; den = -den; }
+            if den < 0 {
+                num = -num;
+                den = -den;
+            }
             let g = crate::vm::numeric::gcd_i64(num.abs(), den);
-            if g > 1 { num /= g; den /= g; }
+            if g > 1 {
+                num /= g;
+                den /= g;
+            }
             self.maybe_gc();
             self.check_alloc()?;
-            let id = self.heap.alloc(HeapObj::Rational(
-                crate::heap::RationalRepr { num, den },
-            ));
+            let id = self
+                .heap
+                .alloc(HeapObj::Rational(crate::heap::RationalRepr { num, den }));
             Ok(Value::Rational(id))
         }
     }
@@ -371,11 +375,19 @@ impl Vm {
                     "truncate" => a / b,
                     "floor" => {
                         let q = a / b;
-                        if a % b != 0 && (a < 0) != (b < 0) { q - 1 } else { q }
+                        if a % b != 0 && (a < 0) != (b < 0) {
+                            q - 1
+                        } else {
+                            q
+                        }
                     }
                     "ceil" => {
                         let q = a / b;
-                        if a % b != 0 && (a < 0) == (b < 0) { q + 1 } else { q }
+                        if a % b != 0 && (a < 0) == (b < 0) {
+                            q + 1
+                        } else {
+                            q
+                        }
                     }
                     // "round"
                     _ => {
@@ -464,9 +476,9 @@ impl Vm {
         }
         self.maybe_gc();
         self.check_alloc()?;
-        let id = self.heap.alloc(HeapObj::Rational(
-            crate::heap::RationalRepr { num, den },
-        ));
+        let id = self
+            .heap
+            .alloc(HeapObj::Rational(crate::heap::RationalRepr { num, den }));
         Ok(Value::Rational(id))
     }
 
@@ -492,7 +504,10 @@ impl Vm {
         f: f64,
         mode: FloatToRationalMode,
     ) -> Result<Value, Trap> {
-        debug_assert!(f.is_finite(), "float_to_rational_value: NaN/Inf must be filtered upstream");
+        debug_assert!(
+            f.is_finite(),
+            "float_to_rational_value: NaN/Inf must be filtered upstream"
+        );
         let (sign, mantissa, exp) =
             crate::vm::numeric::float_decompose(f).expect("finite per debug_assert");
         if mantissa == 0 {
@@ -535,9 +550,8 @@ impl Vm {
                         let shift = (1 - exp) as usize;
                         (mant_a, mant_b, BigInt::one() << shift)
                     };
-                    let (p, q) = stern_brocot_simplest(
-                        a_num, common_den.clone(), b_num, common_den,
-                    );
+                    let (p, q) =
+                        stern_brocot_simplest(a_num, common_den.clone(), b_num, common_den);
                     let p = if sign < 0 { -p } else { p };
                     return self.make_rational_bigint(p, q);
                 }
@@ -645,9 +659,7 @@ impl Vm {
             } else {
                 (a_num, b_num)
             };
-            let (p, q) = stern_brocot_simplest(
-                a_num, common_den.clone(), b_num, common_den,
-            );
+            let (p, q) = stern_brocot_simplest(a_num, common_den.clone(), b_num, common_den);
             let p = if negate_result { -p } else { p };
             self.make_rational_bigint(p, q)
         }
@@ -665,12 +677,14 @@ impl Vm {
                 let shift = exp as u32;
                 if shift >= 63 {
                     return Err(self.trap(RubyError::RangeError {
-                        msg: "Float#to_r exceeds i64 magnitude (rebuild with --features bignum)".to_string(),
+                        msg: "Float#to_r exceeds i64 magnitude (rebuild with --features bignum)"
+                            .to_string(),
                     }));
                 }
                 let num = signed.checked_shl(shift).ok_or_else(|| {
                     self.trap(RubyError::RangeError {
-                        msg: "Float#to_r exceeds i64 magnitude (rebuild with --features bignum)".to_string(),
+                        msg: "Float#to_r exceeds i64 magnitude (rebuild with --features bignum)"
+                            .to_string(),
                     })
                 })?;
                 (num, den)
@@ -678,7 +692,8 @@ impl Vm {
                 let shift = (-exp) as u32;
                 if shift >= 63 {
                     return Err(self.trap(RubyError::RangeError {
-                        msg: "Float#to_r denominator exceeds i64 (rebuild with --features bignum)".to_string(),
+                        msg: "Float#to_r denominator exceeds i64 (rebuild with --features bignum)"
+                            .to_string(),
                     }));
                 }
                 (signed, 1i64 << shift)
@@ -713,9 +728,11 @@ impl Vm {
             Value::BigInt(id) => Ok((self.heap.bigint(*id).clone(), BigInt::one())),
             Value::Float(g) => {
                 debug_assert!(g.is_finite(), "non-finite eps must be filtered upstream");
-                let (sign, mantissa, exp) = crate::vm::numeric::float_decompose(*g)
-                    .expect("finite per debug_assert");
-                if mantissa == 0 { return Ok((BigInt::from(0), BigInt::one())); }
+                let (sign, mantissa, exp) =
+                    crate::vm::numeric::float_decompose(*g).expect("finite per debug_assert");
+                if mantissa == 0 {
+                    return Ok((BigInt::from(0), BigInt::one()));
+                }
                 let mant_big = BigInt::from(mantissa);
                 let signed = if sign < 0 { -mant_big } else { mant_big };
                 if exp >= 0 {
@@ -728,7 +745,9 @@ impl Vm {
                 let r = self.heap.rational(*id);
                 Ok((r.num.clone(), r.den.clone()))
             }
-            _ => unreachable!("eps validated by caller as Numeric (Int / BigInt / Float / Rational); nil rejected at TypeError gate upstream"),
+            _ => unreachable!(
+                "eps validated by caller as Numeric (Int / BigInt / Float / Rational); nil rejected at TypeError gate upstream"
+            ),
         }
     }
 
@@ -779,7 +798,16 @@ impl Vm {
         // actually coerces (else they fall through to the existing,
         // already-correct `<=>`/`<` handling: nil / ArgumentError).
         const ARITH: &[&str] = &[
-            "+", "-", "*", "/", "%", "**", "divmod", "fdiv", "quo", "remainder",
+            "+",
+            "-",
+            "*",
+            "/",
+            "%",
+            "**",
+            "divmod",
+            "fdiv",
+            "quo",
+            "remainder",
         ];
         const CMP: &[&str] = &["<=>", "<", "<=", ">", ">=", "=="];
         let is_arith = ARITH.contains(&name);
@@ -973,11 +1001,7 @@ impl Vm {
     /// short-circuit at its single call site (the i64 RationalRepr
     /// makes the unit-base match trivial without a helper).
     #[cfg(feature = "bignum")]
-    fn try_unit_base_pow(
-        &mut self,
-        r_id: ObjId,
-        ak_is_odd: bool,
-    ) -> Result<Option<Value>, Trap> {
+    fn try_unit_base_pow(&mut self, r_id: ObjId, ak_is_odd: bool) -> Result<Option<Value>, Trap> {
         use num_bigint::BigInt;
         use num_traits::{One, Zero};
         let (is_zero, is_one, is_neg_one) = {
@@ -985,11 +1009,7 @@ impl Vm {
             if !r.den.is_one() {
                 return Ok(None);
             }
-            (
-                r.num.is_zero(),
-                r.num.is_one(),
-                r.num == BigInt::from(-1),
-            )
+            (r.num.is_zero(), r.num.is_one(), r.num == BigInt::from(-1))
         };
         if is_zero {
             // k must be > 0 here (caller traps 0**negative upstream).
@@ -1119,12 +1139,14 @@ impl Vm {
             })?;
             let new_num = r.num.checked_pow(ak_u32).ok_or_else(|| {
                 self.trap(RubyError::RangeError {
-                    msg: "Rational#** numerator overflows i64 (rebuild with --features bignum)".to_string(),
+                    msg: "Rational#** numerator overflows i64 (rebuild with --features bignum)"
+                        .to_string(),
                 })
             })?;
             let new_den = r.den.checked_pow(ak_u32).ok_or_else(|| {
                 self.trap(RubyError::RangeError {
-                    msg: "Rational#** denominator overflows i64 (rebuild with --features bignum)".to_string(),
+                    msg: "Rational#** denominator overflows i64 (rebuild with --features bignum)"
+                        .to_string(),
                 })
             })?;
             if k > 0 {
@@ -1227,14 +1249,21 @@ impl Vm {
                     _ => None,
                 }
             };
-            let (an, ad) = match to_pair(a, &self.heap) { Some(p) => p, None => return Ok(None) };
-            let (bn, bd) = match to_pair(b, &self.heap) { Some(p) => p, None => return Ok(None) };
+            let (an, ad) = match to_pair(a, &self.heap) {
+                Some(p) => p,
+                None => return Ok(None),
+            };
+            let (bn, bd) = match to_pair(b, &self.heap) {
+                Some(p) => p,
+                None => return Ok(None),
+            };
             // `fn` (not a closure) so it satisfies `FnOnce` by-value
             // on every call site without forcing the surrounding
             // closures to be `Copy`/`Clone`.
             fn overflow() -> Trap {
                 Trap::new(RubyError::RangeError {
-                    msg: "Rational result overflows i64 (rebuild with --features bignum)".to_string(),
+                    msg: "Rational result overflows i64 (rebuild with --features bignum)"
+                        .to_string(),
                 })
             }
             match kind {
@@ -1315,8 +1344,14 @@ impl Vm {
                 _ => None,
             }
         };
-        let (an, ad) = match to_pair(a, &self.heap) { Some(p) => p, None => return Ok(None) };
-        let (bn, bd) = match to_pair(b, &self.heap) { Some(p) => p, None => return Ok(None) };
+        let (an, ad) = match to_pair(a, &self.heap) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        let (bn, bd) = match to_pair(b, &self.heap) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
         match kind {
             K::Add => {
                 let num = &an * &bd + &bn * &ad;
@@ -1387,7 +1422,11 @@ impl Vm {
     /// the UTF-8 literal into that encoding's bytes; an unmappable char
     /// leaves the literal UTF-8 (best-effort — a real non-UTF-8 template
     /// wouldn't contain a char its own encoding can't represent).
-    pub(crate) fn retag_literal_to_source_encoding(&self, rs: &std::rc::Rc<crate::value::RStr>, enc: crate::value::EncodingTag) {
+    pub(crate) fn retag_literal_to_source_encoding(
+        &self,
+        rs: &std::rc::Rc<crate::value::RStr>,
+        enc: crate::value::EncodingTag,
+    ) {
         use crate::value::EncodingTag;
         match enc {
             EncodingTag::Utf8 => {}
@@ -1452,7 +1491,10 @@ impl Vm {
             _ => return false,
         };
         let key = self.interner.intern(&const_name);
-        let v = self.constants.get(&key).cloned()
+        let v = self
+            .constants
+            .get(&key)
+            .cloned()
             .expect("ICE: Encoding constant not in table — preamble didn't load");
         self.stack.push(v);
         true
@@ -1476,7 +1518,9 @@ impl Vm {
         args: &[Value],
     ) -> Result<bool, Trap> {
         use crate::value::EncodingTag;
-        let Value::Str(rs) = recv else { return Ok(false) };
+        let Value::Str(rs) = recv else {
+            return Ok(false);
+        };
         match (name, args) {
             ("force_encoding", [arg]) => {
                 if rs.frozen.get() {
@@ -1513,12 +1557,16 @@ impl Vm {
                     );
                     if undef_on {
                         let rep_key = Value::Sym(self.interner.intern("replace"));
-                        replace = Some(match self.heap.hash_index_lookup(*hid, &rep_key)
-                            .map(|pos| self.heap.hash(*hid)[pos].1.clone())
-                        {
-                            Some(Value::Str(r)) => r.content.borrow().clone(),
-                            _ => b"?".to_vec(),
-                        });
+                        replace = Some(
+                            match self
+                                .heap
+                                .hash_index_lookup(*hid, &rep_key)
+                                .map(|pos| self.heap.hash(*hid)[pos].1.clone())
+                            {
+                                Some(Value::Str(r)) => r.content.borrow().clone(),
+                                _ => b"?".to_vec(),
+                            },
+                        );
                     }
                 }
                 let target = match args.first() {
@@ -1545,7 +1593,8 @@ impl Vm {
                     let src = rs.encoding.get();
                     if let (EncodingTag::Utf8, EncodingTag::Other(idx)) = (src, target) {
                         let text = rs.to_string_lossy();
-                        match crate::encoding_full::encode_from_utf8(idx, &text, replace.as_deref()) {
+                        match crate::encoding_full::encode_from_utf8(idx, &text, replace.as_deref())
+                        {
                             Ok(bytes) => {
                                 let v = Value::new_str_bytes(bytes);
                                 if let Value::Str(ref ns) = v {
@@ -1582,9 +1631,8 @@ impl Vm {
                         // ("incomplete …") is approximated.
                         if crate::encoding_full::is_utf_endian_family(idx) {
                             let from = crate::encoding_full::name(idx).unwrap_or("UTF-16");
-                            let shown: String = bytes.iter()
-                                .map(|&b| format!("\\x{b:02X}"))
-                                .collect();
+                            let shown: String =
+                                bytes.iter().map(|&b| format!("\\x{b:02X}")).collect();
                             return Err(self.trap(RubyError::HostException {
                                 class_name: "Encoding::InvalidByteSequenceError".to_string(),
                                 message: format!("\"{shown}\" on {from}"),
@@ -1684,7 +1732,10 @@ impl Vm {
     /// fold set) or a preamble `Encoding` instance (read its
     /// `@name`) — to an E1 tag. `None` = unknown name (caller
     /// raises CRuby's ArgumentError shape).
-    pub(crate) fn resolve_encoding_arg(&mut self, arg: &Value) -> Option<crate::value::EncodingTag> {
+    pub(crate) fn resolve_encoding_arg(
+        &mut self,
+        arg: &Value,
+    ) -> Option<crate::value::EncodingTag> {
         let name: String = match arg {
             Value::Str(s) => s.to_string_lossy(),
             Value::Object(id) => {
@@ -1767,7 +1818,9 @@ impl Vm {
         match enc_name.as_str() {
             "UTF-8" => {
                 if !(0..=0x10_FFFF).contains(&cp) {
-                    return Err(self.trap(RubyError::RangeError { msg: out_of_range() }));
+                    return Err(self.trap(RubyError::RangeError {
+                        msg: out_of_range(),
+                    }));
                 }
                 match char::from_u32(cp as u32) {
                     Some(c) => {
@@ -1784,19 +1837,24 @@ impl Vm {
             }
             "US-ASCII" => {
                 if !(0..=0xFF).contains(&cp) {
-                    return Err(self.trap(RubyError::RangeError { msg: out_of_range() }));
+                    return Err(self.trap(RubyError::RangeError {
+                        msg: out_of_range(),
+                    }));
                 }
                 if cp > 0x7F {
                     return Err(self.trap(RubyError::RangeError {
                         msg: format!("invalid codepoint 0x{cp:X} in US-ASCII"),
                     }));
                 }
-                self.stack.push(Value::new_str((cp as u8 as char).to_string()));
+                self.stack
+                    .push(Value::new_str((cp as u8 as char).to_string()));
                 Ok(true)
             }
             "ASCII-8BIT" => {
                 if !(0..=0xFF).contains(&cp) {
-                    return Err(self.trap(RubyError::RangeError { msg: out_of_range() }));
+                    return Err(self.trap(RubyError::RangeError {
+                        msg: out_of_range(),
+                    }));
                 }
                 // A single raw byte (binary-safe via the byte-backed RStr).
                 self.stack.push(Value::new_str_bytes(vec![cp as u8]));
@@ -1846,8 +1904,7 @@ impl Vm {
         let beg = match begin {
             Value::Nil => {
                 return Err(self.trap(RubyError::ArgumentError {
-                    msg: "The beginless range for Integer#[] results in infinity"
-                        .to_string(),
+                    msg: "The beginless range for Integer#[] results in infinity".to_string(),
                 }));
             }
             Value::Int(b) => b,
@@ -1922,8 +1979,7 @@ impl Vm {
                 Value::Int(e) => {
                     // len = e - beg (+1 inclusive). `beg < 0`, so compute
                     // in i128 to avoid the subtraction overflowing i64.
-                    let len: i128 =
-                        (*e as i128) - (beg as i128) + if exclusive { 0 } else { 1 };
+                    let len: i128 = (*e as i128) - (beg as i128) + if exclusive { 0 } else { 1 };
                     if len <= 0 {
                         shifted
                     } else if len as u64 > BIT_RANGE_CAP {
@@ -1994,8 +2050,6 @@ impl Vm {
             .expect("ICE: cext_invoke_method: do_call produced no result"))
     }
 
-
-
     /// Look up `method_missing` on `recv`'s class chain. If found,
     /// prepend the missed `name_id` as a Symbol arg and invoke it
     /// (pushing a frame); returns `Ok(true)` so the caller can
@@ -2031,8 +2085,12 @@ impl Vm {
             ["Class", "Object", "Kernel"]
         };
         for mn in chain {
-            let Some(mid) = self.interner.get_id(mn) else { continue };
-            let Some(meta) = self.classes.get(&mid).cloned() else { continue };
+            let Some(mid) = self.interner.get_id(mn) else {
+                continue;
+            };
+            let Some(meta) = self.classes.get(&mid).cloned() else {
+                continue;
+            };
             if let Some(m) = self.lookup_method_uncached(&meta, name_id) {
                 return Some(m);
             }
@@ -2063,9 +2121,7 @@ impl Vm {
                 let cls = self.heap.class_of(*id);
                 self.lookup_method_uncached(&cls, mm_id)
             }
-            Value::Class(cls) => {
-                self.lookup_class_singleton_method(cls, mm_id)
-            }
+            Value::Class(cls) => self.lookup_class_singleton_method(cls, mm_id),
             // A Hash SUBCLASS instance (class-tagged) consults its
             // class's `method_missing` — `HashWithDotAccess::Hash`
             // provides dot-access to keys via `method_missing`
@@ -2316,7 +2372,10 @@ impl Vm {
                 for e in &elems {
                     match g.vm.inspect_value(e) {
                         Ok(s) => parts.push(s),
-                        Err(t) => { g.vm.inspect_stack.pop(); return Err(t); }
+                        Err(t) => {
+                            g.vm.inspect_stack.pop();
+                            return Err(t);
+                        }
                     }
                 }
                 g.vm.inspect_stack.pop();
@@ -2328,14 +2387,21 @@ impl Vm {
                 }
                 let mut g = PinGuard::new(self);
                 g.pin(v.clone());
-                let entries: Vec<(Value, Value)> = g.vm.heap.hash(*id)
-                    .iter().map(|(k, val)| (k.clone(), val.clone())).collect();
+                let entries: Vec<(Value, Value)> =
+                    g.vm.heap
+                        .hash(*id)
+                        .iter()
+                        .map(|(k, val)| (k.clone(), val.clone()))
+                        .collect();
                 g.vm.inspect_stack.push(*id);
                 let mut parts = Vec::with_capacity(entries.len());
                 for (k, val) in &entries {
                     let vs = match g.vm.inspect_value(val) {
                         Ok(s) => s,
-                        Err(t) => { g.vm.inspect_stack.pop(); return Err(t); }
+                        Err(t) => {
+                            g.vm.inspect_stack.pop();
+                            return Err(t);
+                        }
                     };
                     // CRuby 3.4+: Symbol keys use `name: value` shorthand
                     // (quoted when not bareword-safe); other keys use the
@@ -2350,7 +2416,10 @@ impl Vm {
                     } else {
                         let ks = match g.vm.inspect_value(k) {
                             Ok(s) => s,
-                            Err(t) => { g.vm.inspect_stack.pop(); return Err(t); }
+                            Err(t) => {
+                                g.vm.inspect_stack.pop();
+                                return Err(t);
+                            }
                         };
                         format!("{ks} => {vs}")
                     };
@@ -2383,7 +2452,9 @@ impl Vm {
         let wants_p = fmt.contains("%p") || fmt.contains("$p");
         let needs_prep = args.iter().any(|v| matches!(v, Value::Object(_)))
             || (wants_p
-                && args.iter().any(|v| matches!(v, Value::Hash(_) | Value::Array(_))));
+                && args
+                    .iter()
+                    .any(|v| matches!(v, Value::Hash(_) | Value::Array(_))));
         if !needs_prep {
             return Ok((args.to_vec(), Vec::new()));
         }
@@ -2391,7 +2462,9 @@ impl Vm {
         let inspect_id = self.interner.intern("inspect");
         let snapshot: Vec<Value> = args.to_vec();
         let mut g = PinGuard::new(self);
-        for a in &snapshot { g.pin(a.clone()); }
+        for a in &snapshot {
+            g.pin(a.clone());
+        }
         let mut out = Vec::with_capacity(snapshot.len());
         // `%p` consumes inspect, not to_s — and the stateless
         // engine can't dispatch a user/singleton inspect (or reach
@@ -2404,8 +2477,10 @@ impl Vm {
             let (has_user_to_s, has_user_inspect) = match v {
                 Value::Object(id) => {
                     let cls = g.vm.heap.class_of(*id);
-                    (g.vm.lookup_method_uncached(&cls, to_s_id).is_some(),
-                     g.vm.lookup_method_uncached(&cls, inspect_id).is_some())
+                    (
+                        g.vm.lookup_method_uncached(&cls, to_s_id).is_some(),
+                        g.vm.lookup_method_uncached(&cls, inspect_id).is_some(),
+                    )
                 }
                 _ => (false, false),
             };
@@ -2444,7 +2519,11 @@ impl Vm {
         }
     }
 
-    pub(crate) fn stringify_for_output(&mut self, v: &Value, inspect: bool) -> Result<String, Trap> {
+    pub(crate) fn stringify_for_output(
+        &mut self,
+        v: &Value,
+        inspect: bool,
+    ) -> Result<String, Trap> {
         // Collections route through the cycle-safe, per-element
         // dispatching renderer so `p [exc]` / `p [custom]` keep each
         // element's real `inspect` and self-referential containers don't
@@ -2466,7 +2545,9 @@ impl Vm {
         if let Value::Block(bid) = v {
             return Ok(self.proc_inspect_string(*bid));
         }
-        let meth_id = self.interner.intern(if inspect { "inspect" } else { "to_s" });
+        let meth_id = self
+            .interner
+            .intern(if inspect { "inspect" } else { "to_s" });
         let m = match v {
             Value::Object(id) => {
                 let cls = self.heap.class_of(*id);
@@ -2478,10 +2559,12 @@ impl Vm {
                 _ => None,
             },
         };
-        let native = |vm: &Self| if inspect {
-            v.to_inspect(&vm.heap, &vm.interner)
-        } else {
-            v.to_display(&vm.heap, &vm.interner)
+        let native = |vm: &Self| {
+            if inspect {
+                v.to_inspect(&vm.heap, &vm.interner)
+            } else {
+                v.to_display(&vm.heap, &vm.interner)
+            }
         };
         let Some(m) = m else {
             // No table/override method. `inspect` on an Exception has no
@@ -2502,11 +2585,13 @@ impl Vm {
             Value::Str(s) => s.to_string_lossy(),
             // A non-String result (a misbehaving override) — render it
             // natively rather than erroring, matching the lenient spirit.
-            _ => if inspect {
-                r.to_inspect(&self.heap, &self.interner)
-            } else {
-                r.to_display(&self.heap, &self.interner)
-            },
+            _ => {
+                if inspect {
+                    r.to_inspect(&self.heap, &self.interner)
+                } else {
+                    r.to_display(&self.heap, &self.interner)
+                }
+            }
         })
     }
 
@@ -2542,8 +2627,6 @@ impl Vm {
         self.invoke_method_with_block(m, recv.clone(), args, block)?;
         Ok(true)
     }
-
-
 
     /// Invoke a registered host fn (either v1 or v2 slot).
     ///
@@ -2627,7 +2710,9 @@ impl Vm {
                     feature = "_liquid_native",
                     feature = "_sqlite",
                 )))]
-                { host(args) }
+                {
+                    host(args)
+                }
             }
             HostFnSlot::V2(host) => {
                 let ctx = HostCtx::new(&self.heap, &self.interner);
@@ -2674,11 +2759,13 @@ impl Vm {
             }));
         }
         if let Some(max) = self.max_symbols
-            && !self.interner.contains(&raw) && self.interner.len() >= max {
-                return Err(self.trap(RubyError::ResourceExhausted {
-                    msg: format!("interner exhausted: {} symbols", max),
-                }));
-            }
+            && !self.interner.contains(&raw)
+            && self.interner.len() >= max
+        {
+            return Err(self.trap(RubyError::ResourceExhausted {
+                msg: format!("interner exhausted: {} symbols", max),
+            }));
+        }
         Ok(self.interner.intern(&raw))
     }
 
@@ -2693,10 +2780,7 @@ impl Vm {
                 // the error path materialises the message; build the
                 // String here so the borrow of `resolved` is dropped
                 // before the `&mut self` call to `trap`.
-                let msg = format!(
-                    "'{}' is not allowed as an instance variable name",
-                    resolved,
-                );
+                let msg = format!("'{}' is not allowed as an instance variable name", resolved,);
                 Err(self.trap(RubyError::NameError { msg }))
             }
             Value::Str(s) => {
@@ -2707,11 +2791,13 @@ impl Vm {
                     }));
                 }
                 if let Some(max) = self.max_symbols
-                    && !self.interner.contains(&raw) && self.interner.len() >= max {
-                        return Err(self.trap(RubyError::ResourceExhausted {
-                            msg: format!("interner exhausted: {} symbols", max),
-                        }));
-                    }
+                    && !self.interner.contains(&raw)
+                    && self.interner.len() >= max
+                {
+                    return Err(self.trap(RubyError::ResourceExhausted {
+                        msg: format!("interner exhausted: {} symbols", max),
+                    }));
+                }
                 Ok(self.interner.intern(&raw))
             }
             other => {
@@ -2748,11 +2834,13 @@ impl Vm {
                 // always re-resolve; only fresh names count.
                 let name = s.to_string_lossy();
                 if let Some(max) = self.max_symbols
-                    && !self.interner.contains(&name) && self.interner.len() >= max {
-                        return Err(self.trap(RubyError::ResourceExhausted {
-                            msg: format!("interner exhausted: {} symbols", max),
-                        }));
-                    }
+                    && !self.interner.contains(&name)
+                    && self.interner.len() >= max
+                {
+                    return Err(self.trap(RubyError::ResourceExhausted {
+                        msg: format!("interner exhausted: {} symbols", max),
+                    }));
+                }
                 Ok(self.interner.intern(&name))
             }
             other => {
@@ -2846,9 +2934,7 @@ impl Vm {
                 // dispatch vs 4ns in CRuby). Array/Hash deliberately
                 // NOT here: their (no-op freeze) answer stays with
                 // the canonical collection arms.
-                Value::Str(a)
-                    if name_id == self.sym_frozen_q && self.prim_reopen_mask == 0 =>
-                {
+                Value::Str(a) if name_id == self.sym_frozen_q && self.prim_reopen_mask == 0 => {
                     Value::Bool(a.frozen.get())
                 }
                 Value::Int(_) | Value::Sym(_) | Value::Float(_) | Value::Bool(_) | Value::Nil
@@ -2859,7 +2945,11 @@ impl Vm {
                 // `nil?` — same universal-constant shape as `frozen?`,
                 // same mask gate ("nil?" is in the universal arm-name
                 // list, so any primitive-class reopen flips the mask).
-                Value::Str(_) | Value::Int(_) | Value::Sym(_) | Value::Float(_) | Value::Bool(_)
+                Value::Str(_)
+                | Value::Int(_)
+                | Value::Sym(_)
+                | Value::Float(_)
+                | Value::Bool(_)
                     if name_id == self.sym_nil_q && self.prim_reopen_mask == 0 =>
                 {
                     Value::Bool(false)
@@ -2885,9 +2975,7 @@ impl Vm {
                 // (byte-emptiness is encoding-independent). Reopen-gated
                 // via fast_prim_str_safe — `empty?` is in the
                 // revalidate name list.
-                Value::Str(a) if name_id == self.sym_empty_q => {
-                    Value::Bool(a.borrow().is_empty())
-                }
+                Value::Str(a) if name_id == self.sym_empty_q => Value::Bool(a.borrow().is_empty()),
                 Value::Int(n) if name_id == self.sym_to_s || name_id == self.sym_inspect => {
                     crate::vm::numeric::integer_to_s_value(*n)
                 }
@@ -2984,7 +3072,9 @@ impl Vm {
                         }
                     }
                     let v = Value::Bool(
-                        self.heap.hash_index_lookup(id, &self.stack[n - 1]).is_some(),
+                        self.heap
+                            .hash_index_lookup(id, &self.stack[n - 1])
+                            .is_some(),
                     );
                     self.stack.truncate(recv_idx);
                     self.stack.push(v);
@@ -3002,8 +3092,7 @@ impl Vm {
                             return false;
                         }
                     }
-                    let v = if let Some(pos) = self.heap.hash_index_lookup(id, &self.stack[n - 1])
-                    {
+                    let v = if let Some(pos) = self.heap.hash_index_lookup(id, &self.stack[n - 1]) {
                         self.heap.hash(id)[pos].1.clone()
                     } else {
                         if self.heap.hash_default_value(id).is_some()
@@ -3135,8 +3224,12 @@ impl Vm {
         self.fast_index_hash_key_safe = match self.classes.get(&hash_sym).cloned() {
             Some(c) => {
                 self.lookup_method_uncached(&c, self.sym_key_q).is_none()
-                    && self.lookup_method_uncached(&c, self.sym_has_key_q).is_none()
-                    && self.lookup_method_uncached(&c, self.sym_include_q).is_none()
+                    && self
+                        .lookup_method_uncached(&c, self.sym_has_key_q)
+                        .is_none()
+                    && self
+                        .lookup_method_uncached(&c, self.sym_include_q)
+                        .is_none()
                     && self.lookup_method_uncached(&c, self.sym_member_q).is_none()
             }
             None => false,
@@ -3167,8 +3260,14 @@ impl Vm {
         // mask is 0 until a USER reopen lands and the per-call gate
         // in do_call stays a single u8 compare.
         const PRIM_CLASSES: [(u8, &str); 8] = [
-            (0, "Integer"), (1, "Float"), (2, "String"), (3, "Symbol"),
-            (4, "NilClass"), (5, "TrueClass"), (5, "FalseClass"), (6, "Rational"),
+            (0, "Integer"),
+            (1, "Float"),
+            (2, "String"),
+            (3, "Symbol"),
+            (4, "NilClass"),
+            (5, "TrueClass"),
+            (5, "FalseClass"),
+            (6, "Rational"),
         ];
         let mut mask = 0u8;
         for (bit, cname) in PRIM_CLASSES {
@@ -3266,7 +3365,9 @@ impl Vm {
         let subject: &Value = match &recv_opt {
             Some(r) => r,
             None => {
-                frame_self_storage = self.frames.last()
+                frame_self_storage = self
+                    .frames
+                    .last()
                     .expect("ICE: do_call(no_recv) with empty frames")
                     .self_val
                     .clone();
@@ -3276,14 +3377,15 @@ impl Vm {
         // User override only blocks `send` (the reserved-name
         // rule applies only to `__send__`). Same lookup shape
         // as the originals at the two inlined sites.
-        let user_override = matches!(name, "send" | "public_send") && match subject {
-            Value::Object(id) => {
-                let cls = self.heap.class_of(*id);
-                self.lookup_method_cached(&cls, name_id, cache_id).is_some()
-            }
-            Value::Class(c) => self.lookup_class_singleton_method(c, name_id).is_some(),
-            _ => false,
-        };
+        let user_override = matches!(name, "send" | "public_send")
+            && match subject {
+                Value::Object(id) => {
+                    let cls = self.heap.class_of(*id);
+                    self.lookup_method_cached(&cls, name_id, cache_id).is_some()
+                }
+                Value::Class(c) => self.lookup_class_singleton_method(c, name_id).is_some(),
+                _ => false,
+            };
         if user_override {
             return SendBypass::NotHandled { args, recv_opt };
         }
@@ -3333,45 +3435,47 @@ impl Vm {
     ) -> Result<CallableOutcome, Trap> {
         // `Proc#to_proc` — identity (CRuby returns self).
         if matches!(&recv, Value::Block(_) | Value::CurriedProc(_))
-            && name == "to_proc" && args.is_empty()
+            && name == "to_proc"
+            && args.is_empty()
         {
             self.stack.push(recv.clone());
             return Ok(CallableOutcome::Handled);
         }
         if let Value::Block(bid) = &recv
-            && matches!(name, "call" | "[]" | "()" | "yield" | "===") {
-                // `===` joins the invocation aliases: CRuby's
-                // `Proc#===` CALLS the proc with the operand
-                // (`case x when matcher_proc` and minitest's
-                // mock-test validators ride it).
-                // CRuby exposes block invocation under four names:
-                // `.call(args)`, `.()` (already lowered to `call`
-                // by parsers but kept here defensively), `[args]`
-                // bracket form, and `.yield(args)` (mostly a
-                // documentation alias). All four route the same
-                // way: invoke the block, drive until its frame
-                // returns, leave the result on the stack.
-                let pre_frames = self.frames.len();
-                self.invoke_block(*bid, args.into_vec())?;
-                self.dispatch_until(pre_frames)?;
-                // ADR 0024 Phase A.6 round 2: stored Proc tried
-                // to `break` after returning to its caller. There
-                // was no Op::Yield wrapper above the block (it
-                // was invoked via `.call`, not `yield`), so
-                // `break_signaled` has no observer above. CRuby
-                // raises `LocalJumpError: break from proc-closure`.
-                if self.break_signaled {
-                    self.break_signaled = false;
-                    self.sync_control_signals();
-                    // Discard the break value the block left on
-                    // the stack — it won't be the call's result.
-                    self.stack.pop();
-                    return Err(self.trap(crate::error::RubyError::LocalJumpError {
-                        msg: "break from proc-closure".to_string(),
-                    }));
-                }
-                return Ok(CallableOutcome::Handled);
+            && matches!(name, "call" | "[]" | "()" | "yield" | "===")
+        {
+            // `===` joins the invocation aliases: CRuby's
+            // `Proc#===` CALLS the proc with the operand
+            // (`case x when matcher_proc` and minitest's
+            // mock-test validators ride it).
+            // CRuby exposes block invocation under four names:
+            // `.call(args)`, `.()` (already lowered to `call`
+            // by parsers but kept here defensively), `[args]`
+            // bracket form, and `.yield(args)` (mostly a
+            // documentation alias). All four route the same
+            // way: invoke the block, drive until its frame
+            // returns, leave the result on the stack.
+            let pre_frames = self.frames.len();
+            self.invoke_block(*bid, args.into_vec())?;
+            self.dispatch_until(pre_frames)?;
+            // ADR 0024 Phase A.6 round 2: stored Proc tried
+            // to `break` after returning to its caller. There
+            // was no Op::Yield wrapper above the block (it
+            // was invoked via `.call`, not `yield`), so
+            // `break_signaled` has no observer above. CRuby
+            // raises `LocalJumpError: break from proc-closure`.
+            if self.break_signaled {
+                self.break_signaled = false;
+                self.sync_control_signals();
+                // Discard the break value the block left on
+                // the stack — it won't be the call's result.
+                self.stack.pop();
+                return Err(self.trap(crate::error::RubyError::LocalJumpError {
+                    msg: "break from proc-closure".to_string(),
+                }));
             }
+            return Ok(CallableOutcome::Handled);
+        }
         // `Proc#arity` — CRuby-shape arity for the block. Block
         // params in rubyrs Tier-1 are only required + rest (no
         // optionals, no keyword params — `compile_block` accepts
@@ -3388,13 +3492,20 @@ impl Vm {
         // the route block's positional bindings. (TRY_RUNS
         // layer #24.)
         if matches!(&recv, Value::Block(_) | Value::CurriedProc(_))
-            && name == "arity" && !args.is_empty() {
+            && name == "arity"
+            && !args.is_empty()
+        {
             return Err(self.trap(RubyError::ArgumentError {
-                msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 0)",
+                    args.len()
+                ),
             }));
         }
         if let Value::Block(bid) = &recv
-            && name == "arity" && args.is_empty() {
+            && name == "arity"
+            && args.is_empty()
+        {
             // CRuby's Proc/lambda arity, accounting for optional
             // positionals, rest, and keyword params. Reads positional
             // shape from the handle (n_params = requireds + optionals,
@@ -3414,12 +3525,25 @@ impl Vm {
             // Value is `base` (positive) or `-(base + 1)` (negative).
             let (n_params, has_rest, is_lambda, proto_idx) = {
                 let bh = self.heap.block(*bid);
-                (bh.n_params as i64, bh.rest_slot.is_some(), bh.is_lambda, bh.proto_idx)
+                (
+                    bh.n_params as i64,
+                    bh.rest_slot.is_some(),
+                    bh.is_lambda,
+                    bh.proto_idx,
+                )
             };
             let proto = &self.protos[proto_idx];
             let n_optional = proto.n_optional_params as i64;
-            let rk = proto.block_kw_params.iter().filter(|(_, _, req)| *req).count() as i64;
-            let ok = proto.block_kw_params.iter().filter(|(_, _, req)| !*req).count() as i64;
+            let rk = proto
+                .block_kw_params
+                .iter()
+                .filter(|(_, _, req)| *req)
+                .count() as i64;
+            let ok = proto
+                .block_kw_params
+                .iter()
+                .filter(|(_, _, req)| !*req)
+                .count() as i64;
             let has_kwrest = proto.kw_rest_param.is_some();
             let rp = n_params - n_optional;
             let base = rp + if rk > 0 { 1 } else { 0 };
@@ -3440,10 +3564,17 @@ impl Vm {
         // `proto.params`, keywords in `block_kw_params`. dry-core's
         // container Item does `item.parameters.empty?`.
         if let Value::Block(bid) = &recv
-            && name == "parameters" && args.is_empty() {
+            && name == "parameters"
+            && args.is_empty()
+        {
             let (n_params, has_rest, is_lambda, proto_idx) = {
                 let bh = self.heap.block(*bid);
-                (bh.n_params as usize, bh.rest_slot.is_some(), bh.is_lambda, bh.proto_idx)
+                (
+                    bh.n_params as usize,
+                    bh.rest_slot.is_some(),
+                    bh.is_lambda,
+                    bh.proto_idx,
+                )
             };
             let proto = &self.protos[proto_idx];
             let n_opt = proto.n_optional_params as usize;
@@ -3451,8 +3582,11 @@ impl Vm {
             let req_kind = if is_lambda { "req" } else { "opt" };
             // Drop compiler-internal placeholder names (anonymous params).
             let real = |n: &String| -> Option<String> {
-                if n.starts_with("__rest_") || n.starts_with("__kwrest_")
-                    || n.starts_with("__blkarg_") || n.starts_with("__destruct_") {
+                if n.starts_with("__rest_")
+                    || n.starts_with("__kwrest_")
+                    || n.starts_with("__blkarg_")
+                    || n.starts_with("__destruct_")
+                {
                     None
                 } else {
                     Some(n.clone())
@@ -3468,11 +3602,18 @@ impl Vm {
             if has_rest {
                 // CRuby reports an ANONYMOUS splat as `:*` (Ruby 3.x
                 // forwarding name), a named one by its name.
-                let rn = proto.rest_param.as_ref().and_then(real).unwrap_or_else(|| "*".to_string());
+                let rn = proto
+                    .rest_param
+                    .as_ref()
+                    .and_then(real)
+                    .unwrap_or_else(|| "*".to_string());
                 params_info.push(("rest", Some(rn)));
             }
             for (kname, _slot, required) in &proto.block_kw_params {
-                params_info.push((if *required { "keyreq" } else { "key" }, Some(kname.clone())));
+                params_info.push((
+                    if *required { "keyreq" } else { "key" },
+                    Some(kname.clone()),
+                ));
             }
             if let Some(kr) = &proto.kw_rest_param {
                 let kn = real(kr).unwrap_or_else(|| "**".to_string());
@@ -3517,7 +3658,8 @@ impl Vm {
                 }
                 Value::CurriedProc(cid) => {
                     let (underlying, _, _) = self.heap.curried_proc(*cid);
-                    let v = matches!(&underlying, Value::Block(bid) if self.heap.block(*bid).is_lambda);
+                    let v =
+                        matches!(&underlying, Value::Block(bid) if self.heap.block(*bid).is_lambda);
                     self.stack.push(Value::Bool(v));
                     return Ok(CallableOutcome::Handled);
                 }
@@ -3532,7 +3674,8 @@ impl Vm {
         // instead of the live frame. erubi's test harness drives
         // `eval(engine.src, block.binding)` to run the generated
         // template source against the block's locals + self.
-        if name == "binding" && args.is_empty()
+        if name == "binding"
+            && args.is_empty()
             && let Value::Block(bid) = &recv
         {
             let Some(bcls) = self.classes.get(&self.interner.intern("Binding")).cloned() else {
@@ -3541,7 +3684,12 @@ impl Vm {
             };
             let (proto_idx, captured, self_val, lex) = {
                 let bh = self.heap.block(*bid);
-                (bh.proto_idx, bh.captured.clone(), bh.self_val.clone(), bh.lexical_cvar_class.clone())
+                (
+                    bh.proto_idx,
+                    bh.captured.clone(),
+                    bh.self_val.clone(),
+                    bh.lexical_cvar_class.clone(),
+                )
             };
             // Snapshot the block's NAMED locals (slot → value) from the
             // captured cell — the block shares this vector with its
@@ -3552,7 +3700,11 @@ impl Vm {
                 let cap = captured.borrow();
                 let n = self.protos[proto_idx].n_locals as usize;
                 for slot in 0..n {
-                    let lname = self.protos[proto_idx].local_names.get(slot).cloned().unwrap_or_default();
+                    let lname = self.protos[proto_idx]
+                        .local_names
+                        .get(slot)
+                        .cloned()
+                        .unwrap_or_default();
                     if lname.is_empty() {
                         continue;
                     }
@@ -3588,30 +3740,29 @@ impl Vm {
         // `Proc#inspect` / `#to_s` — the file:line form. Sits here
         // (not Value::to_inspect) because it reads protos/sources.
         if let Value::Block(bid) = &recv
-            && matches!(name, "inspect" | "to_s") && args.is_empty() {
+            && matches!(name, "inspect" | "to_s")
+            && args.is_empty()
+        {
             let s = self.proc_inspect_string(*bid);
             self.stack.push(Value::new_str(s));
             return Ok(CallableOutcome::Handled);
         }
         if let Value::Block(bid) = &recv
-            && name == "source_location" && args.is_empty() {
+            && name == "source_location"
+            && args.is_empty()
+        {
             let proto_idx = self.heap.block(*bid).proto_idx;
             let proto = &self.protos[proto_idx];
             let filename = proto.filename.clone();
             let span = proto.op_spans.first().copied();
             let line = match (span, self.sources.get(filename.as_ref())) {
-                (Some(sp), Some(src)) => {
-                    crate::error::line_col(src, sp.byte_offset).0 as i64
-                }
+                (Some(sp), Some(src)) => crate::error::line_col(src, sp.byte_offset).0 as i64,
                 _ => 0,
             };
             if line == 0 {
                 self.stack.push(Value::Nil);
             } else {
-                let arr = vec![
-                    Value::new_str(filename.to_string()),
-                    Value::Int(line),
-                ];
+                let arr = vec![Value::new_str(filename.to_string()), Value::Int(line)];
                 let id = self.heap.alloc(crate::heap::HeapObj::Array(arr.into()));
                 self.stack.push(Value::Array(id));
             }
@@ -3626,7 +3777,9 @@ impl Vm {
         // works — inconsistent now that the Block arm exists.
         // (Copilot review #263 round 3.)
         if let Value::CurriedProc(_) = &recv
-            && name == "arity" && args.is_empty() {
+            && name == "arity"
+            && args.is_empty()
+        {
             self.stack.push(Value::Int(-1));
             return Ok(CallableOutcome::Handled);
         }
@@ -3647,207 +3800,211 @@ impl Vm {
         // slot, panicking later in `class_of`.
         if matches!(name, "method" | "singleton_method" | "public_method")
             && args.len() == 1
-            && matches!(&args[0], Value::Sym(_) | Value::Str(_)) {
-                // CRuby accepts a String name too (to_sym'd) —
-                // `Kernel.method("Integer")` (dry-types builds coercers
-                // with `::Kernel.method(primitive.name)`, a String).
-                let bound_name_id_val = match &args[0] {
-                    Value::Sym(s) => *s,
-                    Value::Str(s) => self.interner.intern(&s.to_string_lossy()),
-                    _ => unreachable!(),
-                };
-                let bound_name_id = &bound_name_id_val;
-                // Snapshot the resolved Method at capture time so
-                // `bm.call` survives a subsequent `remove_method`
-                // (CRuby parity, matches the `instance_method` arm).
-                //
-                // Use the DISPATCH class (`heap.class_of`) for
-                // Object receivers — that's the class chain that
-                // a regular `recv.foo` would walk, and it
-                // honours singleton methods (`def obj.foo; ...`).
-                // `Vm::class_of` reports the *real* class for
-                // script-visible `obj.class`, which skips the
-                // eigenclass; using that here would snapshot the
-                // real-class body and silently invoke it instead
-                // of the singleton override.
-                let snapshot = match &recv {
-                    Value::Object(id) => {
-                        let cls = self.heap.class_of(*id);
-                        self.lookup_method_uncached(&cls, *bound_name_id)
-                    }
-                    // Class receivers store their class-method
-                    // entries in `cls.singleton_methods`, not in
-                    // the per-instance method table. Use the
-                    // same helper as explicit `cls.foo`
-                    // dispatch so `K.public_method(:cls_m)`
-                    // finds class methods correctly. The old
-                    // `Vm::class_of(K)` would return the `Class`
-                    // class and miss every class-method
-                    // (PR #314 cycle-2).
-                    Value::Class(cls) => self.lookup_class_singleton_method(cls, *bound_name_id),
-                    _ => match self.class_of(&recv) {
-                        Value::Class(cls) => self.lookup_method_uncached(&cls, *bound_name_id),
-                        _ => None,
-                    },
-                };
-                // `singleton_method` / `public_method` narrow the
-                // snapshot match relative to plain `method`:
-                //
-                //   * `singleton_method(:name)` — installed
-                //     DIRECTLY on the eigenclass (Value::Object)
-                //     or in `cls.singleton_methods` (Value::Class).
-                //     Inherited methods from the receiver's real
-                //     class don't count; raise NameError if the
-                //     method is reachable via dispatch but isn't
-                //     a singleton entry.
-                //
-                //   * `public_method(:name)` — same chain as
-                //     `method`, but raises NameError if the
-                //     captured Method's visibility is Private
-                //     OR Protected. Only Public passes. Also
-                //     raises NameError when the method is
-                //     entirely missing (snapshot is None) so the
-                //     getter fails at capture time rather than
-                //     at the later `.call`.
-                if name == "singleton_method" {
-                    // Walk the eigenclass's own table PLUS its
-                    // transitive includes / prepends so methods
-                    // brought in by `obj.extend(M)` or
-                    // `class << self; prepend M; end` are
-                    // reachable — matches `Object#singleton_methods`
-                    // (vm/dispatch.rs:4550 walk_chain). Without
-                    // this widening, `c.singleton_methods` would
-                    // list `:m` while `c.singleton_method(:m)`
-                    // raised NameError, contradicting itself.
-                    // PR #314 cycle-4.
-                    fn chain_has(
-                        c: &std::rc::Rc<crate::value::Class>,
-                        target: crate::intern::SymId,
-                        visited: &mut Vec<*const crate::value::Class>,
-                    ) -> bool {
-                        let ptr = std::rc::Rc::as_ptr(c);
-                        if visited.contains(&ptr) { return false; }
-                        visited.push(ptr);
-                        if c.methods.borrow().contains_key(&target) { return true; }
-                        for inc in c.includes.borrow().iter() {
-                            if chain_has(inc, target, visited) { return true; }
-                        }
-                        for pre in c.prepends.borrow().iter() {
-                            if chain_has(pre, target, visited) { return true; }
-                        }
-                        false
-                    }
-                    let is_singleton = match &recv {
-                        Value::Object(id) => {
-                            if let crate::heap::HeapObj::Instance(inst) = self.heap.get(*id) {
-                                inst.singleton_class.as_ref().is_some_and(|sc| {
-                                    let mut visited = Vec::new();
-                                    chain_has(sc, *bound_name_id, &mut visited)
-                                })
-                            } else {
-                                false
-                            }
-                        }
-                        Value::Class(c) => {
-                            // Class-level singleton table; also
-                            // honour `singleton_prepends` walked
-                            // the same way `singleton_methods`
-                            // does for Class receivers.
-                            if c.singleton_methods.borrow().contains_key(bound_name_id) {
-                                true
-                            } else {
-                                let mut visited = Vec::new();
-                                c.singleton_prepends.borrow().iter().any(|p| {
-                                    chain_has(p, *bound_name_id, &mut visited)
-                                })
-                            }
-                        }
-                        _ => false,
-                    };
-                    if !is_singleton {
-                        let name_str = self.interner.resolve(*bound_name_id).to_string();
-                        let recv_str = recv.to_inspect(&self.heap, &self.interner);
-                        return Err(self.trap(RubyError::NameError {
-                            msg: format!(
-                                "undefined singleton method '{}' for '{}'",
-                                name_str, recv_str,
-                            ),
-                        }));
-                    }
-                } else if name == "public_method" {
-                    // CRuby rejects both Private and Protected
-                    // here (only Public passes). Treat the
-                    // captured snapshot's visibility as the
-                    // primary signal; if no snapshot exists
-                    // (primitive arms, built-ins like
-                    // Class#new, universal arms like `to_s` /
-                    // `inspect`), consult `responds_to` to tell
-                    // truly-missing-method from
-                    // missing-Method-entry-but-dispatchable.
-                    let vis = snapshot.as_ref().map(|m| m.visibility.get());
-                    let label = match vis {
-                        Some(crate::value::Visibility::Private) => Some("private"),
-                        Some(crate::value::Visibility::Protected) => Some("protected"),
-                        Some(crate::value::Visibility::Public) => None,
-                        // No Method entry — defer to
-                        // `responds_to` (PR #314 cycle-2). If
-                        // the receiver actually dispatches this
-                        // name, we shouldn't lie via NameError.
-                        None => {
-                            if self.responds_to(&recv, *bound_name_id, true) {
-                                None
-                            } else {
-                                // Sentinel — same shape as
-                                // CRuby's "undefined method"
-                                // branch below.
-                                Some("__missing__")
-                            }
-                        }
-                    };
-                    if let Some(tag) = label {
-                        let name_str = self.interner.resolve(*bound_name_id).to_string();
-                        // For Class receivers, use the eigenclass-
-                        // shell form `#<Class:K>` (matches CRuby).
-                        // For Object receivers, use the class of
-                        // the instance. Falling back to
-                        // `self.class_of(&recv)` would return
-                        // "Class" / "Module" for Class receivers
-                        // — the cycle-3 review caught this giving
-                        // `for class 'Class'` instead of
-                        // `for class 'K'` / `'#<Class:K>'`.
-                        let cls_name = match &recv {
-                            Value::Class(c) => format!("#<Class:{}>", c.name),
-                            _ => match self.class_of(&recv) {
-                                Value::Class(c) => c.name.clone(),
-                                _ => "Object".to_string(),
-                            },
-                        };
-                        let msg = if tag == "__missing__" {
-                            format!(
-                                "undefined method '{}' for class '{}'",
-                                name_str, cls_name,
-                            )
-                        } else {
-                            format!(
-                                "method '{}' for class '{}' is {}",
-                                name_str, cls_name, tag,
-                            )
-                        };
-                        return Err(self.trap(RubyError::NameError { msg }));
-                    }
+            && matches!(&args[0], Value::Sym(_) | Value::Str(_))
+        {
+            // CRuby accepts a String name too (to_sym'd) —
+            // `Kernel.method("Integer")` (dry-types builds coercers
+            // with `::Kernel.method(primitive.name)`, a String).
+            let bound_name_id_val = match &args[0] {
+                Value::Sym(s) => *s,
+                Value::Str(s) => self.interner.intern(&s.to_string_lossy()),
+                _ => unreachable!(),
+            };
+            let bound_name_id = &bound_name_id_val;
+            // Snapshot the resolved Method at capture time so
+            // `bm.call` survives a subsequent `remove_method`
+            // (CRuby parity, matches the `instance_method` arm).
+            //
+            // Use the DISPATCH class (`heap.class_of`) for
+            // Object receivers — that's the class chain that
+            // a regular `recv.foo` would walk, and it
+            // honours singleton methods (`def obj.foo; ...`).
+            // `Vm::class_of` reports the *real* class for
+            // script-visible `obj.class`, which skips the
+            // eigenclass; using that here would snapshot the
+            // real-class body and silently invoke it instead
+            // of the singleton override.
+            let snapshot = match &recv {
+                Value::Object(id) => {
+                    let cls = self.heap.class_of(*id);
+                    self.lookup_method_uncached(&cls, *bound_name_id)
                 }
-                let mut g = crate::vm::PinGuard::new(self);
-                g.pin(recv.clone());
-                g.vm.maybe_gc();
-                g.vm.check_alloc()?;
-                let id = g.vm.heap.alloc(HeapObj::BoundMethod {
-                    recv: recv.clone(),
-                    name_id: *bound_name_id,
-                    method: snapshot,
-                });
-                g.vm.stack.push(Value::BoundMethod(id));
-                return Ok(CallableOutcome::Handled);
+                // Class receivers store their class-method
+                // entries in `cls.singleton_methods`, not in
+                // the per-instance method table. Use the
+                // same helper as explicit `cls.foo`
+                // dispatch so `K.public_method(:cls_m)`
+                // finds class methods correctly. The old
+                // `Vm::class_of(K)` would return the `Class`
+                // class and miss every class-method
+                // (PR #314 cycle-2).
+                Value::Class(cls) => self.lookup_class_singleton_method(cls, *bound_name_id),
+                _ => match self.class_of(&recv) {
+                    Value::Class(cls) => self.lookup_method_uncached(&cls, *bound_name_id),
+                    _ => None,
+                },
+            };
+            // `singleton_method` / `public_method` narrow the
+            // snapshot match relative to plain `method`:
+            //
+            //   * `singleton_method(:name)` — installed
+            //     DIRECTLY on the eigenclass (Value::Object)
+            //     or in `cls.singleton_methods` (Value::Class).
+            //     Inherited methods from the receiver's real
+            //     class don't count; raise NameError if the
+            //     method is reachable via dispatch but isn't
+            //     a singleton entry.
+            //
+            //   * `public_method(:name)` — same chain as
+            //     `method`, but raises NameError if the
+            //     captured Method's visibility is Private
+            //     OR Protected. Only Public passes. Also
+            //     raises NameError when the method is
+            //     entirely missing (snapshot is None) so the
+            //     getter fails at capture time rather than
+            //     at the later `.call`.
+            if name == "singleton_method" {
+                // Walk the eigenclass's own table PLUS its
+                // transitive includes / prepends so methods
+                // brought in by `obj.extend(M)` or
+                // `class << self; prepend M; end` are
+                // reachable — matches `Object#singleton_methods`
+                // (vm/dispatch.rs:4550 walk_chain). Without
+                // this widening, `c.singleton_methods` would
+                // list `:m` while `c.singleton_method(:m)`
+                // raised NameError, contradicting itself.
+                // PR #314 cycle-4.
+                fn chain_has(
+                    c: &std::rc::Rc<crate::value::Class>,
+                    target: crate::intern::SymId,
+                    visited: &mut Vec<*const crate::value::Class>,
+                ) -> bool {
+                    let ptr = std::rc::Rc::as_ptr(c);
+                    if visited.contains(&ptr) {
+                        return false;
+                    }
+                    visited.push(ptr);
+                    if c.methods.borrow().contains_key(&target) {
+                        return true;
+                    }
+                    for inc in c.includes.borrow().iter() {
+                        if chain_has(inc, target, visited) {
+                            return true;
+                        }
+                    }
+                    for pre in c.prepends.borrow().iter() {
+                        if chain_has(pre, target, visited) {
+                            return true;
+                        }
+                    }
+                    false
+                }
+                let is_singleton = match &recv {
+                    Value::Object(id) => {
+                        if let crate::heap::HeapObj::Instance(inst) = self.heap.get(*id) {
+                            inst.singleton_class.as_ref().is_some_and(|sc| {
+                                let mut visited = Vec::new();
+                                chain_has(sc, *bound_name_id, &mut visited)
+                            })
+                        } else {
+                            false
+                        }
+                    }
+                    Value::Class(c) => {
+                        // Class-level singleton table; also
+                        // honour `singleton_prepends` walked
+                        // the same way `singleton_methods`
+                        // does for Class receivers.
+                        if c.singleton_methods.borrow().contains_key(bound_name_id) {
+                            true
+                        } else {
+                            let mut visited = Vec::new();
+                            c.singleton_prepends
+                                .borrow()
+                                .iter()
+                                .any(|p| chain_has(p, *bound_name_id, &mut visited))
+                        }
+                    }
+                    _ => false,
+                };
+                if !is_singleton {
+                    let name_str = self.interner.resolve(*bound_name_id).to_string();
+                    let recv_str = recv.to_inspect(&self.heap, &self.interner);
+                    return Err(self.trap(RubyError::NameError {
+                        msg: format!(
+                            "undefined singleton method '{}' for '{}'",
+                            name_str, recv_str,
+                        ),
+                    }));
+                }
+            } else if name == "public_method" {
+                // CRuby rejects both Private and Protected
+                // here (only Public passes). Treat the
+                // captured snapshot's visibility as the
+                // primary signal; if no snapshot exists
+                // (primitive arms, built-ins like
+                // Class#new, universal arms like `to_s` /
+                // `inspect`), consult `responds_to` to tell
+                // truly-missing-method from
+                // missing-Method-entry-but-dispatchable.
+                let vis = snapshot.as_ref().map(|m| m.visibility.get());
+                let label = match vis {
+                    Some(crate::value::Visibility::Private) => Some("private"),
+                    Some(crate::value::Visibility::Protected) => Some("protected"),
+                    Some(crate::value::Visibility::Public) => None,
+                    // No Method entry — defer to
+                    // `responds_to` (PR #314 cycle-2). If
+                    // the receiver actually dispatches this
+                    // name, we shouldn't lie via NameError.
+                    None => {
+                        if self.responds_to(&recv, *bound_name_id, true) {
+                            None
+                        } else {
+                            // Sentinel — same shape as
+                            // CRuby's "undefined method"
+                            // branch below.
+                            Some("__missing__")
+                        }
+                    }
+                };
+                if let Some(tag) = label {
+                    let name_str = self.interner.resolve(*bound_name_id).to_string();
+                    // For Class receivers, use the eigenclass-
+                    // shell form `#<Class:K>` (matches CRuby).
+                    // For Object receivers, use the class of
+                    // the instance. Falling back to
+                    // `self.class_of(&recv)` would return
+                    // "Class" / "Module" for Class receivers
+                    // — the cycle-3 review caught this giving
+                    // `for class 'Class'` instead of
+                    // `for class 'K'` / `'#<Class:K>'`.
+                    let cls_name = match &recv {
+                        Value::Class(c) => format!("#<Class:{}>", c.name),
+                        _ => match self.class_of(&recv) {
+                            Value::Class(c) => c.name.clone(),
+                            _ => "Object".to_string(),
+                        },
+                    };
+                    let msg = if tag == "__missing__" {
+                        format!("undefined method '{}' for class '{}'", name_str, cls_name,)
+                    } else {
+                        format!("method '{}' for class '{}' is {}", name_str, cls_name, tag,)
+                    };
+                    return Err(self.trap(RubyError::NameError { msg }));
+                }
             }
+            let mut g = crate::vm::PinGuard::new(self);
+            g.pin(recv.clone());
+            g.vm.maybe_gc();
+            g.vm.check_alloc()?;
+            let id = g.vm.heap.alloc(HeapObj::BoundMethod {
+                recv: recv.clone(),
+                name_id: *bound_name_id,
+                method: snapshot,
+            });
+            g.vm.stack.push(Value::BoundMethod(id));
+            return Ok(CallableOutcome::Handled);
+        }
         // `bm.call(args)` / `bm.()` / `bm[args]` — dispatch the
         // captured method on the captured receiver. We re-enter
         // `do_call` recursively with the bound recv pushed below
@@ -3859,7 +4016,10 @@ impl Vm {
         // class that defined the method), but for our subset
         // `class_of` is the closest approximation and roundtrips
         // through `bind` correctly for the common shapes.
-        if let Value::BoundMethod(bid) = &recv && name == "unbind" && args.is_empty() {
+        if let Value::BoundMethod(bid) = &recv
+            && name == "unbind"
+            && args.is_empty()
+        {
             // Inherit the snapshot the BoundMethod was carrying;
             // if it has none (legacy values constructed before
             // the snapshot field, or `method` capture sites that
@@ -3868,7 +4028,11 @@ impl Vm {
             // survives a subsequent `remove_method` on either
             // side of the round-trip.
             let (bm_recv, bm_name_id, bm_method) = match self.heap.get(*bid) {
-                HeapObj::BoundMethod { recv, name_id, method } => (recv.clone(), *name_id, method.clone()),
+                HeapObj::BoundMethod {
+                    recv,
+                    name_id,
+                    method,
+                } => (recv.clone(), *name_id, method.clone()),
                 _ => panic!("ICE: BoundMethod slot holds non-BoundMethod"),
             };
             // Use the DISPATCH class (heap.class_of) for Object
@@ -3887,9 +4051,11 @@ impl Vm {
                 Value::Object(id) => self.heap.class_of(*id),
                 _ => match self.class_of(&bm_recv) {
                     Value::Class(c) => c,
-                    _ => return Err(self.trap(RubyError::TypeError {
-                        msg: "cannot unbind method on a value without a class".into(),
-                    })),
+                    _ => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: "cannot unbind method on a value without a class".into(),
+                        }));
+                    }
                 },
             };
             let snapshot = bm_method.or_else(|| self.lookup_method_uncached(&cls, bm_name_id));
@@ -3906,11 +4072,16 @@ impl Vm {
         // `ubm.bind(obj)` — reconstitute a BoundMethod, checking
         // that `obj` is_a? the captured class. Raises TypeError on
         // mismatch, matching CRuby.
-        if let Value::UnboundMethod(uid) = &recv && name == "bind" && args.len() == 1 {
+        if let Value::UnboundMethod(uid) = &recv
+            && name == "bind"
+            && args.len() == 1
+        {
             let (cap_class, cap_name_id, cap_method) = match self.heap.get(*uid) {
-                HeapObj::UnboundMethod { class, name_id, method } => {
-                    (class.clone(), *name_id, method.clone())
-                }
+                HeapObj::UnboundMethod {
+                    class,
+                    name_id,
+                    method,
+                } => (class.clone(), *name_id, method.clone()),
                 _ => panic!("ICE: UnboundMethod slot holds non-UnboundMethod"),
             };
             let mut args = args.into_vec();
@@ -3925,9 +4096,14 @@ impl Vm {
                 Value::Object(id) => self.heap.class_of(*id),
                 _ => match self.class_of(&target) {
                     Value::Class(c) => c,
-                    _ => return Err(self.trap(RubyError::TypeError {
-                        msg: format!("bind argument must have a class (got {})", target.type_name()),
-                    })),
+                    _ => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "bind argument must have a class (got {})",
+                                target.type_name()
+                            ),
+                        }));
+                    }
                 },
             };
             // Kernel is the universally-bindable sentinel — CRuby
@@ -3941,7 +4117,8 @@ impl Vm {
             // fence as the `bind_call` arm below.
             if !matches!(cap_class.name.as_str(), "Kernel" | "Object" | "BasicObject")
                 && !cap_class.is_module
-                && !super::class_is_a(&target_class, &cap_class) {
+                && !super::class_is_a(&target_class, &cap_class)
+            {
                 return Err(self.trap(RubyError::TypeError {
                     msg: format!(
                         "bind argument must be an instance of {} (got {})",
@@ -3998,9 +4175,16 @@ impl Vm {
         // dispatch are identical to the UnboundMethod arm
         // below — see the longer comment block there for the
         // singleton-class / Module-mixin / Kernel edge cases.
-        if let Value::BoundMethod(bid) = &recv && name == "bind_call" && !args.is_empty() {
+        if let Value::BoundMethod(bid) = &recv
+            && name == "bind_call"
+            && !args.is_empty()
+        {
             let (bm_recv, bm_name_id, bm_method) = match self.heap.get(*bid) {
-                HeapObj::BoundMethod { recv, name_id, method } => (recv.clone(), *name_id, method.clone()),
+                HeapObj::BoundMethod {
+                    recv,
+                    name_id,
+                    method,
+                } => (recv.clone(), *name_id, method.clone()),
                 _ => panic!("ICE: BoundMethod slot holds non-BoundMethod"),
             };
             // Capture class from the original receiver — same
@@ -4010,9 +4194,11 @@ impl Vm {
                 Value::Object(id) => self.heap.class_of(*id),
                 _ => match self.class_of(&bm_recv) {
                     Value::Class(c) => c,
-                    _ => return Err(self.trap(RubyError::TypeError {
-                        msg: "cannot bind_call on a Method whose receiver has no class".into(),
-                    })),
+                    _ => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: "cannot bind_call on a Method whose receiver has no class".into(),
+                        }));
+                    }
                 },
             };
             let mut args = args.into_vec();
@@ -4021,14 +4207,20 @@ impl Vm {
                 Value::Object(id) => self.heap.class_of(*id),
                 _ => match self.class_of(&target) {
                     Value::Class(c) => c,
-                    _ => return Err(self.trap(RubyError::TypeError {
-                        msg: format!("bind_call argument must have a class (got {})", target.type_name()),
-                    })),
+                    _ => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "bind_call argument must have a class (got {})",
+                                target.type_name()
+                            ),
+                        }));
+                    }
                 },
             };
             if !matches!(cap_class.name.as_str(), "Kernel" | "Object" | "BasicObject")
                 && !cap_class.is_module
-                && !super::class_is_a(&target_class, &cap_class) {
+                && !super::class_is_a(&target_class, &cap_class)
+            {
                 return Err(self.trap(RubyError::TypeError {
                     msg: format!(
                         "bind_call argument must be an instance of {} (got {})",
@@ -4039,35 +4231,47 @@ impl Vm {
             // real_mod_name (Method form): bypass a `def self.name` override
             // and return the real constant name — see the UnboundMethod arm.
             if self.interner.resolve(bm_name_id).as_ref() == "name"
-                && let Value::Class(c) = &target {
+                && let Value::Class(c) = &target
+            {
                 let v = c.effective_name().map(Value::new_str).unwrap_or(Value::Nil);
                 self.stack.push(v);
                 return Ok(CallableOutcome::Handled);
             }
             match bm_method.or_else(|| self.lookup_method_uncached(&cap_class, bm_name_id)) {
-                Some(m) => { self.invoke_method(m, target, args)?; }
+                Some(m) => {
+                    self.invoke_method(m, target, args)?;
+                }
                 None => {
                     // Native builtin with no table Method — dispatch by
                     // name on the target (see the UnboundMethod arm).
                     let argc = args.len();
                     self.stack.push(target);
-                    for a in args { self.stack.push(a); }
+                    for a in args {
+                        self.stack.push(a);
+                    }
                     self.bypass_visibility_once = true;
                     self.do_call(bm_name_id, argc, false, u32::MAX)?;
                 }
             }
             return Ok(CallableOutcome::Handled);
         }
-        if let Value::BoundMethod(_) = &recv && name == "bind_call" {
+        if let Value::BoundMethod(_) = &recv
+            && name == "bind_call"
+        {
             return Err(self.trap(RubyError::ArgumentError {
                 msg: "wrong number of arguments (given 0, expected 1..)".into(),
             }));
         }
-        if let Value::UnboundMethod(uid) = &recv && name == "bind_call" && !args.is_empty() {
+        if let Value::UnboundMethod(uid) = &recv
+            && name == "bind_call"
+            && !args.is_empty()
+        {
             let (cap_class, cap_name_id, cap_method) = match self.heap.get(*uid) {
-                HeapObj::UnboundMethod { class, name_id, method } => {
-                    (class.clone(), *name_id, method.clone())
-                }
+                HeapObj::UnboundMethod {
+                    class,
+                    name_id,
+                    method,
+                } => (class.clone(), *name_id, method.clone()),
                 _ => panic!("ICE: UnboundMethod slot holds non-UnboundMethod"),
             };
             let mut args = args.into_vec();
@@ -4080,9 +4284,14 @@ impl Vm {
                 Value::Object(id) => self.heap.class_of(*id),
                 _ => match self.class_of(&target) {
                     Value::Class(c) => c,
-                    _ => return Err(self.trap(RubyError::TypeError {
-                        msg: format!("bind_call argument must have a class (got {})", target.type_name()),
-                    })),
+                    _ => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "bind_call argument must have a class (got {})",
+                                target.type_name()
+                            ),
+                        }));
+                    }
                 },
             };
             // Skip the is-a fence when:
@@ -4106,7 +4315,8 @@ impl Vm {
             //     stays strict — `obj.is_a?(cls)` required.
             if !matches!(cap_class.name.as_str(), "Kernel" | "Object" | "BasicObject")
                 && !cap_class.is_module
-                && !super::class_is_a(&target_class, &cap_class) {
+                && !super::class_is_a(&target_class, &cap_class)
+            {
                 return Err(self.trap(RubyError::TypeError {
                     msg: format!(
                         "bind_call argument must be an instance of {} (got {})",
@@ -4126,13 +4336,16 @@ impl Vm {
             // `name` is a SYNTHESISED builtin Method, so cap_method is Some and
             // the snapshot dispatch below would re-find the override; intercept.
             if self.interner.resolve(cap_name_id).as_ref() == "name"
-                && let Value::Class(c) = &target {
+                && let Value::Class(c) = &target
+            {
                 let v = c.effective_name().map(Value::new_str).unwrap_or(Value::Nil);
                 self.stack.push(v);
                 return Ok(CallableOutcome::Handled);
             }
             match cap_method.or_else(|| self.lookup_method_uncached(&cap_class, cap_name_id)) {
-                Some(m) => { self.invoke_method(m, target, args)?; }
+                Some(m) => {
+                    self.invoke_method(m, target, args)?;
+                }
                 None => {
                     // No table Method — the captured method is a NATIVE
                     // builtin (e.g. `String.instance_method(:upcase)`).
@@ -4142,14 +4355,18 @@ impl Vm {
                     // private/protected methods, matching CRuby).
                     let argc = args.len();
                     self.stack.push(target);
-                    for a in args { self.stack.push(a); }
+                    for a in args {
+                        self.stack.push(a);
+                    }
                     self.bypass_visibility_once = true;
                     self.do_call(cap_name_id, argc, false, u32::MAX)?;
                 }
             }
             return Ok(CallableOutcome::Handled);
         }
-        if let Value::UnboundMethod(_) = &recv && name == "bind_call" {
+        if let Value::UnboundMethod(_) = &recv
+            && name == "bind_call"
+        {
             return Err(self.trap(RubyError::ArgumentError {
                 msg: "wrong number of arguments (given 0, expected 1..)".into(),
             }));
@@ -4159,155 +4376,171 @@ impl Vm {
         // `coerce_callable_to_block` forwarder so calling the
         // resulting Proc splats its args back into `bm.call(...)`.
         if let Value::BoundMethod(bid) = &recv
-            && name == "to_proc" && args.is_empty() {
-                let bm_id = *bid;
-                let id = self.coerce_callable_to_block(Value::BoundMethod(bm_id))?;
-                self.stack.push(Value::Block(id));
-                return Ok(CallableOutcome::Handled);
-            }
+            && name == "to_proc"
+            && args.is_empty()
+        {
+            let bm_id = *bid;
+            let id = self.coerce_callable_to_block(Value::BoundMethod(bm_id))?;
+            self.stack.push(Value::Block(id));
+            return Ok(CallableOutcome::Handled);
+        }
         // `m.curry` / `m.curry(n)` — host-side partial application.
         // Returns a CurriedProc that gathers args across successive
         // `.call` invocations until `target_arity` is reached, then
         // invokes the underlying with the full arg list. `class_of`
         // reports CurriedProc as `Proc`, matching CRuby.
         if matches!(&recv, Value::BoundMethod(_) | Value::Block(_))
-            && name == "curry" && args.len() <= 1 {
-                let target_arity: u16 = if let Some(Value::Int(n)) = args.first() {
-                    if *n < 0 {
-                        return Err(self.trap(RubyError::ArgumentError {
-                            msg: format!("negative arity for curry ({})", n),
-                        }));
-                    }
-                    if *n > u16::MAX as i64 {
-                        return Err(self.trap(RubyError::ArgumentError {
-                            msg: format!("curry arity out of range ({})", n),
-                        }));
-                    }
-                    *n as u16
-                } else if let Value::BoundMethod(bid) = &recv {
-                    let (bm_recv, m_name_id) = {
-                        let (r, n) = self.heap.bound_method(*bid);
-                        (r.clone(), n)
-                    };
-                    let class = match self.class_of(&bm_recv) {
-                        Value::Class(c) => c,
-                        _ => return Err(self.trap(RubyError::TypeError {
-                            msg: "Method receiver has no resolvable class".into(),
-                        })),
-                    };
-                    match self.lookup_method_uncached(&class, m_name_id) {
-                        Some(m) => self.protos[m.proto_idx].n_required_positional,
-                        None => return Err(self.trap(RubyError::ArgumentError {
-                            msg: "cannot curry a method with unknown arity (builtin)".into(),
-                        })),
-                    }
-                } else if let Value::Block(bid) = &recv {
-                    // Proc#curry — derive arity from the underlying
-                    // proto's required-positional count. Rest / kw
-                    // are not supported as auto-arity for curry; user
-                    // can still pass an explicit arity hint above.
-                    let bh = self.heap.block(*bid);
-                    let proto = &self.protos[bh.proto_idx];
-                    if bh.rest_slot.is_some() && proto.n_required_positional == 0 {
-                        return Err(self.trap(RubyError::ArgumentError {
-                            msg: "cannot curry a proc with only rest params (pass explicit arity)".into(),
-                        }));
-                    }
-                    proto.n_required_positional
-                } else {
-                    unreachable!()
+            && name == "curry"
+            && args.len() <= 1
+        {
+            let target_arity: u16 = if let Some(Value::Int(n)) = args.first() {
+                if *n < 0 {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("negative arity for curry ({})", n),
+                    }));
+                }
+                if *n > u16::MAX as i64 {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("curry arity out of range ({})", n),
+                    }));
+                }
+                *n as u16
+            } else if let Value::BoundMethod(bid) = &recv {
+                let (bm_recv, m_name_id) = {
+                    let (r, n) = self.heap.bound_method(*bid);
+                    (r.clone(), n)
                 };
-                // Pin `recv` (the underlying BoundMethod / Proc):
-                // it was popped from the operand stack by do_call, so
-                // it has no GC root by the time maybe_gc fires. Same
-                // root-hole shape as the BoundMethod-coerce-to-Block
-                // fix in PR #45 (5874798 / 50867c5).
-                let mut g = crate::vm::PinGuard::new(self);
-                g.pin(recv.clone());
-                g.vm.maybe_gc();
-                g.vm.check_alloc()?;
-                let id = g.vm.heap.alloc(HeapObj::CurriedProc {
-                    underlying: recv.clone(),
-                    gathered: Vec::new(),
-                    target_arity,
-                });
-                g.vm.stack.push(Value::CurriedProc(id));
-                return Ok(CallableOutcome::Handled);
-            }
+                let class = match self.class_of(&bm_recv) {
+                    Value::Class(c) => c,
+                    _ => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: "Method receiver has no resolvable class".into(),
+                        }));
+                    }
+                };
+                match self.lookup_method_uncached(&class, m_name_id) {
+                    Some(m) => self.protos[m.proto_idx].n_required_positional,
+                    None => {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: "cannot curry a method with unknown arity (builtin)".into(),
+                        }));
+                    }
+                }
+            } else if let Value::Block(bid) = &recv {
+                // Proc#curry — derive arity from the underlying
+                // proto's required-positional count. Rest / kw
+                // are not supported as auto-arity for curry; user
+                // can still pass an explicit arity hint above.
+                let bh = self.heap.block(*bid);
+                let proto = &self.protos[bh.proto_idx];
+                if bh.rest_slot.is_some() && proto.n_required_positional == 0 {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: "cannot curry a proc with only rest params (pass explicit arity)"
+                            .into(),
+                    }));
+                }
+                proto.n_required_positional
+            } else {
+                unreachable!()
+            };
+            // Pin `recv` (the underlying BoundMethod / Proc):
+            // it was popped from the operand stack by do_call, so
+            // it has no GC root by the time maybe_gc fires. Same
+            // root-hole shape as the BoundMethod-coerce-to-Block
+            // fix in PR #45 (5874798 / 50867c5).
+            let mut g = crate::vm::PinGuard::new(self);
+            g.pin(recv.clone());
+            g.vm.maybe_gc();
+            g.vm.check_alloc()?;
+            let id = g.vm.heap.alloc(HeapObj::CurriedProc {
+                underlying: recv.clone(),
+                gathered: Vec::new(),
+                target_arity,
+            });
+            g.vm.stack.push(Value::CurriedProc(id));
+            return Ok(CallableOutcome::Handled);
+        }
         // `cp.call(args)` — append to gathered; invoke if arity hit,
         // else return a new CurriedProc carrying the appended state.
         if let Value::CurriedProc(cid) = &recv
-            && matches!(name, "call" | "[]" | "()") {
-                let (underlying, gathered, arity) = {
-                    let (u, g, a) = self.heap.curried_proc(*cid);
-                    (u.clone(), g.clone(), a)
-                };
-                let mut combined = gathered;
-                combined.extend(args);
-                if combined.len() >= arity as usize {
-                    let argc = combined.len();
-                    self.stack.push(underlying);
-                    for a in combined { self.stack.push(a); }
-                    let call_sym = self.interner.intern("call");
-                    self.do_call(call_sym, argc, false, u32::MAX)?;
-                    return Ok(CallableOutcome::Handled);
+            && matches!(name, "call" | "[]" | "()")
+        {
+            let (underlying, gathered, arity) = {
+                let (u, g, a) = self.heap.curried_proc(*cid);
+                (u.clone(), g.clone(), a)
+            };
+            let mut combined = gathered;
+            combined.extend(args);
+            if combined.len() >= arity as usize {
+                let argc = combined.len();
+                self.stack.push(underlying);
+                for a in combined {
+                    self.stack.push(a);
                 }
-                // Same pin-the-underlying pattern as the curry-on-Method
-                // branch above. `combined` may also contain heap-typed
-                // arg values that are only held in this Rust-local Vec;
-                // pinning the underlying alone is enough because the
-                // mark phase walks CurriedProc's contents only after
-                // alloc — but the new alloc's reading the SAME Vec, so
-                // we need both pinned across the maybe_gc call.
-                let mut g = crate::vm::PinGuard::new(self);
-                g.pin(underlying.clone());
-                for v in &combined { g.pin(v.clone()); }
-                g.vm.maybe_gc();
-                g.vm.check_alloc()?;
-                let id = g.vm.heap.alloc(HeapObj::CurriedProc {
-                    underlying,
-                    gathered: combined,
-                    target_arity: arity,
-                });
-                g.vm.stack.push(Value::CurriedProc(id));
+                let call_sym = self.interner.intern("call");
+                self.do_call(call_sym, argc, false, u32::MAX)?;
                 return Ok(CallableOutcome::Handled);
             }
+            // Same pin-the-underlying pattern as the curry-on-Method
+            // branch above. `combined` may also contain heap-typed
+            // arg values that are only held in this Rust-local Vec;
+            // pinning the underlying alone is enough because the
+            // mark phase walks CurriedProc's contents only after
+            // alloc — but the new alloc's reading the SAME Vec, so
+            // we need both pinned across the maybe_gc call.
+            let mut g = crate::vm::PinGuard::new(self);
+            g.pin(underlying.clone());
+            for v in &combined {
+                g.pin(v.clone());
+            }
+            g.vm.maybe_gc();
+            g.vm.check_alloc()?;
+            let id = g.vm.heap.alloc(HeapObj::CurriedProc {
+                underlying,
+                gathered: combined,
+                target_arity: arity,
+            });
+            g.vm.stack.push(Value::CurriedProc(id));
+            return Ok(CallableOutcome::Handled);
+        }
         // `m >> other` / `m << other` — function composition.
         // `(m >> g).(x) == g.(m.(x))`; `(m << g).(x) == m.(g.(x))`.
         // Both sides must be callable — BoundMethod or Block. The
         // result is a Block (Proc) that splats `*args` through the
         // chain in the right order.
         if matches!(&recv, Value::BoundMethod(_) | Value::Block(_))
-            && matches!(name, ">>" | "<<") && args.len() == 1 {
-                let mut args = args.into_vec();
-                let other = args.swap_remove(0);
-                if !matches!(&other, Value::BoundMethod(_) | Value::Block(_)) {
-                    return Err(self.trap(RubyError::TypeError {
-                        msg: format!(
-                            "compose argument must be a Method or Proc (got {})",
-                            other.type_name(),
-                        ),
-                    }));
-                }
-                let (outer, inner) = if name == ">>" {
-                    (other, recv)
-                } else {
-                    (recv, other)
-                };
-                // CRuby: the composed proc's lambda? follows the
-                // FIRST-EXECUTED (inner) function — `(f >> g)` runs f
-                // first, `(f << g)` runs g first. A BoundMethod composes
-                // as a lambda (Method#to_proc is one); a Block carries
-                // its own bit.
-                let inner_is_lambda = match &inner {
-                    Value::BoundMethod(_) => true,
-                    Value::Block(bid) => self.heap.block(*bid).is_lambda,
-                    _ => false,
-                };
-                let id = self.coerce_compose_to_block(outer, inner, inner_is_lambda)?;
-                self.stack.push(Value::Block(id));
-                return Ok(CallableOutcome::Handled);
+            && matches!(name, ">>" | "<<")
+            && args.len() == 1
+        {
+            let mut args = args.into_vec();
+            let other = args.swap_remove(0);
+            if !matches!(&other, Value::BoundMethod(_) | Value::Block(_)) {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: format!(
+                        "compose argument must be a Method or Proc (got {})",
+                        other.type_name(),
+                    ),
+                }));
             }
+            let (outer, inner) = if name == ">>" {
+                (other, recv)
+            } else {
+                (recv, other)
+            };
+            // CRuby: the composed proc's lambda? follows the
+            // FIRST-EXECUTED (inner) function — `(f >> g)` runs f
+            // first, `(f << g)` runs g first. A BoundMethod composes
+            // as a lambda (Method#to_proc is one); a Block carries
+            // its own bit.
+            let inner_is_lambda = match &inner {
+                Value::BoundMethod(_) => true,
+                Value::Block(bid) => self.heap.block(*bid).is_lambda,
+                _ => false,
+            };
+            let id = self.coerce_compose_to_block(outer, inner, inner_is_lambda)?;
+            self.stack.push(Value::Block(id));
+            return Ok(CallableOutcome::Handled);
+        }
         // `m.hash` — Integer hash derived from receiver identity
         // (ObjId / value / Rc-ptr address) + name_id. Two
         // BoundMethods compared equal under `Method#==` must
@@ -4315,60 +4548,62 @@ impl Vm {
         // mix below is wrapping_add + wrapping_mul to be cheap
         // and avoid raising.
         if matches!(&recv, Value::BoundMethod(_) | Value::UnboundMethod(_))
-            && name == "hash" && args.is_empty() {
-                let h: i64 = match &recv {
-                    Value::BoundMethod(bid) => {
-                        // Mirror the BoundMethod ==/eql? resolution
-                        // chain so hash agrees with equality:
-                        // recv_identity + (snapshot Rc-ptr, falling
-                        // back to live lookup, then to `name`).
-                        // Without this, post-redefine BoundMethods
-                        // that compare unequal under the new == arm
-                        // would still collide on hash — violating
-                        // `a.eql?(b) ⇒ a.hash == b.hash` in the
-                        // opposite direction.
-                        let (r, n, snap) = self.heap.bound_method_full(*bid);
-                        let r = r.clone();
-                        let recv_h = method_recv_hash(&r);
-                        let key = snap.clone().or_else(|| match self.class_of(&r) {
-                            Value::Class(c) => self.lookup_method_uncached(&c, n),
-                            _ => None,
-                        });
-                        let method_h = match key {
-                            Some(m) => std::rc::Rc::as_ptr(&m) as i64,
-                            None => n.0 as i64,
-                        };
-                        recv_h.wrapping_mul(0x9E3779B1).wrapping_add(method_h)
-                    }
-                    Value::UnboundMethod(uid) => {
-                        // Mirror `eql?`'s identity: hash the
-                        // underlying Method's Rc pointer. Prefer
-                        // the capture-time snapshot so hash agrees
-                        // with the other capture-preserving arms
-                        // (bind_call, source_location) — UnboundMethod
-                        // semantics pin to the resolution at capture
-                        // time, not the live class table. Two
-                        // UnboundMethods sharing the same definition
-                        // (e.g. `C.instance_method(:foo)` and
-                        // `D.instance_method(:foo)` for `D < C`'s
-                        // inherited foo) satisfy
-                        // `a.eql?(b) ⇒ a.hash == b.hash`. Falls back
-                        // to a live `lookup_method_uncached`, then to
-                        // the captured-class pointer — eql? takes
-                        // the same fallback chain, so hash stays
-                        // consistent in every branch.
-                        let (cls, n, snap) = self.heap.unbound_method_full(*uid);
-                        let key = match snap.or_else(|| self.lookup_method_uncached(&cls, n)) {
-                            Some(m) => std::rc::Rc::as_ptr(&m) as i64,
-                            None => std::rc::Rc::as_ptr(&cls) as i64,
-                        };
-                        key.wrapping_mul(0x9E3779B1).wrapping_add(n.0 as i64)
-                    }
-                    _ => unreachable!(),
-                };
-                self.stack.push(Value::Int(h));
-                return Ok(CallableOutcome::Handled);
-            }
+            && name == "hash"
+            && args.is_empty()
+        {
+            let h: i64 = match &recv {
+                Value::BoundMethod(bid) => {
+                    // Mirror the BoundMethod ==/eql? resolution
+                    // chain so hash agrees with equality:
+                    // recv_identity + (snapshot Rc-ptr, falling
+                    // back to live lookup, then to `name`).
+                    // Without this, post-redefine BoundMethods
+                    // that compare unequal under the new == arm
+                    // would still collide on hash — violating
+                    // `a.eql?(b) ⇒ a.hash == b.hash` in the
+                    // opposite direction.
+                    let (r, n, snap) = self.heap.bound_method_full(*bid);
+                    let r = r.clone();
+                    let recv_h = method_recv_hash(&r);
+                    let key = snap.clone().or_else(|| match self.class_of(&r) {
+                        Value::Class(c) => self.lookup_method_uncached(&c, n),
+                        _ => None,
+                    });
+                    let method_h = match key {
+                        Some(m) => std::rc::Rc::as_ptr(&m) as i64,
+                        None => n.0 as i64,
+                    };
+                    recv_h.wrapping_mul(0x9E3779B1).wrapping_add(method_h)
+                }
+                Value::UnboundMethod(uid) => {
+                    // Mirror `eql?`'s identity: hash the
+                    // underlying Method's Rc pointer. Prefer
+                    // the capture-time snapshot so hash agrees
+                    // with the other capture-preserving arms
+                    // (bind_call, source_location) — UnboundMethod
+                    // semantics pin to the resolution at capture
+                    // time, not the live class table. Two
+                    // UnboundMethods sharing the same definition
+                    // (e.g. `C.instance_method(:foo)` and
+                    // `D.instance_method(:foo)` for `D < C`'s
+                    // inherited foo) satisfy
+                    // `a.eql?(b) ⇒ a.hash == b.hash`. Falls back
+                    // to a live `lookup_method_uncached`, then to
+                    // the captured-class pointer — eql? takes
+                    // the same fallback chain, so hash stays
+                    // consistent in every branch.
+                    let (cls, n, snap) = self.heap.unbound_method_full(*uid);
+                    let key = match snap.or_else(|| self.lookup_method_uncached(&cls, n)) {
+                        Some(m) => std::rc::Rc::as_ptr(&m) as i64,
+                        None => std::rc::Rc::as_ptr(&cls) as i64,
+                    };
+                    key.wrapping_mul(0x9E3779B1).wrapping_add(n.0 as i64)
+                }
+                _ => unreachable!(),
+            };
+            self.stack.push(Value::Int(h));
+            return Ok(CallableOutcome::Handled);
+        }
         // `m.source_location` — three shapes:
         //   - User-defined methods: `[filename, lineno]` derived
         //     from the proto's first op_span via the Vm-side
@@ -4386,64 +4621,78 @@ impl Vm {
         //   - Methods with no snapshot (none-of-the-above
         //     fallback): `nil`.
         if matches!(&recv, Value::BoundMethod(_) | Value::UnboundMethod(_))
-            && name == "source_location" && args.is_empty() {
-                // Prefer the snapshot Method so introspection
-                // survives a subsequent `remove_method` between
-                // capture and the source_location query.
-                let (class, m_name_id, snapshot) = match &recv {
-                    Value::BoundMethod(bid) => {
-                        let (r, n, snap) = self.heap.bound_method_full(*bid);
-                        let r = r.clone();
-                        let snap = snap.clone();
-                        let cls = match self.class_of(&r) {
-                            Value::Class(c) => c,
-                            _ => { self.stack.push(Value::Nil); return Ok(CallableOutcome::Handled); }
-                        };
-                        (cls, n, snap)
-                    }
-                    Value::UnboundMethod(uid) => {
-                        let (cls, n, snap) = self.heap.unbound_method_full(*uid);
-                        (cls, n, snap)
-                    }
-                    _ => unreachable!(),
-                };
-                let m = match snapshot.or_else(|| self.lookup_method_uncached(&class, m_name_id)) {
-                    Some(m) => m,
-                    None => { self.stack.push(Value::Nil); return Ok(CallableOutcome::Handled); }
-                };
-                // Builtin Methods carry their own source_location
-                // label (e.g. `"<internal:kernel>"`) rather than a
-                // real proto's filename. The proto_idx on a builtin
-                // is a placeholder; reading `self.protos[0].filename`
-                // would surface an unrelated file.
-                if let Some(meta) = &m.builtin {
-                    // `None` source_label → nil. CRuby's behavior
-                    // for some C-defined methods (e.g.
-                    // BasicObject's __id__).
-                    let Some(label) = meta.source_label else {
-                        self.stack.push(Value::Nil);
-                        return Ok(CallableOutcome::Handled);
+            && name == "source_location"
+            && args.is_empty()
+        {
+            // Prefer the snapshot Method so introspection
+            // survives a subsequent `remove_method` between
+            // capture and the source_location query.
+            let (class, m_name_id, snapshot) = match &recv {
+                Value::BoundMethod(bid) => {
+                    let (r, n, snap) = self.heap.bound_method_full(*bid);
+                    let r = r.clone();
+                    let snap = snap.clone();
+                    let cls = match self.class_of(&r) {
+                        Value::Class(c) => c,
+                        _ => {
+                            self.stack.push(Value::Nil);
+                            return Ok(CallableOutcome::Handled);
+                        }
                     };
-                    let filename_str = Value::new_str(label.to_string());
-                    self.maybe_gc();
-                    self.check_alloc()?;
-                    let id = self.heap.alloc(HeapObj::Array(vec![filename_str, Value::Int(meta.source_line)].into()));
-                    self.stack.push(Value::Array(id));
+                    (cls, n, snap)
+                }
+                Value::UnboundMethod(uid) => {
+                    let (cls, n, snap) = self.heap.unbound_method_full(*uid);
+                    (cls, n, snap)
+                }
+                _ => unreachable!(),
+            };
+            let m = match snapshot.or_else(|| self.lookup_method_uncached(&class, m_name_id)) {
+                Some(m) => m,
+                None => {
+                    self.stack.push(Value::Nil);
                     return Ok(CallableOutcome::Handled);
                 }
-                let proto = &self.protos[m.proto_idx];
-                let filename = proto.filename.clone();
-                let first_offset = proto.op_spans.first().map(|s| s.byte_offset).unwrap_or(0);
-                let line: u32 = self.sources.get(&*filename)
-                    .map(|src| crate::error::line_col(src, first_offset).0)
-                    .unwrap_or(0);
-                let filename_str = Value::new_str(filename.to_string());
+            };
+            // Builtin Methods carry their own source_location
+            // label (e.g. `"<internal:kernel>"`) rather than a
+            // real proto's filename. The proto_idx on a builtin
+            // is a placeholder; reading `self.protos[0].filename`
+            // would surface an unrelated file.
+            if let Some(meta) = &m.builtin {
+                // `None` source_label → nil. CRuby's behavior
+                // for some C-defined methods (e.g.
+                // BasicObject's __id__).
+                let Some(label) = meta.source_label else {
+                    self.stack.push(Value::Nil);
+                    return Ok(CallableOutcome::Handled);
+                };
+                let filename_str = Value::new_str(label.to_string());
                 self.maybe_gc();
                 self.check_alloc()?;
-                let id = self.heap.alloc(HeapObj::Array(vec![filename_str, Value::Int(line as i64)].into()));
+                let id = self.heap.alloc(HeapObj::Array(
+                    vec![filename_str, Value::Int(meta.source_line)].into(),
+                ));
                 self.stack.push(Value::Array(id));
                 return Ok(CallableOutcome::Handled);
             }
+            let proto = &self.protos[m.proto_idx];
+            let filename = proto.filename.clone();
+            let first_offset = proto.op_spans.first().map(|s| s.byte_offset).unwrap_or(0);
+            let line: u32 = self
+                .sources
+                .get(&*filename)
+                .map(|src| crate::error::line_col(src, first_offset).0)
+                .unwrap_or(0);
+            let filename_str = Value::new_str(filename.to_string());
+            self.maybe_gc();
+            self.check_alloc()?;
+            let id = self.heap.alloc(HeapObj::Array(
+                vec![filename_str, Value::Int(line as i64)].into(),
+            ));
+            self.stack.push(Value::Array(id));
+            return Ok(CallableOutcome::Handled);
+        }
         // `m.owner` — the class that defined the resolved Method
         // (CRuby's `Method#owner` / `UnboundMethod#owner`). Walks
         // the ancestor chain to find where the method actually
@@ -4454,55 +4703,62 @@ impl Vm {
         // UnboundMethod#receiver raises NoMethodError, matching
         // CRuby (it has no receiver to give).
         if matches!(&recv, Value::BoundMethod(_) | Value::UnboundMethod(_))
-            && matches!(name, "owner" | "receiver") && args.is_empty() {
-                if name == "receiver" {
-                    return match &recv {
-                        Value::BoundMethod(bid) => {
-                            let (r, _) = self.heap.bound_method(*bid);
-                            let r = r.clone();
-                            self.stack.push(r);
-                            Ok(CallableOutcome::Handled)
-                        }
-                        Value::UnboundMethod(_) => Err(self.trap(RubyError::NoMethodError {
-                            kind: crate::error::NoMethodErrorKind::Missing,
-                            method: "receiver".into(),
-                            recv_type: std::borrow::Cow::Borrowed("UnboundMethod"),
-                        })),
-                        _ => unreachable!(),
-                    };
-                }
-                // owner: resolve Method through snapshot (or live
-                // lookup as fallback) and prefer its
-                // `defining_class.upgrade()` over the captured
-                // class.
-                let (cap_class, m_name_id, snapshot) = match &recv {
+            && matches!(name, "owner" | "receiver")
+            && args.is_empty()
+        {
+            if name == "receiver" {
+                return match &recv {
                     Value::BoundMethod(bid) => {
-                        let (r, n, snap) = self.heap.bound_method_full(*bid);
+                        let (r, _) = self.heap.bound_method(*bid);
                         let r = r.clone();
-                        let snap = snap.clone();
-                        let cls = match self.class_of(&r) {
-                            Value::Class(c) => c,
-                            _ => return Err(self.trap(RubyError::TypeError {
-                                msg: "Method receiver has no resolvable class".into(),
-                            })),
-                        };
-                        (cls, n, snap)
+                        self.stack.push(r);
+                        Ok(CallableOutcome::Handled)
                     }
-                    Value::UnboundMethod(uid) => {
-                        let (cls, n, snap) = self.heap.unbound_method_full(*uid);
-                        (cls, n, snap)
-                    }
+                    Value::UnboundMethod(_) => Err(self.trap(RubyError::NoMethodError {
+                        kind: crate::error::NoMethodErrorKind::Missing,
+                        method: "receiver".into(),
+                        recv_type: std::borrow::Cow::Borrowed("UnboundMethod"),
+                    })),
                     _ => unreachable!(),
                 };
-                let owner = match snapshot.or_else(|| self.lookup_method_uncached(&cap_class, m_name_id)) {
-                    Some(m) => m.defining_class.as_ref()
+            }
+            // owner: resolve Method through snapshot (or live
+            // lookup as fallback) and prefer its
+            // `defining_class.upgrade()` over the captured
+            // class.
+            let (cap_class, m_name_id, snapshot) = match &recv {
+                Value::BoundMethod(bid) => {
+                    let (r, n, snap) = self.heap.bound_method_full(*bid);
+                    let r = r.clone();
+                    let snap = snap.clone();
+                    let cls = match self.class_of(&r) {
+                        Value::Class(c) => c,
+                        _ => {
+                            return Err(self.trap(RubyError::TypeError {
+                                msg: "Method receiver has no resolvable class".into(),
+                            }));
+                        }
+                    };
+                    (cls, n, snap)
+                }
+                Value::UnboundMethod(uid) => {
+                    let (cls, n, snap) = self.heap.unbound_method_full(*uid);
+                    (cls, n, snap)
+                }
+                _ => unreachable!(),
+            };
+            let owner =
+                match snapshot.or_else(|| self.lookup_method_uncached(&cap_class, m_name_id)) {
+                    Some(m) => m
+                        .defining_class
+                        .as_ref()
                         .and_then(|w| w.upgrade())
                         .unwrap_or_else(|| cap_class.clone()),
                     None => cap_class.clone(),
                 };
-                self.stack.push(Value::Class(owner));
-                return Ok(CallableOutcome::Handled);
-            }
+            self.stack.push(Value::Class(owner));
+            return Ok(CallableOutcome::Handled);
+        }
         // `m.name` — returns the captured method-name Symbol.
         // Same shape for BoundMethod and UnboundMethod; aliased
         // methods report the alias name (CRuby parity — the
@@ -4510,24 +4766,23 @@ impl Vm {
         // Arity-check inside the arm rather than via the guard so
         // excess-arg calls raise ArgumentError (CRuby parity)
         // instead of falling through to NoMethodError.
-        if matches!(&recv, Value::BoundMethod(_) | Value::UnboundMethod(_))
-            && name == "name" {
-                if !args.is_empty() {
-                    return Err(self.trap(RubyError::ArgumentError {
-                        msg: format!(
-                            "wrong number of arguments (given {}, expected 0)",
-                            args.len()
-                        ),
-                    }));
-                }
-                let nid = match &recv {
-                    Value::BoundMethod(bid) => self.heap.bound_method(*bid).1,
-                    Value::UnboundMethod(uid) => self.heap.unbound_method(*uid).1,
-                    _ => unreachable!(),
-                };
-                self.stack.push(Value::Sym(nid));
-                return Ok(CallableOutcome::Handled);
+        if matches!(&recv, Value::BoundMethod(_) | Value::UnboundMethod(_)) && name == "name" {
+            if !args.is_empty() {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 0)",
+                        args.len()
+                    ),
+                }));
             }
+            let nid = match &recv {
+                Value::BoundMethod(bid) => self.heap.bound_method(*bid).1,
+                Value::UnboundMethod(uid) => self.heap.unbound_method(*uid).1,
+                _ => unreachable!(),
+            };
+            self.stack.push(Value::Sym(nid));
+            return Ok(CallableOutcome::Handled);
+        }
         // `m.original_name` — returns the Method's pre-alias name.
         // For a method defined as `def foo` and captured as
         // `.method(:foo)`, equal to `name`. For an alias
@@ -4539,43 +4794,46 @@ impl Vm {
         // (rare — only for synthesised Methods that predate this
         // wiring).
         if matches!(&recv, Value::BoundMethod(_) | Value::UnboundMethod(_))
-            && name == "original_name" {
-                if !args.is_empty() {
-                    return Err(self.trap(RubyError::ArgumentError {
-                        msg: format!(
-                            "wrong number of arguments (given {}, expected 0)",
-                            args.len()
-                        ),
-                    }));
-                }
-                let (cap_class, captured_name, snapshot) = match &recv {
-                    Value::BoundMethod(bid) => {
-                        let (r, n, snap) = self.heap.bound_method_full(*bid);
-                        let r = r.clone();
-                        let snap = snap.clone();
-                        let cls = match self.class_of(&r) {
-                            Value::Class(c) => c,
-                            _ => return Err(self.trap(RubyError::TypeError {
-                                msg: "Method receiver has no resolvable class".into(),
-                            })),
-                        };
-                        (cls, n, snap)
-                    }
-                    Value::UnboundMethod(uid) => {
-                        let (cls, n, snap) = self.heap.unbound_method_full(*uid);
-                        (cls, n, snap)
-                    }
-                    _ => unreachable!(),
-                };
-                let resolved = snapshot
-                    .or_else(|| self.lookup_method_uncached(&cap_class, captured_name));
-                let orig = resolved
-                    .as_ref()
-                    .and_then(|m| m.original_name)
-                    .unwrap_or(captured_name);
-                self.stack.push(Value::Sym(orig));
-                return Ok(CallableOutcome::Handled);
+            && name == "original_name"
+        {
+            if !args.is_empty() {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 0)",
+                        args.len()
+                    ),
+                }));
             }
+            let (cap_class, captured_name, snapshot) = match &recv {
+                Value::BoundMethod(bid) => {
+                    let (r, n, snap) = self.heap.bound_method_full(*bid);
+                    let r = r.clone();
+                    let snap = snap.clone();
+                    let cls = match self.class_of(&r) {
+                        Value::Class(c) => c,
+                        _ => {
+                            return Err(self.trap(RubyError::TypeError {
+                                msg: "Method receiver has no resolvable class".into(),
+                            }));
+                        }
+                    };
+                    (cls, n, snap)
+                }
+                Value::UnboundMethod(uid) => {
+                    let (cls, n, snap) = self.heap.unbound_method_full(*uid);
+                    (cls, n, snap)
+                }
+                _ => unreachable!(),
+            };
+            let resolved =
+                snapshot.or_else(|| self.lookup_method_uncached(&cap_class, captured_name));
+            let orig = resolved
+                .as_ref()
+                .and_then(|m| m.original_name)
+                .unwrap_or(captured_name);
+            self.stack.push(Value::Sym(orig));
+            return Ok(CallableOutcome::Handled);
+        }
         // `m.super_method` — returns the Method/UnboundMethod that
         // `super` would dispatch to, or nil if no super definition
         // exists. CRuby parity: walks past the captured Method's
@@ -4584,86 +4842,91 @@ impl Vm {
         // the same receiver; for UnboundMethod it's anchored on the
         // super-defining class.
         if matches!(&recv, Value::BoundMethod(_) | Value::UnboundMethod(_))
-            && name == "super_method" {
-                if !args.is_empty() {
-                    return Err(self.trap(RubyError::ArgumentError {
-                        msg: format!(
-                            "wrong number of arguments (given {}, expected 0)",
-                            args.len()
-                        ),
-                    }));
-                }
-                let (cap_class, m_name_id, snapshot, recv_opt) = match &recv {
-                    Value::BoundMethod(bid) => {
-                        let (r, n, snap) = self.heap.bound_method_full(*bid);
-                        let r = r.clone();
-                        let snap = snap.clone();
-                        let cls = match self.class_of(&r) {
-                            Value::Class(c) => c,
-                            _ => return Err(self.trap(RubyError::TypeError {
-                                msg: "Method receiver has no resolvable class".into(),
-                            })),
-                        };
-                        (cls, n, snap, Some(r))
-                    }
-                    Value::UnboundMethod(uid) => {
-                        let (cls, n, snap) = self.heap.unbound_method_full(*uid);
-                        (cls, n, snap, None)
-                    }
-                    _ => unreachable!(),
-                };
-                // Resolve the current Method's defining class —
-                // snapshot first (capture-time anchor), then live
-                // lookup as fallback. Builtin methods have no
-                // resolvable defining class → super_method is nil.
-                let cur_method = snapshot
-                    .or_else(|| self.lookup_method_uncached(&cap_class, m_name_id));
-                let defining_class = cur_method.as_ref()
-                    .and_then(|m| m.defining_class.as_ref())
-                    .and_then(|w| w.upgrade());
-                // Walk the receiver's (or captured class's) full
-                // ancestor chain — prepend → own → include → super
-                // — past the defining class, returning the next
-                // (class, method) that defines `m_name_id`.
-                // Required for include/prepend cases:
-                //   class A; def foo; end; prepend M_overrides_foo; end
-                //   A.new.method(:foo).super_method → A#foo
-                // and `class B < P; include M_overrides_foo; end`
-                // → P#foo, neither of which would be reachable via
-                // a plain `defining_class.superclass` walk (Modules
-                // have no superclass).
-                let super_resolved = defining_class.and_then(|dc| {
-                    self.lookup_super_method_uncached(&cap_class, m_name_id, &dc)
-                });
-                match super_resolved {
-                    Some((super_cls, super_method)) => {
-                        let mut g = crate::vm::PinGuard::new(self);
-                        if let Some(r) = recv_opt.as_ref() { g.pin(r.clone()); }
-                        g.vm.maybe_gc();
-                        g.vm.check_alloc()?;
-                        let id = match recv_opt {
-                            Some(r) => g.vm.heap.alloc(HeapObj::BoundMethod {
-                                recv: r,
-                                name_id: m_name_id,
-                                method: Some(super_method),
-                            }),
-                            None => g.vm.heap.alloc(HeapObj::UnboundMethod {
-                                class: super_cls,
-                                name_id: m_name_id,
-                                method: Some(super_method),
-                            }),
-                        };
-                        let v = match &recv {
-                            Value::BoundMethod(_) => Value::BoundMethod(id),
-                            Value::UnboundMethod(_) => Value::UnboundMethod(id),
-                            _ => unreachable!(),
-                        };
-                        g.vm.stack.push(v);
-                    }
-                    None => self.stack.push(Value::Nil),
-                }
-                return Ok(CallableOutcome::Handled);
+            && name == "super_method"
+        {
+            if !args.is_empty() {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 0)",
+                        args.len()
+                    ),
+                }));
             }
+            let (cap_class, m_name_id, snapshot, recv_opt) = match &recv {
+                Value::BoundMethod(bid) => {
+                    let (r, n, snap) = self.heap.bound_method_full(*bid);
+                    let r = r.clone();
+                    let snap = snap.clone();
+                    let cls = match self.class_of(&r) {
+                        Value::Class(c) => c,
+                        _ => {
+                            return Err(self.trap(RubyError::TypeError {
+                                msg: "Method receiver has no resolvable class".into(),
+                            }));
+                        }
+                    };
+                    (cls, n, snap, Some(r))
+                }
+                Value::UnboundMethod(uid) => {
+                    let (cls, n, snap) = self.heap.unbound_method_full(*uid);
+                    (cls, n, snap, None)
+                }
+                _ => unreachable!(),
+            };
+            // Resolve the current Method's defining class —
+            // snapshot first (capture-time anchor), then live
+            // lookup as fallback. Builtin methods have no
+            // resolvable defining class → super_method is nil.
+            let cur_method =
+                snapshot.or_else(|| self.lookup_method_uncached(&cap_class, m_name_id));
+            let defining_class = cur_method
+                .as_ref()
+                .and_then(|m| m.defining_class.as_ref())
+                .and_then(|w| w.upgrade());
+            // Walk the receiver's (or captured class's) full
+            // ancestor chain — prepend → own → include → super
+            // — past the defining class, returning the next
+            // (class, method) that defines `m_name_id`.
+            // Required for include/prepend cases:
+            //   class A; def foo; end; prepend M_overrides_foo; end
+            //   A.new.method(:foo).super_method → A#foo
+            // and `class B < P; include M_overrides_foo; end`
+            // → P#foo, neither of which would be reachable via
+            // a plain `defining_class.superclass` walk (Modules
+            // have no superclass).
+            let super_resolved = defining_class
+                .and_then(|dc| self.lookup_super_method_uncached(&cap_class, m_name_id, &dc));
+            match super_resolved {
+                Some((super_cls, super_method)) => {
+                    let mut g = crate::vm::PinGuard::new(self);
+                    if let Some(r) = recv_opt.as_ref() {
+                        g.pin(r.clone());
+                    }
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let id = match recv_opt {
+                        Some(r) => g.vm.heap.alloc(HeapObj::BoundMethod {
+                            recv: r,
+                            name_id: m_name_id,
+                            method: Some(super_method),
+                        }),
+                        None => g.vm.heap.alloc(HeapObj::UnboundMethod {
+                            class: super_cls,
+                            name_id: m_name_id,
+                            method: Some(super_method),
+                        }),
+                    };
+                    let v = match &recv {
+                        Value::BoundMethod(_) => Value::BoundMethod(id),
+                        Value::UnboundMethod(_) => Value::UnboundMethod(id),
+                        _ => unreachable!(),
+                    };
+                    g.vm.stack.push(v);
+                }
+                None => self.stack.push(Value::Nil),
+            }
+            return Ok(CallableOutcome::Handled);
+        }
         // `m.arity` / `m.parameters` — Method introspection. Walks
         // the captured class chain to find the user-defined Method;
         // if absent (builtin / primitive_call backed), returns
@@ -4671,218 +4934,253 @@ impl Vm {
         // parameters = `[[:rest]]`. Same shape for BoundMethod and
         // UnboundMethod.
         if matches!(&recv, Value::BoundMethod(_) | Value::UnboundMethod(_))
-            && matches!(name, "arity" | "parameters") && args.is_empty() {
-                let (class, m_name_id, snapshot) = match &recv {
-                    Value::BoundMethod(bid) => {
-                        let (bm_recv, nid, snap) = {
-                            let (r, n, snap) = self.heap.bound_method_full(*bid);
-                            (r.clone(), n, snap.clone())
-                        };
-                        let cls = match self.class_of(&bm_recv) {
-                            Value::Class(c) => c,
-                            _ => return Err(self.trap(RubyError::TypeError {
+            && matches!(name, "arity" | "parameters")
+            && args.is_empty()
+        {
+            let (class, m_name_id, snapshot) = match &recv {
+                Value::BoundMethod(bid) => {
+                    let (bm_recv, nid, snap) = {
+                        let (r, n, snap) = self.heap.bound_method_full(*bid);
+                        (r.clone(), n, snap.clone())
+                    };
+                    let cls = match self.class_of(&bm_recv) {
+                        Value::Class(c) => c,
+                        _ => {
+                            return Err(self.trap(RubyError::TypeError {
                                 msg: "Method receiver has no resolvable class".into(),
-                            })),
-                        };
-                        (cls, nid, snap)
-                    }
-                    Value::UnboundMethod(uid) => {
-                        let (cls, n, snap) = self.heap.unbound_method_full(*uid);
-                        (cls, n, snap)
-                    }
-                    _ => unreachable!(),
-                };
-                // Prefer the snapshot Method — survives a later
-                // remove_method that strips the live entry.
-                let m_opt = snapshot.or_else(|| self.lookup_method_uncached(&class, m_name_id));
-                let (arity, params_info) = match m_opt {
-                    // Builtin Methods (synthesised on Kernel etc.)
-                    // carry their introspection metadata directly —
-                    // their `proto_idx` is a placeholder. Read from
-                    // `builtin` before falling back to the
-                    // proto-derived path.
-                    Some(ref m) if m.builtin.is_some() => {
-                        let meta = m.builtin.as_ref().unwrap();
-                        (meta.arity, meta.parameters.clone())
-                    }
-                    Some(m) => {
-                        let proto = &self.protos[m.proto_idx];
-                        // Shared `proto_arity` helper carries the
-                        // CRuby formula (required-kw bumping,
-                        // block-param exclusion, etc.). NOTE:
-                        // `Proc#arity` does NOT share this helper
-                        // — blocks store rest info on
-                        // `BlockHandle`, not on the Proto, so the
-                        // block intrinsic arm above computes
-                        // arity from the handle directly.
-                        let arity = self.proto_arity(m.proto_idx);
-                        // Other counts still needed for the
-                        // `parameters` build below.
-                        let n_req_pos = proto.n_required_positional as usize;
-                        let rest_count = proto.rest_param.is_some() as usize;
-                        let kw_count = proto.kw_param_defaults.len();
-                        let kw_rest_count = proto.kw_rest_param.is_some() as usize;
-                        let block_count = proto.block_param.is_some() as usize;
-                        let positional_total = proto.params.len()
-                            .saturating_sub(rest_count + kw_count + kw_rest_count + block_count);
-                        let mut params: Vec<(&'static str, Option<String>)> = Vec::new();
-                        for i in 0..n_req_pos {
-                            params.push(("req", Some(proto.params[i].clone())));
+                            }));
                         }
-                        for i in n_req_pos..positional_total {
-                            params.push(("opt", Some(proto.params[i].clone())));
-                        }
-                        if let Some(rname) = &proto.rest_param {
-                            let n = if rname.is_empty() { None } else { Some(rname.clone()) };
-                            params.push(("rest", n));
-                        }
-                        let kw_name_start = positional_total + rest_count;
-                        for (i, default) in proto.kw_param_defaults.iter().enumerate() {
-                            let kind = if default.is_none() { "keyreq" } else { "key" };
-                            params.push((kind, Some(proto.params[kw_name_start + i].clone())));
-                        }
-                        if let Some(krname) = &proto.kw_rest_param {
-                            let n = if krname == "__kw_rest_anon" { None } else { Some(krname.clone()) };
-                            params.push(("keyrest", n));
-                        }
-                        if let Some(bname) = &proto.block_param {
-                            // For anonymous `def foo(&)` the sentinel
-                            // `"&"` round-trips here as the Symbol
-                            // `:&` — matches CRuby exactly, which
-                            // also surfaces the anonymous block as
-                            // `[[:block, :&]]` (the literal `&` is a
-                            // legal Symbol payload, just an unusual
-                            // one). No anonymization needed: passing
-                            // the sentinel through gives byte-for-
-                            // byte parity. NOT analogous to the
-                            // `__kw_rest_anon` case above, which
-                            // CRuby DOES report as nameless.
-                            params.push(("block", Some(bname.clone())));
-                        }
-                        (arity, params)
-                    }
-                    // Primitive-backed method with no table entry. The
-                    // generic answer is CRuby's fully-variadic -1 /
-                    // [[:rest]], but the canonical BINARY OPERATORS are
-                    // unambiguously arity 1 on every builtin class
-                    // (`5.method(:+).arity == 1`) — report those
-                    // correctly; everything else keeps the -1 fallback.
-                    None => {
-                        let m_name = self.interner.resolve(m_name_id).clone();
-                        if matches!(
-                            &*m_name,
-                            "+" | "-" | "*" | "/" | "%" | "**" | "&" | "|" | "^"
-                                | "<<" | ">>" | "<=>" | "==" | "===" | "!="
-                                | "<" | "<=" | ">" | ">=" | "eql?"
-                        ) {
-                            (1i64, vec![("req", None)])
-                        } else {
-                            (-1i64, vec![("rest", None)])
-                        }
-                    }
-                };
-                if name == "arity" {
-                    self.stack.push(Value::Int(arity));
-                    return Ok(CallableOutcome::Handled);
+                    };
+                    (cls, nid, snap)
                 }
-                // Build [[kind_sym, name_sym?], ...] array. Anonymous
-                // rest / kw_rest yields a single-element pair, matching
-                // CRuby's `[[:rest]]` / `[[:keyrest]]`.
-                //
-                // PinGuard across the whole loop so the inner-pair
-                // ObjIds in `outer` survive every maybe_gc — without
-                // this, under STRESS_GC each iteration's pair slot
-                // gets swept (no GC root: `outer` is a Rust-local
-                // Vec), the next alloc reuses it, and the final
-                // `heap.alloc(HeapObj::Array(outer))` can land on the
-                // same recycled slot — yielding a self-referencing
-                // Array whose `.inspect` recurses to stack overflow.
-                let mut g = crate::vm::PinGuard::new(self);
-                let mut outer: Vec<Value> = Vec::with_capacity(params_info.len());
-                for (kind, name_opt) in params_info {
-                    let kind_sym = g.vm.interner.intern(kind);
-                    let mut pair = vec![Value::Sym(kind_sym)];
-                    if let Some(n) = name_opt {
-                        let nsym = g.vm.interner.intern(&n);
-                        pair.push(Value::Sym(nsym));
+                Value::UnboundMethod(uid) => {
+                    let (cls, n, snap) = self.heap.unbound_method_full(*uid);
+                    (cls, n, snap)
+                }
+                _ => unreachable!(),
+            };
+            // Prefer the snapshot Method — survives a later
+            // remove_method that strips the live entry.
+            let m_opt = snapshot.or_else(|| self.lookup_method_uncached(&class, m_name_id));
+            let (arity, params_info) = match m_opt {
+                // Builtin Methods (synthesised on Kernel etc.)
+                // carry their introspection metadata directly —
+                // their `proto_idx` is a placeholder. Read from
+                // `builtin` before falling back to the
+                // proto-derived path.
+                Some(ref m) if m.builtin.is_some() => {
+                    let meta = m.builtin.as_ref().unwrap();
+                    (meta.arity, meta.parameters.clone())
+                }
+                Some(m) => {
+                    let proto = &self.protos[m.proto_idx];
+                    // Shared `proto_arity` helper carries the
+                    // CRuby formula (required-kw bumping,
+                    // block-param exclusion, etc.). NOTE:
+                    // `Proc#arity` does NOT share this helper
+                    // — blocks store rest info on
+                    // `BlockHandle`, not on the Proto, so the
+                    // block intrinsic arm above computes
+                    // arity from the handle directly.
+                    let arity = self.proto_arity(m.proto_idx);
+                    // Other counts still needed for the
+                    // `parameters` build below.
+                    let n_req_pos = proto.n_required_positional as usize;
+                    let rest_count = proto.rest_param.is_some() as usize;
+                    let kw_count = proto.kw_param_defaults.len();
+                    let kw_rest_count = proto.kw_rest_param.is_some() as usize;
+                    let block_count = proto.block_param.is_some() as usize;
+                    let positional_total = proto
+                        .params
+                        .len()
+                        .saturating_sub(rest_count + kw_count + kw_rest_count + block_count);
+                    let mut params: Vec<(&'static str, Option<String>)> = Vec::new();
+                    for i in 0..n_req_pos {
+                        params.push(("req", Some(proto.params[i].clone())));
                     }
-                    g.vm.maybe_gc();
-                    g.vm.check_alloc()?;
-                    let pid = g.vm.heap.alloc(HeapObj::Array(pair.into()));
-                    g.pin(Value::Array(pid));
-                    outer.push(Value::Array(pid));
+                    for i in n_req_pos..positional_total {
+                        params.push(("opt", Some(proto.params[i].clone())));
+                    }
+                    if let Some(rname) = &proto.rest_param {
+                        let n = if rname.is_empty() {
+                            None
+                        } else {
+                            Some(rname.clone())
+                        };
+                        params.push(("rest", n));
+                    }
+                    let kw_name_start = positional_total + rest_count;
+                    for (i, default) in proto.kw_param_defaults.iter().enumerate() {
+                        let kind = if default.is_none() { "keyreq" } else { "key" };
+                        params.push((kind, Some(proto.params[kw_name_start + i].clone())));
+                    }
+                    if let Some(krname) = &proto.kw_rest_param {
+                        let n = if krname == "__kw_rest_anon" {
+                            None
+                        } else {
+                            Some(krname.clone())
+                        };
+                        params.push(("keyrest", n));
+                    }
+                    if let Some(bname) = &proto.block_param {
+                        // For anonymous `def foo(&)` the sentinel
+                        // `"&"` round-trips here as the Symbol
+                        // `:&` — matches CRuby exactly, which
+                        // also surfaces the anonymous block as
+                        // `[[:block, :&]]` (the literal `&` is a
+                        // legal Symbol payload, just an unusual
+                        // one). No anonymization needed: passing
+                        // the sentinel through gives byte-for-
+                        // byte parity. NOT analogous to the
+                        // `__kw_rest_anon` case above, which
+                        // CRuby DOES report as nameless.
+                        params.push(("block", Some(bname.clone())));
+                    }
+                    (arity, params)
+                }
+                // Primitive-backed method with no table entry. The
+                // generic answer is CRuby's fully-variadic -1 /
+                // [[:rest]], but the canonical BINARY OPERATORS are
+                // unambiguously arity 1 on every builtin class
+                // (`5.method(:+).arity == 1`) — report those
+                // correctly; everything else keeps the -1 fallback.
+                None => {
+                    let m_name = self.interner.resolve(m_name_id).clone();
+                    if matches!(
+                        &*m_name,
+                        "+" | "-"
+                            | "*"
+                            | "/"
+                            | "%"
+                            | "**"
+                            | "&"
+                            | "|"
+                            | "^"
+                            | "<<"
+                            | ">>"
+                            | "<=>"
+                            | "=="
+                            | "==="
+                            | "!="
+                            | "<"
+                            | "<="
+                            | ">"
+                            | ">="
+                            | "eql?"
+                    ) {
+                        (1i64, vec![("req", None)])
+                    } else {
+                        (-1i64, vec![("rest", None)])
+                    }
+                }
+            };
+            if name == "arity" {
+                self.stack.push(Value::Int(arity));
+                return Ok(CallableOutcome::Handled);
+            }
+            // Build [[kind_sym, name_sym?], ...] array. Anonymous
+            // rest / kw_rest yields a single-element pair, matching
+            // CRuby's `[[:rest]]` / `[[:keyrest]]`.
+            //
+            // PinGuard across the whole loop so the inner-pair
+            // ObjIds in `outer` survive every maybe_gc — without
+            // this, under STRESS_GC each iteration's pair slot
+            // gets swept (no GC root: `outer` is a Rust-local
+            // Vec), the next alloc reuses it, and the final
+            // `heap.alloc(HeapObj::Array(outer))` can land on the
+            // same recycled slot — yielding a self-referencing
+            // Array whose `.inspect` recurses to stack overflow.
+            let mut g = crate::vm::PinGuard::new(self);
+            let mut outer: Vec<Value> = Vec::with_capacity(params_info.len());
+            for (kind, name_opt) in params_info {
+                let kind_sym = g.vm.interner.intern(kind);
+                let mut pair = vec![Value::Sym(kind_sym)];
+                if let Some(n) = name_opt {
+                    let nsym = g.vm.interner.intern(&n);
+                    pair.push(Value::Sym(nsym));
                 }
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                let aid = g.vm.heap.alloc(HeapObj::Array(outer.into()));
-                g.vm.stack.push(Value::Array(aid));
-                return Ok(CallableOutcome::Handled);
+                let pid = g.vm.heap.alloc(HeapObj::Array(pair.into()));
+                g.pin(Value::Array(pid));
+                outer.push(Value::Array(pid));
             }
+            g.vm.maybe_gc();
+            g.vm.check_alloc()?;
+            let aid = g.vm.heap.alloc(HeapObj::Array(outer.into()));
+            g.vm.stack.push(Value::Array(aid));
+            return Ok(CallableOutcome::Handled);
+        }
         if let Value::BoundMethod(bid) = &recv
-            && matches!(name, "call" | "[]" | "()") {
-                let (bm_recv, bm_name_id, bm_method) = match self.heap.get(*bid) {
-                    HeapObj::BoundMethod { recv, name_id, method } => {
-                        (recv.clone(), *name_id, method.clone())
-                    }
-                    _ => panic!("ICE: BoundMethod slot holds non-BoundMethod"),
-                };
-                // real_mod_name (bound form): `Module.instance_method(:name)
-                // .bind(mod).call` must bypass a `def self.name` override and
-                // return the real constant name — same as the bind_call path.
-                // `name` is a synthesised builtin (bm_method is Some), so the
-                // snapshot fast path below would re-dispatch to the override.
-                if self.interner.resolve(bm_name_id).as_ref() == "name"
-                    && let Value::Class(c) = &bm_recv {
-                    let v = c.effective_name().map(Value::new_str).unwrap_or(Value::Nil);
-                    self.stack.push(v);
-                    return Ok(CallableOutcome::Handled);
-                }
-                // Snapshot fast path: invoke the captured Method
-                // directly so a `remove_method` on the captured
-                // class between capture and call doesn't break
-                // `bm.call` (CRuby parity, matches the bind_call
-                // path).
-                if let Some(m) = bm_method {
-                    self.invoke_method(m, bm_recv, args.into_vec())?;
-                    return Ok(CallableOutcome::Handled);
-                }
-                // No table Method — the BoundMethod wraps a Kernel
-                // global builtin (`method(:print)` / `:puts` / `:p`;
-                // zeitwerk's logging test does `loader.logger =
-                // method(:print)`). Route through `builtin_call`: the
-                // builtin acts on its args / global state independent
-                // of the (private) receiver, matching CRuby's
-                // `Method#call` invoking the bound Kernel method.
-                // Universal methods (class / inspect / to_s) aren't in
-                // `builtin_call` and fall through to the explicit-
-                // receiver `do_call` below.
-                let bm_name = self.interner.resolve(bm_name_id).to_string();
-                if let Some(res) = self.builtin_call(&bm_name, &args) {
-                    let v = res?;
-                    if self.suppress_call_result_push {
-                        self.suppress_call_result_push = false;
-                    } else {
-                        self.stack.push(v);
-                    }
-                    return Ok(CallableOutcome::Handled);
-                }
-                let argc = args.len();
-                self.stack.push(bm_recv);
-                for a in args {
-                    self.stack.push(a);
-                }
-                self.do_call(
-                    bm_name_id, argc,
-                    /* no_recv = */ false,
-                    /* cache_id = */ u32::MAX,
-                )?;
+            && matches!(name, "call" | "[]" | "()")
+        {
+            let (bm_recv, bm_name_id, bm_method) = match self.heap.get(*bid) {
+                HeapObj::BoundMethod {
+                    recv,
+                    name_id,
+                    method,
+                } => (recv.clone(), *name_id, method.clone()),
+                _ => panic!("ICE: BoundMethod slot holds non-BoundMethod"),
+            };
+            // real_mod_name (bound form): `Module.instance_method(:name)
+            // .bind(mod).call` must bypass a `def self.name` override and
+            // return the real constant name — same as the bind_call path.
+            // `name` is a synthesised builtin (bm_method is Some), so the
+            // snapshot fast path below would re-dispatch to the override.
+            if self.interner.resolve(bm_name_id).as_ref() == "name"
+                && let Value::Class(c) = &bm_recv
+            {
+                let v = c.effective_name().map(Value::new_str).unwrap_or(Value::Nil);
+                self.stack.push(v);
                 return Ok(CallableOutcome::Handled);
             }
+            // Snapshot fast path: invoke the captured Method
+            // directly so a `remove_method` on the captured
+            // class between capture and call doesn't break
+            // `bm.call` (CRuby parity, matches the bind_call
+            // path).
+            if let Some(m) = bm_method {
+                self.invoke_method(m, bm_recv, args.into_vec())?;
+                return Ok(CallableOutcome::Handled);
+            }
+            // No table Method — the BoundMethod wraps a Kernel
+            // global builtin (`method(:print)` / `:puts` / `:p`;
+            // zeitwerk's logging test does `loader.logger =
+            // method(:print)`). Route through `builtin_call`: the
+            // builtin acts on its args / global state independent
+            // of the (private) receiver, matching CRuby's
+            // `Method#call` invoking the bound Kernel method.
+            // Universal methods (class / inspect / to_s) aren't in
+            // `builtin_call` and fall through to the explicit-
+            // receiver `do_call` below.
+            let bm_name = self.interner.resolve(bm_name_id).to_string();
+            if let Some(res) = self.builtin_call(&bm_name, &args) {
+                let v = res?;
+                if self.suppress_call_result_push {
+                    self.suppress_call_result_push = false;
+                } else {
+                    self.stack.push(v);
+                }
+                return Ok(CallableOutcome::Handled);
+            }
+            let argc = args.len();
+            self.stack.push(bm_recv);
+            for a in args {
+                self.stack.push(a);
+            }
+            self.do_call(
+                bm_name_id,
+                argc,
+                /* no_recv = */ false,
+                /* cache_id = */ u32::MAX,
+            )?;
+            return Ok(CallableOutcome::Handled);
+        }
         // No arm matched; return args + recv intact for the caller
         // to continue dispatch.
         Ok(CallableOutcome::NotHandled { args, recv })
     }
-    
+
     /// Class-receiver intrinsics — `cls.[]` (Hash[]) / `cls.new` /
     /// `cls.allocate` / `cls.include` / `cls.prepend` / `cls.extend`
     /// / `cls.private` / `cls.public` / `cls.protected` /
@@ -5099,7 +5397,9 @@ impl Vm {
         args: &[Value],
         recv: &Value,
     ) -> Result<bool, Trap> {
-        let Value::Class(cls_ref) = recv else { return Ok(false); };
+        let Value::Class(cls_ref) = recv else {
+            return Ok(false);
+        };
         let cls = cls_ref.clone();
         match (name, args) {
             // Ruby 3.3+ `Module#set_temporary_name` — give an ANONYMOUS module
@@ -5116,7 +5416,9 @@ impl Vm {
                     }));
                 }
                 match arg {
-                    Value::Nil => { *cls.assigned_name.borrow_mut() = None; }
+                    Value::Nil => {
+                        *cls.assigned_name.borrow_mut() = None;
+                    }
                     Value::Str(s) => {
                         let nm = s.to_string_lossy();
                         if nm.is_empty() {
@@ -5144,15 +5446,21 @@ impl Vm {
                         }
                         *cls.assigned_name.borrow_mut() = Some(nm);
                     }
-                    other => return Err(self.trap(RubyError::TypeError {
-                        msg: format!("expected a String or nil (given an instance of {})", other.type_name()),
-                    })),
+                    other => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "expected a String or nil (given an instance of {})",
+                                other.type_name()
+                            ),
+                        }));
+                    }
                 }
                 self.stack.push(recv.clone());
                 Ok(true)
             }
             ("ancestors", []) => {
-                let mut seen: crate::intern::FxHashSet<*const Class> = crate::intern::FxHashSet::default();
+                let mut seen: crate::intern::FxHashSet<*const Class> =
+                    crate::intern::FxHashSet::default();
                 let mut chain: Vec<Value> = Vec::new();
                 // A singleton-class shell (`obj.singleton_class`) keeps
                 // its prepended modules on the TARGET's
@@ -5163,7 +5471,12 @@ impl Vm {
                 // Rc the dispatch chain uses — `remove_method` on it
                 // then actually restores dispatch (Tilt's finalize!
                 // teardown does exactly this).
-                if let Some(target) = cls.singleton_target.borrow().as_ref().and_then(|w| w.upgrade()) {
+                if let Some(target) = cls
+                    .singleton_target
+                    .borrow()
+                    .as_ref()
+                    .and_then(|w| w.upgrade())
+                {
                     for pre in target.singleton_prepends.borrow().iter() {
                         for a in super::flatten_ancestors(pre) {
                             if seen.insert(Rc::as_ptr(&a)) {
@@ -5237,24 +5550,27 @@ impl Vm {
                 // `singleton_includes`, which class_is_a doesn't walk — match
                 // the (now singleton-aware) `ancestors`.
                 if !included
-                    && let Some(target) =
-                        cls.singleton_target.borrow().as_ref().and_then(|w| w.upgrade())
+                    && let Some(target) = cls
+                        .singleton_target
+                        .borrow()
+                        .as_ref()
+                        .and_then(|w| w.upgrade())
                 {
-                    included = target.singleton_includes.borrow().iter().any(|inc| {
-                        Rc::ptr_eq(inc, m) || super::class_is_a(inc, m)
-                    });
+                    included = target
+                        .singleton_includes
+                        .borrow()
+                        .iter()
+                        .any(|inc| Rc::ptr_eq(inc, m) || super::class_is_a(inc, m));
                 }
                 self.stack.push(Value::Bool(included));
                 Ok(true)
             }
-            ("include?", [other]) => {
-                Err(self.trap(RubyError::TypeError {
-                    msg: format!(
-                        "wrong argument type {} (expected Module)",
-                        other.type_name(),
-                    ),
-                }))
-            }
+            ("include?", [other]) => Err(self.trap(RubyError::TypeError {
+                msg: format!(
+                    "wrong argument type {} (expected Module)",
+                    other.type_name(),
+                ),
+            })),
             ("superclass", []) => {
                 // CRuby: `Module#superclass` raises NoMethodError
                 // because modules don't have a superclass chain
@@ -5319,7 +5635,10 @@ impl Vm {
             // raises ArgumentError instead.
             ("<" | "<=" | ">" | ">=", args_) if args_.len() != 1 => {
                 Err(self.trap(RubyError::ArgumentError {
-                    msg: format!("wrong number of arguments (given {}, expected 1)", args_.len()),
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 1)",
+                        args_.len()
+                    ),
                 }))
             }
             ("<" | "<=" | ">" | ">=", [arg]) => {
@@ -5332,18 +5651,42 @@ impl Vm {
                 let self_is_desc = !same && super::class_is_a(&cls, other);
                 let other_is_desc = !same && super::class_is_a(other, &cls);
                 let result = match name {
-                    "<"  => if self_is_desc { Value::Bool(true) }
-                            else if same || other_is_desc { Value::Bool(false) }
-                            else { Value::Nil },
-                    "<=" => if same || self_is_desc { Value::Bool(true) }
-                            else if other_is_desc { Value::Bool(false) }
-                            else { Value::Nil },
-                    ">"  => if other_is_desc { Value::Bool(true) }
-                            else if same || self_is_desc { Value::Bool(false) }
-                            else { Value::Nil },
-                    ">=" => if same || other_is_desc { Value::Bool(true) }
-                            else if self_is_desc { Value::Bool(false) }
-                            else { Value::Nil },
+                    "<" => {
+                        if self_is_desc {
+                            Value::Bool(true)
+                        } else if same || other_is_desc {
+                            Value::Bool(false)
+                        } else {
+                            Value::Nil
+                        }
+                    }
+                    "<=" => {
+                        if same || self_is_desc {
+                            Value::Bool(true)
+                        } else if other_is_desc {
+                            Value::Bool(false)
+                        } else {
+                            Value::Nil
+                        }
+                    }
+                    ">" => {
+                        if other_is_desc {
+                            Value::Bool(true)
+                        } else if same || self_is_desc {
+                            Value::Bool(false)
+                        } else {
+                            Value::Nil
+                        }
+                    }
+                    ">=" => {
+                        if same || other_is_desc {
+                            Value::Bool(true)
+                        } else if self_is_desc {
+                            Value::Bool(false)
+                        } else {
+                            Value::Nil
+                        }
+                    }
                     _ => unreachable!(),
                 };
                 self.stack.push(result);
@@ -5409,13 +5752,14 @@ impl Vm {
             | ("public_instance_methods", args_)
             | ("private_instance_methods", args_)
             | ("protected_instance_methods", args_)
-                if args_.is_empty()
-                    || matches!(args_, [Value::Bool(_)]) =>
+                if args_.is_empty() || matches!(args_, [Value::Bool(_)]) =>
             {
                 use crate::value::Visibility;
                 let inherited = !matches!(args_, [Value::Bool(false)]);
                 let allow: fn(Visibility) -> bool = match name {
-                    "instance_methods" => |v| matches!(v, Visibility::Public | Visibility::Protected),
+                    "instance_methods" => {
+                        |v| matches!(v, Visibility::Public | Visibility::Protected)
+                    }
                     "public_instance_methods" => |v| v == Visibility::Public,
                     "private_instance_methods" => |v| v == Visibility::Private,
                     "protected_instance_methods" => |v| v == Visibility::Protected,
@@ -5442,7 +5786,9 @@ impl Vm {
                         dead: &mut Vec<crate::intern::SymId>,
                     ) {
                         let ptr = std::rc::Rc::as_ptr(c);
-                        if visited.contains(&ptr) { return; }
+                        if visited.contains(&ptr) {
+                            return;
+                        }
                         visited.push(ptr);
                         for (k, m) in c.methods.borrow().iter() {
                             if allow(m.visibility.get()) && !out.contains(k) && !dead.contains(k) {
@@ -5525,7 +5871,10 @@ impl Vm {
                 // enumerates `singleton_class.instance_methods`. Mirrors
                 // the `instance_method` / `method_defined?` shell
                 // redirects.
-                if let Some(target) = cls.singleton_target.borrow().as_ref()
+                if let Some(target) = cls
+                    .singleton_target
+                    .borrow()
+                    .as_ref()
                     .and_then(std::rc::Weak::upgrade)
                 {
                     for (k, m) in target.singleton_methods.borrow().iter() {
@@ -5534,9 +5883,7 @@ impl Vm {
                         }
                     }
                 }
-                sids.sort_by(|a, b| {
-                    self.interner.resolve(*a).cmp(self.interner.resolve(*b))
-                });
+                sids.sort_by(|a, b| self.interner.resolve(*a).cmp(self.interner.resolve(*b)));
                 let elems: Vec<Value> = sids.into_iter().map(Value::Sym).collect();
                 self.maybe_gc();
                 self.check_alloc()?;
@@ -5544,9 +5891,7 @@ impl Vm {
                 self.stack.push(Value::Array(id));
                 Ok(true)
             }
-            ("constants", args_) if args_.is_empty()
-                || matches!(args_, [Value::Bool(_)]) =>
-            {
+            ("constants", args_) if args_.is_empty() || matches!(args_, [Value::Bool(_)]) => {
                 // `Module#constants(inherit=true)` lists the
                 // module's own constants PLUS those of its ancestors
                 // (included/prepended modules and superclasses up to
@@ -5574,7 +5919,8 @@ impl Vm {
                         let s = self.interner.resolve(*k).to_string();
                         if let Some(short) = s.strip_prefix(prefix)
                             && !short.contains("::")
-                            && !names.contains(&short.to_string()) {
+                            && !names.contains(&short.to_string())
+                        {
                             names.push(short.to_string());
                         }
                     };
@@ -5619,17 +5965,15 @@ impl Vm {
                     // `Foo.constants` in CRuby.
                     for anc in super::flatten_ancestors(&cls) {
                         let anc_name = anc.effective_name().unwrap_or_else(|| anc.name.clone());
-                        if anc_name.is_empty()
-                            || anc_name == own_name
-                            || anc_name == "Object"
-                        {
+                        if anc_name.is_empty() || anc_name == own_name || anc_name == "Object" {
                             continue;
                         }
                         let anc_prefix = format!("{}::", anc_name);
                         collect(&anc_prefix, &mut names);
                     }
                 }
-                let elems: Vec<Value> = names.into_iter()
+                let elems: Vec<Value> = names
+                    .into_iter()
                     .map(|n| Value::Sym(self.interner.intern(&n)))
                     .collect();
                 self.maybe_gc();
@@ -5638,14 +5982,12 @@ impl Vm {
                 self.stack.push(Value::Array(id));
                 Ok(true)
             }
-            ("method_defined?", [Value::Sym(sid)])
-            | ("method_defined?", [Value::Sym(sid), _]) => {
+            ("method_defined?", [Value::Sym(sid)]) | ("method_defined?", [Value::Sym(sid), _]) => {
                 let answer = class_method_defined(self, &cls, *sid);
                 self.stack.push(Value::Bool(answer));
                 Ok(true)
             }
-            ("method_defined?", [Value::Str(s)])
-            | ("method_defined?", [Value::Str(s), _]) => {
+            ("method_defined?", [Value::Str(s)]) | ("method_defined?", [Value::Str(s), _]) => {
                 let sid = self.interner.intern(&s.to_string_lossy());
                 let answer = class_method_defined(self, &cls, sid);
                 self.stack.push(Value::Bool(answer));
@@ -5910,7 +6252,8 @@ impl Vm {
                         Value::Str(s) => s.with_str_lossy(|raw| -> Result<SymId, Trap> {
                             if let Some(max) = self.max_symbols
                                 && !self.interner.contains(raw)
-                                && self.interner.len() >= max {
+                                && self.interner.len() >= max
+                            {
                                 return Err(self.trap(RubyError::ResourceExhausted {
                                     msg: format!("interner exhausted: {} symbols", max),
                                 }));
@@ -5955,7 +6298,10 @@ impl Vm {
                             // path. Free for the common case.
                             let name_for_msg = self.interner.resolve(sid).to_string();
                             return Err(self.trap(RubyError::NameError {
-                                msg: format!("method '{}' not defined in {}", name_for_msg, cls.name),
+                                msg: format!(
+                                    "method '{}' not defined in {}",
+                                    name_for_msg, cls.name
+                                ),
                             }));
                         }
                     }
@@ -6030,7 +6376,8 @@ impl Vm {
                 // inherited reflection (`User.instance_method(:class)`
                 // → Kernel synth via Object→Kernel include chain)
                 // work the same as the direct case.
-                let snapshot = self.lookup_method_uncached(&cls, *sid)
+                let snapshot = self
+                    .lookup_method_uncached(&cls, *sid)
                     .or_else(|| self.builtin_method_via_ancestor_chain(&cls, *sid))
                     .or_else(|| {
                         // Eigenclass-shell introspection: a class-level
@@ -6041,12 +6388,16 @@ impl Vm {
                         // the target's singleton-method chain — sorbet's
                         // `singleton_class.instance_method(:included)`
                         // (run_sig over a `def self.included`).
-                        cls.singleton_target.borrow().as_ref()
+                        cls.singleton_target
+                            .borrow()
+                            .as_ref()
                             .and_then(std::rc::Weak::upgrade)
                             .and_then(|target| self.lookup_class_singleton_method(&target, *sid))
                     });
-                if snapshot.is_none() && !is_primitive_class_name(&cls.name)
-                    && !matches!(cls.name.as_str(), "Class" | "Module") {
+                if snapshot.is_none()
+                    && !is_primitive_class_name(&cls.name)
+                    && !matches!(cls.name.as_str(), "Class" | "Module")
+                {
                     let mname = self.interner.resolve(*sid).to_string();
                     return Err(self.trap(RubyError::NameError {
                         msg: format!("undefined method '{}' for class '{}'", mname, cls.name),
@@ -6076,7 +6427,8 @@ impl Vm {
                 s.with_str_lossy(|raw| {
                     if let Some(max) = self.max_symbols
                         && !self.interner.contains(raw)
-                        && self.interner.len() >= max {
+                        && self.interner.len() >= max
+                    {
                         return Err(self.trap(RubyError::ResourceExhausted {
                             msg: format!("interner exhausted: {} symbols", max),
                         }));
@@ -6085,10 +6437,13 @@ impl Vm {
                     // Same registry consultation as the Symbol-form
                     // arm above — live table first, then ancestor-
                     // chain walk so inherited reflection works.
-                    let snapshot = self.lookup_method_uncached(&cls, sid)
+                    let snapshot = self
+                        .lookup_method_uncached(&cls, sid)
                         .or_else(|| self.builtin_method_via_ancestor_chain(&cls, sid));
-                    if snapshot.is_none() && !is_primitive_class_name(&cls.name)
-                    && !matches!(cls.name.as_str(), "Class" | "Module") {
+                    if snapshot.is_none()
+                        && !is_primitive_class_name(&cls.name)
+                        && !matches!(cls.name.as_str(), "Class" | "Module")
+                    {
                         return Err(self.trap(RubyError::NameError {
                             msg: format!("undefined method '{}' for class '{}'", raw, cls.name),
                         }));
@@ -6121,77 +6476,77 @@ impl Vm {
         // override arms throughout this cluster. Was re-interned per
         // call (a HashMap hash+lookup on every `Object.new`).
         let new_id = self.sym_new;
-    // Singleton-class-shell fence: `A.singleton_class.new` raises
-    // TypeError in CRuby ("can't create instance of singleton
-    // class"). Without this fence the shell falls into the
-    // default `Class.new` allocator at line 2294 and silently
-    // allocates a `Value::Object` whose class is the shell —
-    // producing an orphan instance whose every method call
-    // raises NoMethodError because the shell's method table is
-    // empty. Defensive code that `rescue TypeError`s to detect
-    // singleton-class misuse would skip; the orphan only
-    // surfaces as the confusing downstream NoMethodError.
-    // (Code-review #253 round 9 #1.)
-    if name_id == new_id
-        && let Value::Class(cls) = &recv
-        && cls.singleton_target.borrow().is_some()
-    {
-        return Err(self.trap(RubyError::TypeError {
-            msg: "can't create instance of singleton class".into(),
-        }));
-    }
-    // `Hash.try_convert(obj)` / `Array.try_convert` / `String.try_convert`
-    // — return `obj` when it's already the target type, else its
-    // `to_hash`/`to_ary`/`to_str` coercion, else `nil` (the object isn't
-    // implicitly convertible). rake/task.rb:278 does
-    // `if opts = Hash.try_convert(args) and !opts.empty?`.
-    if name == "try_convert"
-        && args.len() == 1
-        && let Value::Class(cls) = &recv
-    {
-        let conv_name = match cls.name.as_str() {
-            "Hash" => Some("to_hash"),
-            "Array" => Some("to_ary"),
-            "String" => Some("to_str"),
-            _ => None,
-        };
-        if let Some(conv_name) = conv_name {
-            // `args.len() == 1` was checked above, so element 0 exists.
-            let obj = args.into_vec().remove(0);
-            let already = match conv_name {
-                "to_hash" => matches!(&obj, Value::Hash(_)),
-                "to_ary" => matches!(&obj, Value::Array(_)),
-                _ => matches!(&obj, Value::Str(_)),
-            };
-            if already {
-                self.stack.push(obj);
-            } else {
-                let conv_id = self.interner.intern(conv_name);
-                if self.responds_to(&obj, conv_id, false) {
-                    // `obj.to_hash` — its result (or TypeError) is the answer.
-                    self.stack.push(obj);
-                    self.do_call(conv_id, 0, /*no_recv=*/ false, u32::MAX)?;
-                } else {
-                    self.stack.push(Value::Nil);
-                }
-            }
-            return Ok(ClassOutcome::Handled);
+        // Singleton-class-shell fence: `A.singleton_class.new` raises
+        // TypeError in CRuby ("can't create instance of singleton
+        // class"). Without this fence the shell falls into the
+        // default `Class.new` allocator at line 2294 and silently
+        // allocates a `Value::Object` whose class is the shell —
+        // producing an orphan instance whose every method call
+        // raises NoMethodError because the shell's method table is
+        // empty. Defensive code that `rescue TypeError`s to detect
+        // singleton-class misuse would skip; the orphan only
+        // surfaces as the confusing downstream NoMethodError.
+        // (Code-review #253 round 9 #1.)
+        if name_id == new_id
+            && let Value::Class(cls) = &recv
+            && cls.singleton_target.borrow().is_some()
+        {
+            return Err(self.trap(RubyError::TypeError {
+                msg: "can't create instance of singleton class".into(),
+            }));
         }
-    }
-    // `Hash[...]` class-method constructor. CRuby has three
-    // call shapes:
-    //   - `Hash[]`               → empty Hash
-    //   - `Hash[k1, v1, k2, v2]` → flat-pair form (even arity)
-    //   - `Hash[[[k, v], ...]]`  → 1 Array of 2-element pairs
-    //   - `Hash[{k => v, ...}]`  → 1 Hash (copy semantics)
-    // The flat-pair form is the most common; older gems prefer
-    // it over `pairs.to_h`. Without this intercept, `Hash[]`
-    // would NoMethodError on Class (no `[]` defined on
-    // Value::Class).
-    //
-    // Odd-arity (k without matching v) is ArgumentError in
-    // CRuby; mirror that.
-    if name == "[]"
+        // `Hash.try_convert(obj)` / `Array.try_convert` / `String.try_convert`
+        // — return `obj` when it's already the target type, else its
+        // `to_hash`/`to_ary`/`to_str` coercion, else `nil` (the object isn't
+        // implicitly convertible). rake/task.rb:278 does
+        // `if opts = Hash.try_convert(args) and !opts.empty?`.
+        if name == "try_convert"
+            && args.len() == 1
+            && let Value::Class(cls) = &recv
+        {
+            let conv_name = match cls.name.as_str() {
+                "Hash" => Some("to_hash"),
+                "Array" => Some("to_ary"),
+                "String" => Some("to_str"),
+                _ => None,
+            };
+            if let Some(conv_name) = conv_name {
+                // `args.len() == 1` was checked above, so element 0 exists.
+                let obj = args.into_vec().remove(0);
+                let already = match conv_name {
+                    "to_hash" => matches!(&obj, Value::Hash(_)),
+                    "to_ary" => matches!(&obj, Value::Array(_)),
+                    _ => matches!(&obj, Value::Str(_)),
+                };
+                if already {
+                    self.stack.push(obj);
+                } else {
+                    let conv_id = self.interner.intern(conv_name);
+                    if self.responds_to(&obj, conv_id, false) {
+                        // `obj.to_hash` — its result (or TypeError) is the answer.
+                        self.stack.push(obj);
+                        self.do_call(conv_id, 0, /*no_recv=*/ false, u32::MAX)?;
+                    } else {
+                        self.stack.push(Value::Nil);
+                    }
+                }
+                return Ok(ClassOutcome::Handled);
+            }
+        }
+        // `Hash[...]` class-method constructor. CRuby has three
+        // call shapes:
+        //   - `Hash[]`               → empty Hash
+        //   - `Hash[k1, v1, k2, v2]` → flat-pair form (even arity)
+        //   - `Hash[[[k, v], ...]]`  → 1 Array of 2-element pairs
+        //   - `Hash[{k => v, ...}]`  → 1 Hash (copy semantics)
+        // The flat-pair form is the most common; older gems prefer
+        // it over `pairs.to_h`. Without this intercept, `Hash[]`
+        // would NoMethodError on Class (no `[]` defined on
+        // Value::Class).
+        //
+        // Odd-arity (k without matching v) is ArgumentError in
+        // CRuby; mirror that.
+        if name == "[]"
         && let Value::Class(cls) = &recv
         && (cls.name.as_str() == "Hash" || class_inherits_named(cls, "Hash"))
         // A subclass that REDEFINES `self.[]` (e.g. Rack::Headers,
@@ -6201,411 +6556,441 @@ impl Vm {
         // that merely inherits Hash.[] finds nothing here and still
         // gets the native tagged-instance build below.
         && self.lookup_class_singleton_method(cls, name_id).is_none()
-    {
-        // A Hash subclass (`class Conf < Hash`) constructs a tagged
-        // instance of itself — `Jekyll::Configuration[override]` is
-        // `Configuration.[]` inherited from Hash. The literal Hash
-        // class tags None (a plain Hash).
-        let class_tag = if cls.name.as_str() == "Hash" {
-            None
-        } else {
-            Some(cls.clone())
-        };
-        // GC rooting: `args` came from `self.stack.drain(...)`
-        // and is a Rust-local Vec with no GC root, so any heap-
-        // shaped element (Array / Hash for the `Hash[[[k,v],...]]`
-        // and `Hash[{…}]` shapes) gets swept if `maybe_gc` runs
-        // before we finish reading their pairs. Pin every arg
-        // across the entire alloc + pair-extract window. Repro
-        // pre-fix: `Hash[[[:x, 10], [:y, 20]]]` under STRESS_GC=1
-        // tripped `ICE: use-after-free` on the inner-pair walk.
-        let mut g = PinGuard::new(self);
-        for a in &args { g.pin(a.clone()); }
-        g.vm.maybe_gc();
-        g.vm.check_alloc()?;
-        let pairs: Vec<(Value, Value)> = if args.len() == 1 {
-            match &args[0] {
-                Value::Array(aid) => {
-                    // `Hash[[[k, v], ...]]`. Each element must be
-                    // a 2-element Array; anything else is
-                    // ArgumentError in CRuby (`invalid number of
-                    // elements (X for 2)`), but we follow the
-                    // common shape — non-pair elements are dropped
-                    // with TypeError. Stay strict only on the
-                    // outer Array shape.
-                    let outer = g.vm.heap.array(*aid).clone();
-                    let mut out = Vec::with_capacity(outer.len());
-                    for elem in outer {
-                        if let Value::Array(pair_id) = elem {
-                            let pair = g.vm.heap.array(pair_id);
-                            if pair.len() == 2 {
-                                out.push((pair[0].clone(), pair[1].clone()));
+        {
+            // A Hash subclass (`class Conf < Hash`) constructs a tagged
+            // instance of itself — `Jekyll::Configuration[override]` is
+            // `Configuration.[]` inherited from Hash. The literal Hash
+            // class tags None (a plain Hash).
+            let class_tag = if cls.name.as_str() == "Hash" {
+                None
+            } else {
+                Some(cls.clone())
+            };
+            // GC rooting: `args` came from `self.stack.drain(...)`
+            // and is a Rust-local Vec with no GC root, so any heap-
+            // shaped element (Array / Hash for the `Hash[[[k,v],...]]`
+            // and `Hash[{…}]` shapes) gets swept if `maybe_gc` runs
+            // before we finish reading their pairs. Pin every arg
+            // across the entire alloc + pair-extract window. Repro
+            // pre-fix: `Hash[[[:x, 10], [:y, 20]]]` under STRESS_GC=1
+            // tripped `ICE: use-after-free` on the inner-pair walk.
+            let mut g = PinGuard::new(self);
+            for a in &args {
+                g.pin(a.clone());
+            }
+            g.vm.maybe_gc();
+            g.vm.check_alloc()?;
+            let pairs: Vec<(Value, Value)> = if args.len() == 1 {
+                match &args[0] {
+                    Value::Array(aid) => {
+                        // `Hash[[[k, v], ...]]`. Each element must be
+                        // a 2-element Array; anything else is
+                        // ArgumentError in CRuby (`invalid number of
+                        // elements (X for 2)`), but we follow the
+                        // common shape — non-pair elements are dropped
+                        // with TypeError. Stay strict only on the
+                        // outer Array shape.
+                        let outer = g.vm.heap.array(*aid).clone();
+                        let mut out = Vec::with_capacity(outer.len());
+                        for elem in outer {
+                            if let Value::Array(pair_id) = elem {
+                                let pair = g.vm.heap.array(pair_id);
+                                if pair.len() == 2 {
+                                    out.push((pair[0].clone(), pair[1].clone()));
+                                } else {
+                                    return Err(g.vm.trap(RubyError::ArgumentError {
+                                        msg: format!(
+                                            "invalid number of elements ({} for 2)",
+                                            pair.len()
+                                        ),
+                                    }));
+                                }
                             } else {
-                                return Err(g.vm.trap(RubyError::ArgumentError {
-                                    msg: format!("invalid number of elements ({} for 2)", pair.len()),
+                                return Err(g.vm.trap(RubyError::TypeError {
+                                    msg: format!(
+                                        "wrong element type {} (expected array)",
+                                        elem.type_name()
+                                    ),
                                 }));
                             }
-                        } else {
-                            return Err(g.vm.trap(RubyError::TypeError {
-                                msg: format!("wrong element type {} (expected array)", elem.type_name()),
-                            }));
                         }
+                        out
                     }
-                    out
+                    Value::Hash(hid) => g.vm.heap.hash(*hid).clone(),
+                    _ => {
+                        return Err(g.vm.trap(RubyError::ArgumentError {
+                            msg: "odd number of arguments for Hash".into(),
+                        }));
+                    }
                 }
-                Value::Hash(hid) => g.vm.heap.hash(*hid).clone(),
-                _ => return Err(g.vm.trap(RubyError::ArgumentError {
+            } else if args.len().is_multiple_of(2) {
+                args.chunks(2)
+                    .map(|c| (c[0].clone(), c[1].clone()))
+                    .collect()
+            } else {
+                return Err(g.vm.trap(RubyError::ArgumentError {
                     msg: "odd number of arguments for Hash".into(),
-                })),
-            }
-        } else if args.len().is_multiple_of(2) {
-            args.chunks(2).map(|c| (c[0].clone(), c[1].clone())).collect()
-        } else {
-            return Err(g.vm.trap(RubyError::ArgumentError {
-                msg: "odd number of arguments for Hash".into(),
-            }));
-        };
-        let hid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj {
-            pairs,
-            default_block: None,
-            default_value: None,
-            class_tag,
-            ivars: crate::intern::FxHashMap::default(),
-            index: None,
-            user_index: None,
-                singleton_class: None,
-            frozen: std::cell::Cell::new(false),
-            by_identity: std::cell::Cell::new(false),
-        }));
-        g.vm.stack.push(Value::Hash(hid));
-        return Ok(ClassOutcome::Handled);
-    }
-    // User-defined `def self.new` takes precedence over the
-    // built-in allocator AND over the Hash.new / String.new /
-    // other built-in class-level intercepts below. CRuby's
-    // `Class#new` is a normal Ruby method (allocate +
-    // initialize), and reopening any class — built-in or
-    // user — to override `self.new` should win. Without this
-    // check ahead of the Hash / String special-cases, e.g.
-    // `class Hash; def self.new; ...; end; end; Hash.new`
-    // silently bypassed the override and returned an empty
-    // `{}` from the hardcoded Hash path.
-    //
-    // The block-form path (`do_call_block`) generally routes
-    // user `self.new` overrides through its general
-    // Value::Class singleton-method dispatch arm, so most
-    // classes don't need a mirrored check there. The one
-    // exception is `do_call_block`'s `Hash.new { block }`
-    // intercept, which fires before that generic arm — it
-    // carries the same singleton pre-check pattern as this
-    // one for parity.
-    //
-    // Documented gap: `def self.new ... super ... end` still
-    // hits the allocator via super only if Class's builtin
-    // `new` is reachable through super_lookup — which it
-    // isn't today. Override-without-super covers the tilt
-    // entry-point (and the common DSL builder pattern); the
-    // super-into-allocator case is a separable follow-up.
-    // A user `def self.new` override wins — UNLESS this is a
-    // force-primitive call (a `<primitive-alias-forwarder>`: `alias new!
-    // new` snapshots the builtin `Class#new`, so `new!` must reach the
-    // allocator below, NOT re-enter the redefined `new` — Sinatra's
-    // `alias new! new; def new …; new!` would otherwise recurse forever).
-    if name_id == new_id
-        && !force_primitive
-        && let Value::Class(cls) = &recv
-        && let Some(m) = self.lookup_class_singleton_method(cls, new_id) {
-        self.invoke_method(m, recv.clone(), args.into_vec())?;
-        return Ok(ClassOutcome::Handled);
-    }
-    // `String.new` / `String.new(s)` — Tier 1 primitive
-    // constructor. Without this intercept the generic
-    // `Class.new` allocator below would build a
-    // `Value::Object` (Instance with `class = String`), and
-    // every String primitive method (`length`, `<<`,
-    // `bytesize`, …) would `NoMethodError` because they
-    // pattern-match on `Value::Str`, not `Value::Object`.
-    //
-    // CRuby supports `String.new(s, encoding: …, capacity: …)`;
-    // the encoding model is Tier 3 (ADR 0017), so we cover
-    // only the positional `s` argument here. Anything else
-    // raises ArgumentError.
-    if name_id == new_id
-        && let Value::Class(cls) = &recv
-        && cls.name.as_str() == "String"
-    {
-        match &args[..] {
-            [] => {
-                self.stack.push(Value::new_str(""));
-                return Ok(ClassOutcome::Handled);
-            }
-            [Value::Str(s)] => {
-                // Fresh, mutable copy — CRuby's `String.new(s)`
-                // returns an unfrozen clone even if `s` was
-                // frozen.
-                let copy = s.to_string_lossy();
-                self.stack.push(Value::new_str(copy));
-                return Ok(ClassOutcome::Handled);
-            }
-            [other] => {
-                return Err(self.trap(RubyError::TypeError {
-                    msg: format!(
-                        "no implicit conversion of {} into String",
-                        other.type_name(),
-                    ),
                 }));
+            };
+            let hid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj {
+                pairs,
+                default_block: None,
+                default_value: None,
+                class_tag,
+                ivars: crate::intern::FxHashMap::default(),
+                index: None,
+                user_index: None,
+                singleton_class: None,
+                frozen: std::cell::Cell::new(false),
+                by_identity: std::cell::Cell::new(false),
+            }));
+            g.vm.stack.push(Value::Hash(hid));
+            return Ok(ClassOutcome::Handled);
+        }
+        // User-defined `def self.new` takes precedence over the
+        // built-in allocator AND over the Hash.new / String.new /
+        // other built-in class-level intercepts below. CRuby's
+        // `Class#new` is a normal Ruby method (allocate +
+        // initialize), and reopening any class — built-in or
+        // user — to override `self.new` should win. Without this
+        // check ahead of the Hash / String special-cases, e.g.
+        // `class Hash; def self.new; ...; end; end; Hash.new`
+        // silently bypassed the override and returned an empty
+        // `{}` from the hardcoded Hash path.
+        //
+        // The block-form path (`do_call_block`) generally routes
+        // user `self.new` overrides through its general
+        // Value::Class singleton-method dispatch arm, so most
+        // classes don't need a mirrored check there. The one
+        // exception is `do_call_block`'s `Hash.new { block }`
+        // intercept, which fires before that generic arm — it
+        // carries the same singleton pre-check pattern as this
+        // one for parity.
+        //
+        // Documented gap: `def self.new ... super ... end` still
+        // hits the allocator via super only if Class's builtin
+        // `new` is reachable through super_lookup — which it
+        // isn't today. Override-without-super covers the tilt
+        // entry-point (and the common DSL builder pattern); the
+        // super-into-allocator case is a separable follow-up.
+        // A user `def self.new` override wins — UNLESS this is a
+        // force-primitive call (a `<primitive-alias-forwarder>`: `alias new!
+        // new` snapshots the builtin `Class#new`, so `new!` must reach the
+        // allocator below, NOT re-enter the redefined `new` — Sinatra's
+        // `alias new! new; def new …; new!` would otherwise recurse forever).
+        if name_id == new_id
+            && !force_primitive
+            && let Value::Class(cls) = &recv
+            && let Some(m) = self.lookup_class_singleton_method(cls, new_id)
+        {
+            self.invoke_method(m, recv.clone(), args.into_vec())?;
+            return Ok(ClassOutcome::Handled);
+        }
+        // `String.new` / `String.new(s)` — Tier 1 primitive
+        // constructor. Without this intercept the generic
+        // `Class.new` allocator below would build a
+        // `Value::Object` (Instance with `class = String`), and
+        // every String primitive method (`length`, `<<`,
+        // `bytesize`, …) would `NoMethodError` because they
+        // pattern-match on `Value::Str`, not `Value::Object`.
+        //
+        // CRuby supports `String.new(s, encoding: …, capacity: …)`;
+        // the encoding model is Tier 3 (ADR 0017), so we cover
+        // only the positional `s` argument here. Anything else
+        // raises ArgumentError.
+        if name_id == new_id
+            && let Value::Class(cls) = &recv
+            && cls.name.as_str() == "String"
+        {
+            match &args[..] {
+                [] => {
+                    self.stack.push(Value::new_str(""));
+                    return Ok(ClassOutcome::Handled);
+                }
+                [Value::Str(s)] => {
+                    // Fresh, mutable copy — CRuby's `String.new(s)`
+                    // returns an unfrozen clone even if `s` was
+                    // frozen.
+                    let copy = s.to_string_lossy();
+                    self.stack.push(Value::new_str(copy));
+                    return Ok(ClassOutcome::Handled);
+                }
+                [other] => {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "no implicit conversion of {} into String",
+                            other.type_name(),
+                        ),
+                    }));
+                }
+                _ => {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 0..1)",
+                            args.len(),
+                        ),
+                    }));
+                }
             }
-            _ => {
+        }
+        // `Module.new` (no block) — returns a fresh anonymous
+        // Module. Empty name is the sentinel for "anonymous"
+        // that `Module#name` consults to return `nil`; `to_s` /
+        // `inspect` render `"#<Module>"` instead. The block-form
+        // `Module.new { |m| ... }` evaluates the block as the
+        // module body and lives in `do_call_block` — same shape
+        // as the existing `Hash.new` / `class_eval` intercepts.
+        //
+        // Documented divergence (NOT addressed here): CRuby
+        // assigns the module's name on first constant write
+        // (`M = Module.new` → `M.name == "M"`). rubyrs leaves
+        // the name empty until a future StoreConst hook lands;
+        // most real-world uses (`include` an anonymous helper)
+        // don't depend on the name-promote behaviour.
+        // Tier-1 2b: `Proc.new` without an explicit block raises
+        // ArgumentError, matching CRuby 3.x (which removed implicit
+        // block capture from caller). Without this check the
+        // default Object#new path returns a Proc-class instance
+        // that has no `.call` arm — `.call` on it raises a
+        // confusing NoMethodError instead of the canonical
+        // "tried to create Proc object without a block".
+        if name_id == new_id
+            && let Value::Class(cls) = &recv
+            && cls.name.as_str() == "Proc"
+        {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: "tried to create Proc object without a block".to_string(),
+            }));
+        }
+        if name_id == new_id
+            && let Value::Class(cls) = &recv
+            && cls.name.as_str() == "Module"
+        {
+            if !args.is_empty() {
                 return Err(self.trap(RubyError::ArgumentError {
                     msg: format!(
-                        "wrong number of arguments (given {}, expected 0..1)",
+                        "wrong number of arguments (given {}, expected 0)",
                         args.len(),
                     ),
                 }));
             }
-        }
-    }
-    // `Module.new` (no block) — returns a fresh anonymous
-    // Module. Empty name is the sentinel for "anonymous"
-    // that `Module#name` consults to return `nil`; `to_s` /
-    // `inspect` render `"#<Module>"` instead. The block-form
-    // `Module.new { |m| ... }` evaluates the block as the
-    // module body and lives in `do_call_block` — same shape
-    // as the existing `Hash.new` / `class_eval` intercepts.
-    //
-    // Documented divergence (NOT addressed here): CRuby
-    // assigns the module's name on first constant write
-    // (`M = Module.new` → `M.name == "M"`). rubyrs leaves
-    // the name empty until a future StoreConst hook lands;
-    // most real-world uses (`include` an anonymous helper)
-    // don't depend on the name-promote behaviour.
-    // Tier-1 2b: `Proc.new` without an explicit block raises
-    // ArgumentError, matching CRuby 3.x (which removed implicit
-    // block capture from caller). Without this check the
-    // default Object#new path returns a Proc-class instance
-    // that has no `.call` arm — `.call` on it raises a
-    // confusing NoMethodError instead of the canonical
-    // "tried to create Proc object without a block".
-    if name_id == new_id
-        && let Value::Class(cls) = &recv
-        && cls.name.as_str() == "Proc"
-    {
-        return Err(self.trap(RubyError::ArgumentError {
-            msg: "tried to create Proc object without a block".to_string(),
-        }));
-    }
-    if name_id == new_id
-        && let Value::Class(cls) = &recv
-        && cls.name.as_str() == "Module"
-    {
-        if !args.is_empty() {
-            return Err(self.trap(RubyError::ArgumentError {
-                msg: format!(
-                    "wrong number of arguments (given {}, expected 0)",
-                    args.len(),
-                ),
-            }));
-        }
-        let m = std::rc::Rc::new(Class {
-            name: String::new(),
-            is_module: true,
-            undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
-            anon_serial: std::cell::Cell::new(0),
-            ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
-            methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
-            singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
-            superclass: std::cell::RefCell::new(None),
-            includes: std::cell::RefCell::new(Vec::new()),
-            prepends: std::cell::RefCell::new(Vec::new()),
-            singleton_prepends: std::cell::RefCell::new(Vec::new()),
-            singleton_includes: std::cell::RefCell::new(Vec::new()),
-            singleton_view: std::cell::RefCell::new(None),
-            singleton_target: std::cell::RefCell::new(None),
-            class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
-            consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
-            assigned_name: std::cell::RefCell::new(None),
-            class_tag: None,
-            #[cfg(feature = "cext")]
-            cext_alloc_func: std::cell::Cell::new(None),
-        });
-        self.stack.push(Value::Class(m));
-        return Ok(ClassOutcome::Handled);
-    }
-    // `Module#define_method` no-block path. The block-form
-    // intrinsic lives in `do_call_block`; this arm handles the
-    // no-block shapes that CRuby validates here, ordered to
-    // match CRuby's actual validation sequence (arity first,
-    // then missing-block). The 2-arg form
-    // (`define_method(:foo, proc { … })` / Method / UnboundMethod)
-    // is implemented at the 2-arg case below via
-    // `install_method_from_value` — see PR #321.
-    // (PR #245 Copilot round 2 #2 + round 4 #1 + round 5 #1.)
-    if name == "define_method"
-        && let Value::Class(cls) = &recv
-    {
-        // Same precedence rule as the block-form arm — user
-        // override wins regardless of arity (let the override
-        // own its own validation).
-        if let Some(m) = self.lookup_class_singleton_method(cls, name_id) {
-            let recv_val = Value::Class(cls.clone());
-            self.invoke_method(m, recv_val, args.into_vec())?;
+            let m = std::rc::Rc::new(Class {
+                name: String::new(),
+                is_module: true,
+                undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
+                anon_serial: std::cell::Cell::new(0),
+                ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+                methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+                singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+                superclass: std::cell::RefCell::new(None),
+                includes: std::cell::RefCell::new(Vec::new()),
+                prepends: std::cell::RefCell::new(Vec::new()),
+                singleton_prepends: std::cell::RefCell::new(Vec::new()),
+                singleton_includes: std::cell::RefCell::new(Vec::new()),
+                singleton_view: std::cell::RefCell::new(None),
+                singleton_target: std::cell::RefCell::new(None),
+                class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+                consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+                assigned_name: std::cell::RefCell::new(None),
+                class_tag: None,
+                frozen: std::cell::Cell::new(false),
+                #[cfg(feature = "cext")]
+                cext_alloc_func: std::cell::Cell::new(None),
+            });
+            self.stack.push(Value::Class(m));
             return Ok(ClassOutcome::Handled);
         }
-        // CRuby validates arity before the missing-block check:
-        //   0 args      → ArgumentError "wrong number of arguments
-        //                 (given 0, expected 1..2)"
-        //   1 arg, none → ArgumentError "tried to create Proc
-        //                 object without a block"
-        //   2 args      → Proc / Method / UnboundMethod install
-        //                 form (PR #321) — args[1] is the body
-        //                 source, name is args[0]. Built-in
-        //                 method bodies (snapshot=None, e.g.
-        //                 `m = obj.method(:object_id)`) raise
-        //                 TypeError because rubyrs needs a real
-        //                 Proto to install; a name-forwarding
-        //                 fallback is a Tier-2 follow-up.
-        //   3+ args     → ArgumentError "wrong number of arguments
-        //                 (given N, expected 1..2)"
-        match args.len() {
-            0 => return Err(self.trap(RubyError::ArgumentError {
-                msg: "wrong number of arguments (given 0, expected 1..2)".into(),
-            })),
-            1 => return Err(self.trap(RubyError::ArgumentError {
-                msg: "tried to create Proc object without a block".into(),
-            })),
-            2 => {
-                // 2-arg Proc / Method / UnboundMethod install.
-                // Name is args[0], source is args[1]. Visibility
-                // defaults to Public on the explicit-receiver
-                // path — the bare-in-class-body shape (where
-                // class_visibility_stack matters) is handled
-                // before the bridge re-enters here (PR #321
-                // cycle-1), so reaching this arm means the
-                // caller explicitly wrote `cls.define_method(...)`
-                // and CRuby treats those installs as Public
-                // regardless of the surrounding class body's
-                // visibility mode.
-                let name_sym = match &args[0] {
-                    Value::Sym(s) => *s,
-                    Value::Str(s) => {
-                        let raw = s.to_string_lossy();
-                        if let Some(max) = self.max_symbols
-                            && !self.interner.contains(&raw) && self.interner.len() >= max {
+        // `Module#define_method` no-block path. The block-form
+        // intrinsic lives in `do_call_block`; this arm handles the
+        // no-block shapes that CRuby validates here, ordered to
+        // match CRuby's actual validation sequence (arity first,
+        // then missing-block). The 2-arg form
+        // (`define_method(:foo, proc { … })` / Method / UnboundMethod)
+        // is implemented at the 2-arg case below via
+        // `install_method_from_value` — see PR #321.
+        // (PR #245 Copilot round 2 #2 + round 4 #1 + round 5 #1.)
+        if name == "define_method"
+            && let Value::Class(cls) = &recv
+        {
+            // Same precedence rule as the block-form arm — user
+            // override wins regardless of arity (let the override
+            // own its own validation).
+            if let Some(m) = self.lookup_class_singleton_method(cls, name_id) {
+                let recv_val = Value::Class(cls.clone());
+                self.invoke_method(m, recv_val, args.into_vec())?;
+                return Ok(ClassOutcome::Handled);
+            }
+            // CRuby validates arity before the missing-block check:
+            //   0 args      → ArgumentError "wrong number of arguments
+            //                 (given 0, expected 1..2)"
+            //   1 arg, none → ArgumentError "tried to create Proc
+            //                 object without a block"
+            //   2 args      → Proc / Method / UnboundMethod install
+            //                 form (PR #321) — args[1] is the body
+            //                 source, name is args[0]. Built-in
+            //                 method bodies (snapshot=None, e.g.
+            //                 `m = obj.method(:object_id)`) raise
+            //                 TypeError because rubyrs needs a real
+            //                 Proto to install; a name-forwarding
+            //                 fallback is a Tier-2 follow-up.
+            //   3+ args     → ArgumentError "wrong number of arguments
+            //                 (given N, expected 1..2)"
+            match args.len() {
+                0 => {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: "wrong number of arguments (given 0, expected 1..2)".into(),
+                    }));
+                }
+                1 => {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: "tried to create Proc object without a block".into(),
+                    }));
+                }
+                2 => {
+                    // 2-arg Proc / Method / UnboundMethod install.
+                    // Name is args[0], source is args[1]. Visibility
+                    // defaults to Public on the explicit-receiver
+                    // path — the bare-in-class-body shape (where
+                    // class_visibility_stack matters) is handled
+                    // before the bridge re-enters here (PR #321
+                    // cycle-1), so reaching this arm means the
+                    // caller explicitly wrote `cls.define_method(...)`
+                    // and CRuby treats those installs as Public
+                    // regardless of the surrounding class body's
+                    // visibility mode.
+                    let name_sym = match &args[0] {
+                        Value::Sym(s) => *s,
+                        Value::Str(s) => {
+                            let raw = s.to_string_lossy();
+                            if let Some(max) = self.max_symbols
+                                && !self.interner.contains(&raw)
+                                && self.interner.len() >= max
+                            {
                                 return Err(self.trap(RubyError::ResourceExhausted {
                                     msg: format!("interner exhausted: {} symbols", max),
                                 }));
                             }
-                        self.interner.intern(&raw)
-                    }
-                    other => return Err(self.trap(RubyError::TypeError {
-                        msg: format!(
-                            "wrong argument type {} (expected Symbol or String)",
-                            other.type_name(),
-                        ),
-                    })),
-                };
-                let src = args[1].clone();
-                let installed = self
-                    .install_method_from_value(
-                        cls,
-                        name_sym,
-                        &src,
-                        crate::value::Visibility::Public,
-                    )
-                    .map_err(|e| self.trap(e))?;
-                self.stack.push(Value::Sym(installed));
-                return Ok(ClassOutcome::Handled);
+                            self.interner.intern(&raw)
+                        }
+                        other => {
+                            return Err(self.trap(RubyError::TypeError {
+                                msg: format!(
+                                    "wrong argument type {} (expected Symbol or String)",
+                                    other.type_name(),
+                                ),
+                            }));
+                        }
+                    };
+                    let src = args[1].clone();
+                    let installed = self
+                        .install_method_from_value(
+                            cls,
+                            name_sym,
+                            &src,
+                            crate::value::Visibility::Public,
+                        )
+                        .map_err(|e| self.trap(e))?;
+                    self.stack.push(Value::Sym(installed));
+                    return Ok(ClassOutcome::Handled);
+                }
+                n => {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("wrong number of arguments (given {}, expected 1..2)", n),
+                    }));
+                }
             }
-            n => return Err(self.trap(RubyError::ArgumentError {
-                msg: format!("wrong number of arguments (given {}, expected 1..2)", n),
-            })),
         }
-    }
-    // `Class.new` / `Class.new(superclass)` — no-block path.
-    // Mirrors the block-form arm in `do_call_block` (which
-    // ALSO runs the body as a class_eval); this one returns
-    // the freshly-built anonymous Class without invoking any
-    // body. Pre-fix this fell through to the generic Class
-    // allocator below which produced a `Value::Object` whose
-    // class was `Class` — NOT a real `Value::Class` —
-    // breaking downstream `Class.new(anon) { ... }` block-form
-    // calls and any introspection (`#superclass`, `#name`,
-    // `#new` on the result) that requires the Class value
-    // variant. Mustermann's
-    // `mustermann/ast/translator.rb:75`
-    //   `Class.new(const_get(:NodeTranslator)) do ... end`
-    // tripped this because `NodeTranslator` (built via an
-    // earlier `Class.new(Delegator)`) was the Value::Object
-    // form, and the block-form arm's `[Value::Class(sc)]`
-    // pattern failed to match, raising "superclass must be
-    // a Class (Object given)".
-    if name_id == new_id
-        && let Value::Class(cls) = &recv
-        && cls.name.as_str() == "Class"
-    {
-        let explicit_super: Option<Rc<Class>> = match &args[..] {
-            [] => None,
-            [Value::Class(sc)] if !sc.is_module => Some(sc.clone()),
-            [Value::Class(_)] => {
-                return Err(self.trap(RubyError::TypeError {
-                    msg: "superclass must be an instance of Class (given an instance of Module)".to_string(),
-                }));
-            }
-            [other] => {
-                return Err(self.trap(RubyError::TypeError {
-                    msg: format!("superclass must be an instance of Class (given an instance of {})", other.type_name()),
-                }));
-            }
-            _ => {
-                return Err(self.trap(RubyError::ArgumentError {
-                    msg: format!(
-                        "wrong number of arguments (given {}, expected 0..1)",
-                        args.len(),
-                    ),
-                }));
-            }
-        };
-        let object_sym = self.interner.intern("Object");
-        let parent = explicit_super.or_else(|| self.classes.get(&object_sym).cloned());
-        let new_cls = Rc::new(Class {
-            name: String::new(),
-            is_module: false,
-            undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
-            anon_serial: std::cell::Cell::new(0),
-            ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
-            methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
-            singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
-            superclass: std::cell::RefCell::new(parent),
-            includes: std::cell::RefCell::new(Vec::new()),
-            prepends: std::cell::RefCell::new(Vec::new()),
-            singleton_prepends: std::cell::RefCell::new(Vec::new()),
-            singleton_includes: std::cell::RefCell::new(Vec::new()),
-            singleton_view: std::cell::RefCell::new(None),
-            singleton_target: std::cell::RefCell::new(None),
-            class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
-            consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
-            assigned_name: std::cell::RefCell::new(None),
-            class_tag: None,
-            #[cfg(feature = "cext")]
-            cext_alloc_func: std::cell::Cell::new(None),
-        });
-        // Fire the parent's `inherited(subclass)` hook, matching
-        // CRuby's `Class.new(P)` → `P.inherited(<anon>)` contract.
-        // Source-form `class C < P` fires this via `Op::DefClass`;
-        // the dynamic `Class.new(P)` path didn't, breaking gems
-        // (Mustermann's AST::Translator at `mustermann/ast/
-        // translator.rb:62`) that rely on per-subclass setup
-        // happening in the hook. Look up the parent's `inherited`
-        // and invoke it with the new class as the single arg.
-        // Missing-hook is silently accepted (matches CRuby's
-        // default Object#inherited no-op).
-        self.invoke_inherited_hook(&new_cls)?;
-        self.anon_class_counter += 1;
-        new_cls.anon_serial.set(self.anon_class_counter);
-        self.stack.push(Value::Class(new_cls));
-        return Ok(ClassOutcome::Handled);
-    }
-    if name_id == new_id
+        // `Class.new` / `Class.new(superclass)` — no-block path.
+        // Mirrors the block-form arm in `do_call_block` (which
+        // ALSO runs the body as a class_eval); this one returns
+        // the freshly-built anonymous Class without invoking any
+        // body. Pre-fix this fell through to the generic Class
+        // allocator below which produced a `Value::Object` whose
+        // class was `Class` — NOT a real `Value::Class` —
+        // breaking downstream `Class.new(anon) { ... }` block-form
+        // calls and any introspection (`#superclass`, `#name`,
+        // `#new` on the result) that requires the Class value
+        // variant. Mustermann's
+        // `mustermann/ast/translator.rb:75`
+        //   `Class.new(const_get(:NodeTranslator)) do ... end`
+        // tripped this because `NodeTranslator` (built via an
+        // earlier `Class.new(Delegator)`) was the Value::Object
+        // form, and the block-form arm's `[Value::Class(sc)]`
+        // pattern failed to match, raising "superclass must be
+        // a Class (Object given)".
+        if name_id == new_id
+            && let Value::Class(cls) = &recv
+            && cls.name.as_str() == "Class"
+        {
+            let explicit_super: Option<Rc<Class>> = match &args[..] {
+                [] => None,
+                [Value::Class(sc)] if !sc.is_module => Some(sc.clone()),
+                [Value::Class(_)] => {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg:
+                            "superclass must be an instance of Class (given an instance of Module)"
+                                .to_string(),
+                    }));
+                }
+                [other] => {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "superclass must be an instance of Class (given an instance of {})",
+                            other.type_name()
+                        ),
+                    }));
+                }
+                _ => {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 0..1)",
+                            args.len(),
+                        ),
+                    }));
+                }
+            };
+            let object_sym = self.interner.intern("Object");
+            let parent = explicit_super.or_else(|| self.classes.get(&object_sym).cloned());
+            let new_cls = Rc::new(Class {
+                name: String::new(),
+                is_module: false,
+                undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
+                anon_serial: std::cell::Cell::new(0),
+                ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+                methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+                singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+                superclass: std::cell::RefCell::new(parent),
+                includes: std::cell::RefCell::new(Vec::new()),
+                prepends: std::cell::RefCell::new(Vec::new()),
+                singleton_prepends: std::cell::RefCell::new(Vec::new()),
+                singleton_includes: std::cell::RefCell::new(Vec::new()),
+                singleton_view: std::cell::RefCell::new(None),
+                singleton_target: std::cell::RefCell::new(None),
+                class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+                consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+                assigned_name: std::cell::RefCell::new(None),
+                class_tag: None,
+                frozen: std::cell::Cell::new(false),
+                #[cfg(feature = "cext")]
+                cext_alloc_func: std::cell::Cell::new(None),
+            });
+            // Fire the parent's `inherited(subclass)` hook, matching
+            // CRuby's `Class.new(P)` → `P.inherited(<anon>)` contract.
+            // Source-form `class C < P` fires this via `Op::DefClass`;
+            // the dynamic `Class.new(P)` path didn't, breaking gems
+            // (Mustermann's AST::Translator at `mustermann/ast/
+            // translator.rb:62`) that rely on per-subclass setup
+            // happening in the hook. Look up the parent's `inherited`
+            // and invoke it with the new class as the single arg.
+            // Missing-hook is silently accepted (matches CRuby's
+            // default Object#inherited no-op).
+            self.invoke_inherited_hook(&new_cls)?;
+            self.anon_class_counter += 1;
+            new_cls.anon_serial.set(self.anon_class_counter);
+            self.stack.push(Value::Class(new_cls));
+            return Ok(ClassOutcome::Handled);
+        }
+        if name_id == new_id
         && let Value::Class(cls) = &recv
         && (cls.name.as_str() == "Hash" || class_inherits_named(cls, "Hash"))
         // A Hash SUBCLASS that defines its own `initialize` runs it via
@@ -6616,566 +7001,601 @@ impl Vm {
         && {
             let init_id = self.sym_initialize;
             self.lookup_method_uncached(cls, init_id).is_none()
-        }
-    {
-        // `Hash.new` (and Hash-subclass.new) without a block. CRuby:
-        //   - 0 args: empty Hash, no default
-        //   - 1 arg:  empty Hash with scalar default; missing-
-        //             key lookup returns this value as-is (not
-        //             cached into the Hash).
-        //   - 2+ args: ArgumentError
-        // A subclass constructs a TAGGED instance of itself (so
-        // `Rack::Headers.new('1')['x']` returns '1'); the literal
-        // Hash class tags None. The block-form (`Hash.new { |h, k|
-        // ... }`) routes through `do_call_block` and has its own
-        // intercept (which raises ArgumentError when a scalar default
-        // is also given — CRuby refuses both at once).
-        if args.len() > 1 {
-            return Err(self.trap(RubyError::ArgumentError {
-                msg: format!("wrong number of arguments (given {}, expected 0..1)", args.len()),
+        } {
+            // `Hash.new` (and Hash-subclass.new) without a block. CRuby:
+            //   - 0 args: empty Hash, no default
+            //   - 1 arg:  empty Hash with scalar default; missing-
+            //             key lookup returns this value as-is (not
+            //             cached into the Hash).
+            //   - 2+ args: ArgumentError
+            // A subclass constructs a TAGGED instance of itself (so
+            // `Rack::Headers.new('1')['x']` returns '1'); the literal
+            // Hash class tags None. The block-form (`Hash.new { |h, k|
+            // ... }`) routes through `do_call_block` and has its own
+            // intercept (which raises ArgumentError when a scalar default
+            // is also given — CRuby refuses both at once).
+            if args.len() > 1 {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 0..1)",
+                        args.len()
+                    ),
+                }));
+            }
+            let class_tag = if cls.name.as_str() == "Hash" {
+                None
+            } else {
+                Some(cls.clone())
+            };
+            let default = args.first().cloned();
+            // Pin the default across maybe_gc — if it's a heap
+            // value (Array / Hash / String), it could be a
+            // temporary on its way to becoming the default and
+            // would otherwise be unrooted between args.first() and
+            // hash_set_default_value below.
+            let mut g = PinGuard::new(self);
+            if let Some(v) = &default {
+                g.pin(v.clone());
+            }
+            g.vm.maybe_gc();
+            g.vm.check_alloc()?;
+            let hid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj {
+                pairs: Vec::new(),
+                default_block: None,
+                default_value: None,
+                class_tag,
+                ivars: crate::intern::FxHashMap::default(),
+                index: None,
+                user_index: None,
+                singleton_class: None,
+                frozen: std::cell::Cell::new(false),
+                by_identity: std::cell::Cell::new(false),
             }));
+            if default.is_some() {
+                g.vm.heap.hash_set_default_value(hid, default);
+            }
+            g.vm.stack.push(Value::Hash(hid));
+            return Ok(ClassOutcome::Handled);
         }
-        let class_tag = if cls.name.as_str() == "Hash" { None } else { Some(cls.clone()) };
-        let default = args.first().cloned();
-        // Pin the default across maybe_gc — if it's a heap
-        // value (Array / Hash / String), it could be a
-        // temporary on its way to becoming the default and
-        // would otherwise be unrooted between args.first() and
-        // hash_set_default_value below.
-        let mut g = PinGuard::new(self);
-        if let Some(v) = &default { g.pin(v.clone()); }
-        g.vm.maybe_gc();
-        g.vm.check_alloc()?;
-        let hid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj {
-            pairs: Vec::new(),
-            default_block: None,
-            default_value: None,
-            class_tag,
-            ivars: crate::intern::FxHashMap::default(),
-            index: None,
-            user_index: None,
-            singleton_class: None,
-            frozen: std::cell::Cell::new(false),
-            by_identity: std::cell::Cell::new(false),
-        }));
-        if default.is_some() {
-            g.vm.heap.hash_set_default_value(hid, default);
-        }
-        g.vm.stack.push(Value::Hash(hid));
-        return Ok(ClassOutcome::Handled);
-    }
-    // `Array[1, 2]` / `Subclass[1, 2]` — the literal-ish class
-    // constructor (mirrors the Hash[] intercept above). A subclass
-    // constructs a TAGGED instance of itself; the literal Array
-    // class tags None.
-    if name == "[]"
+        // `Array[1, 2]` / `Subclass[1, 2]` — the literal-ish class
+        // constructor (mirrors the Hash[] intercept above). A subclass
+        // constructs a TAGGED instance of itself; the literal Array
+        // class tags None.
+        if name == "[]"
         && let Value::Class(cls) = &recv
         && (cls.name.as_str() == "Array" || class_inherits_named(cls, "Array"))
         // Same guard as the Hash[] intercept: a subclass overriding
         // `self.[]` reaches its own class method.
         && self.lookup_class_singleton_method(cls, name_id).is_none()
-    {
-        let class_tag = if cls.name.as_str() == "Array" {
-            None
-        } else {
-            Some(cls.clone())
-        };
-        let mut g = PinGuard::new(self);
-        for a in &args {
-            if a.is_gc_heap_ref() { g.pin(a.clone()); }
+        {
+            let class_tag = if cls.name.as_str() == "Array" {
+                None
+            } else {
+                Some(cls.clone())
+            };
+            let mut g = PinGuard::new(self);
+            for a in &args {
+                if a.is_gc_heap_ref() {
+                    g.pin(a.clone());
+                }
+            }
+            g.vm.maybe_gc();
+            g.vm.check_alloc()?;
+            let aid = g.vm.heap.alloc(HeapObj::Array(crate::heap::ArrayObj {
+                elems: args.to_vec(),
+                class_tag,
+                ivars: crate::intern::FxHashMap::default(),
+                frozen: std::cell::Cell::new(false),
+            }));
+            g.vm.stack.push(Value::Array(aid));
+            return Ok(ClassOutcome::Handled);
         }
-        g.vm.maybe_gc();
-        g.vm.check_alloc()?;
-        let aid = g.vm.heap.alloc(HeapObj::Array(crate::heap::ArrayObj {
-            elems: args.to_vec(),
-            class_tag,
-            ivars: crate::intern::FxHashMap::default(),
-            frozen: std::cell::Cell::new(false),
-        }));
-        g.vm.stack.push(Value::Array(aid));
-        return Ok(ClassOutcome::Handled);
-    }
-    if name_id == new_id
-        && let Value::Class(cls) = &recv
-        && cls.name.as_str() == "Array"
-    {
-        // `Array.new` WITHOUT a block (the block form lives in
-        // do_call_block):
-        //   - 0 args      → []
-        //   - Int n       → [nil] * n
-        //   - Int n, val  → [val] * n   (val is SHARED, not copied)
-        //   - Array a     → a shallow copy of a
-        // n < 0 → ArgumentError; a lone non-Int/non-Array → TypeError.
-        // Without this, no-block `Array.new(...)` fell to the generic
-        // Class#new and produced a bare `#<Array>` instance.
-        let elems: Vec<Value> = match &args[..] {
-            [] => Vec::new(),
-            [Value::Int(n)] | [Value::Int(n), _] => {
-                if *n < 0 {
-                    return Err(self.trap(RubyError::ArgumentError {
-                        msg: "negative array size".to_string(),
+        if name_id == new_id
+            && let Value::Class(cls) = &recv
+            && cls.name.as_str() == "Array"
+        {
+            // `Array.new` WITHOUT a block (the block form lives in
+            // do_call_block):
+            //   - 0 args      → []
+            //   - Int n       → [nil] * n
+            //   - Int n, val  → [val] * n   (val is SHARED, not copied)
+            //   - Array a     → a shallow copy of a
+            // n < 0 → ArgumentError; a lone non-Int/non-Array → TypeError.
+            // Without this, no-block `Array.new(...)` fell to the generic
+            // Class#new and produced a bare `#<Array>` instance.
+            let elems: Vec<Value> = match &args[..] {
+                [] => Vec::new(),
+                [Value::Int(n)] | [Value::Int(n), _] => {
+                    if *n < 0 {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: "negative array size".to_string(),
+                        }));
+                    }
+                    let fill = args.get(1).cloned().unwrap_or(Value::Nil);
+                    vec![fill; *n as usize]
+                }
+                [Value::Array(aid)] => self.heap.array(*aid).clone(),
+                [other] => {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "no implicit conversion of {} into Integer",
+                            other.type_name()
+                        ),
                     }));
                 }
-                let fill = args.get(1).cloned().unwrap_or(Value::Nil);
-                vec![fill; *n as usize]
+                _ => {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 0..2)",
+                            args.len()
+                        ),
+                    }));
+                }
+            };
+            let mut g = PinGuard::new(self);
+            for e in &elems {
+                if e.is_gc_heap_ref() {
+                    g.pin(e.clone());
+                }
             }
-            [Value::Array(aid)] => self.heap.array(*aid).clone(),
-            [other] => {
-                return Err(self.trap(RubyError::TypeError {
-                    msg: format!(
-                        "no implicit conversion of {} into Integer",
-                        other.type_name()
-                    ),
-                }));
-            }
-            _ => {
+            g.vm.maybe_gc();
+            g.vm.check_alloc()?;
+            let aid = g.vm.heap.alloc(HeapObj::Array(elems.into()));
+            g.vm.stack.push(Value::Array(aid));
+            return Ok(ClassOutcome::Handled);
+        }
+        // `Regexp.compile(pat)` / `Regexp.new(pat)` — compile a
+        // String pattern into a Regexp. Same code path the regex
+        // literal `/.../` takes (Op::LoadRegex / Op::CompileRegex),
+        // including `preprocess_regex_pattern` so Onigmo-specific
+        // anchors like `\G` translate identically. Needed by gems
+        // that build patterns from runtime data (rack-cors uses
+        // `Regexp.compile("^[a-z]+://#{Regexp.quote(host)}$")`
+        // when turning `origins 'example.com'` into a matcher).
+        #[cfg(feature = "regex")]
+        if (name == "compile" || name_id == new_id)
+            && let Value::Class(cls) = &recv
+            && cls.name.as_str() == "Regexp"
+        {
+            if args.is_empty() || args.len() > 2 {
                 return Err(self.trap(RubyError::ArgumentError {
                     msg: format!(
-                        "wrong number of arguments (given {}, expected 0..2)",
+                        "wrong number of arguments (given {}, expected 1..2)",
                         args.len()
                     ),
                 }));
             }
-        };
-        let mut g = PinGuard::new(self);
-        for e in &elems {
-            if e.is_gc_heap_ref() { g.pin(e.clone()); }
+            let pat = match &args[0] {
+                Value::Str(s) => s.to_string_lossy(),
+                other => {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "no implicit conversion of {} into String",
+                            other.type_name()
+                        ),
+                    }));
+                }
+            };
+            // `Regexp.new(str, options)`: an Integer is a flag bitmask
+            // (IGNORECASE=1|EXTENDED=2|MULTILINE=4, plus
+            // encoding bits rubyrs ignores for matching but preserves
+            // in #options); any other truthy value is the legacy
+            // boolean form meaning IGNORECASE; nil/false/absent → 0.
+            let flags: u8 = match args.get(1) {
+                None | Some(Value::Nil) | Some(Value::Bool(false)) => 0,
+                Some(Value::Int(n)) => *n as u8,
+                Some(_) => crate::regex_engine::RB_IGNORECASE,
+            };
+            let translated = crate::vm::step::preprocess_regex_pattern(&pat);
+            let prefixed = crate::vm::step::apply_ruby_flags(&translated, flags);
+            let mut compiled =
+                crate::regex_engine::compile_with_flags(&prefixed, flags, &translated).map_err(
+                    |e| {
+                        self.trap(RubyError::HostException {
+                            class_name: "RegexpError".into(),
+                            message: format!("invalid regex /{}/: {}", pat, e),
+                        })
+                    },
+                )?;
+            compiled.set_g_anchored(crate::vm::step::leading_g_anchor(&pat));
+            self.stack.push(Value::Regex(Rc::new(compiled)));
+            return Ok(ClassOutcome::Handled);
         }
-        g.vm.maybe_gc();
-        g.vm.check_alloc()?;
-        let aid = g.vm.heap.alloc(HeapObj::Array(elems.into()));
-        g.vm.stack.push(Value::Array(aid));
-        return Ok(ClassOutcome::Handled);
-    }
-    // `Regexp.compile(pat)` / `Regexp.new(pat)` — compile a
-    // String pattern into a Regexp. Same code path the regex
-    // literal `/.../` takes (Op::LoadRegex / Op::CompileRegex),
-    // including `preprocess_regex_pattern` so Onigmo-specific
-    // anchors like `\G` translate identically. Needed by gems
-    // that build patterns from runtime data (rack-cors uses
-    // `Regexp.compile("^[a-z]+://#{Regexp.quote(host)}$")`
-    // when turning `origins 'example.com'` into a matcher).
-    #[cfg(feature = "regex")]
-    if (name == "compile" || name_id == new_id)
-        && let Value::Class(cls) = &recv
-        && cls.name.as_str() == "Regexp"
-    {
-        if args.is_empty() || args.len() > 2 {
-            return Err(self.trap(RubyError::ArgumentError {
-                msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
-            }));
-        }
-        let pat = match &args[0] {
-            Value::Str(s) => s.to_string_lossy(),
-            other => {
-                return Err(self.trap(RubyError::TypeError {
-                    msg: format!("no implicit conversion of {} into String", other.type_name()),
-                }));
-            }
-        };
-        // `Regexp.new(str, options)`: an Integer is a flag bitmask
-        // (IGNORECASE=1|EXTENDED=2|MULTILINE=4, plus
-        // encoding bits rubyrs ignores for matching but preserves
-        // in #options); any other truthy value is the legacy
-        // boolean form meaning IGNORECASE; nil/false/absent → 0.
-        let flags: u8 = match args.get(1) {
-            None | Some(Value::Nil) | Some(Value::Bool(false)) => 0,
-            Some(Value::Int(n)) => *n as u8,
-            Some(_) => crate::regex_engine::RB_IGNORECASE,
-        };
-        let translated = crate::vm::step::preprocess_regex_pattern(&pat);
-        let prefixed = crate::vm::step::apply_ruby_flags(&translated, flags);
-        let mut compiled = crate::regex_engine::compile_with_flags(&prefixed, flags, &translated).map_err(|e| {
-            self.trap(RubyError::HostException {
-                class_name: "RegexpError".into(),
-                message: format!("invalid regex /{}/: {}", pat, e),
-            })
-        })?;
-        compiled.set_g_anchored(crate::vm::step::leading_g_anchor(&pat));
-        self.stack.push(Value::Regex(Rc::new(compiled)));
-        return Ok(ClassOutcome::Handled);
-    }
 
-    // `Regexp.last_match` / `Regexp.last_match(n)` — the `$~` of the
-    // current scope. No arg returns the whole MatchData (or nil); an
-    // Integer returns that capture group (0 = whole match), or nil.
-    // Discovery: P3 Jekyll spike — `convertible.rb#read_yaml` splits
-    // front matter with `Regexp.last_match.post_match` /
-    // `Regexp.last_match(1)`.
-    #[cfg(feature = "regex")]
-    if name == "last_match"
-        && let Value::Class(cls) = &recv
-        && cls.name.as_str() == "Regexp"
-    {
-        let v = match args.first() {
-            // No arg → the whole MatchData (with pre/post-match), or nil.
-            None => self.materialize_last_match()?,
-            // `Regexp.last_match(n)`: same as `MatchData#[]`. Index 0
-            // is the whole match; n>=1 the n-th capture. A negative
-            // index counts from the end of the *captures* (CRuby's
-            // `rb_reg_nth_match`) — it can reach any capture but never
-            // wraps to the whole match. `LastMatch.caps` holds ONLY
-            // the captures (index 0 == group 1).
-            Some(Value::Int(n)) => match self.scoped_last_match() {
-                None => Value::Nil,
-                Some(lm) => {
-                    let cl = lm.caps.len() as i64;
-                    // Resolve to a captures index, -1 for the whole
-                    // match, or None for out-of-range.
-                    let pick: Option<i64> = if *n < 0 {
-                        let j = *n + cl;
-                        if j >= 0 { Some(j) } else { None }
-                    } else if *n == 0 {
-                        Some(-1)
-                    } else if *n - 1 < cl {
-                        Some(*n - 1)
-                    } else {
-                        None
+        // `Regexp.last_match` / `Regexp.last_match(n)` — the `$~` of the
+        // current scope. No arg returns the whole MatchData (or nil); an
+        // Integer returns that capture group (0 = whole match), or nil.
+        // Discovery: P3 Jekyll spike — `convertible.rb#read_yaml` splits
+        // front matter with `Regexp.last_match.post_match` /
+        // `Regexp.last_match(1)`.
+        #[cfg(feature = "regex")]
+        if name == "last_match"
+            && let Value::Class(cls) = &recv
+            && cls.name.as_str() == "Regexp"
+        {
+            let v = match args.first() {
+                // No arg → the whole MatchData (with pre/post-match), or nil.
+                None => self.materialize_last_match()?,
+                // `Regexp.last_match(n)`: same as `MatchData#[]`. Index 0
+                // is the whole match; n>=1 the n-th capture. A negative
+                // index counts from the end of the *captures* (CRuby's
+                // `rb_reg_nth_match`) — it can reach any capture but never
+                // wraps to the whole match. `LastMatch.caps` holds ONLY
+                // the captures (index 0 == group 1).
+                Some(Value::Int(n)) => match self.scoped_last_match() {
+                    None => Value::Nil,
+                    Some(lm) => {
+                        let cl = lm.caps.len() as i64;
+                        // Resolve to a captures index, -1 for the whole
+                        // match, or None for out-of-range.
+                        let pick: Option<i64> = if *n < 0 {
+                            let j = *n + cl;
+                            if j >= 0 { Some(j) } else { None }
+                        } else if *n == 0 {
+                            Some(-1)
+                        } else if *n - 1 < cl {
+                            Some(*n - 1)
+                        } else {
+                            None
+                        };
+                        match pick {
+                            None => Value::Nil,
+                            Some(-1) => Value::new_str(lm.whole.clone()),
+                            Some(j) => lm.caps[j as usize]
+                                .as_ref()
+                                .map(|s| Value::new_str(s.clone()))
+                                .unwrap_or(Value::Nil),
+                        }
+                    }
+                },
+                // `Regexp.last_match(:name)` / `("name")` — named capture.
+                // An existing-but-non-participating group is nil; an
+                // unknown name raises IndexError (CRuby, via MatchData#[]).
+                Some(Value::Sym(_)) | Some(Value::Str(_)) => {
+                    let key = match args.first() {
+                        Some(Value::Sym(id)) => self.interner.resolve(*id).to_string(),
+                        Some(Value::Str(s)) => s.to_string_lossy(),
+                        _ => unreachable!(),
                     };
-                    match pick {
-                        None => Value::Nil,
-                        Some(-1) => Value::new_str(lm.whole.clone()),
-                        Some(j) => lm.caps[j as usize]
-                            .as_ref()
-                            .map(|s| Value::new_str(s.clone()))
-                            .unwrap_or(Value::Nil),
+                    let resolved: Option<Value> = match self.scoped_last_match() {
+                        None => Some(Value::Nil),
+                        Some(lm) => match lm.named.iter().find(|(n, _)| *n == key) {
+                            Some((_, Some(s))) => Some(Value::new_str(s.clone())),
+                            Some((_, None)) => Some(Value::Nil),
+                            None => None,
+                        },
+                    };
+                    match resolved {
+                        Some(v) => v,
+                        None => {
+                            return Err(self.trap(RubyError::IndexError {
+                                msg: format!("undefined group name reference: {}", key),
+                            }));
+                        }
                     }
                 }
-            },
-            // `Regexp.last_match(:name)` / `("name")` — named capture.
-            // An existing-but-non-participating group is nil; an
-            // unknown name raises IndexError (CRuby, via MatchData#[]).
-            Some(Value::Sym(_)) | Some(Value::Str(_)) => {
-                let key = match args.first() {
-                    Some(Value::Sym(id)) => self.interner.resolve(*id).to_string(),
-                    Some(Value::Str(s)) => s.to_string_lossy(),
-                    _ => unreachable!(),
-                };
-                let resolved: Option<Value> = match self.scoped_last_match() {
-                    None => Some(Value::Nil),
-                    Some(lm) => match lm.named.iter().find(|(n, _)| *n == key) {
-                        Some((_, Some(s))) => Some(Value::new_str(s.clone())),
-                        Some((_, None)) => Some(Value::Nil),
-                        None => None,
-                    },
-                };
-                match resolved {
-                    Some(v) => v,
-                    None => {
-                        return Err(self.trap(RubyError::IndexError {
-                            msg: format!("undefined group name reference: {}", key),
+                Some(_) => Value::Nil,
+            };
+            self.stack.push(v);
+            return Ok(ClassOutcome::Handled);
+        }
+
+        // `Regexp.escape(s)` / `Regexp.quote(s)` — escape regex
+        // metacharacters in `s` so it can be safely interpolated
+        // into a pattern. The `regex` crate's `escape` covers the
+        // same metacharacter set Ruby's Regexp.escape does for
+        // ASCII; rack-cors uses this to quote user-supplied
+        // origin hostnames before compiling a Regexp.
+        //
+        // Gated on the `regex` feature alongside the sibling
+        // `Regexp.compile` / `Regexp.new` arm above — same
+        // metacharacter handling lives in the `regex` crate and is
+        // unavailable in no-default-features builds (wasm32-wasip1).
+        #[cfg(feature = "regex")]
+        if (name == "escape" || name == "quote")
+            && let Value::Class(cls) = &recv
+            && cls.name.as_str() == "Regexp"
+        {
+            if args.len() != 1 {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 1)",
+                        args.len()
+                    ),
+                }));
+            }
+            let s = match &args[0] {
+                Value::Str(s) => s.to_string_lossy(),
+                other => {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "no implicit conversion of {} into String",
+                            other.type_name()
+                        ),
+                    }));
+                }
+            };
+            let escaped = regex::escape(&s);
+            self.stack.push(Value::new_str_bytes(escaped.into_bytes()));
+            return Ok(ClassOutcome::Handled);
+        }
+
+        // `Regexp.union(*patterns)` — combine String / Regexp args
+        // into one alternation Regexp. Strings are escaped via
+        // `regex::escape` so metacharacters become literals; Regexp
+        // args contribute their existing source. A single Array
+        // argument is splatted (CRuby parity). No args -> `(?!)`
+        // (never-matching pattern). Required by Rack 3
+        // `rack/utils.rb:607`
+        //   `Regexp.union(*[::File::SEPARATOR, ::File::ALT_SEPARATOR].compact)`
+        // which evaluates at class-body load time during the P3
+        // Sinatra spike.
+        #[cfg(feature = "regex")]
+        if name == "union"
+            && let Value::Class(cls) = &recv
+            && cls.name.as_str() == "Regexp"
+        {
+            // Splat a sole Array arg per CRuby (Regexp.union([a, b])
+            // behaves like Regexp.union(a, b)).
+            let parts_iter: Vec<Value> = if args.len() == 1 {
+                if let Value::Array(oid) = &args[0] {
+                    self.heap.array(*oid).clone()
+                } else {
+                    args.to_vec()
+                }
+            } else {
+                args.to_vec()
+            };
+            let mut chunks: Vec<String> = Vec::with_capacity(parts_iter.len());
+            for v in &parts_iter {
+                match v {
+                    Value::Str(s) => chunks.push(regex::escape(&s.to_string_lossy())),
+                    // Each Regexp member contributes its `#to_s` form
+                    // `(?on-off:source)`, NOT the bare source — so a
+                    // member's own flags (esp. `/x` extended mode, where
+                    // literal whitespace in the source is insignificant)
+                    // stay scoped to that member in the combined pattern.
+                    // Bare `source` would let an `/x` member's spaces turn
+                    // significant under the union's default mode (rack's
+                    // ipv6 `Regexp.union` of `/x` parts — ` :: ` must mean
+                    // `::`, not space-colon-colon-space).
+                    Value::Regex(r) => chunks.push(r.to_s_string()),
+                    other => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "no implicit conversion of {} into String",
+                                other.type_name()
+                            ),
                         }));
                     }
                 }
             }
-            Some(_) => Value::Nil,
-        };
-        self.stack.push(v);
-        return Ok(ClassOutcome::Handled);
-    }
-
-    // `Regexp.escape(s)` / `Regexp.quote(s)` — escape regex
-    // metacharacters in `s` so it can be safely interpolated
-    // into a pattern. The `regex` crate's `escape` covers the
-    // same metacharacter set Ruby's Regexp.escape does for
-    // ASCII; rack-cors uses this to quote user-supplied
-    // origin hostnames before compiling a Regexp.
-    //
-    // Gated on the `regex` feature alongside the sibling
-    // `Regexp.compile` / `Regexp.new` arm above — same
-    // metacharacter handling lives in the `regex` crate and is
-    // unavailable in no-default-features builds (wasm32-wasip1).
-    #[cfg(feature = "regex")]
-    if (name == "escape" || name == "quote")
-        && let Value::Class(cls) = &recv
-        && cls.name.as_str() == "Regexp"
-    {
-        if args.len() != 1 {
-            return Err(self.trap(RubyError::ArgumentError {
-                msg: format!("wrong number of arguments (given {}, expected 1)", args.len()),
-            }));
-        }
-        let s = match &args[0] {
-            Value::Str(s) => s.to_string_lossy(),
-            other => {
-                return Err(self.trap(RubyError::TypeError {
-                    msg: format!("no implicit conversion of {} into String", other.type_name()),
-                }));
-            }
-        };
-        let escaped = regex::escape(&s);
-        self.stack.push(Value::new_str_bytes(escaped.into_bytes()));
-        return Ok(ClassOutcome::Handled);
-    }
-
-    // `Regexp.union(*patterns)` — combine String / Regexp args
-    // into one alternation Regexp. Strings are escaped via
-    // `regex::escape` so metacharacters become literals; Regexp
-    // args contribute their existing source. A single Array
-    // argument is splatted (CRuby parity). No args -> `(?!)`
-    // (never-matching pattern). Required by Rack 3
-    // `rack/utils.rb:607`
-    //   `Regexp.union(*[::File::SEPARATOR, ::File::ALT_SEPARATOR].compact)`
-    // which evaluates at class-body load time during the P3
-    // Sinatra spike.
-    #[cfg(feature = "regex")]
-    if name == "union"
-        && let Value::Class(cls) = &recv
-        && cls.name.as_str() == "Regexp"
-    {
-        // Splat a sole Array arg per CRuby (Regexp.union([a, b])
-        // behaves like Regexp.union(a, b)).
-        let parts_iter: Vec<Value> = if args.len() == 1 {
-            if let Value::Array(oid) = &args[0] {
-                self.heap.array(*oid).clone()
+            let combined = if chunks.is_empty() {
+                // CRuby's empty `Regexp.union` returns `/(?!)/` —
+                // a zero-width negative lookahead that always
+                // fails. The native `regex` crate doesn't support
+                // lookaround; `[^\s\S]` (intersection-complement
+                // char class — never matches anything) is the
+                // linear-engine equivalent. Behavioural difference
+                // is only in `.source` (which Sinatra/Rack don't
+                // inspect for the union result).
+                "[^\\s\\S]".to_string()
             } else {
-                args.to_vec()
-            }
-        } else {
-            args.to_vec()
-        };
-        let mut chunks: Vec<String> = Vec::with_capacity(parts_iter.len());
-        for v in &parts_iter {
-            match v {
-                Value::Str(s) => chunks.push(regex::escape(&s.to_string_lossy())),
-                // Each Regexp member contributes its `#to_s` form
-                // `(?on-off:source)`, NOT the bare source — so a
-                // member's own flags (esp. `/x` extended mode, where
-                // literal whitespace in the source is insignificant)
-                // stay scoped to that member in the combined pattern.
-                // Bare `source` would let an `/x` member's spaces turn
-                // significant under the union's default mode (rack's
-                // ipv6 `Regexp.union` of `/x` parts — ` :: ` must mean
-                // `::`, not space-colon-colon-space).
-                Value::Regex(r) => chunks.push(r.to_s_string()),
-                other => {
-                    return Err(self.trap(RubyError::TypeError {
-                        msg: format!("no implicit conversion of {} into String", other.type_name()),
-                    }));
-                }
-            }
-        }
-        let combined = if chunks.is_empty() {
-            // CRuby's empty `Regexp.union` returns `/(?!)/` —
-            // a zero-width negative lookahead that always
-            // fails. The native `regex` crate doesn't support
-            // lookaround; `[^\s\S]` (intersection-complement
-            // char class — never matches anything) is the
-            // linear-engine equivalent. Behavioural difference
-            // is only in `.source` (which Sinatra/Rack don't
-            // inspect for the union result).
-            "[^\\s\\S]".to_string()
-        } else {
-            chunks.join("|")
-        };
-        let translated = crate::vm::step::preprocess_regex_pattern(&combined);
-        let compiled = crate::regex_engine::compile(&translated).map_err(|e| {
-            self.trap(RubyError::HostException {
-                class_name: "RegexpError".into(),
-                message: format!("invalid regex /{}/: {}", combined, e),
-            })
-        })?;
-        self.stack.push(Value::Regex(Rc::new(compiled)));
-        return Ok(ClassOutcome::Handled);
-    }
-
-    // `Class#allocate` user-singleton override — CRuby allows
-    // `def self.allocate` to replace the built-in allocator (used
-    // by Marshal / dup / ORM hydration hooks). Mirrors the
-    // `def self.new` pre-check at line 1053. Must fire BEFORE the
-    // builtin allocate arm below or the user override is silently
-    // shadowed; do_call_block has the same precedence (its
-    // generic singleton check at ~4601 runs before its allocate
-    // arm). PR #181 follow-up: code-review caught the asymmetry.
-    if name == "allocate"
-        && let Value::Class(cls) = &recv
-        && let Some(m) = self.lookup_class_singleton_method(cls, name_id) {
-        self.invoke_method(m, recv.clone(), args.into_vec())?;
-        return Ok(ClassOutcome::Handled);
-    }
-    // `Class#allocate` — bare-instance allocator without calling
-    // `initialize`. Used by frameworks for unmarshalling / dup /
-    // clone / ORM hydration, and by the TRY_RUNS pass-7 probe's
-    // `ERB.new` stub (layer #4). Sits before the `new` arm so the
-    // class-receiver path is uniform.
-    //
-    // Semantics:
-    //   - User classes (`Value::Class` not in the primitive
-    //     whitelist): allocate a fresh `HeapObj::Instance` with
-    //     the class pointer set, empty ivars, no singleton class.
-    //     No `initialize` call.
-    //   - Primitive class shells fall into two groups:
-    //       * "Truly disallowed" in CRuby — Integer / Float /
-    //         Symbol / Regexp / Proc / Method / UnboundMethod /
-    //         TrueClass / FalseClass / NilClass / Kernel. CRuby
-    //         raises TypeError; rubyrs matches byte-for-byte.
-    //       * "Allowed in CRuby" — String / Array / Hash / Range.
-    //         CRuby produces a bare instance of the builtin
-    //         (empty string / array / hash / Range struct); rubyrs
-    //         currently raises TypeError because the heap model
-    //         unboxes those values and we don't yet route through
-    //         a TypedData allocator. Documented as a KNOWN GAP
-    //         below; the comment used to claim CRuby parity here
-    //         which was wrong (PR #181 review round 4 Copilot
-    //         comment #2).
-    //     Either way: zero Instance slot to populate, so the
-    //     bare-allocator path can't run for any primitive shell.
-    //   - Zero args; any positional arg raises ArgumentError
-    //     with the standard "wrong number of arguments" shape.
-    //
-    // KNOWN GAP: `cext_alloc_func` (set by
-    // `rb_define_alloc_func`) is currently NOT routed through
-    // this arm. The `new` arm below DOES route through it (so a
-    // cext `Foo.new` produces a TypedData-wrapped Object), but
-    // `Foo.allocate` here falls back to the default bare
-    // Instance. For a cext whose initialize-after-allocate
-    // relies on the alloc_func having wrapped its C struct, the
-    // separation of allocate-vs-new becomes visible. No caller
-    // surfaced today (pass-7 probe layer #4 only needs the
-    // bare Instance path). Routed via a follow-up if a cext
-    // surfaces the need; tracked as a comment so a future
-    // reader doesn't think the bare-allocate is an oversight.
-    // String-compare on the already-resolved `name` instead of
-    // interning "allocate" each call (PR #181 review round 3
-    // Copilot comment #1). Avoids both the per-call hash lookup
-    // on a hot dispatch path and the latent edge case where
-    // unconditional `intern()` could grow the symbol table
-    // outside the existing `Config::max_symbols` accounting
-    // points.
-    if name == "allocate"
-        && let Value::Class(cls) = &recv {
-        if !args.is_empty() {
-            return Err(self.trap(RubyError::ArgumentError {
-                msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),
-            }));
-        }
-        // Eigenclass-shell fence — CRuby:
-        // `A.singleton_class.allocate` raises TypeError ("can't
-        // create instance of singleton class"). Without this the
-        // shell falls into the bare-instance allocator below and
-        // produces an orphan. (Code-review #253 round 9 #1.)
-        if cls.singleton_target.borrow().is_some() {
-            return Err(self.trap(RubyError::TypeError {
-                msg: "can't create instance of singleton class".into(),
-            }));
-        }
-        // Module / Class shells are NOT user classes — a real
-        // CRuby raises NoMethodError ("undefined method
-        // 'allocate' for ...Module/Class...") on Module-flavored
-        // receivers; we approximate with the same TypeError
-        // surface as the primitive shells so the call site sees
-        // a clean failure instead of a bogus bare-Instance whose
-        // `class` says Module but which can't behave like one
-        // (PR #181 review #1 — Copilot flagged this gap).
-        // KNOWN GAP: `Class.allocate` itself in CRuby DOES
-        // succeed (returns a new anonymous Class). We block it
-        // here for safety until a proper Class/Module allocator
-        // lands; the only caller surfaced today (ERB stub) wants
-        // an Instance, not a Class.
-        // True modules don't HAVE allocate at all in CRuby —
-        // NoMethodError, not the removed-allocator TypeError — so
-        // decline and let the dispatch tail (meta-chain →
-        // method_missing → NoMethodError) produce the right
-        // surface. Surfaced when the bare-call→receiver-form
-        // bridge made module-body `allocate` reach this arm.
-        if cls.is_module && cls.name != "Module" {
-            return Ok(ClassOutcome::NotHandled { args, recv });
-        }
-        if cls.name == "Module"
-            || cls.name == "Class"
-            || is_primitive_class_name(&cls.name)
-        {
-            // Anonymous Module / Class shells have an empty
-            // `cls.name`; without a fallback the message would
-            // read "allocator undefined for " (trailing space,
-            // no class hint). Pick "Module" vs "Class" by the
-            // `is_module` flag so the surface is actionable
-            // (PR #181 review round 3 Copilot comment #2).
-            let display = if cls.name.is_empty() {
-                if cls.is_module { "Module" } else { "Class" }
-            } else {
-                &cls.name
+                chunks.join("|")
             };
-            return Err(self.trap(RubyError::TypeError {
-                msg: format!("allocator undefined for {}", display),
-            }));
-        }
-        let obj = self.alloc_default_instance(cls)?;
-        self.stack.push(obj);
-        return Ok(ClassOutcome::Handled);
-    }
-    // `T.new` where T is a USER subclass of `Module` (or `Class`) —
-    // `class Tagged < Module; end; Tagged.new(...)`. CRuby allocates a
-    // real module/class VALUE that IS an instance of T: it has its own
-    // method table, is `extend`-able, fires inclusion hooks, and reports
-    // T as its `.class`. Build a fresh `Value::Class` tagged with T
-    // (class_tag), then run T#initialize on it (whose `super()` reaches
-    // `Module#initialize`). dry-core's `Deprecations::Tagged` /
-    // `ClassAttributes` use this — the whole dry-rb stack depends on it.
-    // Skipped for `Module`/`Class` themselves (their own `new` arms
-    // above) and for already-tagged receivers.
-    if name_id == new_id
-        && let Value::Class(cls) = &recv
-        && cls.class_tag.is_none()
-    {
-        let mod_sym = self.interner.intern("Module");
-        let cls_sym = self.interner.intern("Class");
-        let module_cls = self.classes.get(&mod_sym).cloned();
-        let class_cls = self.classes.get(&cls_sym).cloned();
-        if let (Some(mc), Some(cc)) = (module_cls, class_cls)
-            && !Rc::ptr_eq(cls, &mc)
-            && !Rc::ptr_eq(cls, &cc)
-            && super::class_is_a(cls, &mc)
-        {
-            // `T < Class` → the instance is a CLASS (is_module false,
-            // default superclass Object); `T < Module` → a module.
-            let as_class = super::class_is_a(cls, &cc);
-            let sup = if as_class {
-                self.classes.get(&self.interner.intern("Object")).cloned()
-            } else {
-                None
-            };
-            self.anon_class_counter += 1;
-            let serial = self.anon_class_counter;
-            let new_obj = Rc::new(crate::value::Class {
-                name: String::new(),
-                is_module: !as_class,
-                undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
-                anon_serial: std::cell::Cell::new(serial),
-                ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
-                methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
-                singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
-                superclass: std::cell::RefCell::new(sup),
-                includes: std::cell::RefCell::new(Vec::new()),
-                prepends: std::cell::RefCell::new(Vec::new()),
-                singleton_prepends: std::cell::RefCell::new(Vec::new()),
-                singleton_includes: std::cell::RefCell::new(Vec::new()),
-                singleton_view: std::cell::RefCell::new(None),
-                singleton_target: std::cell::RefCell::new(None),
-                class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
-                consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
-                assigned_name: std::cell::RefCell::new(None),
-                class_tag: Some(cls.clone()),
-                #[cfg(feature = "cext")]
-                cext_alloc_func: std::cell::Cell::new(None),
-            });
-            let modv = Value::Class(new_obj);
-            // Run T#initialize (forwarding args); its return is
-            // discarded — `new` yields the module itself.
-            let init_id = self.sym_initialize;
-            if let Some(m) = self.lookup_method_uncached(cls, init_id) {
-                self.invoke_method(m, modv.clone(), args.into_vec())?;
-                self.frames.last_mut()
-                    .expect("ICE: frames empty after module-subclass new")
-                    .swap_return = Some(modv);
-            } else {
-                self.stack.push(modv);
-            }
+            let translated = crate::vm::step::preprocess_regex_pattern(&combined);
+            let compiled = crate::regex_engine::compile(&translated).map_err(|e| {
+                self.trap(RubyError::HostException {
+                    class_name: "RegexpError".into(),
+                    message: format!("invalid regex /{}/: {}", combined, e),
+                })
+            })?;
+            self.stack.push(Value::Regex(Rc::new(compiled)));
             return Ok(ClassOutcome::Handled);
         }
-    }
-    if name_id == new_id
-        && let Value::Class(cls) = &recv {
+
+        // `Class#allocate` user-singleton override — CRuby allows
+        // `def self.allocate` to replace the built-in allocator (used
+        // by Marshal / dup / ORM hydration hooks). Mirrors the
+        // `def self.new` pre-check at line 1053. Must fire BEFORE the
+        // builtin allocate arm below or the user override is silently
+        // shadowed; do_call_block has the same precedence (its
+        // generic singleton check at ~4601 runs before its allocate
+        // arm). PR #181 follow-up: code-review caught the asymmetry.
+        if name == "allocate"
+            && let Value::Class(cls) = &recv
+            && let Some(m) = self.lookup_class_singleton_method(cls, name_id)
+        {
+            self.invoke_method(m, recv.clone(), args.into_vec())?;
+            return Ok(ClassOutcome::Handled);
+        }
+        // `Class#allocate` — bare-instance allocator without calling
+        // `initialize`. Used by frameworks for unmarshalling / dup /
+        // clone / ORM hydration, and by the TRY_RUNS pass-7 probe's
+        // `ERB.new` stub (layer #4). Sits before the `new` arm so the
+        // class-receiver path is uniform.
+        //
+        // Semantics:
+        //   - User classes (`Value::Class` not in the primitive
+        //     whitelist): allocate a fresh `HeapObj::Instance` with
+        //     the class pointer set, empty ivars, no singleton class.
+        //     No `initialize` call.
+        //   - Primitive class shells fall into two groups:
+        //       * "Truly disallowed" in CRuby — Integer / Float /
+        //         Symbol / Regexp / Proc / Method / UnboundMethod /
+        //         TrueClass / FalseClass / NilClass / Kernel. CRuby
+        //         raises TypeError; rubyrs matches byte-for-byte.
+        //       * "Allowed in CRuby" — String / Array / Hash / Range.
+        //         CRuby produces a bare instance of the builtin
+        //         (empty string / array / hash / Range struct); rubyrs
+        //         currently raises TypeError because the heap model
+        //         unboxes those values and we don't yet route through
+        //         a TypedData allocator. Documented as a KNOWN GAP
+        //         below; the comment used to claim CRuby parity here
+        //         which was wrong (PR #181 review round 4 Copilot
+        //         comment #2).
+        //     Either way: zero Instance slot to populate, so the
+        //     bare-allocator path can't run for any primitive shell.
+        //   - Zero args; any positional arg raises ArgumentError
+        //     with the standard "wrong number of arguments" shape.
+        //
+        // KNOWN GAP: `cext_alloc_func` (set by
+        // `rb_define_alloc_func`) is currently NOT routed through
+        // this arm. The `new` arm below DOES route through it (so a
+        // cext `Foo.new` produces a TypedData-wrapped Object), but
+        // `Foo.allocate` here falls back to the default bare
+        // Instance. For a cext whose initialize-after-allocate
+        // relies on the alloc_func having wrapped its C struct, the
+        // separation of allocate-vs-new becomes visible. No caller
+        // surfaced today (pass-7 probe layer #4 only needs the
+        // bare Instance path). Routed via a follow-up if a cext
+        // surfaces the need; tracked as a comment so a future
+        // reader doesn't think the bare-allocate is an oversight.
+        // String-compare on the already-resolved `name` instead of
+        // interning "allocate" each call (PR #181 review round 3
+        // Copilot comment #1). Avoids both the per-call hash lookup
+        // on a hot dispatch path and the latent edge case where
+        // unconditional `intern()` could grow the symbol table
+        // outside the existing `Config::max_symbols` accounting
+        // points.
+        if name == "allocate"
+            && let Value::Class(cls) = &recv
+        {
+            if !args.is_empty() {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 0)",
+                        args.len()
+                    ),
+                }));
+            }
+            // Eigenclass-shell fence — CRuby:
+            // `A.singleton_class.allocate` raises TypeError ("can't
+            // create instance of singleton class"). Without this the
+            // shell falls into the bare-instance allocator below and
+            // produces an orphan. (Code-review #253 round 9 #1.)
+            if cls.singleton_target.borrow().is_some() {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: "can't create instance of singleton class".into(),
+                }));
+            }
+            // Module / Class shells are NOT user classes — a real
+            // CRuby raises NoMethodError ("undefined method
+            // 'allocate' for ...Module/Class...") on Module-flavored
+            // receivers; we approximate with the same TypeError
+            // surface as the primitive shells so the call site sees
+            // a clean failure instead of a bogus bare-Instance whose
+            // `class` says Module but which can't behave like one
+            // (PR #181 review #1 — Copilot flagged this gap).
+            // KNOWN GAP: `Class.allocate` itself in CRuby DOES
+            // succeed (returns a new anonymous Class). We block it
+            // here for safety until a proper Class/Module allocator
+            // lands; the only caller surfaced today (ERB stub) wants
+            // an Instance, not a Class.
+            // True modules don't HAVE allocate at all in CRuby —
+            // NoMethodError, not the removed-allocator TypeError — so
+            // decline and let the dispatch tail (meta-chain →
+            // method_missing → NoMethodError) produce the right
+            // surface. Surfaced when the bare-call→receiver-form
+            // bridge made module-body `allocate` reach this arm.
+            if cls.is_module && cls.name != "Module" {
+                return Ok(ClassOutcome::NotHandled { args, recv });
+            }
+            if cls.name == "Module" || cls.name == "Class" || is_primitive_class_name(&cls.name) {
+                // Anonymous Module / Class shells have an empty
+                // `cls.name`; without a fallback the message would
+                // read "allocator undefined for " (trailing space,
+                // no class hint). Pick "Module" vs "Class" by the
+                // `is_module` flag so the surface is actionable
+                // (PR #181 review round 3 Copilot comment #2).
+                let display = if cls.name.is_empty() {
+                    if cls.is_module { "Module" } else { "Class" }
+                } else {
+                    &cls.name
+                };
+                return Err(self.trap(RubyError::TypeError {
+                    msg: format!("allocator undefined for {}", display),
+                }));
+            }
+            let obj = self.alloc_default_instance(cls)?;
+            self.stack.push(obj);
+            return Ok(ClassOutcome::Handled);
+        }
+        // `T.new` where T is a USER subclass of `Module` (or `Class`) —
+        // `class Tagged < Module; end; Tagged.new(...)`. CRuby allocates a
+        // real module/class VALUE that IS an instance of T: it has its own
+        // method table, is `extend`-able, fires inclusion hooks, and reports
+        // T as its `.class`. Build a fresh `Value::Class` tagged with T
+        // (class_tag), then run T#initialize on it (whose `super()` reaches
+        // `Module#initialize`). dry-core's `Deprecations::Tagged` /
+        // `ClassAttributes` use this — the whole dry-rb stack depends on it.
+        // Skipped for `Module`/`Class` themselves (their own `new` arms
+        // above) and for already-tagged receivers.
+        if name_id == new_id
+            && let Value::Class(cls) = &recv
+            && cls.class_tag.is_none()
+        {
+            let mod_sym = self.interner.intern("Module");
+            let cls_sym = self.interner.intern("Class");
+            let module_cls = self.classes.get(&mod_sym).cloned();
+            let class_cls = self.classes.get(&cls_sym).cloned();
+            if let (Some(mc), Some(cc)) = (module_cls, class_cls)
+                && !Rc::ptr_eq(cls, &mc)
+                && !Rc::ptr_eq(cls, &cc)
+                && super::class_is_a(cls, &mc)
+            {
+                // `T < Class` → the instance is a CLASS (is_module false,
+                // default superclass Object); `T < Module` → a module.
+                let as_class = super::class_is_a(cls, &cc);
+                let sup = if as_class {
+                    self.classes.get(&self.interner.intern("Object")).cloned()
+                } else {
+                    None
+                };
+                self.anon_class_counter += 1;
+                let serial = self.anon_class_counter;
+                let new_obj = Rc::new(crate::value::Class {
+                    name: String::new(),
+                    is_module: !as_class,
+                    undefed: std::cell::RefCell::new(crate::intern::FxHashSet::default()),
+                    anon_serial: std::cell::Cell::new(serial),
+                    ivars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+                    methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+                    singleton_methods: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+                    superclass: std::cell::RefCell::new(sup),
+                    includes: std::cell::RefCell::new(Vec::new()),
+                    prepends: std::cell::RefCell::new(Vec::new()),
+                    singleton_prepends: std::cell::RefCell::new(Vec::new()),
+                    singleton_includes: std::cell::RefCell::new(Vec::new()),
+                    singleton_view: std::cell::RefCell::new(None),
+                    singleton_target: std::cell::RefCell::new(None),
+                    class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+                    consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+                    assigned_name: std::cell::RefCell::new(None),
+                    class_tag: Some(cls.clone()),
+                    frozen: std::cell::Cell::new(false),
+                    #[cfg(feature = "cext")]
+                    cext_alloc_func: std::cell::Cell::new(None),
+                });
+                let modv = Value::Class(new_obj);
+                // Run T#initialize (forwarding args); its return is
+                // discarded — `new` yields the module itself.
+                let init_id = self.sym_initialize;
+                if let Some(m) = self.lookup_method_uncached(cls, init_id) {
+                    self.invoke_method(m, modv.clone(), args.into_vec())?;
+                    self.frames
+                        .last_mut()
+                        .expect("ICE: frames empty after module-subclass new")
+                        .swap_return = Some(modv);
+                } else {
+                    self.stack.push(modv);
+                }
+                return Ok(ClassOutcome::Handled);
+            }
+        }
+        if name_id == new_id
+            && let Value::Class(cls) = &recv
+        {
             // L3-F: cext-registered allocator path. When the class
             // came from rb_define_class_under AND the cext called
             // rb_define_alloc_func on it, route the allocation
@@ -7192,7 +7612,9 @@ impl Vm {
             // review #1 + #3 — same shape as the Integer#times
             // PinGuard fix in L3-D).
             let mut g = PinGuard::new(self);
-            for a in &args { g.pin(a.clone()); }
+            for a in &args {
+                g.pin(a.clone());
+            }
             // Default Instance allocator — used by every branch of
             // the cext-selection cascade below that doesn't go
             // through `rb_define_alloc_func`. Delegates to
@@ -7290,7 +7712,10 @@ impl Vm {
                 // invoke_method propagates.
                 drop(g);
                 self.invoke_method(m, obj.clone(), args.into_vec())?;
-                self.frames.last_mut().expect("ICE: frames empty after new").swap_return = Some(obj);
+                self.frames
+                    .last_mut()
+                    .expect("ICE: frames empty after new")
+                    .swap_return = Some(obj);
             } else if let Value::Array(aid) = &obj
                 && !args.is_empty()
             {
@@ -7343,10 +7768,11 @@ impl Vm {
                     // validates argc against arity for fixed
                     // cases and raises ArgumentError on a
                     // mismatch.
-                    let cext_init_reg = g.vm.cext_instance_methods
-                        .get(cls.name.as_str())
-                        .and_then(|t| t.get(&init_id).cloned())
-                        .filter(|reg| reg.arity == -1 || (0..=5).contains(&reg.arity));
+                    let cext_init_reg =
+                        g.vm.cext_instance_methods
+                            .get(cls.name.as_str())
+                            .and_then(|t| t.get(&init_id).cloned())
+                            .filter(|reg| reg.arity == -1 || (0..=5).contains(&reg.arity));
                     if let Some(reg) = cext_init_reg {
                         let qualified = reg.qualified_name.clone();
                         let func = reg.func;
@@ -7356,7 +7782,10 @@ impl Vm {
                         let vm_ptr: *mut Vm = g.vm;
                         super::cext::with_vm_ptr_set(vm_ptr, || {
                             super::cext::cext_dispatch(
-                                &qualified, func, arity, &args_ref,
+                                &qualified,
+                                func,
+                                arity,
+                                &args_ref,
                                 super::cext::CextSelfHandle::Object(obj_clone),
                             )
                         })?;
@@ -7371,280 +7800,303 @@ impl Vm {
         Ok(ClassOutcome::NotHandled { args, recv })
     }
 
-        /// `Op::CallKw*` entry — the compiler emits this for call
-        /// sites whose trailing arg came from `KeywordHashNode`
-        /// (`foo(k: v)` sugar). Peek at the trailing Hash on the
-        /// stack; if the call targets a primitive that consumes
-        /// the kwarg (currently only `Integer#round(half:)` /
-        /// `Float#round(half:)`), dispatch the kwarg-aware path
-        /// directly. Otherwise fall through to `do_call`, which
-        /// continues to treat the trailing Hash as a positional
-        /// arg — preserves today's behaviour for user-defined
-        /// methods (whose `invoke_method` already pops the Hash
-        /// when the proto declares kw_params) and for primitives
-        /// that genuinely take a positional Hash.
-        pub(crate) fn do_call_kw(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u32) -> Result<(), Trap> {
-            // Empty / nil keyword-splat contributes ZERO arguments,
-            // matching CRuby: `f(**{})` and `f(**nil)` pass nothing
-            // (and `f(1, **{})` passes just `1`). The kwargs travel
-            // as the trailing stack arg under CallKw; an EMPTY Hash
-            // (from `**{}` or an empty `**h`) or `nil` (from `**nil`)
-            // must be dropped so a `*rest` callee doesn't collect a
-            // phantom positional — `pos(**{})` is `[]`, not `[{}]`.
-            // Non-empty kwargs hashes are left intact (they're real
-            // kwargs / the trailing positional hash a no-kwarg callee
-            // receives). Runs before the `round` arm so
-            // `5.round(**{})` degrades to `5.round`.
-            if argc > 0 {
-                let drop_trailing = match self.stack.last() {
-                    Some(Value::Hash(hid)) => self.heap.hash(*hid).is_empty(),
-                    Some(Value::Nil) => true,
-                    _ => false,
-                };
-                if drop_trailing {
-                    self.stack.pop();
-                    return self.do_call(name_id, argc - 1, no_recv, cache_id);
-                }
-            }
-            // Only `round` is kwarg-aware today, AND only for
-            // Int/Float receivers with a supported arg shape.
-            // Every other shape — user-defined `C#round(half:)`,
-            // 2+ positional args, non-Integer precision, BigInt
-            // receiver — must fall back to `do_call` so the
-            // existing primitive arms (arity ArgumentError, TypeError
-            // for non-Integer precision) AND user-method dispatch
-            // still fire. The trailing Hash travels as positional in
-            // that path, identical to pre-CallKw behaviour.
-            // SymId compare instead of resolving + cloning the
-            // name on every CallKw dispatch — the `interner.intern`
-            // is amortised across the run (same id returned for the
-            // canonical "round" string), so a single == lookup
-            // beats a per-call heap allocation. Same pattern below
-            // for the `:half` key probe.
-            let round_id = self.interner.intern("round");
-            if name_id != round_id {
-                return self.do_call(name_id, argc, no_recv, cache_id);
-            }
-            // Peek receiver + trailing arg WITHOUT disturbing the
-            // stack — the fallback `do_call` needs the stack intact.
-            if argc == 0 {
-                return self.do_call(name_id, argc, no_recv, cache_id);
-            }
-            let stack_len = self.stack.len();
-            let trailing = self.stack[stack_len - 1].clone();
-            let Value::Hash(hash_id) = trailing else {
-                return self.do_call(name_id, argc, no_recv, cache_id);
+    /// `Op::CallKw*` entry — the compiler emits this for call
+    /// sites whose trailing arg came from `KeywordHashNode`
+    /// (`foo(k: v)` sugar). Peek at the trailing Hash on the
+    /// stack; if the call targets a primitive that consumes
+    /// the kwarg (currently only `Integer#round(half:)` /
+    /// `Float#round(half:)`), dispatch the kwarg-aware path
+    /// directly. Otherwise fall through to `do_call`, which
+    /// continues to treat the trailing Hash as a positional
+    /// arg — preserves today's behaviour for user-defined
+    /// methods (whose `invoke_method` already pops the Hash
+    /// when the proto declares kw_params) and for primitives
+    /// that genuinely take a positional Hash.
+    pub(crate) fn do_call_kw(
+        &mut self,
+        name_id: SymId,
+        argc: usize,
+        no_recv: bool,
+        cache_id: u32,
+    ) -> Result<(), Trap> {
+        // Empty / nil keyword-splat contributes ZERO arguments,
+        // matching CRuby: `f(**{})` and `f(**nil)` pass nothing
+        // (and `f(1, **{})` passes just `1`). The kwargs travel
+        // as the trailing stack arg under CallKw; an EMPTY Hash
+        // (from `**{}` or an empty `**h`) or `nil` (from `**nil`)
+        // must be dropped so a `*rest` callee doesn't collect a
+        // phantom positional — `pos(**{})` is `[]`, not `[{}]`.
+        // Non-empty kwargs hashes are left intact (they're real
+        // kwargs / the trailing positional hash a no-kwarg callee
+        // receives). Runs before the `round` arm so
+        // `5.round(**{})` degrades to `5.round`.
+        if argc > 0 {
+            let drop_trailing = match self.stack.last() {
+                Some(Value::Hash(hid)) => self.heap.hash(*hid).is_empty(),
+                Some(Value::Nil) => true,
+                _ => false,
             };
-            // Receiver position: if `no_recv` it's the frame self;
-            // else it's stack[stack_len - argc - 1].
-            let recv_peek = if no_recv {
-                self.frames.last().expect("ICE: do_call_kw no frames").self_val.clone()
-            } else {
-                if stack_len < argc + 1 {
-                    return self.do_call(name_id, argc, no_recv, cache_id);
-                }
-                self.stack[stack_len - argc - 1].clone()
-            };
-            if !matches!(recv_peek, Value::Int(_) | Value::Float(_)) {
-                return self.do_call(name_id, argc, no_recv, cache_id);
+            if drop_trailing {
+                self.stack.pop();
+                return self.do_call(name_id, argc - 1, no_recv, cache_id);
             }
-            // Positional arg shape — only `[]` (no precision) and
-            // `[Int]` (single Integer precision) are supported by
-            // the kwarg helpers. Anything else (arity > 1,
-            // non-Integer precision, BigInt precision) is left to
-            // the regular round arm in numeric.rs which has the
-            // existing ArgumentError / TypeError / BigInt guards.
-            let positional_argc = argc - 1; // exclude the kwargs Hash
-            if positional_argc > 1 {
-                return self.do_call(name_id, argc, no_recv, cache_id);
-            }
-            if positional_argc == 1 {
-                let precision = &self.stack[stack_len - 2];
-                if !matches!(precision, Value::Int(_)) {
-                    return self.do_call(name_id, argc, no_recv, cache_id);
-                }
-            }
-            // Resolve the :half kwarg. CRuby raises
-            // `ArgumentError: unknown keyword: :foo` for unknown
-            // keys, `ArgumentError: invalid rounding mode: foo`
-            // for unknown values.
-            let half_sym = self.interner.intern("half");
-            let pairs: Vec<(Value, Value)> = self.heap.hash(hash_id).clone();
-            let mut mode = crate::vm::numeric::HalfMode::Up;
-            for (k, v) in &pairs {
-                match k {
-                    Value::Sym(s) if *s == half_sym => {
-                        // Mode resolution without per-dispatch allocation:
-                        // Symbol values match against the canonical SymId
-                        // (pre-interned once before the loop); String
-                        // values use `with_str_lossy` so the comparison
-                        // runs against borrowed `&str` instead of an
-                        // owned `String`. Non-Sym/Str values surface a
-                        // CRuby-shape "invalid rounding mode: <inspect>"
-                        // — using `to_inspect` instead of the class name
-                        // mirrors `Float#round` / `Numeric#round`'s
-                        // shape (e.g. `0` / `nil` / `1.5` instead of
-                        // `Integer` / `nil` / `Float`).
-                        let up_id = self.interner.intern("up");
-                        let down_id = self.interner.intern("down");
-                        let even_id = self.interner.intern("even");
-                        let resolved: Option<crate::vm::numeric::HalfMode> = match v {
-                            Value::Sym(vsym) => {
-                                if *vsym == up_id { Some(crate::vm::numeric::HalfMode::Up) }
-                                else if *vsym == down_id { Some(crate::vm::numeric::HalfMode::Down) }
-                                else if *vsym == even_id { Some(crate::vm::numeric::HalfMode::Even) }
-                                else { None }
-                            }
-                            Value::Str(s) => s.with_str_lossy(|t| match t {
-                                "up" => Some(crate::vm::numeric::HalfMode::Up),
-                                "down" => Some(crate::vm::numeric::HalfMode::Down),
-                                "even" => Some(crate::vm::numeric::HalfMode::Even),
-                                _ => None,
-                            }),
-                            _ => {
-                                let inspected = v.to_inspect(&self.heap, &self.interner);
-                                return Err(self.trap(RubyError::ArgumentError {
-                                    msg: format!("invalid rounding mode: {}", inspected),
-                                }));
-                            }
-                        };
-                        mode = match resolved {
-                            Some(m) => m,
-                            None => {
-                                // For unknown Symbol/String values
-                                // CRuby reports the bare name
-                                // (`invalid rounding mode: weird`);
-                                // for non-Sym/Str values the inspect
-                                // shape carries more information
-                                // (handled in the outer match arm).
-                                let label: String = match v {
-                                    Value::Sym(vsym) => self.interner.resolve(*vsym).to_string(),
-                                    Value::Str(s) => s.to_string_lossy(),
-                                    _ => unreachable!("non-Sym/Str handled by outer arm"),
-                                };
-                                return Err(self.trap(RubyError::ArgumentError {
-                                    msg: format!("invalid rounding mode: {}", label),
-                                }));
-                            }
-                        };
-                    }
-                    Value::Sym(s) => {
-                        let key = self.interner.resolve(*s).to_string();
-                        return Err(self.trap(RubyError::ArgumentError {
-                            msg: format!("unknown keyword: :{}", key),
-                        }));
-                    }
-                    _ => {
-                        return Err(self.trap(RubyError::ArgumentError {
-                            msg: "non-symbol key in keyword arguments".to_string(),
-                        }));
-                    }
-                }
-            }
-            // Stack consume — receiver + positional + kwargs Hash.
-            // Guards above guarantee shape is one of:
-            //   - (Int|Float, [])
-            //   - (Int|Float, [Int])
-            let _kwargs_hash = self.stack.pop().expect("ICE: kwargs hash");
-            let pos_args: Vec<Value> = {
-                let split = self.stack.len() - positional_argc;
-                self.stack.drain(split..).collect()
-            };
-            let recv = if no_recv {
-                self.frames.last().expect("ICE: do_call_kw no frames").self_val.clone()
-            } else {
-                self.stack.pop().expect("ICE: do_call_kw recv")
-            };
-            // i128 overflow → BigInt promotion under bignum, or a
-            // RangeError without it (matches CRuby's behaviour for
-            // overflow into a number that doesn't fit native int).
-            let promote_overflow = |this: &mut Vm, overflow: i128| -> Result<Value, Trap> {
-                #[cfg(feature = "bignum")]
-                {
-                    let b = num_bigint::BigInt::from(overflow);
-                    this.bigint_to_value(b)
-                }
-                #[cfg(not(feature = "bignum"))]
-                {
-                    let _ = overflow;
-                    Err(this.trap(RubyError::RangeError {
-                        msg: "rounded result out of i64 range".to_string(),
-                    }))
-                }
-            };
-            let result = match (&recv, pos_args.as_slice()) {
-                (Value::Int(a), []) => {
-                    match crate::vm::numeric::int_round_with_half(*a, 0, mode) {
-                        Ok(v) => v,
-                        Err(over) => promote_overflow(self, over)?,
-                    }
-                }
-                (Value::Int(a), [Value::Int(n)]) => {
-                    match crate::vm::numeric::int_round_with_half(*a, *n, mode) {
-                        Ok(v) => v,
-                        Err(over) => promote_overflow(self, over)?,
-                    }
-                }
-                (Value::Float(a), []) => {
-                    crate::vm::numeric::float_round_with_half(*a, 0, mode)
-                        .map_err(|e| self.trap(e))?
-                }
-                (Value::Float(a), [Value::Int(n)]) => {
-                    crate::vm::numeric::float_round_with_half(*a, *n, mode)
-                        .map_err(|e| self.trap(e))?
-                }
-                _ => unreachable!("guards above limit recv+args to Int/Float × [] | [Int]"),
-            };
-            self.stack.push(result);
-            Ok(())
         }
-        // D selective routing: instead of globally bypassing the interpreter
-        // fast paths when the JIT is on (which slows ALL non-JIT'd code), route
-        // ONLY methods the JIT can handle to the hook — after the fast path has
-        // resolved the method, so the decision is per-method. Everything else
-        // keeps its fast path. This makes the JIT production-shaped: it speeds
-        // up hot compiled methods without taxing the surrounding code.
-        #[cfg(feature = "jit-native")]
-        #[inline]
-        fn jit_should_route(&self, proto_idx: usize, argc: usize) -> bool {
-            if !self.jit_native_on {
-                return false;
+        // Only `round` is kwarg-aware today, AND only for
+        // Int/Float receivers with a supported arg shape.
+        // Every other shape — user-defined `C#round(half:)`,
+        // 2+ positional args, non-Integer precision, BigInt
+        // receiver — must fall back to `do_call` so the
+        // existing primitive arms (arity ArgumentError, TypeError
+        // for non-Integer precision) AND user-method dispatch
+        // still fire. The trailing Hash travels as positional in
+        // that path, identical to pre-CallKw behaviour.
+        // SymId compare instead of resolving + cloning the
+        // name on every CallKw dispatch — the `interner.intern`
+        // is amortised across the run (same id returned for the
+        // canonical "round" string), so a single == lookup
+        // beats a per-call heap allocation. Same pattern below
+        // for the `:half` key probe.
+        let round_id = self.interner.intern("round");
+        if name_id != round_id {
+            return self.do_call(name_id, argc, no_recv, cache_id);
+        }
+        // Peek receiver + trailing arg WITHOUT disturbing the
+        // stack — the fallback `do_call` needs the stack intact.
+        if argc == 0 {
+            return self.do_call(name_id, argc, no_recv, cache_id);
+        }
+        let stack_len = self.stack.len();
+        let trailing = self.stack[stack_len - 1].clone();
+        let Value::Hash(hash_id) = trailing else {
+            return self.do_call(name_id, argc, no_recv, cache_id);
+        };
+        // Receiver position: if `no_recv` it's the frame self;
+        // else it's stack[stack_len - argc - 1].
+        let recv_peek = if no_recv {
+            self.frames
+                .last()
+                .expect("ICE: do_call_kw no frames")
+                .self_val
+                .clone()
+        } else {
+            if stack_len < argc + 1 {
+                return self.do_call(name_id, argc, no_recv, cache_id);
             }
-            // Already compiled (integer or value) → route to use the native code.
-            if matches!(self.jit_native.get(&proto_idx), Some(Some(_)))
-                || matches!(self.jit_value.get(&proto_idx), Some(Some(_)))
+            self.stack[stack_len - argc - 1].clone()
+        };
+        if !matches!(recv_peek, Value::Int(_) | Value::Float(_)) {
+            return self.do_call(name_id, argc, no_recv, cache_id);
+        }
+        // Positional arg shape — only `[]` (no precision) and
+        // `[Int]` (single Integer precision) are supported by
+        // the kwarg helpers. Anything else (arity > 1,
+        // non-Integer precision, BigInt precision) is left to
+        // the regular round arm in numeric.rs which has the
+        // existing ArgumentError / TypeError / BigInt guards.
+        let positional_argc = argc - 1; // exclude the kwargs Hash
+        if positional_argc > 1 {
+            return self.do_call(name_id, argc, no_recv, cache_id);
+        }
+        if positional_argc == 1 {
+            let precision = &self.stack[stack_len - 2];
+            if !matches!(precision, Value::Int(_)) {
+                return self.do_call(name_id, argc, no_recv, cache_id);
+            }
+        }
+        // Resolve the :half kwarg. CRuby raises
+        // `ArgumentError: unknown keyword: :foo` for unknown
+        // keys, `ArgumentError: invalid rounding mode: foo`
+        // for unknown values.
+        let half_sym = self.interner.intern("half");
+        let pairs: Vec<(Value, Value)> = self.heap.hash(hash_id).clone();
+        let mut mode = crate::vm::numeric::HalfMode::Up;
+        for (k, v) in &pairs {
+            match k {
+                Value::Sym(s) if *s == half_sym => {
+                    // Mode resolution without per-dispatch allocation:
+                    // Symbol values match against the canonical SymId
+                    // (pre-interned once before the loop); String
+                    // values use `with_str_lossy` so the comparison
+                    // runs against borrowed `&str` instead of an
+                    // owned `String`. Non-Sym/Str values surface a
+                    // CRuby-shape "invalid rounding mode: <inspect>"
+                    // — using `to_inspect` instead of the class name
+                    // mirrors `Float#round` / `Numeric#round`'s
+                    // shape (e.g. `0` / `nil` / `1.5` instead of
+                    // `Integer` / `nil` / `Float`).
+                    let up_id = self.interner.intern("up");
+                    let down_id = self.interner.intern("down");
+                    let even_id = self.interner.intern("even");
+                    let resolved: Option<crate::vm::numeric::HalfMode> = match v {
+                        Value::Sym(vsym) => {
+                            if *vsym == up_id {
+                                Some(crate::vm::numeric::HalfMode::Up)
+                            } else if *vsym == down_id {
+                                Some(crate::vm::numeric::HalfMode::Down)
+                            } else if *vsym == even_id {
+                                Some(crate::vm::numeric::HalfMode::Even)
+                            } else {
+                                None
+                            }
+                        }
+                        Value::Str(s) => s.with_str_lossy(|t| match t {
+                            "up" => Some(crate::vm::numeric::HalfMode::Up),
+                            "down" => Some(crate::vm::numeric::HalfMode::Down),
+                            "even" => Some(crate::vm::numeric::HalfMode::Even),
+                            _ => None,
+                        }),
+                        _ => {
+                            let inspected = v.to_inspect(&self.heap, &self.interner);
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: format!("invalid rounding mode: {}", inspected),
+                            }));
+                        }
+                    };
+                    mode = match resolved {
+                        Some(m) => m,
+                        None => {
+                            // For unknown Symbol/String values
+                            // CRuby reports the bare name
+                            // (`invalid rounding mode: weird`);
+                            // for non-Sym/Str values the inspect
+                            // shape carries more information
+                            // (handled in the outer match arm).
+                            let label: String = match v {
+                                Value::Sym(vsym) => self.interner.resolve(*vsym).to_string(),
+                                Value::Str(s) => s.to_string_lossy(),
+                                _ => unreachable!("non-Sym/Str handled by outer arm"),
+                            };
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: format!("invalid rounding mode: {}", label),
+                            }));
+                        }
+                    };
+                }
+                Value::Sym(s) => {
+                    let key = self.interner.resolve(*s).to_string();
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("unknown keyword: :{}", key),
+                    }));
+                }
+                _ => {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: "non-symbol key in keyword arguments".to_string(),
+                    }));
+                }
+            }
+        }
+        // Stack consume — receiver + positional + kwargs Hash.
+        // Guards above guarantee shape is one of:
+        //   - (Int|Float, [])
+        //   - (Int|Float, [Int])
+        let _kwargs_hash = self.stack.pop().expect("ICE: kwargs hash");
+        let pos_args: Vec<Value> = {
+            let split = self.stack.len() - positional_argc;
+            self.stack.drain(split..).collect()
+        };
+        let recv = if no_recv {
+            self.frames
+                .last()
+                .expect("ICE: do_call_kw no frames")
+                .self_val
+                .clone()
+        } else {
+            self.stack.pop().expect("ICE: do_call_kw recv")
+        };
+        // i128 overflow → BigInt promotion under bignum, or a
+        // RangeError without it (matches CRuby's behaviour for
+        // overflow into a number that doesn't fit native int).
+        let promote_overflow = |this: &mut Vm, overflow: i128| -> Result<Value, Trap> {
+            #[cfg(feature = "bignum")]
             {
-                return true;
+                let b = num_bigint::BigInt::from(overflow);
+                this.bigint_to_value(b)
             }
-            // Eligible shape not yet ruled out → route to the hook, which tries
-            // the integer JIT then the value JIT, caching each (Some = native,
-            // None = ineligible). Keep routing a 1-arg method until BOTH are
-            // ruled out, then it stays on the fast path forever.
-            //
-            // Getters are NOT routed here (argc == 0): the interpreter's
-            // `getter_ivar` fast path serves `obj.foo` frame-free, beating a
-            // native call for a 1-op body. The value JIT's win is the 1-arg
-            // `instance_variable_get(:lit)` shape — NOT fast-pathed, so native
-            // dispatch-elimination pays off.
-            // A compiled OBJECT-param variant (`walk(node)`, ADR 0034) → route to use it.
-            if matches!(self.jit_native_objparam.get(&proto_idx), Some(Some(_))) {
-                return true;
+            #[cfg(not(feature = "bignum"))]
+            {
+                let _ = overflow;
+                Err(this.trap(RubyError::RangeError {
+                    msg: "rounded result out of i64 range".to_string(),
+                }))
             }
-            let int_dead = matches!(self.jit_native.get(&proto_idx), Some(None));
-            let val_dead = matches!(self.jit_value.get(&proto_idx), Some(None));
-            // The obj-param variant compiles INSIDE B1, so keep routing until it too has
-            // been ruled out — else an Int/value-declined but obj-param-VIABLE method (the
-            // rubocop `.each` AST-walk shape) stopped routing before its obj-param variant
-            // ever compiled, and never fired.
-            let objp_dead = matches!(self.jit_native_objparam.get(&proto_idx), Some(None));
-            argc == 1 && !(int_dead && val_dead && objp_dead)
+        };
+        let result = match (&recv, pos_args.as_slice()) {
+            (Value::Int(a), []) => match crate::vm::numeric::int_round_with_half(*a, 0, mode) {
+                Ok(v) => v,
+                Err(over) => promote_overflow(self, over)?,
+            },
+            (Value::Int(a), [Value::Int(n)]) => {
+                match crate::vm::numeric::int_round_with_half(*a, *n, mode) {
+                    Ok(v) => v,
+                    Err(over) => promote_overflow(self, over)?,
+                }
+            }
+            (Value::Float(a), []) => {
+                crate::vm::numeric::float_round_with_half(*a, 0, mode).map_err(|e| self.trap(e))?
+            }
+            (Value::Float(a), [Value::Int(n)]) => {
+                crate::vm::numeric::float_round_with_half(*a, *n, mode).map_err(|e| self.trap(e))?
+            }
+            _ => unreachable!("guards above limit recv+args to Int/Float × [] | [Int]"),
+        };
+        self.stack.push(result);
+        Ok(())
+    }
+    // D selective routing: instead of globally bypassing the interpreter
+    // fast paths when the JIT is on (which slows ALL non-JIT'd code), route
+    // ONLY methods the JIT can handle to the hook — after the fast path has
+    // resolved the method, so the decision is per-method. Everything else
+    // keeps its fast path. This makes the JIT production-shaped: it speeds
+    // up hot compiled methods without taxing the surrounding code.
+    #[cfg(feature = "jit-native")]
+    #[inline]
+    fn jit_should_route(&self, proto_idx: usize, argc: usize) -> bool {
+        if !self.jit_native_on {
+            return false;
         }
-        #[cfg(not(feature = "jit-native"))]
-        #[inline]
-        #[allow(dead_code)] // mirror of the jit-native variant; its callers are feature-gated too
-        fn jit_should_route(&self, _proto_idx: usize, _argc: usize) -> bool { false }
+        // Already compiled (integer or value) → route to use the native code.
+        if matches!(self.jit_native.get(&proto_idx), Some(Some(_)))
+            || matches!(self.jit_value.get(&proto_idx), Some(Some(_)))
+        {
+            return true;
+        }
+        // Eligible shape not yet ruled out → route to the hook, which tries
+        // the integer JIT then the value JIT, caching each (Some = native,
+        // None = ineligible). Keep routing a 1-arg method until BOTH are
+        // ruled out, then it stays on the fast path forever.
+        //
+        // Getters are NOT routed here (argc == 0): the interpreter's
+        // `getter_ivar` fast path serves `obj.foo` frame-free, beating a
+        // native call for a 1-op body. The value JIT's win is the 1-arg
+        // `instance_variable_get(:lit)` shape — NOT fast-pathed, so native
+        // dispatch-elimination pays off.
+        // A compiled OBJECT-param variant (`walk(node)`, ADR 0034) → route to use it.
+        if matches!(self.jit_native_objparam.get(&proto_idx), Some(Some(_))) {
+            return true;
+        }
+        let int_dead = matches!(self.jit_native.get(&proto_idx), Some(None));
+        let val_dead = matches!(self.jit_value.get(&proto_idx), Some(None));
+        // The obj-param variant compiles INSIDE B1, so keep routing until it too has
+        // been ruled out — else an Int/value-declined but obj-param-VIABLE method (the
+        // rubocop `.each` AST-walk shape) stopped routing before its obj-param variant
+        // ever compiled, and never fired.
+        let objp_dead = matches!(self.jit_native_objparam.get(&proto_idx), Some(None));
+        argc == 1 && !(int_dead && val_dead && objp_dead)
+    }
+    #[cfg(not(feature = "jit-native"))]
+    #[inline]
+    #[allow(dead_code)] // mirror of the jit-native variant; its callers are feature-gated too
+    fn jit_should_route(&self, _proto_idx: usize, _argc: usize) -> bool {
+        false
+    }
 
-        pub(crate) fn do_call(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u32) -> Result<(), Trap> {
+    pub(crate) fn do_call(
+        &mut self,
+        name_id: SymId,
+        argc: usize,
+        no_recv: bool,
+        cache_id: u32,
+    ) -> Result<(), Trap> {
         // Consume `bypass_visibility_once` at the dispatch
         // boundary, before any arm runs. A naive consume-at-the-
         // vis-check would leak the flag whenever the dispatch
@@ -7680,14 +8132,16 @@ impl Vm {
         // the refinement check below). The gate is the cheap empty-set
         // test, so no-refinement programs are unaffected; even with
         // refinements active, only the few refined names detour.
-        let maybe_refined = !self.refined_method_names.is_empty()
-            && self.refined_method_names.contains(&name_id);
+        let maybe_refined =
+            !self.refined_method_names.is_empty() && self.refined_method_names.contains(&name_id);
         // Implicit-self cached fast path (ADR 0031 increment 1): a bare
         // `foo(args)` on an Object self — the bulk of a Sinatra request —
         // otherwise falls through the whole cascade. `!host_fns` keeps a
         // host-registered function's precedence (matches the toplevel
         // path). −2.3% wall on the Sinatra request; see the helper's doc.
-        if no_recv && !maybe_refined && !force_primitive
+        if no_recv
+            && !maybe_refined
+            && !force_primitive
             && !self.host_fns.contains_key(&name_id)
             && self.try_invoke_self_recv_cached(name_id, argc, cache_id)?
         {
@@ -7825,8 +8279,11 @@ impl Vm {
         // that same user method via the cache — otherwise `def freeze; …;
         // super; end` recurses forever. The other user-dispatch paths below
         // already gate on `!force_primitive`; this fast path was the gap.
-        if !maybe_refined && !no_recv && !force_primitive
-            && self.try_invoke_explicit_recv_cached(name_id, argc, cache_id)? {
+        if !maybe_refined
+            && !no_recv
+            && !force_primitive
+            && self.try_invoke_explicit_recv_cached(name_id, argc, cache_id)?
+        {
             return Ok(());
         }
         // Class/Module-receiver sibling (`X.class_method`): resolves
@@ -7914,9 +8371,12 @@ impl Vm {
                     | "eql?"
             )
         {
-            let self_val = self.frames.last()
+            let self_val = self
+                .frames
+                .last()
                 .expect("ICE: do_call(no_recv) with empty frames for ivar bare-call routing")
-                .self_val.clone();
+                .self_val
+                .clone();
             // Route for ANY self — bare implicit-self IS `self.<method>`,
             // and these universals work on every receiver type via the
             // explicit-recv path. Previously gated to Object/Class, so
@@ -7935,9 +8395,12 @@ impl Vm {
             }
         }
         if no_recv {
-            let self_val = self.frames.last()
+            let self_val = self
+                .frames
+                .last()
                 .expect("ICE: do_call(no_recv) with empty frames")
-                .self_val.clone();
+                .self_val
+                .clone();
             let can_try_toplevel_fast_path = (matches!(self_val, Value::Nil)
                 || self.is_main_self(&self_val))
                 && !self.host_fns.contains_key(&name_id)
@@ -7961,7 +8424,11 @@ impl Vm {
         let recv = if no_recv {
             None
         } else {
-            Some(self.stack.pop().expect("ICE: stack underflow before do_call receiver"))
+            Some(
+                self.stack
+                    .pop()
+                    .expect("ICE: stack underflow before do_call receiver"),
+            )
         };
 
         // A user `Kernel#require` override (zeitwerk decorates require
@@ -7975,7 +8442,8 @@ impl Vm {
         let require_overridden = no_recv
             && matches!(&*name, "require" | "require_relative" | "load")
             && self.bare_builtin_user_override(&name);
-        if no_recv && !require_overridden
+        if no_recv
+            && !require_overridden
             && self.try_dispatch_no_recv_builtin_or_host(&name, name_id, &args)?
         {
             return Ok(());
@@ -8101,30 +8569,34 @@ impl Vm {
                 // so the resulting NoMethodError carries the
                 // correct receiver class name in its message.
             } else {
-            use std::path::Path;
-            let fname = self.frames.last()
-                .map(|f| self.protos[f.proto_idx].filename.to_string())
-                .unwrap_or_default();
-            let lexical_parent = |fname: &str| -> String {
-                Path::new(fname).parent()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| ".".to_string())
-            };
-            let wide_open = self.allow_filesystem_io && self.allowed_paths.is_none();
-            let dir = if wide_open {
-                match std::fs::canonicalize(&fname) {
-                    Ok(real) => real.parent()
+                use std::path::Path;
+                let fname = self
+                    .frames
+                    .last()
+                    .map(|f| self.protos[f.proto_idx].filename.to_string())
+                    .unwrap_or_default();
+                let lexical_parent = |fname: &str| -> String {
+                    Path::new(fname)
+                        .parent()
                         .map(|p| p.to_string_lossy().into_owned())
                         .filter(|s| !s.is_empty())
-                        .unwrap_or_else(|| ".".to_string()),
-                    Err(_) => lexical_parent(&fname),
-                }
-            } else {
-                lexical_parent(&fname)
-            };
-            self.stack.push(Value::new_str(dir));
-            return Ok(());
+                        .unwrap_or_else(|| ".".to_string())
+                };
+                let wide_open = self.allow_filesystem_io && self.allowed_paths.is_none();
+                let dir = if wide_open {
+                    match std::fs::canonicalize(&fname) {
+                        Ok(real) => real
+                            .parent()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| ".".to_string()),
+                        Err(_) => lexical_parent(&fname),
+                    }
+                } else {
+                    lexical_parent(&fname)
+                };
+                self.stack.push(Value::new_str(dir));
+                return Ok(());
             }
         }
         if no_recv {
@@ -8157,36 +8629,43 @@ impl Vm {
             // `self_val`. Lets `arr.map(&method(:foo))` work from
             // inside an instance method body without writing
             // `&self.method(:foo)`.
-            let self_val = self.frames.last().expect("ICE: do_call with empty frames").self_val.clone();
-            if &*name == "method" && args.len() == 1
-                && let Value::Sym(bound_name_id) = &args[0] {
-                    // Snapshot the Method at capture time so the
-                    // BoundMethod survives a later remove_method.
-                    // Use `heap.class_of` for Object self so a
-                    // singleton method on `self` is captured
-                    // (matches dispatch); `Vm::class_of` would
-                    // skip the eigenclass and snapshot the real
-                    // class's body instead.
-                    let snapshot = match &self_val {
-                        Value::Object(id) => {
-                            let cls = self.heap.class_of(*id);
-                            self.lookup_method_uncached(&cls, *bound_name_id)
-                        }
-                        _ => match self.class_of(&self_val) {
-                            Value::Class(cls) => self.lookup_method_uncached(&cls, *bound_name_id),
-                            _ => None,
-                        },
-                    };
-                    self.maybe_gc(); // allow: gc-rooting — BoundMethod holds `recv: self_val.clone()` (cloned from `frames.last().self_val`, which stays rooted via `self.frames` for the whole alloc window) and a primitive `SymId`; no unrooted slot at risk.
-                    self.check_alloc()?;
-                    let id = self.heap.alloc(HeapObj::BoundMethod {
-                        recv: self_val.clone(),
-                        name_id: *bound_name_id,
-                        method: snapshot,
-                    });
-                    self.stack.push(Value::BoundMethod(id));
-                    return Ok(());
-                }
+            let self_val = self
+                .frames
+                .last()
+                .expect("ICE: do_call with empty frames")
+                .self_val
+                .clone();
+            if &*name == "method"
+                && args.len() == 1
+                && let Value::Sym(bound_name_id) = &args[0]
+            {
+                // Snapshot the Method at capture time so the
+                // BoundMethod survives a later remove_method.
+                // Use `heap.class_of` for Object self so a
+                // singleton method on `self` is captured
+                // (matches dispatch); `Vm::class_of` would
+                // skip the eigenclass and snapshot the real
+                // class's body instead.
+                let snapshot = match &self_val {
+                    Value::Object(id) => {
+                        let cls = self.heap.class_of(*id);
+                        self.lookup_method_uncached(&cls, *bound_name_id)
+                    }
+                    _ => match self.class_of(&self_val) {
+                        Value::Class(cls) => self.lookup_method_uncached(&cls, *bound_name_id),
+                        _ => None,
+                    },
+                };
+                self.maybe_gc(); // allow: gc-rooting — BoundMethod holds `recv: self_val.clone()` (cloned from `frames.last().self_val`, which stays rooted via `self.frames` for the whole alloc window) and a primitive `SymId`; no unrooted slot at risk.
+                self.check_alloc()?;
+                let id = self.heap.alloc(HeapObj::BoundMethod {
+                    recv: self_val.clone(),
+                    name_id: *bound_name_id,
+                    method: snapshot,
+                });
+                self.stack.push(Value::BoundMethod(id));
+                return Ok(());
+            }
             if let Value::Object(id) = &self_val {
                 let cls = self.heap.class_of(*id);
                 if let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {
@@ -8205,7 +8684,8 @@ impl Vm {
             // conversion function on require.
             if matches!(&self_val, Value::Nil)
                 && let Value::Class(cls) = self.class_of(&self_val)
-                && let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {
+                && let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id)
+            {
                 self.invoke_method(m, self_val.clone(), args.into_vec())?;
                 return Ok(());
             }
@@ -8226,7 +8706,8 @@ impl Vm {
             // ~660), so `self.bar` and bare `bar` resolve
             // identically.
             if let Value::Class(c) = &self_val
-                && let Some(m) = self.lookup_class_singleton_method(c, name_id) {
+                && let Some(m) = self.lookup_class_singleton_method(c, name_id)
+            {
                 self.invoke_method(m, self_val.clone(), args.into_vec())?;
                 return Ok(());
             }
@@ -8254,7 +8735,8 @@ impl Vm {
             // functions.
             if let Some(ksym) = self.kernel_class_sym
                 && let Some(kernel) = self.classes.get(&ksym).cloned()
-                && let Some(m) = self.lookup_method_cached(&kernel, name_id, cache_id) {
+                && let Some(m) = self.lookup_method_cached(&kernel, name_id, cache_id)
+            {
                 self.invoke_method(m, self_val.clone(), args.into_vec())?;
                 return Ok(());
             }
@@ -8268,10 +8750,22 @@ impl Vm {
             // (Narrowly scoped to `freeze` — a broad bridge of every
             // bare Object-self call to receiver form regressed many
             // method_missing / arity / toplevel shapes.)
-            if &*name == "freeze" && args.is_empty()
+            if &*name == "freeze"
+                && args.is_empty()
                 && let Value::Object(id) = &self_val
             {
                 self.heap.instance(*id).frozen.set(true);
+                self.stack.push(self_val.clone());
+                return Ok(());
+            }
+            // Bare `freeze` (implicit self) inside a class/module body or a
+            // class-method, where self is the Class/Module — flip its frozen
+            // Cell, mirroring the Object-self arm above.
+            if &*name == "freeze"
+                && args.is_empty()
+                && let Value::Class(c) = &self_val
+            {
+                c.frozen.set(true);
                 self.stack.push(self_val.clone());
                 return Ok(());
             }
@@ -8335,7 +8829,10 @@ impl Vm {
             // NilClass, so it is untouched). Self-as-nil inside a block
             // body keeps the documented limitation (SUBSET.md).
             if matches!(&self_val, Value::Nil)
-                && self.frames.last().is_some_and(|f| f.defining_class.is_some())
+                && self
+                    .frames
+                    .last()
+                    .is_some_and(|f| f.defining_class.is_some())
                 && let Value::Class(cls) = self.class_of(&self_val)
                 && let Some(m) = self.lookup_method_uncached(&cls, name_id)
             {
@@ -8355,8 +8852,10 @@ impl Vm {
                 // `self.foo` lowering would have hit.
                 let argc = args.len();
                 self.stack.push(self_val.clone());
-                for a in args { self.stack.push(a); }
-                return self.do_call(name_id, argc, /*no_recv=*/false, u32::MAX);
+                for a in args {
+                    self.stack.push(a);
+                }
+                return self.do_call(name_id, argc, /*no_recv=*/ false, u32::MAX);
             }
             // Bare calls on Class instances inside `class Foo
             // ... end` bodies and `def self.X` singleton methods.
@@ -8425,13 +8924,13 @@ impl Vm {
             // CRuby's ArgumentError / TypeError. Block-form is
             // already handled by `do_call_block`'s own no_recv
             // path. PR #309 cycle-5.
-            if matches!(&self_val, Value::Object(_))
-                && &*name == "define_singleton_method"
-            {
+            if matches!(&self_val, Value::Object(_)) && &*name == "define_singleton_method" {
                 let argc = args.len();
                 self.stack.push(self_val.clone());
-                for a in args { self.stack.push(a); }
-                return self.do_call(name_id, argc, /*no_recv=*/false, u32::MAX);
+                for a in args {
+                    self.stack.push(a);
+                }
+                return self.do_call(name_id, argc, /*no_recv=*/ false, u32::MAX);
             }
             // 2-arg `define_method` / `define_singleton_method`
             // in a class body — intercept BEFORE the bridge
@@ -8457,36 +8956,42 @@ impl Vm {
                     Value::Str(s) => {
                         let raw = s.to_string_lossy();
                         if let Some(max) = self.max_symbols
-                            && !self.interner.contains(&raw) && self.interner.len() >= max {
-                                return Err(self.trap(RubyError::ResourceExhausted {
-                                    msg: format!("interner exhausted: {} symbols", max),
-                                }));
-                            }
+                            && !self.interner.contains(&raw)
+                            && self.interner.len() >= max
+                        {
+                            return Err(self.trap(RubyError::ResourceExhausted {
+                                msg: format!("interner exhausted: {} symbols", max),
+                            }));
+                        }
                         self.interner.intern(&raw)
                     }
-                    other => return Err(self.trap(RubyError::TypeError {
-                        msg: format!(
-                            "wrong argument type {} (expected Symbol or String)",
-                            other.type_name(),
-                        ),
-                    })),
+                    other => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "wrong argument type {} (expected Symbol or String)",
+                                other.type_name(),
+                            ),
+                        }));
+                    }
                 };
                 let src = args[1].clone();
-                let vis = self.class_visibility_stack.last().copied()
+                let vis = self
+                    .class_visibility_stack
+                    .last()
+                    .copied()
                     .unwrap_or(crate::value::Visibility::Public);
                 let installed = if &*name == "define_method" {
                     self.install_method_from_value(cls, name_sym, &src, vis)
                 } else {
-                    self.install_singleton_method_on_class_from_value(
-                        cls, name_sym, &src,
-                    )
+                    self.install_singleton_method_on_class_from_value(cls, name_sym, &src)
                 }
                 .map_err(|e| self.trap(e))?;
                 self.stack.push(Value::Sym(installed));
                 return Ok(());
             }
             if let Value::Class(cls) = &self_val {
-                let in_set = matches!(&*name,
+                let in_set = matches!(
+                    &*name,
                     "new" | "name" | "to_s" | "inspect"
                     | "method_defined?" | "instance_method" | "undef_method" | "remove_method"
                     | "superclass" | "ancestors" | "include?"
@@ -8543,13 +9048,13 @@ impl Vm {
                 // the global `Module` shell), bare `allocate`
                 // shouldn't dispatch. PR #196 Copilot round 2 #1.
                 let allocate_allowed =
-                    &*name == "allocate"
-                        && !cls.is_module
-                        && cls.name != "Module";
+                    &*name == "allocate" && !cls.is_module && cls.name != "Module";
                 if in_set || allocate_allowed {
                     let argc = args.len();
                     self.stack.push(self_val.clone());
-                    for a in args { self.stack.push(a); }
+                    for a in args {
+                        self.stack.push(a);
+                    }
                     // `cache_id = u16::MAX` (sentinel: skip cache
                     // write) — re-entry from a bare-call site
                     // into a receiver-form lookup; the cache
@@ -8559,7 +9064,7 @@ impl Vm {
                     // consult. Same pattern as send / send_with_
                     // block re-entries (lines ~464 / ~924, plus
                     // the lib.rs sentinel comment at ~77).
-                    return self.do_call(name_id, argc, /*no_recv=*/false, u32::MAX);
+                    return self.do_call(name_id, argc, /*no_recv=*/ false, u32::MAX);
                 }
             }
             // (`__dir__` is now handled by the hoisted arm
@@ -8617,14 +9122,18 @@ impl Vm {
             // raises ArgumentError so caller bugs don't get hidden by
             // the stub fast-path. Returns nil (CRuby's actual return).
             if &*name == "autoload"
-                && let Value::Class(owner) = &self_val {
+                && let Value::Class(owner) = &self_val
+            {
                 // `owner` drives the scoped-registry key, which only
                 // exists on non-wasi (no `require` on wasm32-wasi).
                 #[cfg(target_os = "wasi")]
                 let _ = owner;
                 if args.len() != 2 {
                     return Err(self.trap(RubyError::ArgumentError {
-                        msg: format!("wrong number of arguments (given {}, expected 2)", args.len()),
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 2)",
+                            args.len()
+                        ),
                     }));
                 }
                 // wasm32-wasi has no `require` (no file I/O), so the
@@ -8690,12 +9199,16 @@ impl Vm {
             // when never registered. tilt's `mapping.rb:362` calls
             // `scope.autoload?(n)` inside `constant_defined?`.
             if &*name == "autoload?"
-                && let Value::Class(owner) = &self_val {
+                && let Value::Class(owner) = &self_val
+            {
                 #[cfg(target_os = "wasi")]
                 let _ = owner;
                 if args.is_empty() || args.len() > 2 {
                     return Err(self.trap(RubyError::ArgumentError {
-                        msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 1..2)",
+                            args.len()
+                        ),
                     }));
                 }
                 #[cfg(not(target_os = "wasi"))]
@@ -8733,10 +9246,14 @@ impl Vm {
             // Foo itself, not its includes/superclass chain.
             // (TRY_RUNS pass-10 layer #2.)
             if &*name == "const_defined?"
-                && let Value::Class(cls) = &self_val {
+                && let Value::Class(cls) = &self_val
+            {
                 if args.is_empty() || args.len() > 2 {
                     return Err(self.trap(RubyError::ArgumentError {
-                        msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 1..2)",
+                            args.len()
+                        ),
                     }));
                 }
                 // CRuby splits the path on `::` for String args
@@ -8748,21 +9265,30 @@ impl Vm {
                 let (const_name, split) = match &args[0] {
                     Value::Sym(s) => (self.interner.resolve(*s).to_string(), false),
                     Value::Str(s) => (s.to_string_lossy(), true),
-                    other => return Err(self.trap(RubyError::TypeError {
-                        msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
-                    })),
+                    other => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "no implicit conversion of {} into Symbol",
+                                other.type_name()
+                            ),
+                        }));
+                    }
                 };
                 let cls_clone = cls.clone();
                 let outcome = self.resolve_const_path(&cls_clone, &const_name, split, true);
                 match outcome {
                     ConstPathOutcome::Found(_) => self.stack.push(Value::Bool(true)),
                     ConstPathOutcome::Missing { .. } => self.stack.push(Value::Bool(false)),
-                    ConstPathOutcome::WrongName { name } => return Err(self.trap(RubyError::NameError {
-                        msg: format!("wrong constant name {}", name),
-                    })),
-                    ConstPathOutcome::NotClass { full_path } => return Err(self.trap(RubyError::TypeError {
-                        msg: format!("{} does not refer to class/module", full_path),
-                    })),
+                    ConstPathOutcome::WrongName { name } => {
+                        return Err(self.trap(RubyError::NameError {
+                            msg: format!("wrong constant name {}", name),
+                        }));
+                    }
+                    ConstPathOutcome::NotClass { full_path } => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!("{} does not refer to class/module", full_path),
+                        }));
+                    }
                     // A scoped-autoload `require` trapped — re-raise.
                     #[cfg(not(target_os = "wasi"))]
                     ConstPathOutcome::Trap(t) => return Err(t),
@@ -8775,23 +9301,35 @@ impl Vm {
             // tilt's `constant_defined?` walk calls `scope.const_get(n)`
             // after the `const_defined?` check passes.
             if &*name == "const_get"
-                && let Value::Class(cls) = &self_val {
+                && let Value::Class(cls) = &self_val
+            {
                 if args.is_empty() || args.len() > 2 {
                     return Err(self.trap(RubyError::ArgumentError {
-                        msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 1..2)",
+                            args.len()
+                        ),
                     }));
                 }
                 let (const_name, split) = match &args[0] {
                     Value::Sym(s) => (self.interner.resolve(*s).to_string(), false),
                     Value::Str(s) => (s.to_string_lossy(), true),
-                    other => return Err(self.trap(RubyError::TypeError {
-                        msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
-                    })),
+                    other => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "no implicit conversion of {} into Symbol",
+                                other.type_name()
+                            ),
+                        }));
+                    }
                 };
                 let cls_clone = cls.clone();
                 let outcome = self.resolve_const_path(&cls_clone, &const_name, split, true);
                 match outcome {
-                    ConstPathOutcome::Found(v) => { self.stack.push(v); return Ok(()); }
+                    ConstPathOutcome::Found(v) => {
+                        self.stack.push(v);
+                        return Ok(());
+                    }
                     ConstPathOutcome::Missing { missing_qualified } => {
                         if self.try_const_missing(&cls_clone, &const_name)? {
                             return Ok(());
@@ -8800,12 +9338,16 @@ impl Vm {
                             msg: format!("uninitialized constant {}", missing_qualified),
                         }));
                     }
-                    ConstPathOutcome::WrongName { name } => return Err(self.trap(RubyError::NameError {
-                        msg: format!("wrong constant name {}", name),
-                    })),
-                    ConstPathOutcome::NotClass { full_path } => return Err(self.trap(RubyError::TypeError {
-                        msg: format!("{} does not refer to class/module", full_path),
-                    })),
+                    ConstPathOutcome::WrongName { name } => {
+                        return Err(self.trap(RubyError::NameError {
+                            msg: format!("wrong constant name {}", name),
+                        }));
+                    }
+                    ConstPathOutcome::NotClass { full_path } => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!("{} does not refer to class/module", full_path),
+                        }));
+                    }
                     // A scoped-autoload `require` trapped — re-raise.
                     #[cfg(not(target_os = "wasi"))]
                     ConstPathOutcome::Trap(t) => return Err(t),
@@ -8823,8 +9365,11 @@ impl Vm {
             // the value silently (visibility unaffected).
             // Motivating use: MRI `lib/erb.rb:264`
             // (`deprecate_constant :Revision`).
-            if matches!(&*name, "private_constant" | "public_constant" | "deprecate_constant")
-                && let Value::Class(owner) = &self_val {
+            if matches!(
+                &*name,
+                "private_constant" | "public_constant" | "deprecate_constant"
+            ) && let Value::Class(owner) = &self_val
+            {
                 self.record_const_visibility(owner.clone(), &name, &args);
                 self.stack.push(self_val);
                 return Ok(());
@@ -8836,7 +9381,8 @@ impl Vm {
             // → `[1, {k: 2}]`), so the flag is a no-op here. Returns nil
             // (CRuby). Surfaced by faraday's RackBuilder::Handler.
             if &*name == "ruby2_keywords"
-                && let Value::Class(_) = &self_val {
+                && let Value::Class(_) = &self_val
+            {
                 self.stack.push(Value::Nil);
                 return Ok(());
             }
@@ -8847,7 +9393,8 @@ impl Vm {
             // forwardable-extended all call this during require;
             // the explicit-receiver twin lives in the recv arm).
             if matches!(&*name, "private_class_method" | "public_class_method")
-                && let Value::Class(target) = &self_val {
+                && let Value::Class(target) = &self_val
+            {
                 let vis = if &*name == "private_class_method" {
                     Visibility::Private
                 } else {
@@ -8866,8 +9413,10 @@ impl Vm {
             // protection's base.rb hits this via
             // `def self.default_reaction(reaction); alias_method(
             // :default_reaction, reaction); end`.
-            if &*name == "alias_method" && args.len() == 2
-                && let Value::Class(target) = &self_val {
+            if &*name == "alias_method"
+                && args.len() == 2
+                && let Value::Class(target) = &self_val
+            {
                 let new_id_opt = match &args[0] {
                     Value::Sym(id) => Some(*id),
                     Value::Str(s) => Some(self.interner.intern(&s.to_string_lossy())),
@@ -8888,7 +9437,12 @@ impl Vm {
                     // `internal` does exactly this (`alias_method
                     // "#{m}_internal", m` after `def m` inside
                     // `class << self`).
-                    if let Some(real) = target.singleton_target.borrow().as_ref().and_then(std::rc::Weak::upgrade) {
+                    if let Some(real) = target
+                        .singleton_target
+                        .borrow()
+                        .as_ref()
+                        .and_then(std::rc::Weak::upgrade)
+                    {
                         match self.lookup_class_singleton_method(&real, old_id) {
                             Some(method) => {
                                 // Install a FRESH Method (shared body,
@@ -8946,7 +9500,9 @@ impl Vm {
                                         proto_idx: 0,
                                         fixed_arity: None,
                                         defining_class: Some(std::rc::Rc::downgrade(&real)),
-                                        visibility: std::cell::Cell::new(crate::value::Visibility::Public),
+                                        visibility: std::cell::Cell::new(
+                                            crate::value::Visibility::Public,
+                                        ),
                                         closure: None,
                                         original_name: Some(old_id),
                                         builtin: Some(meta),
@@ -8986,15 +9542,18 @@ impl Vm {
                             let old_name_str = self.interner.resolve(old_id).to_string();
                             let mut primitive_hit =
                                 crate::vm::Vm::universal_arm_name(&old_name_str)
-                                || crate::vm::Vm::universal_kernel_private(&old_name_str)
-                                || crate::vm::Vm::UNIVERSAL_OBJECT_METHODS
-                                    .contains(&old_name_str.as_str());
+                                    || crate::vm::Vm::universal_kernel_private(&old_name_str)
+                                    || crate::vm::Vm::UNIVERSAL_OBJECT_METHODS
+                                        .contains(&old_name_str.as_str());
                             if !primitive_hit {
-                                let mut visited: std::collections::HashSet<*const crate::value::Class> =
-                                    std::collections::HashSet::new();
+                                let mut visited: std::collections::HashSet<
+                                    *const crate::value::Class,
+                                > = std::collections::HashSet::new();
                                 let mut walker: Option<Rc<Class>> = Some(target.clone());
                                 while let Some(c) = walker {
-                                    if !visited.insert(Rc::as_ptr(&c)) { break; }
+                                    if !visited.insert(Rc::as_ptr(&c)) {
+                                        break;
+                                    }
                                     if self.primitive_class_responds_to(&c.name, old_id) {
                                         primitive_hit = true;
                                         break;
@@ -9020,10 +9579,12 @@ impl Vm {
                     }
                 }
             }
-            if matches!(&*name, "include" | "extend" | "prepend") && !args.is_empty()
-                && let Value::Class(target) = &self_val {
-                    return self.do_module_inclusion(target.clone(), &name, &args);
-                }
+            if matches!(&*name, "include" | "extend" | "prepend")
+                && !args.is_empty()
+                && let Value::Class(target) = &self_val
+            {
+                return self.do_module_inclusion(target.clone(), &name, &args);
+            }
             // `private` / `protected` / `public` inside a class
             // body. With no args, switch the current visibility
             // mode for any subsequent `def`s. With Symbol or
@@ -9109,10 +9670,7 @@ impl Vm {
                                 other => {
                                     let inspected = other.to_inspect(&self.heap, &self.interner);
                                     return Err(self.trap(RubyError::TypeError {
-                                        msg: format!(
-                                            "{} is not a symbol nor a string",
-                                            inspected,
-                                        ),
+                                        msg: format!("{} is not a symbol nor a string", inspected,),
                                     }));
                                 }
                             };
@@ -9161,7 +9719,9 @@ impl Vm {
                             original_name: m.original_name,
                             builtin: m.builtin.clone(),
                         });
-                        cls.singleton_methods.borrow_mut().insert(sid, singleton_copy);
+                        cls.singleton_methods
+                            .borrow_mut()
+                            .insert(sid, singleton_copy);
                         m.visibility.set(Visibility::Private);
                     }
                     self.method_gen = self.method_gen.wrapping_add(1);
@@ -9203,7 +9763,12 @@ impl Vm {
                         if let Some(top) = self.class_visibility_stack.last_mut() {
                             *top = vis;
                         }
-                    } else if let Some(real) = cls.singleton_target.borrow().as_ref().and_then(std::rc::Weak::upgrade) {
+                    } else if let Some(real) = cls
+                        .singleton_target
+                        .borrow()
+                        .as_ref()
+                        .and_then(std::rc::Weak::upgrade)
+                    {
                         // Eigenclass-shell (real `class << M` body):
                         // `private :foo` / `public :foo` flip the
                         // visibility of M's SINGLETON method `foo`
@@ -9296,7 +9861,10 @@ impl Vm {
                 // body or class body.
                 if args.is_empty() || args.len() > 2 {
                     return Err(self.trap(RubyError::ArgumentError {
-                        msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 1..2)",
+                            args.len()
+                        ),
                     }));
                 }
                 // Reopened-primitive user override: `class String;
@@ -9337,12 +9905,14 @@ impl Vm {
                 let lookup_name: SymId = match &args[0] {
                     Value::Sym(id) => *id,
                     Value::Str(s) => self.interner.intern(&s.to_string_lossy()),
-                    other => return Err(self.trap(RubyError::TypeError {
-                        msg: format!(
-                            "{} is not a symbol nor a string",
-                            other.to_inspect(&self.heap, &self.interner),
-                        ),
-                    })),
+                    other => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "{} is not a symbol nor a string",
+                                other.to_inspect(&self.heap, &self.interner),
+                            ),
+                        }));
+                    }
                 };
                 let include_private = matches!(args.get(1), Some(Value::Bool(true)));
                 if self.responds_to(&self_val, lookup_name, include_private) {
@@ -9368,8 +9938,10 @@ impl Vm {
             if let Value::Class(_) = &self_val {
                 let argc = args.len();
                 self.stack.push(self_val.clone());
-                for a in args { self.stack.push(a); }
-                return self.do_call(name_id, argc, /*no_recv=*/false, u32::MAX);
+                for a in args {
+                    self.stack.push(a);
+                }
+                return self.do_call(name_id, argc, /*no_recv=*/ false, u32::MAX);
             }
             // method_missing fallback (PoC #2). For Object self, look
             // up the class chain — if found, hand it the missed name
@@ -9379,7 +9951,8 @@ impl Vm {
             }
             return Err(self.trap(RubyError::NoMethodError {
                 kind: crate::error::NoMethodErrorKind::Missing,
-                method: name.to_string(), recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(&self_val)),
+                method: name.to_string(),
+                recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(&self_val)),
             }));
         }
 
@@ -9403,14 +9976,21 @@ impl Vm {
                     std::collections::HashSet::new();
                 let mut walker = Some(root);
                 while let Some(c) = walker {
-                    if !visited.insert(Rc::as_ptr(&c)) { break; }
+                    if !visited.insert(Rc::as_ptr(&c)) {
+                        break;
+                    }
                     // Own-table BEFORE tombstone: a redefine-after-
                     // undef leaves its stale tombstone behind and
                     // the new method wins (mirrors
                     // lookup_method_uncached; minitest Mock undefs
                     // respond_to? then defines its own).
-                    if c.methods.borrow().contains_key(&name_id) { break; }
-                    if c.undefed.borrow().contains(&name_id) { undefed = true; break; }
+                    if c.methods.borrow().contains_key(&name_id) {
+                        break;
+                    }
+                    if c.undefed.borrow().contains(&name_id) {
+                        undefed = true;
+                        break;
+                    }
                     walker = c.superclass.borrow().clone();
                 }
                 if undefed {
@@ -9496,12 +10076,10 @@ impl Vm {
             // to the default label would silently ignore the
             // caller's mistake.
             if let Some(a1) = args.get(1)
-                && !matches!(a1, Value::Str(_)) {
+                && !matches!(a1, Value::Str(_))
+            {
                 return Err(self.trap(RubyError::TypeError {
-                    msg: format!(
-                        "no implicit conversion of {} into String",
-                        a1.type_name()
-                    ),
+                    msg: format!("no implicit conversion of {} into String", a1.type_name()),
                 }));
             }
             // Validate args[2] (line) when present: CRuby raises
@@ -9510,12 +10088,10 @@ impl Vm {
             // types even though we ultimately ignore the line
             // offset — silent acceptance would mask caller bugs.
             if let Some(a2) = args.get(2)
-                && !matches!(a2, Value::Int(_) | Value::Float(_)) {
+                && !matches!(a2, Value::Int(_) | Value::Float(_))
+            {
                 return Err(self.trap(RubyError::TypeError {
-                    msg: format!(
-                        "no implicit conversion of {} into Integer",
-                        a2.type_name()
-                    ),
+                    msg: format!("no implicit conversion of {} into Integer", a2.type_name()),
                 }));
             }
             // Source encoding: when the eval'd string isn't UTF-8 (a
@@ -9544,7 +10120,9 @@ impl Vm {
                     #[cfg(not(feature = "_encoding_full"))]
                     EncodingTag::Other(_) => (s.to_string_lossy(), None),
                 }
-            } else { unreachable!() };
+            } else {
+                unreachable!()
+            };
             // Track whether the filename is our synthetic default
             // or caller-supplied. Only the synthetic case opts
             // into the source-table collision-suffix dedupe; an
@@ -9578,7 +10156,16 @@ impl Vm {
                 Some(Value::Float(f)) => Some(*f as i32),
                 _ => None,
             };
-            let v = self.eval_string_full(&src, &filename, synthetic, Some(cls.clone()), None, seed, line_base, source_enc)?;
+            let v = self.eval_string_full(
+                &src,
+                &filename,
+                synthetic,
+                Some(cls.clone()),
+                None,
+                seed,
+                line_base,
+                source_enc,
+            )?;
             if self.suppress_call_result_push {
                 self.suppress_call_result_push = false;
             } else {
@@ -9627,10 +10214,13 @@ impl Vm {
         // send/__send__ bypass recogniser — unified helper
         // (#192 commit 2/5). NotHandled returns recv + args
         // back so the dispatcher can continue below.
-        let (recv, args) = match self.try_dispatch_send_bypass(&name, name_id, cache_id, args, Some(recv)) {
-            SendBypass::Handled(r) => return r,
-            SendBypass::NotHandled { args, recv_opt } => (recv_opt.expect("with-recv path"), args),
-        };
+        let (recv, args) =
+            match self.try_dispatch_send_bypass(&name, name_id, cache_id, args, Some(recv)) {
+                SendBypass::Handled(r) => return r,
+                SendBypass::NotHandled { args, recv_opt } => {
+                    (recv_opt.expect("with-recv path"), args)
+                }
+            };
 
         // Int#+/-/* operator method-call BigInt-aware intercept.
         // Op::BinOp's hot path inlines `apply_int.unwrap_or →
@@ -9647,13 +10237,16 @@ impl Vm {
             && matches!(&recv, Value::Int(_))
             && matches!(&args[0], Value::Int(_))
             && let Some(kind) = crate::bytecode::BinOpKind::from_op_name(&name)
-            && matches!(kind,
+            && matches!(
+                kind,
                 crate::bytecode::BinOpKind::Add
-                | crate::bytecode::BinOpKind::Sub
-                | crate::bytecode::BinOpKind::Mul
+                    | crate::bytecode::BinOpKind::Sub
+                    | crate::bytecode::BinOpKind::Mul
             )
         {
-            let (Value::Int(x), Value::Int(y)) = (&recv, &args[0]) else { unreachable!() };
+            let (Value::Int(x), Value::Int(y)) = (&recv, &args[0]) else {
+                unreachable!()
+            };
             let v = self.apply_int_promote(kind, *x, *y)?;
             self.stack.push(v);
             return Ok(());
@@ -9735,7 +10328,8 @@ impl Vm {
         let prim_args: &[Value] = &args;
         if !class_intrinsic_overridden
             && let Some(v) = primitive_call(&recv, &name, prim_args, self.max_value_bytes)
-            .map_err(|e| self.trap(e))? {
+                .map_err(|e| self.trap(e))?
+        {
             self.stack.push(v);
             return Ok(());
         }
@@ -9797,7 +10391,14 @@ impl Vm {
         // include / prepend / extend / private / public / protected
         // / name / superclass / method_defined?. Extracted into
         // try_dispatch_class_intrinsics (#192 commit 4/5).
-        let (args, recv) = match self.try_dispatch_class_intrinsics(&name, name_id, cache_id, args, recv, force_primitive)? {
+        let (args, recv) = match self.try_dispatch_class_intrinsics(
+            &name,
+            name_id,
+            cache_id,
+            args,
+            recv,
+            force_primitive,
+        )? {
             ClassOutcome::Handled => return Ok(()),
             ClassOutcome::NotHandled { args, recv } => (args, recv),
         };
@@ -9821,7 +10422,8 @@ impl Vm {
         if !force_primitive
             && !matches!(&recv, Value::Object(_) | Value::Class(_))
             && let Value::Class(cls) = self.class_of(&recv)
-            && let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {
+            && let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id)
+        {
             self.invoke_method(m, recv.clone(), args.into_vec())?;
             return Ok(());
         }
@@ -9841,8 +10443,8 @@ impl Vm {
             // user respond_to? calls __respond_to?, which without
             // this gate re-entered the user method — infinite
             // recursion).
-            if !force_primitive
-                && let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {
+            if !force_primitive && let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id)
+            {
                 self.check_method_visibility(&m, &recv, &name, bypass_visibility)?;
                 self.invoke_method(m, recv.clone(), args.into_vec())?;
                 return Ok(());
@@ -9867,75 +10469,80 @@ impl Vm {
             #[cfg(all(feature = "cext", not(target_os = "wasi")))]
             {
                 if let Some(table) = self.cext_instance_methods.get(cls.name.as_str())
-                    && let Some(reg) = table.get(&name_id).cloned() {
-                        // Pin recv + args across the cext call
-                        // (review #4 on PR #27). cext_dispatch may
-                        // run maybe_gc during arg translation /
-                        // TypedData wrapping / result translation;
-                        // recv was popped from vm.stack before we
-                        // got here, so without pinning a STRESS_GC
-                        // sweep can reclaim it mid-call →
-                        // use-after-free in the cext body. Same
-                        // shape as the L1.5 P0-A pattern.
-                        //
-                        // RAII guard holding only a `*mut Vec<Value>`
-                        // (not `&mut Vm`) so it doesn't conflict with
-                        // the `vm_ptr: *mut Vm` we hand to
-                        // `with_vm_ptr_set` — PinGuard's `&mut Vm`
-                        // would alias under Stacked Borrows when
-                        // cext_dispatch's rb_funcall reentrance
-                        // re-derefs the raw pointer (same gotcha L3-A
-                        // review #15 / PR #6 hit). The narrower
-                        // pointer is sound because it borrows only
-                        // the field, not the whole Vm.
-                        //
-                        // Truncate runs on Drop, so a panic from
-                        // `with_vm_ptr_set` / `cext_dispatch` (or
-                        // the trailing `?`) doesn't leak pinned
-                        // entries — fixes review #11 on PR #27,
-                        // where the prior manual push/truncate
-                        // skipped truncate on the unwind path.
-                        struct PinTruncateGuard {
-                            pinned: *mut Vec<Value>,
-                            saved_depth: usize,
-                        }
-                        impl Drop for PinTruncateGuard {
-                            fn drop(&mut self) {
-                                // SAFETY: `pinned` was taken from
-                                // `&mut self.pinned` in the
-                                // enclosing scope; the guard is
-                                // dropped before that borrow could
-                                // be used elsewhere, and no other
-                                // Rust code mutates `pinned` while
-                                // the cext call is on the stack.
-                                unsafe { (*self.pinned).truncate(self.saved_depth); }
+                    && let Some(reg) = table.get(&name_id).cloned()
+                {
+                    // Pin recv + args across the cext call
+                    // (review #4 on PR #27). cext_dispatch may
+                    // run maybe_gc during arg translation /
+                    // TypedData wrapping / result translation;
+                    // recv was popped from vm.stack before we
+                    // got here, so without pinning a STRESS_GC
+                    // sweep can reclaim it mid-call →
+                    // use-after-free in the cext body. Same
+                    // shape as the L1.5 P0-A pattern.
+                    //
+                    // RAII guard holding only a `*mut Vec<Value>`
+                    // (not `&mut Vm`) so it doesn't conflict with
+                    // the `vm_ptr: *mut Vm` we hand to
+                    // `with_vm_ptr_set` — PinGuard's `&mut Vm`
+                    // would alias under Stacked Borrows when
+                    // cext_dispatch's rb_funcall reentrance
+                    // re-derefs the raw pointer (same gotcha L3-A
+                    // review #15 / PR #6 hit). The narrower
+                    // pointer is sound because it borrows only
+                    // the field, not the whole Vm.
+                    //
+                    // Truncate runs on Drop, so a panic from
+                    // `with_vm_ptr_set` / `cext_dispatch` (or
+                    // the trailing `?`) doesn't leak pinned
+                    // entries — fixes review #11 on PR #27,
+                    // where the prior manual push/truncate
+                    // skipped truncate on the unwind path.
+                    struct PinTruncateGuard {
+                        pinned: *mut Vec<Value>,
+                        saved_depth: usize,
+                    }
+                    impl Drop for PinTruncateGuard {
+                        fn drop(&mut self) {
+                            // SAFETY: `pinned` was taken from
+                            // `&mut self.pinned` in the
+                            // enclosing scope; the guard is
+                            // dropped before that borrow could
+                            // be used elsewhere, and no other
+                            // Rust code mutates `pinned` while
+                            // the cext call is on the stack.
+                            unsafe {
+                                (*self.pinned).truncate(self.saved_depth);
                             }
                         }
-                        let saved_pin_depth = self.pinned.len();
-                        self.pinned.push(recv.clone());
-                        for a in &args { self.pinned.push(a.clone()); }
-                        let _pin_guard = PinTruncateGuard {
-                            pinned: &raw mut self.pinned,
-                            saved_depth: saved_pin_depth,
-                        };
-                        let vm_ptr: *mut Vm = self;
-                        let recv_clone = recv.clone();
-                        let v = with_vm_ptr_set(vm_ptr, || {
-                            crate::vm::cext::cext_dispatch(
-                                &reg.qualified_name,
-                                reg.func,
-                                reg.arity,
-                                &args,
-                                crate::vm::cext::CextSelfHandle::Object(recv_clone),
-                            )
-                        })?;
-                        // Explicit drop here is documentation, not
-                        // necessity — `_pin_guard` drops at scope
-                        // end either way.
-                        drop(_pin_guard);
-                        self.stack.push(v);
-                        return Ok(());
                     }
+                    let saved_pin_depth = self.pinned.len();
+                    self.pinned.push(recv.clone());
+                    for a in &args {
+                        self.pinned.push(a.clone());
+                    }
+                    let _pin_guard = PinTruncateGuard {
+                        pinned: &raw mut self.pinned,
+                        saved_depth: saved_pin_depth,
+                    };
+                    let vm_ptr: *mut Vm = self;
+                    let recv_clone = recv.clone();
+                    let v = with_vm_ptr_set(vm_ptr, || {
+                        crate::vm::cext::cext_dispatch(
+                            &reg.qualified_name,
+                            reg.func,
+                            reg.arity,
+                            &args,
+                            crate::vm::cext::CextSelfHandle::Object(recv_clone),
+                        )
+                    })?;
+                    // Explicit drop here is documentation, not
+                    // necessity — `_pin_guard` drops at scope
+                    // end either way.
+                    drop(_pin_guard);
+                    self.stack.push(v);
+                    return Ok(());
+                }
             }
         }
         // C-ext singleton dispatch: `BCrypt::Engine.__bc_crypt(args)`
@@ -9993,9 +10600,7 @@ impl Vm {
             // instance methods. dry-core's `Equalizer#initialize` calls
             // the private `define_methods` (an Equalizer instance method)
             // on the equalizer module value.
-            if !force_primitive
-                && let Some(t) = &cls.class_tag
-            {
+            if !force_primitive && let Some(t) = &cls.class_tag {
                 let t = t.clone();
                 if let Some(m) = self.lookup_method_uncached(&t, name_id) {
                     return self.invoke_method(m, recv.clone(), args.into_vec());
@@ -10028,10 +10633,11 @@ impl Vm {
                 return Ok(());
             }
             if cls.name.as_str() == "File"
-                && let Some(v) = self.file_class_dispatch(&name, &args)? {
-                    self.stack.push(v);
-                    return Ok(());
-                }
+                && let Some(v) = self.file_class_dispatch(&name, &args)?
+            {
+                self.stack.push(v);
+                return Ok(());
+            }
             // `IO.read`/`write`/… — File < IO in CRuby, so the I/O class
             // methods live on IO and File inherits them. Route just those
             // (NOT File-specific ones like `exist?`/`dirname`, which stay
@@ -10042,22 +10648,24 @@ impl Vm {
             // as IO preamble class methods (delegating to the File
             // veneer), resolved before this native fallback.
             if cls.name.as_str() == "IO"
-                && matches!(&*name,
-                    "read" | "write" | "binread" | "binwrite")
-                && let Some(v) = self.file_class_dispatch(&name, &args)? {
-                    self.stack.push(v);
-                    return Ok(());
-                }
+                && matches!(&*name, "read" | "write" | "binread" | "binwrite")
+                && let Some(v) = self.file_class_dispatch(&name, &args)?
+            {
+                self.stack.push(v);
+                return Ok(());
+            }
             if cls.name.as_str() == "Dir"
-                && let Some(v) = self.dir_class_dispatch(&name, &args)? {
-                    self.stack.push(v);
-                    return Ok(());
-                }
+                && let Some(v) = self.dir_class_dispatch(&name, &args)?
+            {
+                self.stack.push(v);
+                return Ok(());
+            }
             if cls.name.as_str() == "FileUtils"
-                && let Some(v) = self.fileutils_class_dispatch(&name, &args)? {
-                    self.stack.push(v);
-                    return Ok(());
-                }
+                && let Some(v) = self.fileutils_class_dispatch(&name, &args)?
+            {
+                self.stack.push(v);
+                return Ok(());
+            }
             // `RubyrsSass.compile(scss)` — host primitive backing the
             // jekyll-sass-converter shim. Compiles SCSS/Sass to CSS via
             // the active `SassBackend` (grass under `--features sass`);
@@ -10065,7 +10673,8 @@ impl Vm {
             // caller's `rescue` surfaces it.
             if cls.name.as_str() == "RubyrsSass"
                 && &*name == "compile"
-                && let [Value::Str(src)] = &args[..] {
+                && let [Value::Str(src)] = &args[..]
+            {
                 let scss = src.to_string_lossy();
                 match crate::sass::compile(&scss) {
                     Ok(css) => {
@@ -10085,7 +10694,8 @@ impl Vm {
             // String; `digest` returns the raw bytes as a binary String.
             if cls.name.as_str() == "RubyrsDigest"
                 && matches!(&*name, "hexdigest" | "digest")
-                && let [Value::Str(algo), Value::Str(data)] = &args[..] {
+                && let [Value::Str(algo), Value::Str(data)] = &args[..]
+            {
                 let algo_s = algo.to_string_lossy();
                 let bytes = data.borrow().clone();
                 match crate::digest::raw(&algo_s, &bytes) {
@@ -10136,20 +10746,21 @@ impl Vm {
             }
             #[cfg(feature = "cext")]
             if let Some(table) = self.cext_class_methods.get(cls.name.as_str())
-                && let Some(host) = table.get(&name_id).cloned() {
-                    // Stash Vm pointer for the singleton-method's
-                    // C body — same rationale as the top-level
-                    // host_fns dispatch above.
-                    #[cfg(not(target_os = "wasi"))]
-                    let v = {
-                        let vm_ptr: *mut Vm = self;
-                        with_vm_ptr_set(vm_ptr, || host(&args))?
-                    };
-                    #[cfg(target_os = "wasi")]
-                    let v = host(&args)?;
-                    self.stack.push(v);
-                    return Ok(());
-                }
+                && let Some(host) = table.get(&name_id).cloned()
+            {
+                // Stash Vm pointer for the singleton-method's
+                // C body — same rationale as the top-level
+                // host_fns dispatch above.
+                #[cfg(not(target_os = "wasi"))]
+                let v = {
+                    let vm_ptr: *mut Vm = self;
+                    with_vm_ptr_set(vm_ptr, || host(&args))?
+                };
+                #[cfg(target_os = "wasi")]
+                let v = host(&args)?;
+                self.stack.push(v);
+                return Ok(());
+            }
         }
         // `include Mod` — without real Modules in the subset, we
         // approximate by copying the source class's method table
@@ -10169,10 +10780,11 @@ impl Vm {
         // BoundMethod / UnboundMethod / CurriedProc family.
         // Extracted into try_dispatch_callable_intrinsics
         // (#192 commit 3/5). NotHandled returns args + recv back.
-        let (args, recv) = match self.try_dispatch_callable_intrinsics(&name, name_id, args, recv)? {
-            CallableOutcome::Handled => return Ok(()),
-            CallableOutcome::NotHandled { args, recv } => (args, recv),
-        };
+        let (args, recv) =
+            match self.try_dispatch_callable_intrinsics(&name, name_id, args, recv)? {
+                CallableOutcome::Handled => return Ok(()),
+                CallableOutcome::NotHandled { args, recv } => (args, recv),
+            };
         // Explicit-receiver no-op stubs — `Foo.private_constant :X`,
         // `Foo.public_constant :X`, `Foo.deprecate_constant :X`,
         // `Foo.autoload :X, "path"`. Explicit-receiver parallel of
@@ -10183,12 +10795,16 @@ impl Vm {
         // and Rack's 40+ `autoload :Response, 'rack/response'` are
         // the canonical callers.
         if &*name == "autoload"
-            && let Value::Class(owner) = &recv {
+            && let Value::Class(owner) = &recv
+        {
             #[cfg(target_os = "wasi")]
             let _ = owner;
             if args.len() != 2 {
                 return Err(self.trap(RubyError::ArgumentError {
-                    msg: format!("wrong number of arguments (given {}, expected 2)", args.len()),
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 2)",
+                        args.len()
+                    ),
                 }));
             }
             #[cfg(not(target_os = "wasi"))]
@@ -10248,12 +10864,16 @@ impl Vm {
         // the scoped autoload is registered, nil once it has fired
         // (or was never set).
         if &*name == "autoload?"
-            && let Value::Class(owner) = &recv {
+            && let Value::Class(owner) = &recv
+        {
             #[cfg(target_os = "wasi")]
             let _ = owner;
             if args.is_empty() || args.len() > 2 {
                 return Err(self.trap(RubyError::ArgumentError {
-                    msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 1..2)",
+                        args.len()
+                    ),
                 }));
             }
             #[cfg(not(target_os = "wasi"))]
@@ -10282,8 +10902,7 @@ impl Vm {
                         let already_defined = self.classes.contains_key(&key_id)
                             || self.constants.contains_key(&key_id)
                             || owner.consts.borrow().contains_key(&short);
-                        if !already_defined
-                            && let Some(path) = self.autoloads_scoped.get(&key_id) {
+                        if !already_defined && let Some(path) = self.autoloads_scoped.get(&key_id) {
                             let v = Value::new_str(path.clone());
                             self.stack.push(v);
                             return Ok(());
@@ -10299,10 +10918,14 @@ impl Vm {
         // `scope.const_defined?(n)` where scope is reached via the
         // `inject(Object)` walk in `constant_defined?`.
         if &*name == "const_defined?"
-            && let Value::Class(cls) = &recv {
+            && let Value::Class(cls) = &recv
+        {
             if args.is_empty() || args.len() > 2 {
                 return Err(self.trap(RubyError::ArgumentError {
-                    msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 1..2)",
+                        args.len()
+                    ),
                 }));
             }
             // String args walked via `::`; Symbol args treated as
@@ -10311,9 +10934,14 @@ impl Vm {
             let (const_name, split) = match &args[0] {
                 Value::Sym(s) => (self.interner.resolve(*s).to_string(), false),
                 Value::Str(s) => (s.to_string_lossy(), true),
-                other => return Err(self.trap(RubyError::TypeError {
-                    msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
-                })),
+                other => {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "no implicit conversion of {} into Symbol",
+                            other.type_name()
+                        ),
+                    }));
+                }
             };
             // `const_defined?(name, inherit = true)`. When `inherit` is
             // falsy AND the name is a bare symbol (no `::` path), check
@@ -10341,8 +10969,13 @@ impl Vm {
             // an undefined `A` raises rather than returning false. The
             // uppercase-first guard keeps an INVALID name (e.g. "foo") on the
             // normal path so it still raises "wrong constant name".
-            if !const_name.contains("::")
-                && const_name.starts_with(|c: char| c.is_ascii_uppercase())
+            // (The uppercase-first `starts_with` guard this replaced wrongly
+            // returned `false` for a never-interned but INVALID uppercase name
+            // like "Foo-bar" instead of raising "wrong constant name";
+            // `is_valid_const_name` rejects malformed names — and any
+            // `::`-bearing path — so they fall through to the raising path.
+            // zeitwerk test_cpath_expected_at via ConstantPathValidator.)
+            if is_valid_const_name(&const_name)
                 && self.interner.get_id(&const_name).is_none()
             {
                 self.stack.push(Value::Bool(false));
@@ -10369,8 +11002,7 @@ impl Vm {
                 // suites rely on this. (`autoloads_scoped` is wasi-gated —
                 // autoload needs `require`, which traps on wasm32-wasi.)
                 #[cfg(not(target_os = "wasi"))]
-                let found = found
-                    || key.is_some_and(|k| self.autoloads_scoped.contains_key(&k));
+                let found = found || key.is_some_and(|k| self.autoloads_scoped.contains_key(&k));
                 self.stack.push(Value::Bool(found));
                 return Ok(());
             }
@@ -10391,8 +11023,7 @@ impl Vm {
                     self.classes.contains_key(&k) || self.constants.contains_key(&k)
                 }) || short.is_some_and(|s| cls.consts.borrow().contains_key(&s));
                 #[cfg(not(target_os = "wasi"))]
-                let scoped_pending =
-                    key.is_some_and(|k| self.autoloads_scoped.contains_key(&k));
+                let scoped_pending = key.is_some_and(|k| self.autoloads_scoped.contains_key(&k));
                 #[cfg(target_os = "wasi")]
                 let scoped_pending = false;
                 if !already && scoped_pending {
@@ -10405,12 +11036,16 @@ impl Vm {
             match outcome {
                 ConstPathOutcome::Found(_) => self.stack.push(Value::Bool(true)),
                 ConstPathOutcome::Missing { .. } => self.stack.push(Value::Bool(false)),
-                ConstPathOutcome::WrongName { name } => return Err(self.trap(RubyError::NameError {
-                    msg: format!("wrong constant name {}", name),
-                })),
-                ConstPathOutcome::NotClass { full_path } => return Err(self.trap(RubyError::TypeError {
-                    msg: format!("{} does not refer to class/module", full_path),
-                })),
+                ConstPathOutcome::WrongName { name } => {
+                    return Err(self.trap(RubyError::NameError {
+                        msg: format!("wrong constant name {}", name),
+                    }));
+                }
+                ConstPathOutcome::NotClass { full_path } => {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!("{} does not refer to class/module", full_path),
+                    }));
+                }
                 // A scoped-autoload `require` trapped — re-raise.
                 #[cfg(not(target_os = "wasi"))]
                 ConstPathOutcome::Trap(t) => return Err(t),
@@ -10418,18 +11053,27 @@ impl Vm {
             return Ok(());
         }
         if &*name == "const_get"
-            && let Value::Class(cls) = &recv {
+            && let Value::Class(cls) = &recv
+        {
             if args.is_empty() || args.len() > 2 {
                 return Err(self.trap(RubyError::ArgumentError {
-                    msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 1..2)",
+                        args.len()
+                    ),
                 }));
             }
             let (const_name, split) = match &args[0] {
                 Value::Sym(s) => (self.interner.resolve(*s).to_string(), false),
                 Value::Str(s) => (s.to_string_lossy(), true),
-                other => return Err(self.trap(RubyError::TypeError {
-                    msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
-                })),
+                other => {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "no implicit conversion of {} into Symbol",
+                            other.type_name()
+                        ),
+                    }));
+                }
             };
             // Single-segment, valid, never-interned name → definitely missing.
             // Raise the same NameError resolve_const_path would, WITHOUT
@@ -10456,7 +11100,10 @@ impl Vm {
             let cls_clone = cls.clone();
             let outcome = self.resolve_const_path(&cls_clone, &const_name, split, true);
             match outcome {
-                ConstPathOutcome::Found(v) => { self.stack.push(v); return Ok(()); }
+                ConstPathOutcome::Found(v) => {
+                    self.stack.push(v);
+                    return Ok(());
+                }
                 ConstPathOutcome::Missing { missing_qualified } => {
                     if self.try_const_missing(&cls_clone, &const_name)? {
                         return Ok(());
@@ -10465,12 +11112,16 @@ impl Vm {
                         msg: format!("uninitialized constant {}", missing_qualified),
                     }));
                 }
-                ConstPathOutcome::WrongName { name } => return Err(self.trap(RubyError::NameError {
-                    msg: format!("wrong constant name {}", name),
-                })),
-                ConstPathOutcome::NotClass { full_path } => return Err(self.trap(RubyError::TypeError {
-                    msg: format!("{} does not refer to class/module", full_path),
-                })),
+                ConstPathOutcome::WrongName { name } => {
+                    return Err(self.trap(RubyError::NameError {
+                        msg: format!("wrong constant name {}", name),
+                    }));
+                }
+                ConstPathOutcome::NotClass { full_path } => {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!("{} does not refer to class/module", full_path),
+                    }));
+                }
                 // A scoped-autoload `require` trapped — re-raise.
                 #[cfg(not(target_os = "wasi"))]
                 ConstPathOutcome::Trap(t) => return Err(t),
@@ -10491,9 +11142,14 @@ impl Vm {
             let const_name = match &args[0] {
                 Value::Sym(s) => self.interner.resolve(*s).to_string(),
                 Value::Str(s) => s.to_string_lossy(),
-                other => return Err(self.trap(RubyError::TypeError {
-                    msg: format!("no implicit conversion of {} into String", other.type_name()),
-                })),
+                other => {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "no implicit conversion of {} into String",
+                            other.type_name()
+                        ),
+                    }));
+                }
             };
             let key_str = match owner.effective_name().as_deref() {
                 Some("Object") | None => const_name.clone(),
@@ -10506,34 +11162,38 @@ impl Vm {
             // "C-defined core", so a preamble-located constant maps to
             // the empty-Array form.
             let short_key = self.interner.intern(&const_name);
-            let result: Value = if let Some((file, line)) = self.const_source_locations.get(&key).cloned() {
-                if file.starts_with("<rubyrs:preamble") {
+            let result: Value =
+                if let Some((file, line)) = self.const_source_locations.get(&key).cloned() {
+                    if file.starts_with("<rubyrs:preamble") {
+                        let id = self.heap.alloc(HeapObj::Array(Vec::new().into()));
+                        Value::Array(id)
+                    } else {
+                        let arr = vec![Value::new_str(file.to_string()), Value::Int(line as i64)];
+                        self.maybe_gc();
+                        self.check_alloc()?;
+                        let id = self.heap.alloc(HeapObj::Array(arr.into()));
+                        Value::Array(id)
+                    }
+                } else if self.classes.contains_key(&key)
+                    || self.constants.contains_key(&key)
+                    || owner.consts.borrow().contains_key(&short_key)
+                {
+                    // Defined but no tracked location (native core) → [].
                     let id = self.heap.alloc(HeapObj::Array(Vec::new().into()));
                     Value::Array(id)
                 } else {
-                    let arr = vec![Value::new_str(file.to_string()), Value::Int(line as i64)];
-                    self.maybe_gc();
-                    self.check_alloc()?;
-                    let id = self.heap.alloc(HeapObj::Array(arr.into()));
-                    Value::Array(id)
-                }
-            } else if self.classes.contains_key(&key)
-                || self.constants.contains_key(&key)
-                || owner.consts.borrow().contains_key(&short_key)
-            {
-                // Defined but no tracked location (native core) → [].
-                let id = self.heap.alloc(HeapObj::Array(Vec::new().into()));
-                Value::Array(id)
-            } else {
-                // Untriggered autoload or undefined → nil (CRuby does
-                // NOT raise for an undefined-but-valid constant name).
-                Value::Nil
-            };
+                    // Untriggered autoload or undefined → nil (CRuby does
+                    // NOT raise for an undefined-but-valid constant name).
+                    Value::Nil
+                };
             self.stack.push(result);
             return Ok(());
         }
-        if matches!(&*name, "private_constant" | "public_constant" | "deprecate_constant")
-            && let Value::Class(owner) = &recv {
+        if matches!(
+            &*name,
+            "private_constant" | "public_constant" | "deprecate_constant"
+        ) && let Value::Class(owner) = &recv
+        {
             self.record_const_visibility(owner.clone(), &name, &args);
             self.stack.push(recv);
             return Ok(());
@@ -10546,7 +11206,8 @@ impl Vm {
         // `klass.private_class_method(method)` and rubygems both
         // hit this during their require.
         if matches!(&*name, "private_class_method" | "public_class_method")
-            && let Value::Class(target) = &recv {
+            && let Value::Class(target) = &recv
+        {
             let vis = if &*name == "private_class_method" {
                 Visibility::Private
             } else {
@@ -10676,7 +11337,8 @@ impl Vm {
         // entry; anonymous owners clear their per-class consts
         // table. uri's `parser=` (Sinatra/rack chains) and
         // minitest's own suite both scrub constants this way.
-        if &*name == "remove_const" && args.len() == 1
+        if &*name == "remove_const"
+            && args.len() == 1
             && let Value::Class(owner) = &recv
         {
             let const_name = match &args[0] {
@@ -10688,7 +11350,11 @@ impl Vm {
                     }));
                 }
             };
-            if !const_name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+            if !const_name
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_uppercase())
+            {
                 return Err(self.trap(RubyError::NameError {
                     msg: format!("wrong constant name {}", const_name),
                 }));
@@ -10703,27 +11369,28 @@ impl Vm {
                 let c = vm.classes.remove(&key);
                 v.or(c.map(Value::Class))
             };
-            let removed: Option<Value> = if matches!(owner.name.as_str(), "Object" | "Class" | "Module") {
-                let key = self.interner.intern(&const_name);
-                remove_key(self, key)
-            } else {
-                match owner.effective_name() {
-                    Some(owner_name) => {
-                        let qualified = format!("{}::{}", owner_name, const_name);
-                        let key = self.interner.intern(&qualified);
-                        let v = remove_key(self, key);
-                        // A nested `class Owner::NAME` also lands in
-                        // the owner's consts table — clear both.
-                        let short = self.interner.intern(&const_name);
-                        let tbl = owner.consts.borrow_mut().remove(&short);
-                        v.or(tbl)
+            let removed: Option<Value> =
+                if matches!(owner.name.as_str(), "Object" | "Class" | "Module") {
+                    let key = self.interner.intern(&const_name);
+                    remove_key(self, key)
+                } else {
+                    match owner.effective_name() {
+                        Some(owner_name) => {
+                            let qualified = format!("{}::{}", owner_name, const_name);
+                            let key = self.interner.intern(&qualified);
+                            let v = remove_key(self, key);
+                            // A nested `class Owner::NAME` also lands in
+                            // the owner's consts table — clear both.
+                            let short = self.interner.intern(&const_name);
+                            let tbl = owner.consts.borrow_mut().remove(&short);
+                            v.or(tbl)
+                        }
+                        None => {
+                            let short = self.interner.intern(&const_name);
+                            owner.consts.borrow_mut().remove(&short)
+                        }
                     }
-                    None => {
-                        let short = self.interner.intern(&const_name);
-                        owner.consts.borrow_mut().remove(&short)
-                    }
-                }
-            };
+                };
             self.bump_const_gen();
             // Clear the removed constant's recorded source location so a later
             // REDEFINITION records the new one. StoreConst is first-write-wins
@@ -10783,21 +11450,30 @@ impl Vm {
                     if matches!(owner.name.as_str(), "Object" | "Class" | "Module") {
                         keys.push(self.interner.intern(&const_name));
                     } else if let Some(owner_name) = owner.effective_name() {
-                        keys.push(self.interner.intern(&format!("{}::{}", owner_name, const_name)));
+                        keys.push(
+                            self.interner
+                                .intern(&format!("{}::{}", owner_name, const_name)),
+                        );
                     }
                     let mut removed_autoload = false;
                     for k in &keys {
                         #[cfg(not(target_os = "wasi"))]
-                        if self.autoloads_toplevel.remove(k).is_some() { removed_autoload = true; }
+                        if self.autoloads_toplevel.remove(k).is_some() {
+                            removed_autoload = true;
+                        }
                         #[cfg(not(target_os = "wasi"))]
-                        if self.autoloads_scoped.remove(k).is_some() { removed_autoload = true; }
+                        if self.autoloads_scoped.remove(k).is_some() {
+                            removed_autoload = true;
+                        }
                         // CRuby also lets `remove_const` succeed for a const
                         // whose autoload FIRED but never defined it (the
                         // "undef-after-autoload" slot — consumed_autoloads).
                         // zeitwerk's on_file_autoloaded `remove_const`s such a
                         // cref before raising Zeitwerk::NameError; without this
                         // a plain NameError surfaces instead.
-                        if self.consumed_autoloads.remove(k) { removed_autoload = true; }
+                        if self.consumed_autoloads.remove(k) {
+                            removed_autoload = true;
+                        }
                     }
                     if removed_autoload {
                         self.stack.push(Value::Nil);
@@ -10809,21 +11485,32 @@ impl Vm {
                 }
             }
         }
-        if &*name == "const_set" && args.len() == 2
-            && let Value::Class(cls) = &recv {
+        if &*name == "const_set"
+            && args.len() == 2
+            && let Value::Class(cls) = &recv
+        {
             let const_name = match &args[0] {
                 Value::Sym(s) => self.interner.resolve(*s).to_string(),
                 Value::Str(s) => s.to_string_lossy(),
-                other => return Err(self.trap(RubyError::TypeError {
-                    msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
-                })),
+                other => {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "no implicit conversion of {} into Symbol",
+                            other.type_name()
+                        ),
+                    }));
+                }
             };
             let value = args[1].clone();
             // CRuby raises NameError on lowercase-leading names; the
             // simple `Class.const_set(:foo, ...)` form is what gem
             // code actually hits, but mirror the check so we don't
             // silently install a name that `const_get` can't read.
-            if !const_name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+            if !const_name
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_uppercase())
+            {
                 return Err(self.trap(RubyError::NameError {
                     msg: format!("wrong constant name {}", const_name),
                 }));
@@ -10908,106 +11595,128 @@ impl Vm {
         // arity-checked main arm below so a missing arg can't
         // fall through to the dispatch-not-found path.
         if let Value::Object(_) = &recv
-            && &*name == "extend" && args.is_empty() {
-                return Err(self.trap(RubyError::ArgumentError {
-                    msg: "wrong number of arguments (given 0, expected 1+)".to_string(),
-                }));
-            }
+            && &*name == "extend"
+            && args.is_empty()
+        {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: "wrong number of arguments (given 0, expected 1+)".to_string(),
+            }));
+        }
         if let Value::Object(id) = &recv
-            && &*name == "extend" && !args.is_empty() {
-                // CRuby walks `obj.extend(M1, M2)` args RIGHT-to-LEFT
-                // — M2 inserts into the eigenclass first, M1 last and
-                // ends up at the head; hook fire order mirrors the
-                // insertion order (M2.extended then M1.extended).
-                // Single-arg cases are unaffected.
-                let mut modules: Vec<std::rc::Rc<crate::value::Class>> = Vec::with_capacity(args.len());
-                for a in args.iter().rev() {
-                    match a {
-                        Value::Class(c) if c.is_module => modules.push(c.clone()),
-                        Value::Class(_) => return Err(self.trap(RubyError::TypeError {
+            && &*name == "extend"
+            && !args.is_empty()
+        {
+            // CRuby walks `obj.extend(M1, M2)` args RIGHT-to-LEFT
+            // — M2 inserts into the eigenclass first, M1 last and
+            // ends up at the head; hook fire order mirrors the
+            // insertion order (M2.extended then M1.extended).
+            // Single-arg cases are unaffected.
+            let mut modules: Vec<std::rc::Rc<crate::value::Class>> = Vec::with_capacity(args.len());
+            for a in args.iter().rev() {
+                match a {
+                    Value::Class(c) if c.is_module => modules.push(c.clone()),
+                    Value::Class(_) => {
+                        return Err(self.trap(RubyError::TypeError {
                             msg: "wrong argument type Class (expected Module)".to_string(),
-                        })),
-                        _ => return Err(self.trap(RubyError::TypeError {
-                            msg: format!(
-                                "wrong argument type {} (expected Module)",
-                                a.type_name(),
-                            ),
-                        })),
+                        }));
+                    }
+                    _ => {
+                        return Err(
+                            self.trap(RubyError::TypeError {
+                                msg: format!(
+                                    "wrong argument type {} (expected Module)",
+                                    a.type_name(),
+                                ),
+                            }),
+                        );
                     }
                 }
-                let sc = self.heap.ensure_singleton_class(*id);
-                let mut fire_hooks: Vec<std::rc::Rc<crate::value::Class>> = Vec::new();
-                for src in modules {
-                    if !super::class_is_a(&sc, &src) {
-                        sc.includes.borrow_mut().insert(0, src.clone());
-                        self.bump_const_gen();
-                    }
-                    // `Module.extended(obj)` fires on every extend
-                    // call (CRuby parity — same shape as included /
-                    // prepended). Hook arg is the receiver Object,
-                    // not a Class, since `obj.extend(M)` extends an
-                    // instance.
-                    fire_hooks.push(src);
-                }
-                self.method_gen = self.method_gen.wrapping_add(1);
-                let target_v = recv.clone();
-                self.fire_inclusion_hooks(&fire_hooks, &target_v, "extended")?;
-                self.stack.push(recv.clone());
-                return Ok(());
             }
+            let sc = self.heap.ensure_singleton_class(*id);
+            let mut fire_hooks: Vec<std::rc::Rc<crate::value::Class>> = Vec::new();
+            for src in modules {
+                if !super::class_is_a(&sc, &src) {
+                    sc.includes.borrow_mut().insert(0, src.clone());
+                    self.bump_const_gen();
+                }
+                // `Module.extended(obj)` fires on every extend
+                // call (CRuby parity — same shape as included /
+                // prepended). Hook arg is the receiver Object,
+                // not a Class, since `obj.extend(M)` extends an
+                // instance.
+                fire_hooks.push(src);
+            }
+            self.method_gen = self.method_gen.wrapping_add(1);
+            let target_v = recv.clone();
+            self.fire_inclusion_hooks(&fire_hooks, &target_v, "extended")?;
+            self.stack.push(recv.clone());
+            return Ok(());
+        }
         // `str.extend(M)` — String twin of the Object arm above. A String
         // gets its singleton via `ensure_str_singleton`, then M's methods
         // sit on the eigenclass `includes`. Sinatra's `render` does
         // `output.extend(...)` on the rendered String to attach a
         // content-type accessor.
         if let Value::Str(_) = &recv
-            && &*name == "extend" && args.is_empty() {
-                return Err(self.trap(RubyError::ArgumentError {
-                    msg: "wrong number of arguments (given 0, expected 1+)".to_string(),
-                }));
-            }
+            && &*name == "extend"
+            && args.is_empty()
+        {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: "wrong number of arguments (given 0, expected 1+)".to_string(),
+            }));
+        }
         if let Value::Str(s) = &recv
-            && &*name == "extend" && !args.is_empty() {
-                let s = s.clone();
-                let mut modules: Vec<std::rc::Rc<crate::value::Class>> = Vec::with_capacity(args.len());
-                for a in args.iter().rev() {
-                    match a {
-                        Value::Class(c) if c.is_module => modules.push(c.clone()),
-                        Value::Class(_) => return Err(self.trap(RubyError::TypeError {
+            && &*name == "extend"
+            && !args.is_empty()
+        {
+            let s = s.clone();
+            let mut modules: Vec<std::rc::Rc<crate::value::Class>> = Vec::with_capacity(args.len());
+            for a in args.iter().rev() {
+                match a {
+                    Value::Class(c) if c.is_module => modules.push(c.clone()),
+                    Value::Class(_) => {
+                        return Err(self.trap(RubyError::TypeError {
                             msg: "wrong argument type Class (expected Module)".to_string(),
-                        })),
-                        _ => return Err(self.trap(RubyError::TypeError {
-                            msg: format!(
-                                "wrong argument type {} (expected Module)",
-                                a.type_name(),
-                            ),
-                        })),
+                        }));
+                    }
+                    _ => {
+                        return Err(
+                            self.trap(RubyError::TypeError {
+                                msg: format!(
+                                    "wrong argument type {} (expected Module)",
+                                    a.type_name(),
+                                ),
+                            }),
+                        );
                     }
                 }
-                let sc = self.ensure_str_singleton(&s);
-                let mut fire_hooks: Vec<std::rc::Rc<crate::value::Class>> = Vec::new();
-                for src in modules {
-                    if !super::class_is_a(&sc, &src) {
-                        sc.includes.borrow_mut().insert(0, src.clone());
-                        self.bump_const_gen();
-                    }
-                    fire_hooks.push(src);
-                }
-                self.method_gen = self.method_gen.wrapping_add(1);
-                let target_v = recv.clone();
-                self.fire_inclusion_hooks(&fire_hooks, &target_v, "extended")?;
-                self.stack.push(recv.clone());
-                return Ok(());
             }
+            let sc = self.ensure_str_singleton(&s);
+            let mut fire_hooks: Vec<std::rc::Rc<crate::value::Class>> = Vec::new();
+            for src in modules {
+                if !super::class_is_a(&sc, &src) {
+                    sc.includes.borrow_mut().insert(0, src.clone());
+                    self.bump_const_gen();
+                }
+                fire_hooks.push(src);
+            }
+            self.method_gen = self.method_gen.wrapping_add(1);
+            let target_v = recv.clone();
+            self.fire_inclusion_hooks(&fire_hooks, &target_v, "extended")?;
+            self.stack.push(recv.clone());
+            return Ok(());
+        }
         // Immediate values can't carry a singleton, so `5.extend(M)` /
         // `:s.extend(M)` / `1.5.extend(M)` raise TypeError in CRuby (nil/
         // true/false DO allow it, so they're not matched here).
-        if &*name == "extend" && !args.is_empty()
-            && matches!(&recv, Value::Int(_) | Value::Float(_) | Value::Sym(_)) {
-                return Err(self.trap(RubyError::TypeError {
-                    msg: "can't define singleton".to_string(),
-                }));
-            }
+        if &*name == "extend"
+            && !args.is_empty()
+            && matches!(&recv, Value::Int(_) | Value::Float(_) | Value::Sym(_))
+        {
+            return Err(self.trap(RubyError::TypeError {
+                msg: "can't define singleton".to_string(),
+            }));
+        }
         // `Klass.alias_method(:new_name, :old_name)` — runtime
         // dispatch path (compile-time intercept at compiler.rs:225
         // only catches the literal-Symbol shape inside a class
@@ -11021,7 +11730,9 @@ impl Vm {
         // call sites re-resolve. CRuby's `alias_method` returns
         // the receiver class; mirror that.
         if let Value::Class(target) = &recv
-            && &*name == "alias_method" && args.len() == 2 {
+            && &*name == "alias_method"
+            && args.len() == 2
+        {
             let new_id_opt = match &args[0] {
                 Value::Sym(id) => Some(*id),
                 Value::Str(s) => Some(self.interner.intern(&s.to_string_lossy())),
@@ -11066,12 +11777,29 @@ impl Vm {
                             // :zeitwerk_original_require, :require; end`
                             // inside `module Kernel`.
                             let old_name_rc = self.interner.resolve(old_id).clone();
-                            if matches!(&*old_name_rc,
-                                "sleep" | "rand" | "srand" | "exit" | "exit!" | "abort"
-                                | "puts" | "print" | "p" | "pp" | "warn"
-                                | "sprintf" | "format" | "caller" | "at_exit"
-                                | "require" | "require_relative" | "load" | "system"
-                                | "raise" | "fail"
+                            if matches!(
+                                &*old_name_rc,
+                                "sleep"
+                                    | "rand"
+                                    | "srand"
+                                    | "exit"
+                                    | "exit!"
+                                    | "abort"
+                                    | "puts"
+                                    | "print"
+                                    | "p"
+                                    | "pp"
+                                    | "warn"
+                                    | "sprintf"
+                                    | "format"
+                                    | "caller"
+                                    | "at_exit"
+                                    | "require"
+                                    | "require_relative"
+                                    | "load"
+                                    | "system"
+                                    | "raise"
+                                    | "fail"
                             ) {
                                 let synth = self.synth_kernel_forwarder(&real, old_id);
                                 // These Kernel builtins are PRIVATE in
@@ -11151,12 +11879,29 @@ impl Vm {
                         // eigenclass stubbing can save/restore them
                         // (minitest's `self.stub :sleep, nil`).
                         let old_name_rc = self.interner.resolve(old_id).clone();
-                        if matches!(&*old_name_rc,
-                            "sleep" | "rand" | "srand" | "exit" | "exit!" | "abort"
-                            | "puts" | "print" | "p" | "pp" | "warn"
-                            | "sprintf" | "format" | "caller" | "at_exit"
-                            | "require" | "require_relative" | "load" | "system"
-                            | "raise" | "fail"
+                        if matches!(
+                            &*old_name_rc,
+                            "sleep"
+                                | "rand"
+                                | "srand"
+                                | "exit"
+                                | "exit!"
+                                | "abort"
+                                | "puts"
+                                | "print"
+                                | "p"
+                                | "pp"
+                                | "warn"
+                                | "sprintf"
+                                | "format"
+                                | "caller"
+                                | "at_exit"
+                                | "require"
+                                | "require_relative"
+                                | "load"
+                                | "system"
+                                | "raise"
+                                | "fail"
                         ) {
                             let synth = self.synth_kernel_forwarder(target, old_id);
                             target.methods.borrow_mut().insert(new_id, synth);
@@ -11177,8 +11922,13 @@ impl Vm {
                                 std::collections::HashSet::new();
                             let mut walker = Some(target.clone());
                             while let Some(c) = walker {
-                                if !visited.insert(Rc::as_ptr(&c)) { break; }
-                                if self.primitive_class_responds_to(&c.name, old_id) { hit = true; break; }
+                                if !visited.insert(Rc::as_ptr(&c)) {
+                                    break;
+                                }
+                                if self.primitive_class_responds_to(&c.name, old_id) {
+                                    hit = true;
+                                    break;
+                                }
                                 walker = c.superclass.borrow().clone();
                             }
                             hit
@@ -11210,21 +11960,22 @@ impl Vm {
         if let Value::Class(module) = &recv
             && matches!(&*name, "append_features" | "prepend_features")
             && args.len() == 1
-            && let Value::Class(base) = &args[0] {
-                let is_prep = &*name == "prepend_features";
-                if !super::class_reaches_via_chain(base, module, is_prep) {
-                    if is_prep {
-                        base.prepends.borrow_mut().insert(0, module.clone());
-                    } else {
-                        base.includes.borrow_mut().insert(0, module.clone());
-                    }
-                    self.bump_const_gen();
+            && let Value::Class(base) = &args[0]
+        {
+            let is_prep = &*name == "prepend_features";
+            if !super::class_reaches_via_chain(base, module, is_prep) {
+                if is_prep {
+                    base.prepends.borrow_mut().insert(0, module.clone());
+                } else {
+                    base.includes.borrow_mut().insert(0, module.clone());
                 }
-                self.method_gen = self.method_gen.wrapping_add(1);
-                // CRuby's append_features returns the module (self).
-                self.stack.push(recv.clone());
-                return Ok(());
+                self.bump_const_gen();
             }
+            self.method_gen = self.method_gen.wrapping_add(1);
+            // CRuby's append_features returns the module (self).
+            self.stack.push(recv.clone());
+            return Ok(());
+        }
         // Native `Module#extend_object(obj)`: the insert primitive that
         // `extend` dispatches into — add `self`'s instance methods to `obj`'s
         // singleton. A module that overrides it (Mutex_m's `extend_object`
@@ -11233,222 +11984,250 @@ impl Vm {
         // plain object (its eigenclass `includes`).
         if let Value::Class(module) = &recv
             && &*name == "extend_object"
-            && args.len() == 1 {
-                match &args[0] {
-                    Value::Class(obj) => {
-                        let dup = obj.singleton_includes.borrow().iter().any(|m| Rc::ptr_eq(m, module));
-                        if !dup {
-                            obj.singleton_includes.borrow_mut().insert(0, module.clone());
-                            self.bump_const_gen();
-                        }
-                    }
-                    Value::Object(id) => {
-                        let sc = self.heap.ensure_singleton_class(*id);
-                        if !super::class_is_a(&sc, module) {
-                            sc.includes.borrow_mut().insert(0, module.clone());
-                            self.bump_const_gen();
-                        }
-                    }
-                    _ => {}
-                }
-                self.method_gen = self.method_gen.wrapping_add(1);
-                // CRuby's extend_object returns the extended object.
-                self.stack.push(args[0].clone());
-                return Ok(());
-            }
-        if let Value::Class(target) = &recv
-            && matches!(&*name, "include" | "extend" | "prepend") && !args.is_empty() {
-                // Explicit-receiver form: `MyClass.include(Mod)` /
-                // `.prepend(Mod)`. Same chain-push semantics as the
-                // no-receiver form above — see that comment for the
-                // rationale and the prepend-vs-include split. The
-                // `Module.included` / `Module.prepended` hooks fire
-                // here too, mirroring the no-receiver path.
-                let is_prepend = &*name == "prepend";
-                let is_include = &*name == "include";
-                let target_cls = target.clone();
-                let mut fire_hooks: Vec<std::rc::Rc<crate::value::Class>> = Vec::new();
-                // Same right-to-left iteration as the no-receiver
-                // arm — see that comment for rationale. All three
-                // keywords (include / prepend / extend) reverse.
-                let reverse_args = is_prepend || is_include || (&*name == "extend");
-                let n_args = args.len();
-                for idx in 0..n_args {
-                    let a = if reverse_args { &args[n_args - 1 - idx] } else { &args[idx] };
-                    let src = match a {
-                        Value::Class(c) => c.clone(),
-                        _ => return Err(self.trap(RubyError::TypeError {
-                            msg: format!(
-                                "wrong argument type {} (expected Module)",
-                                a.type_name(),
-                            ),
-                        })),
-                    };
-                    // Per-chain transitive idempotency, same as the
-                    // no-receiver arm — see that comment for the
-                    // include-vs-prepend coexistence rationale and
-                    // the extend-keeps-class_is_a gate.
-                    //
-                    // `Klass.extend(M)` is CRuby-equivalent to
-                    // `class << Klass; include M; end`: M's instance
-                    // methods become class-level methods, NOT
-                    // instance methods of Klass. So extend writes to
-                    // `singleton_includes` (a separate chain walked
-                    // by `lookup_class_singleton_method`), while
-                    // include/prepend still write to the class's own
-                    // includes/prepends chain (which lookup uses for
-                    // instance method dispatch). Pre-fix, extend was
-                    // pushing into `includes` here — instances of
-                    // Klass picked up M's methods, but `Klass.foo`
-                    // did NOT (the singleton-lookup walk doesn't
-                    // consult the instance-method chain). Surfaced
-                    // by sinatra-contrib/MultiRoute's `register
-                    // MultiRoute` shape, where the gem expects
-                    // `Klass.get` to resolve to MultiRoute's override.
-                    let is_extend = !is_include && !is_prepend;
-                    // Route through a user `append_features`/`prepend_features`
-                    // override (ActiveSupport::Concern) — same as the
-                    // no-receiver path in do_module_inclusion. Needed for
-                    // nested Concern dependencies, where Concern's own
-                    // append_features does `base.include(dep)` (this
-                    // explicit-receiver form) for each dependency.
-                    let feature_override = if !is_extend {
-                        let fs = self.interner.intern(
-                            if is_prepend { "prepend_features" } else { "append_features" },
-                        );
-                        self.lookup_class_singleton_method(&src, fs)
-                    } else {
-                        // `extend` routes through an overridden `extend_object`
-                        // (Mutex_m runs `super; obj.mu_extended`); its super
-                        // force-dispatches the native extend_object arm.
-                        let eo = self.interner.intern("extend_object");
-                        self.lookup_class_singleton_method(&src, eo)
-                    };
-                    if let Some(m) = feature_override {
-                        self.call_resolved_method(
-                            m,
-                            Value::Class(src.clone()),
-                            vec![Value::Class(target_cls.clone())],
-                        )?;
-                        fire_hooks.push(src);
-                        continue;
-                    }
-                    let already_reachable = if is_extend {
-                        target_cls.singleton_includes.borrow().iter().any(|m| Rc::ptr_eq(m, &src))
-                    } else {
-                        super::class_reaches_via_chain(&target_cls, &src, is_prepend)
-                    };
-                    if !already_reachable {
-                        let mut chain = if is_prepend {
-                            target_cls.prepends.borrow_mut()
-                        } else if is_extend {
-                            target_cls.singleton_includes.borrow_mut()
-                        } else {
-                            target_cls.includes.borrow_mut()
-                        };
-                        chain.insert(0, src.clone());
-                        drop(chain);
-                        // include/prepend changes the cref-ancestor
-                        // constant walk — invalidate the const ICs.
+            && args.len() == 1
+        {
+            match &args[0] {
+                Value::Class(obj) => {
+                    let dup = obj
+                        .singleton_includes
+                        .borrow()
+                        .iter()
+                        .any(|m| Rc::ptr_eq(m, module));
+                    if !dup {
+                        obj.singleton_includes
+                            .borrow_mut()
+                            .insert(0, module.clone());
                         self.bump_const_gen();
                     }
-                    if is_extend {
-                        // Force a method-cache generation bump so any
-                        // call site that previously NoMethodError'd
-                        // on this class re-resolves and finds the
-                        // newly-extended module's methods.
-                        self.method_gen = self.method_gen.wrapping_add(1);
-                    }
-                    // Hook fires on every call — see no-recv arm
-                    // for rationale. Extend's hook is `extended`.
-                    fire_hooks.push(src);
                 }
-                self.method_gen = self.method_gen.wrapping_add(1);
-                let hook_name = if is_prepend {
-                    "prepended"
-                } else if is_include {
-                    "included"
-                } else {
-                    "extended"
-                };
-                self.fire_inclusion_hooks(&fire_hooks, &Value::Class(target_cls), hook_name)?;
-                self.stack.push(recv.clone());
-                return Ok(());
+                Value::Object(id) => {
+                    let sc = self.heap.ensure_singleton_class(*id);
+                    if !super::class_is_a(&sc, module) {
+                        sc.includes.borrow_mut().insert(0, module.clone());
+                        self.bump_const_gen();
+                    }
+                }
+                _ => {}
             }
+            self.method_gen = self.method_gen.wrapping_add(1);
+            // CRuby's extend_object returns the extended object.
+            self.stack.push(args[0].clone());
+            return Ok(());
+        }
+        if let Value::Class(target) = &recv
+            && matches!(&*name, "include" | "extend" | "prepend")
+            && !args.is_empty()
+        {
+            // Explicit-receiver form: `MyClass.include(Mod)` /
+            // `.prepend(Mod)`. Same chain-push semantics as the
+            // no-receiver form above — see that comment for the
+            // rationale and the prepend-vs-include split. The
+            // `Module.included` / `Module.prepended` hooks fire
+            // here too, mirroring the no-receiver path.
+            let is_prepend = &*name == "prepend";
+            let is_include = &*name == "include";
+            let target_cls = target.clone();
+            let mut fire_hooks: Vec<std::rc::Rc<crate::value::Class>> = Vec::new();
+            // Same right-to-left iteration as the no-receiver
+            // arm — see that comment for rationale. All three
+            // keywords (include / prepend / extend) reverse.
+            let reverse_args = is_prepend || is_include || (&*name == "extend");
+            let n_args = args.len();
+            for idx in 0..n_args {
+                let a = if reverse_args {
+                    &args[n_args - 1 - idx]
+                } else {
+                    &args[idx]
+                };
+                let src =
+                    match a {
+                        Value::Class(c) => c.clone(),
+                        _ => {
+                            return Err(self.trap(RubyError::TypeError {
+                                msg: format!(
+                                    "wrong argument type {} (expected Module)",
+                                    a.type_name(),
+                                ),
+                            }));
+                        }
+                    };
+                // Per-chain transitive idempotency, same as the
+                // no-receiver arm — see that comment for the
+                // include-vs-prepend coexistence rationale and
+                // the extend-keeps-class_is_a gate.
+                //
+                // `Klass.extend(M)` is CRuby-equivalent to
+                // `class << Klass; include M; end`: M's instance
+                // methods become class-level methods, NOT
+                // instance methods of Klass. So extend writes to
+                // `singleton_includes` (a separate chain walked
+                // by `lookup_class_singleton_method`), while
+                // include/prepend still write to the class's own
+                // includes/prepends chain (which lookup uses for
+                // instance method dispatch). Pre-fix, extend was
+                // pushing into `includes` here — instances of
+                // Klass picked up M's methods, but `Klass.foo`
+                // did NOT (the singleton-lookup walk doesn't
+                // consult the instance-method chain). Surfaced
+                // by sinatra-contrib/MultiRoute's `register
+                // MultiRoute` shape, where the gem expects
+                // `Klass.get` to resolve to MultiRoute's override.
+                let is_extend = !is_include && !is_prepend;
+                // Route through a user `append_features`/`prepend_features`
+                // override (ActiveSupport::Concern) — same as the
+                // no-receiver path in do_module_inclusion. Needed for
+                // nested Concern dependencies, where Concern's own
+                // append_features does `base.include(dep)` (this
+                // explicit-receiver form) for each dependency.
+                let feature_override = if !is_extend {
+                    let fs = self.interner.intern(if is_prepend {
+                        "prepend_features"
+                    } else {
+                        "append_features"
+                    });
+                    self.lookup_class_singleton_method(&src, fs)
+                } else {
+                    // `extend` routes through an overridden `extend_object`
+                    // (Mutex_m runs `super; obj.mu_extended`); its super
+                    // force-dispatches the native extend_object arm.
+                    let eo = self.interner.intern("extend_object");
+                    self.lookup_class_singleton_method(&src, eo)
+                };
+                if let Some(m) = feature_override {
+                    self.call_resolved_method(
+                        m,
+                        Value::Class(src.clone()),
+                        vec![Value::Class(target_cls.clone())],
+                    )?;
+                    fire_hooks.push(src);
+                    continue;
+                }
+                let already_reachable = if is_extend {
+                    target_cls
+                        .singleton_includes
+                        .borrow()
+                        .iter()
+                        .any(|m| Rc::ptr_eq(m, &src))
+                } else {
+                    super::class_reaches_via_chain(&target_cls, &src, is_prepend)
+                };
+                if !already_reachable {
+                    let mut chain = if is_prepend {
+                        target_cls.prepends.borrow_mut()
+                    } else if is_extend {
+                        target_cls.singleton_includes.borrow_mut()
+                    } else {
+                        target_cls.includes.borrow_mut()
+                    };
+                    chain.insert(0, src.clone());
+                    drop(chain);
+                    // include/prepend changes the cref-ancestor
+                    // constant walk — invalidate the const ICs.
+                    self.bump_const_gen();
+                }
+                if is_extend {
+                    // Force a method-cache generation bump so any
+                    // call site that previously NoMethodError'd
+                    // on this class re-resolves and finds the
+                    // newly-extended module's methods.
+                    self.method_gen = self.method_gen.wrapping_add(1);
+                }
+                // Hook fires on every call — see no-recv arm
+                // for rationale. Extend's hook is `extended`.
+                fire_hooks.push(src);
+            }
+            self.method_gen = self.method_gen.wrapping_add(1);
+            let hook_name = if is_prepend {
+                "prepended"
+            } else if is_include {
+                "included"
+            } else {
+                "extended"
+            };
+            self.fire_inclusion_hooks(&fire_hooks, &Value::Class(target_cls), hook_name)?;
+            self.stack.push(recv.clone());
+            return Ok(());
+        }
         // Universal class predicates: `is_a?` / `kind_of?` walk
         // the ancestor chain (own class + includes + superclass);
         // `instance_of?` is exact-class only. CRuby exposes both
         // on `Object`, so they apply to every receiver — for
         // primitives (Int / Str / Sym / ...) we resolve their
         // class via `class_of`.
-        if matches!(&*name, "is_a?" | "kind_of?" | "instance_of?") && args.len() == 1
-            && let Value::Class(target) = &args[0] {
-                // Class/Module receiver + module target: a CLASS
-                // OBJECT is kind_of? every module `extend`ed into
-                // its metaclass tower — walk singleton_includes up
-                // the superclass chain (extend inherits: Kid's
-                // metaclass superclass is Base's metaclass).
-                // minitest Spec.describe gates on
-                // `kind_of?(Minitest::Spec::DSL)` with self = a
-                // describe-created Spec subclass.
-                if &*name != "instance_of?"
-                    && target.is_module
-                    && let Value::Class(rc) = &recv
-                {
-                    let mut visited: std::collections::HashSet<*const crate::value::Class> =
-                        std::collections::HashSet::new();
-                    let mut walker = Some(rc.clone());
-                    let mut hit = false;
-                    'outer: while let Some(c) = walker {
-                        if !visited.insert(Rc::as_ptr(&c)) { break; }
-                        for inc in c.singleton_includes.borrow().iter() {
-                            if Rc::ptr_eq(inc, target) || super::class_is_a(inc, target) {
-                                hit = true;
-                                break 'outer;
-                            }
+        if matches!(&*name, "is_a?" | "kind_of?" | "instance_of?")
+            && args.len() == 1
+            && let Value::Class(target) = &args[0]
+        {
+            // Class/Module receiver + module target: a CLASS
+            // OBJECT is kind_of? every module `extend`ed into
+            // its metaclass tower — walk singleton_includes up
+            // the superclass chain (extend inherits: Kid's
+            // metaclass superclass is Base's metaclass).
+            // minitest Spec.describe gates on
+            // `kind_of?(Minitest::Spec::DSL)` with self = a
+            // describe-created Spec subclass.
+            if &*name != "instance_of?"
+                && target.is_module
+                && let Value::Class(rc) = &recv
+            {
+                let mut visited: std::collections::HashSet<*const crate::value::Class> =
+                    std::collections::HashSet::new();
+                let mut walker = Some(rc.clone());
+                let mut hit = false;
+                'outer: while let Some(c) = walker {
+                    if !visited.insert(Rc::as_ptr(&c)) {
+                        break;
+                    }
+                    for inc in c.singleton_includes.borrow().iter() {
+                        if Rc::ptr_eq(inc, target) || super::class_is_a(inc, target) {
+                            hit = true;
+                            break 'outer;
                         }
-                        walker = c.superclass.borrow().clone();
                     }
-                    if hit {
-                        self.stack.push(Value::Bool(true));
-                        return Ok(());
-                    }
+                    walker = c.superclass.borrow().clone();
                 }
-                let recv_class_v = self.class_of(&recv);
-                let recv_class = if let Value::Class(c) = recv_class_v { c } else {
-                    self.stack.push(Value::Bool(false));
+                if hit {
+                    self.stack.push(Value::Bool(true));
                     return Ok(());
-                };
-                let result = if &*name == "instance_of?" {
-                    // Strict: the REAL class only — `extend`ed modules and
-                    // subclasses don't count for instance_of?.
-                    Rc::ptr_eq(&recv_class, target)
-                } else {
-                    // is_a?/kind_of?: walk the SINGLETON-aware class so a module
-                    // `extend`ed into the object's eigenclass is found. The
-                    // eigenclass's superclass is the real class, so the regular
-                    // ancestry stays covered. (`Vm::class_of` returns the REAL
-                    // class for `obj.class`, hiding the eigenclass — so
-                    // `obj.extend(M); obj.is_a?(M)` was false.)
-                    let walk_class = match &recv {
-                        Value::Object(id) => self.heap.class_of(*id),
-                        // A String `extend`ed with M has its eigenclass (with M
-                        // in `includes`) in the str_singletons side-table; walk
-                        // it so `s.extend(M); s.is_a?(M)` is true.
-                        Value::Str(s) => {
-                            let key = std::rc::Rc::as_ptr(s) as usize;
-                            self.str_singletons
-                                .get(&key)
-                                .map(|(_, sc)| sc.clone())
-                                .unwrap_or_else(|| recv_class.clone())
-                        }
-                        _ => recv_class.clone(),
-                    };
-                    self.class_is_a_cached(&walk_class, target)
-                };
-                self.stack.push(Value::Bool(result));
-                return Ok(());
+                }
             }
+            let recv_class_v = self.class_of(&recv);
+            let recv_class = if let Value::Class(c) = recv_class_v {
+                c
+            } else {
+                self.stack.push(Value::Bool(false));
+                return Ok(());
+            };
+            let result = if &*name == "instance_of?" {
+                // Strict: the REAL class only — `extend`ed modules and
+                // subclasses don't count for instance_of?.
+                Rc::ptr_eq(&recv_class, target)
+            } else {
+                // is_a?/kind_of?: walk the SINGLETON-aware class so a module
+                // `extend`ed into the object's eigenclass is found. The
+                // eigenclass's superclass is the real class, so the regular
+                // ancestry stays covered. (`Vm::class_of` returns the REAL
+                // class for `obj.class`, hiding the eigenclass — so
+                // `obj.extend(M); obj.is_a?(M)` was false.)
+                let walk_class = match &recv {
+                    Value::Object(id) => self.heap.class_of(*id),
+                    // A String `extend`ed with M has its eigenclass (with M
+                    // in `includes`) in the str_singletons side-table; walk
+                    // it so `s.extend(M); s.is_a?(M)` is true.
+                    Value::Str(s) => {
+                        let key = std::rc::Rc::as_ptr(s) as usize;
+                        self.str_singletons
+                            .get(&key)
+                            .map(|(_, sc)| sc.clone())
+                            .unwrap_or_else(|| recv_class.clone())
+                    }
+                    _ => recv_class.clone(),
+                };
+                self.class_is_a_cached(&walk_class, target)
+            };
+            self.stack.push(Value::Bool(result));
+            return Ok(());
+        }
         // Class-receiver introspection cluster (the second
         // Class cluster from #192 commit 4 — deferred to its
         // own helper). Returns true when an arm matched and
@@ -11513,8 +12292,10 @@ impl Vm {
         // Array (the subset doesn't expose Kernel-level methods
         // individually). De-dups by SymId, sorted by interner
         // string order for determinism.
-        if matches!(&*name, "methods" | "public_methods" | "private_methods" | "protected_methods")
-            && (args.is_empty() || args.len() == 1)
+        if matches!(
+            &*name,
+            "methods" | "public_methods" | "private_methods" | "protected_methods"
+        ) && (args.is_empty() || args.len() == 1)
         {
             use crate::value::Visibility;
             // Optional `regular` boolean (`methods(false)`): CRuby returns
@@ -11544,14 +12325,18 @@ impl Vm {
                     recurse: bool,
                 ) {
                     let ptr = std::rc::Rc::as_ptr(c);
-                    if visited.contains(&ptr) { return; }
+                    if visited.contains(&ptr) {
+                        return;
+                    }
                     visited.push(ptr);
                     for (k, m) in c.methods.borrow().iter() {
                         if !out.iter().any(|(s, _)| s == k) {
                             out.push((*k, m.visibility.get()));
                         }
                     }
-                    if !recurse { return; }
+                    if !recurse {
+                        return;
+                    }
                     for inc in c.includes.borrow().iter() {
                         walk(inc, out, visited, recurse);
                     }
@@ -11561,11 +12346,11 @@ impl Vm {
                 }
                 walk(&cls, &mut pairs, &mut visited, include_inherited);
                 for (sid, vis) in pairs {
-                    if pred(vis) { names.push(sid); }
+                    if pred(vis) {
+                        names.push(sid);
+                    }
                 }
-                names.sort_by(|a, b| {
-                    self.interner.resolve(*a).cmp(self.interner.resolve(*b))
-                });
+                names.sort_by(|a, b| self.interner.resolve(*a).cmp(self.interner.resolve(*b)));
             } else if matches!(&*name, "methods" | "public_methods") {
                 // Class receiver — class-method (singleton) chain.
                 // Singleton methods DO carry per-entry visibility
@@ -11577,53 +12362,59 @@ impl Vm {
                 // `protected_methods` have no class-method surface
                 // and fall through to an empty Array.
                 if let Value::Class(cls) = &recv {
-                // Walk a prepended module's transitive includes /
-                // prepends — same shape as `walk_module` in
-                // lookup.rs, but collects method names rather
-                // than searching for one.
-                fn walk_mod(
-                    m: &std::rc::Rc<crate::value::Class>,
-                    out: &mut Vec<crate::intern::SymId>,
-                    visited: &mut Vec<*const crate::value::Class>,
-                ) {
-                    let ptr = std::rc::Rc::as_ptr(m);
-                    if visited.contains(&ptr) { return; }
-                    visited.push(ptr);
-                    for pre in m.prepends.borrow().iter() {
-                        walk_mod(pre, out, visited);
-                    }
-                    for k in m.methods.borrow().keys() {
-                        if !out.contains(k) { out.push(*k); }
-                    }
-                    for inc in m.includes.borrow().iter() {
-                        walk_mod(inc, out, visited);
-                    }
-                }
-                let mut sc_visited: Vec<*const crate::value::Class> = Vec::new();
-                let mut mod_visited: Vec<*const crate::value::Class> = Vec::new();
-                let mut current = cls.clone();
-                loop {
-                    let ptr = std::rc::Rc::as_ptr(&current);
-                    if sc_visited.contains(&ptr) { break; }
-                    sc_visited.push(ptr);
-                    for pre in current.singleton_prepends.borrow().iter() {
-                        walk_mod(pre, &mut names, &mut mod_visited);
-                    }
-                    for (k, m) in current.singleton_methods.borrow().iter() {
-                        if pred(m.visibility.get()) && !names.contains(k) {
-                            names.push(*k);
+                    // Walk a prepended module's transitive includes /
+                    // prepends — same shape as `walk_module` in
+                    // lookup.rs, but collects method names rather
+                    // than searching for one.
+                    fn walk_mod(
+                        m: &std::rc::Rc<crate::value::Class>,
+                        out: &mut Vec<crate::intern::SymId>,
+                        visited: &mut Vec<*const crate::value::Class>,
+                    ) {
+                        let ptr = std::rc::Rc::as_ptr(m);
+                        if visited.contains(&ptr) {
+                            return;
+                        }
+                        visited.push(ptr);
+                        for pre in m.prepends.borrow().iter() {
+                            walk_mod(pre, out, visited);
+                        }
+                        for k in m.methods.borrow().keys() {
+                            if !out.contains(k) {
+                                out.push(*k);
+                            }
+                        }
+                        for inc in m.includes.borrow().iter() {
+                            walk_mod(inc, out, visited);
                         }
                     }
-                    if !include_inherited { break; }
-                    let parent = current.superclass.borrow().clone();
-                    match parent {
-                        Some(p) => current = p,
-                        None => break,
+                    let mut sc_visited: Vec<*const crate::value::Class> = Vec::new();
+                    let mut mod_visited: Vec<*const crate::value::Class> = Vec::new();
+                    let mut current = cls.clone();
+                    loop {
+                        let ptr = std::rc::Rc::as_ptr(&current);
+                        if sc_visited.contains(&ptr) {
+                            break;
+                        }
+                        sc_visited.push(ptr);
+                        for pre in current.singleton_prepends.borrow().iter() {
+                            walk_mod(pre, &mut names, &mut mod_visited);
+                        }
+                        for (k, m) in current.singleton_methods.borrow().iter() {
+                            if pred(m.visibility.get()) && !names.contains(k) {
+                                names.push(*k);
+                            }
+                        }
+                        if !include_inherited {
+                            break;
+                        }
+                        let parent = current.superclass.borrow().clone();
+                        match parent {
+                            Some(p) => current = p,
+                            None => break,
+                        }
                     }
-                }
-                names.sort_by(|a, b| {
-                    self.interner.resolve(*a).cmp(self.interner.resolve(*b))
-                });
+                    names.sort_by(|a, b| self.interner.resolve(*a).cmp(self.interner.resolve(*b)));
                 }
             }
             let elems: Vec<Value> = names.into_iter().map(Value::Sym).collect();
@@ -11656,7 +12447,9 @@ impl Vm {
                         // Methods installed via `def obj.foo` /
                         // define_singleton_method land here directly.
                         for k in sc.methods.borrow().keys() {
-                            if !names.contains(k) { names.push(*k); }
+                            if !names.contains(k) {
+                                names.push(*k);
+                            }
                         }
                         // Modules brought in via `obj.extend(M)` live
                         // on the eigenclass's `includes` chain; CRuby
@@ -11674,10 +12467,14 @@ impl Vm {
                             for chain in [c.includes.borrow(), c.prepends.borrow()] {
                                 for m in chain.iter() {
                                     let ptr = std::rc::Rc::as_ptr(m);
-                                    if visited.contains(&ptr) { continue; }
+                                    if visited.contains(&ptr) {
+                                        continue;
+                                    }
                                     visited.push(ptr);
                                     for k in m.methods.borrow().keys() {
-                                        if !out.contains(k) { out.push(*k); }
+                                        if !out.contains(k) {
+                                            out.push(*k);
+                                        }
                                     }
                                     walk_chain(m, out, visited);
                                 }
@@ -11689,14 +12486,14 @@ impl Vm {
                 }
                 Value::Class(cls) => {
                     for k in cls.singleton_methods.borrow().keys() {
-                        if !names.contains(k) { names.push(*k); }
+                        if !names.contains(k) {
+                            names.push(*k);
+                        }
                     }
                 }
                 _ => {}
             }
-            names.sort_by(|a, b| {
-                self.interner.resolve(*a).cmp(self.interner.resolve(*b))
-            });
+            names.sort_by(|a, b| self.interner.resolve(*a).cmp(self.interner.resolve(*b)));
             let elems: Vec<Value> = names.into_iter().map(Value::Sym).collect();
             self.maybe_gc();
             self.check_alloc()?;
@@ -11738,7 +12535,10 @@ impl Vm {
                             let mut c = Some(inst.class.clone());
                             let mut hit = false;
                             while let Some(k) = c {
-                                if k.name == "Exception" { hit = true; break; }
+                                if k.name == "Exception" {
+                                    hit = true;
+                                    break;
+                                }
                                 let next = k.superclass.borrow().clone();
                                 c = next;
                             }
@@ -11747,7 +12547,9 @@ impl Vm {
                         if is_exception {
                             let msg_id = self.interner.intern("@message");
                             let bt_id = self.interner.intern("@backtrace");
-                            inst.ivars.keys().copied()
+                            inst.ivars
+                                .keys()
+                                .copied()
                                 .filter(|k| *k != msg_id && *k != bt_id)
                                 .collect()
                         } else {
@@ -11760,18 +12562,25 @@ impl Vm {
                 Value::Class(cls) => cls.ivars.borrow().keys().copied().collect(),
                 Value::Str(s) => {
                     let key = std::rc::Rc::as_ptr(s) as usize;
-                    self.str_ivars.get(&key).map_or_else(Vec::new, |(_, m)| m.keys().copied().collect())
+                    self.str_ivars
+                        .get(&key)
+                        .map_or_else(Vec::new, |(_, m)| m.keys().copied().collect())
                 }
                 _ => Vec::new(),
             };
             if !ivar_ids.is_empty() {
-                let mut decorated: Vec<(String, crate::intern::SymId)> = ivar_ids.into_iter()
+                let mut decorated: Vec<(String, crate::intern::SymId)> = ivar_ids
+                    .into_iter()
                     .map(|s| {
                         let raw = self.interner.resolve(s).to_string();
                         // Internal interner key includes the `@`
                         // prefix already (matches how parser interns
                         // ivar names). If not, prepend.
-                        let key = if raw.starts_with('@') { raw } else { format!("@{}", raw) };
+                        let key = if raw.starts_with('@') {
+                            raw
+                        } else {
+                            format!("@{}", raw)
+                        };
                         (key, s)
                     })
                     .collect();
@@ -11828,7 +12637,8 @@ impl Vm {
         // Discovery: Sinatra dups its app prototype per request;
         // user-defined `dup` overrides win via the class-method
         // lookup that fires above this universal fallback.
-        if &*name == "dup" && args.is_empty()
+        if &*name == "dup"
+            && args.is_empty()
             && let Value::Object(oid) = &recv
             && let crate::heap::HeapObj::Instance(inst) = self.heap.get(*oid)
         {
@@ -11838,12 +12648,14 @@ impl Vm {
             g.pin(recv.clone());
             g.vm.maybe_gc();
             g.vm.check_alloc()?;
-            let new_id = g.vm.heap.alloc(crate::heap::HeapObj::Instance(crate::value::Instance {
-                class,
-                ivars,
-                singleton_class: None,
-                frozen: std::cell::Cell::new(false),
-            }));
+            let new_id =
+                g.vm.heap
+                    .alloc(crate::heap::HeapObj::Instance(crate::value::Instance {
+                        class,
+                        ivars,
+                        singleton_class: None,
+                        frozen: std::cell::Cell::new(false),
+                    }));
             drop(g);
             // CRuby `dup` invokes the `initialize_copy` hook (via
             // initialize_dup) AFTER the shallow ivar copy, so a class can
@@ -11884,7 +12696,12 @@ impl Vm {
             }
             match owner {
                 Some(o) => {
-                    let v = o.class_vars.borrow().get(&cv_id).cloned().unwrap_or(Value::Nil);
+                    let v = o
+                        .class_vars
+                        .borrow()
+                        .get(&cv_id)
+                        .cloned()
+                        .unwrap_or(Value::Nil);
                     self.stack.push(v);
                 }
                 None => {
@@ -11896,7 +12713,8 @@ impl Vm {
             }
             return Ok(());
         }
-        if &*name == "class_variable_set" && args.len() == 2
+        if &*name == "class_variable_set"
+            && args.len() == 2
             && let Value::Class(cls) = &recv
         {
             let cls = cls.clone();
@@ -11943,9 +12761,12 @@ impl Vm {
                     }
                     _ => Value::Nil,
                 },
-                Value::Class(cls) => {
-                    cls.ivars.borrow().get(&ivar_id).cloned().unwrap_or(Value::Nil)
-                }
+                Value::Class(cls) => cls
+                    .ivars
+                    .borrow()
+                    .get(&ivar_id)
+                    .cloned()
+                    .unwrap_or(Value::Nil),
                 // Ivars on a String VALUE live in the `str_ivars`
                 // side-table (RStr has no ivar slot). Unset → nil.
                 Value::Str(s) => {
@@ -12063,7 +12884,9 @@ impl Vm {
                 Value::Class(cls) => cls.ivars.borrow_mut().remove(&ivar_id),
                 Value::Str(s) => {
                     let key = std::rc::Rc::as_ptr(s) as usize;
-                    self.str_ivars.get_mut(&key).and_then(|(_, m)| m.remove(&ivar_id))
+                    self.str_ivars
+                        .get_mut(&key)
+                        .and_then(|(_, m)| m.remove(&ivar_id))
                 }
                 _ => None,
             };
@@ -12084,15 +12907,15 @@ impl Vm {
             let ivar_id = self.resolve_ivar_name_arg(&args[0])?;
             let defined = match &recv {
                 Value::Object(oid) => match self.heap.get(*oid) {
-                    crate::heap::HeapObj::Instance(inst) => {
-                        inst.ivars.contains_key(&ivar_id)
-                    }
+                    crate::heap::HeapObj::Instance(inst) => inst.ivars.contains_key(&ivar_id),
                     _ => false,
                 },
                 Value::Class(cls) => cls.ivars.borrow().contains_key(&ivar_id),
                 Value::Str(s) => {
                     let key = std::rc::Rc::as_ptr(s) as usize;
-                    self.str_ivars.get(&key).is_some_and(|(_, m)| m.contains_key(&ivar_id))
+                    self.str_ivars
+                        .get(&key)
+                        .is_some_and(|(_, m)| m.contains_key(&ivar_id))
                 }
                 _ => false,
             };
@@ -12108,22 +12931,34 @@ impl Vm {
         // `_get` / `_defined?` take one; `_set` takes two.
         if &*name == "instance_variables" {
             return Err(self.trap(RubyError::ArgumentError {
-                msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 0)",
+                    args.len()
+                ),
             }));
         }
         if &*name == "instance_variable_get" {
             return Err(self.trap(RubyError::ArgumentError {
-                msg: format!("wrong number of arguments (given {}, expected 1)", args.len()),
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 1)",
+                    args.len()
+                ),
             }));
         }
         if &*name == "instance_variable_set" {
             return Err(self.trap(RubyError::ArgumentError {
-                msg: format!("wrong number of arguments (given {}, expected 2)", args.len()),
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 2)",
+                    args.len()
+                ),
             }));
         }
         if &*name == "instance_variable_defined?" {
             return Err(self.trap(RubyError::ArgumentError {
-                msg: format!("wrong number of arguments (given {}, expected 1)", args.len()),
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 1)",
+                    args.len()
+                ),
             }));
         }
         // `Integer#digits([base])` for Int receivers — LSB-first
@@ -12152,7 +12987,10 @@ impl Vm {
         // bignum the equivalent check in `bigint_primitive` fires
         // before this dispatcher runs, but keep this guard for
         // the no-bignum profile and as defense-in-depth.
-        if let Value::Int(n) = &recv && &*name == "digits" && *n < 0 {
+        if let Value::Int(n) = &recv
+            && &*name == "digits"
+            && *n < 0
+        {
             return Err(self.trap(RubyError::ArgumentError {
                 msg: "out of domain".to_string(),
             }));
@@ -12166,9 +13004,13 @@ impl Vm {
         // BigInt-receiver path through here for the alloc).
         let recv_is_integer = {
             #[cfg(feature = "bignum")]
-            { matches!(&recv, Value::Int(_) | Value::BigInt(_)) }
+            {
+                matches!(&recv, Value::Int(_) | Value::BigInt(_))
+            }
             #[cfg(not(feature = "bignum"))]
-            { matches!(&recv, Value::Int(_)) }
+            {
+                matches!(&recv, Value::Int(_))
+            }
         };
         // Phase C.4.4 — `Integer ** Rational` and `Float ** Rational`.
         // Lives here (not at the Int / Float arms inside numeric.rs /
@@ -12189,10 +13031,9 @@ impl Vm {
             && matches!(&args[0], Value::Rational(_))
         {
             if let Some(k) = integer_valued_exp(&args[0], &self.heap) {
-                let delegated = crate::vm::numeric::numeric_call(
-                    &recv, "**", &[Value::Int(k)], None,
-                )
-                .map_err(|e| self.trap(e))?;
+                let delegated =
+                    crate::vm::numeric::numeric_call(&recv, "**", &[Value::Int(k)], None)
+                        .map_err(|e| self.trap(e))?;
                 if let Some(v) = delegated {
                     self.stack.push(v);
                     return Ok(());
@@ -12272,13 +13113,13 @@ impl Vm {
                                 // Mod call's `bigint_to_value` →
                                 // `maybe_gc` window.
                                 let mut g = PinGuard::new(self);
-                                let q = g.vm.bigint_arith(
-                                    crate::bytecode::BinOpKind::Div, &recv, arg,
-                                ).expect("ICE: bigint_arith None for i64::MIN/-1")?;
+                                let q =
+                                    g.vm.bigint_arith(crate::bytecode::BinOpKind::Div, &recv, arg)
+                                        .expect("ICE: bigint_arith None for i64::MIN/-1")?;
                                 g.pin(q.clone());
-                                let r = g.vm.bigint_arith(
-                                    crate::bytecode::BinOpKind::Mod, &recv, arg,
-                                ).expect("ICE: bigint_arith None for i64::MIN/-1")?;
+                                let r =
+                                    g.vm.bigint_arith(crate::bytecode::BinOpKind::Mod, &recv, arg)
+                                        .expect("ICE: bigint_arith None for i64::MIN/-1")?;
                                 (q, r)
                             } else {
                                 (
@@ -12303,13 +13144,13 @@ impl Vm {
                             // q before r lands.
                             let mut g = PinGuard::new(self);
                             g.pin(recv.clone());
-                            let q = g.vm.bigint_arith(
-                                crate::bytecode::BinOpKind::Div, &recv, arg,
-                            ).expect("ICE: bigint_arith None for BigInt divmod")?;
+                            let q =
+                                g.vm.bigint_arith(crate::bytecode::BinOpKind::Div, &recv, arg)
+                                    .expect("ICE: bigint_arith None for BigInt divmod")?;
                             g.pin(q.clone());
-                            let r = g.vm.bigint_arith(
-                                crate::bytecode::BinOpKind::Mod, &recv, arg,
-                            ).expect("ICE: bigint_arith None for BigInt divmod")?;
+                            let r =
+                                g.vm.bigint_arith(crate::bytecode::BinOpKind::Mod, &recv, arg)
+                                    .expect("ICE: bigint_arith None for BigInt divmod")?;
                             (q, r)
                         }
                         _ => unreachable!("recv is Int or BigInt by outer guard"),
@@ -12345,14 +13186,15 @@ impl Vm {
                     let r_f = crate::vm::numeric::floor_mod_f64(a_f, *b);
                     // CRuby: q is Integer-valued Float for Int.divmod(Float)? No —
                     // for `13.divmod(4.0)` CRuby returns `[3, 1.0]` (Int q, Float r).
-                    let q_int = if q_f.is_finite() && q_f >= (i64::MIN as f64) && q_f < (i64::MAX as f64) {
-                        Value::Int(q_f as i64)
-                    } else {
-                        // q overflows i64 → keep as Float (CRuby would
-                        // promote to BigInt; approximate by Float for
-                        // now matching the fdiv precision tier).
-                        Value::Float(q_f)
-                    };
+                    let q_int =
+                        if q_f.is_finite() && q_f >= (i64::MIN as f64) && q_f < (i64::MAX as f64) {
+                            Value::Int(q_f as i64)
+                        } else {
+                            // q overflows i64 → keep as Float (CRuby would
+                            // promote to BigInt; approximate by Float for
+                            // now matching the fdiv precision tier).
+                            Value::Float(q_f)
+                        };
                     (q_int, Value::Float(r_f))
                 }
                 #[cfg(feature = "bignum")]
@@ -12363,13 +13205,13 @@ impl Vm {
                     let mut g = PinGuard::new(self);
                     g.pin(recv.clone());
                     g.pin(arg.clone());
-                    let q = g.vm.bigint_arith(
-                        crate::bytecode::BinOpKind::Div, &recv, arg,
-                    ).expect("ICE: bigint_arith None for BigInt divmod")?;
+                    let q =
+                        g.vm.bigint_arith(crate::bytecode::BinOpKind::Div, &recv, arg)
+                            .expect("ICE: bigint_arith None for BigInt divmod")?;
                     g.pin(q.clone());
-                    let r = g.vm.bigint_arith(
-                        crate::bytecode::BinOpKind::Mod, &recv, arg,
-                    ).expect("ICE: bigint_arith None for BigInt divmod")?;
+                    let r =
+                        g.vm.bigint_arith(crate::bytecode::BinOpKind::Mod, &recv, arg)
+                            .expect("ICE: bigint_arith None for BigInt divmod")?;
                     (q, r)
                 }
                 _ => {
@@ -12456,10 +13298,7 @@ impl Vm {
                 }
                 let q_f = (a / b).floor();
                 let r_f = crate::vm::numeric::floor_mod_f64(a, b);
-                let q = if q_f.is_finite()
-                    && q_f >= (i64::MIN as f64)
-                    && q_f < (i64::MAX as f64)
-                {
+                let q = if q_f.is_finite() && q_f >= (i64::MIN as f64) && q_f < (i64::MAX as f64) {
                     Value::Int(q_f as i64)
                 } else {
                     Value::Float(q_f)
@@ -12509,8 +13348,9 @@ impl Vm {
                 let g = crate::vm::numeric::gcd_i64(a, b);
                 self.maybe_gc();
                 self.check_alloc()?;
-                let arr_id =
-                    self.heap.alloc(HeapObj::Array(vec![Value::Int(g), Value::Int(l)].into()));
+                let arr_id = self
+                    .heap
+                    .alloc(HeapObj::Array(vec![Value::Int(g), Value::Int(l)].into()));
                 self.stack.push(Value::Array(arr_id));
                 return Ok(());
             }
@@ -12529,13 +13369,16 @@ impl Vm {
         //   - Float.coerce(Numeric)→ [Float,   Float]
         //   - any.coerce(non-Numeric) → TypeError
         //     "<other> can't be coerced into <recv_class>"
-        let recv_is_numeric = matches!(&recv, Value::Int(_) | Value::Float(_))
-            || {
-                #[cfg(feature = "bignum")]
-                { matches!(&recv, Value::BigInt(_)) }
-                #[cfg(not(feature = "bignum"))]
-                { false }
-            };
+        let recv_is_numeric = matches!(&recv, Value::Int(_) | Value::Float(_)) || {
+            #[cfg(feature = "bignum")]
+            {
+                matches!(&recv, Value::BigInt(_))
+            }
+            #[cfg(not(feature = "bignum"))]
+            {
+                false
+            }
+        };
         if recv_is_numeric && &*name == "coerce" {
             if args.len() != 1 {
                 return Err(self.trap(RubyError::ArgumentError {
@@ -12560,20 +13403,18 @@ impl Vm {
             // unchanged).
             let (other_v, self_v) = match (&recv, arg) {
                 (Value::Float(_), Value::Float(_)) => (arg.clone(), recv.clone()),
-                (Value::Float(s), Value::Int(o)) => {
-                    (Value::Float(*o as f64), Value::Float(*s))
-                }
-                (Value::Int(s), Value::Float(_)) => {
-                    (arg.clone(), Value::Float(*s as f64))
-                }
+                (Value::Float(s), Value::Int(o)) => (Value::Float(*o as f64), Value::Float(*s)),
+                (Value::Int(s), Value::Float(_)) => (arg.clone(), Value::Float(*s as f64)),
                 #[cfg(feature = "bignum")]
                 (Value::Float(s), Value::BigInt(id)) => {
-                    let o_f = crate::vm::bignum::bigint_to_f64_sign_preserving(self.heap.bigint(*id));
+                    let o_f =
+                        crate::vm::bignum::bigint_to_f64_sign_preserving(self.heap.bigint(*id));
                     (Value::Float(o_f), Value::Float(*s))
                 }
                 #[cfg(feature = "bignum")]
                 (Value::BigInt(id), Value::Float(_)) => {
-                    let s_f = crate::vm::bignum::bigint_to_f64_sign_preserving(self.heap.bigint(*id));
+                    let s_f =
+                        crate::vm::bignum::bigint_to_f64_sign_preserving(self.heap.bigint(*id));
                     (arg.clone(), Value::Float(s_f))
                 }
                 (Value::Int(_), Value::Int(_)) => (arg.clone(), recv.clone()),
@@ -12606,7 +13447,8 @@ impl Vm {
                 g.pin(self_v.clone());
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                g.vm.heap.alloc(HeapObj::Array(vec![other_v, self_v].into()))
+                g.vm.heap
+                    .alloc(HeapObj::Array(vec![other_v, self_v].into()))
             };
             self.stack.push(Value::Array(arr_id));
             return Ok(());
@@ -12638,7 +13480,8 @@ impl Vm {
                 return Err(self.trap(RubyError::ArgumentError {
                     msg: format!(
                         "wrong number of arguments (given {}, expected {})",
-                        args.len(), expected,
+                        args.len(),
+                        expected,
                     ),
                 }));
             }
@@ -12658,9 +13501,13 @@ impl Vm {
                     Value::Int(_) | Value::Float(_) | Value::Nil | Value::Rational(_)
                 ) || {
                     #[cfg(feature = "bignum")]
-                    { matches!(&args[0], Value::BigInt(_)) }
+                    {
+                        matches!(&args[0], Value::BigInt(_))
+                    }
                     #[cfg(not(feature = "bignum"))]
-                    { false }
+                    {
+                        false
+                    }
                 };
                 if !is_numeric_or_nil {
                     return Err(self.trap(RubyError::TypeError {
@@ -12704,63 +13551,71 @@ impl Vm {
             && (&*name == "to_r" || &*name == "rationalize")
         {
             let f = *f;
-                let max_arity: usize = if &*name == "rationalize" { 1 } else { 0 };
-                if args.len() > max_arity {
-                    let expected = if max_arity == 0 {
-                        "0".to_string()
-                    } else {
-                        format!("0..{}", max_arity)
-                    };
-                    return Err(self.trap(RubyError::ArgumentError {
+            let max_arity: usize = if &*name == "rationalize" { 1 } else { 0 };
+            if args.len() > max_arity {
+                let expected = if max_arity == 0 {
+                    "0".to_string()
+                } else {
+                    format!("0..{}", max_arity)
+                };
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected {})",
+                        args.len(),
+                        expected,
+                    ),
+                }));
+            }
+            if !f.is_finite() {
+                return Err(self.trap(RubyError::FloatDomainError {
+                    msg: crate::vm::numeric::float_domain_label(f).to_string(),
+                }));
+            }
+            // eps type-check (rationalize only). Numeric required
+            // — nil is REJECTED (CRuby's `Float#rationalize(nil)`
+            // raises NoMethodError 'undefined method abs for nil';
+            // we surface the cleaner TypeError shape).
+            let eps_value: Option<&Value> = if &*name == "rationalize" && args.len() == 1 {
+                let is_numeric = matches!(
+                    &args[0],
+                    Value::Int(_) | Value::Float(_) | Value::Rational(_)
+                ) || {
+                    #[cfg(feature = "bignum")]
+                    {
+                        matches!(&args[0], Value::BigInt(_))
+                    }
+                    #[cfg(not(feature = "bignum"))]
+                    {
+                        false
+                    }
+                };
+                if !is_numeric {
+                    return Err(self.trap(RubyError::TypeError {
                         msg: format!(
-                            "wrong number of arguments (given {}, expected {})",
-                            args.len(), expected,
+                            "{} can't be coerced into Float",
+                            crate::vm::numeric::type_name_for_coerce(&args[0]),
                         ),
                     }));
                 }
-                if !f.is_finite() {
-                    return Err(self.trap(RubyError::FloatDomainError {
-                        msg: crate::vm::numeric::float_domain_label(f).to_string(),
-                    }));
-                }
-                // eps type-check (rationalize only). Numeric required
-                // — nil is REJECTED (CRuby's `Float#rationalize(nil)`
-                // raises NoMethodError 'undefined method abs for nil';
-                // we surface the cleaner TypeError shape).
-                let eps_value: Option<&Value> = if &*name == "rationalize" && args.len() == 1 {
-                    let is_numeric = matches!(
-                        &args[0],
-                        Value::Int(_) | Value::Float(_) | Value::Rational(_)
-                    ) || {
-                        #[cfg(feature = "bignum")]
-                        { matches!(&args[0], Value::BigInt(_)) }
-                        #[cfg(not(feature = "bignum"))]
-                        { false }
-                    };
-                    if !is_numeric {
-                        return Err(self.trap(RubyError::TypeError {
-                            msg: format!(
-                                "{} can't be coerced into Float",
-                                crate::vm::numeric::type_name_for_coerce(&args[0]),
-                            ),
-                        }));
-                    }
-                    Some(&args[0])
-                } else {
-                    None
-                };
-                let mode = if &*name == "to_r" {
-                    FloatToRationalMode::Lossless
-                } else if let Some(eps_v) = eps_value {
-                    FloatToRationalMode::EpsArg(eps_v.clone())
-                } else {
-                    FloatToRationalMode::DefaultUlp
-                };
-                let v = self.float_to_rational_value(f, mode)?;
-                self.stack.push(v);
-                return Ok(());
+                Some(&args[0])
+            } else {
+                None
+            };
+            let mode = if &*name == "to_r" {
+                FloatToRationalMode::Lossless
+            } else if let Some(eps_v) = eps_value {
+                FloatToRationalMode::EpsArg(eps_v.clone())
+            } else {
+                FloatToRationalMode::DefaultUlp
+            };
+            let v = self.float_to_rational_value(f, mode)?;
+            self.stack.push(v);
+            return Ok(());
         }
-        if let Value::Int(_) = &recv && &*name == "digits" && args.len() > 1 {
+        if let Value::Int(_) = &recv
+            && &*name == "digits"
+            && args.len() > 1
+        {
             return Err(self.trap(RubyError::ArgumentError {
                 msg: format!(
                     "wrong number of arguments (given {}, expected 0..1)",
@@ -12768,7 +13623,10 @@ impl Vm {
                 ),
             }));
         }
-        if let Value::Int(n) = &recv && &*name == "digits" && args.len() <= 1 {
+        if let Value::Int(n) = &recv
+            && &*name == "digits"
+            && args.len() <= 1
+        {
             let base: i64 = match args.first() {
                 None => 10,
                 Some(Value::Int(b)) => *b,
@@ -12798,17 +13656,19 @@ impl Vm {
                     self.stack.push(Value::Array(id));
                     return Ok(());
                 }
-                Some(other) => return Err(self.trap(RubyError::TypeError {
-                    // Share the same class-name helper as the
-                    // BigInt-receiver path in `Vm::try_integer_digits`
-                    // so cross-profile error text agrees ("nil",
-                    // "true", "false" vs `Value::type_name`'s
-                    // "NilClass", "Boolean").
-                    msg: format!(
-                        "no implicit conversion of {} into Integer",
-                        crate::vm::numeric::type_name_for_coerce(other),
-                    ),
-                })),
+                Some(other) => {
+                    return Err(self.trap(RubyError::TypeError {
+                        // Share the same class-name helper as the
+                        // BigInt-receiver path in `Vm::try_integer_digits`
+                        // so cross-profile error text agrees ("nil",
+                        // "true", "false" vs `Value::type_name`'s
+                        // "NilClass", "Boolean").
+                        msg: format!(
+                            "no implicit conversion of {} into Integer",
+                            crate::vm::numeric::type_name_for_coerce(other),
+                        ),
+                    }));
+                }
             };
             if base < 0 {
                 return Err(self.trap(RubyError::ArgumentError {
@@ -12916,7 +13776,11 @@ impl Vm {
         // Universal `respond_to?(:eql?)` already returns true via
         // the universal whitelist.
         if &*name == "eql?"
-            && !matches!(&recv, Value::Rational(_) | Value::BoundMethod(_) | Value::UnboundMethod(_)) {
+            && !matches!(
+                &recv,
+                Value::Rational(_) | Value::BoundMethod(_) | Value::UnboundMethod(_)
+            )
+        {
             // Arity guard fires regardless of receiver — CRuby
             // raises ArgumentError before doing any per-type
             // dispatch. Primitive_call's per-type arms above only
@@ -12992,79 +13856,80 @@ impl Vm {
         // fallback (same false result, negated to true) — both
         // wrong for two equivalent Methods.
         if (&*name == "==" || &*name == "!=" || &*name == "eql?")
-            && matches!(&recv, Value::BoundMethod(_) | Value::UnboundMethod(_)) {
-                if args.len() != 1 {
-                    return Err(self.trap(RubyError::ArgumentError {
-                        msg: format!(
-                            "wrong number of arguments (given {}, expected 1)",
-                            args.len()
-                        ),
-                    }));
-                }
-                let other = &args[0];
-                let eq = match (&recv, other) {
-                    (Value::BoundMethod(a), Value::BoundMethod(b)) => {
-                        // Snapshot-first identity, mirroring the
-                        // UnboundMethod arm: same receiver AND the
-                        // underlying Method Rc must agree. After a
-                        // `def`/`remove_method` on the recv's class,
-                        // a fresh `obj.method(:foo)` captures a NEW
-                        // Method Rc — old and new BoundMethods then
-                        // compare unequal, matching CRuby's
-                        // iseq-aware Method#==. Two `.method(:foo)`
-                        // captures with no intervening redefine
-                        // share the same class-table Rc (clone of
-                        // the HashMap entry) → Rc::ptr_eq true. For
-                        // builtin / no-snapshot recvs both sides
-                        // resolve to None and fall back to name —
-                        // `7.method(:+) == 7.method(:+)` stays true.
-                        let (ra, na, sa) = self.heap.bound_method_full(*a);
-                        let ra = ra.clone();
-                        let (rb, nb, sb) = self.heap.bound_method_full(*b);
-                        let rb = rb.clone();
-                        let sa = sa.clone();
-                        let sb = sb.clone();
-                        if !method_recv_identity(&ra, &rb) {
-                            false
-                        } else {
-                            let ma = sa.or_else(|| match self.class_of(&ra) {
-                                Value::Class(c) => self.lookup_method_uncached(&c, na),
-                                _ => None,
-                            });
-                            let mb = sb.or_else(|| match self.class_of(&rb) {
-                                Value::Class(c) => self.lookup_method_uncached(&c, nb),
-                                _ => None,
-                            });
-                            match (ma, mb) {
-                                (Some(x), Some(y)) => Rc::ptr_eq(&x, &y),
-                                _ => na == nb,
-                            }
-                        }
-                    }
-                    (Value::UnboundMethod(a), Value::UnboundMethod(b)) => {
-                        // Snapshot-first identity: prefer the
-                        // capture-time Method Rc — UnboundMethod
-                        // semantics pin to capture-time, matching
-                        // bind_call/source_location/hash, and avoids
-                        // an extra ancestor-chain walk per side.
-                        // Falls through to live lookup, then to
-                        // class-ptr identity, so the eql?/hash chain
-                        // stays in lock-step.
-                        let (ca, na, sa) = self.heap.unbound_method_full(*a);
-                        let (cb, nb, sb) = self.heap.unbound_method_full(*b);
-                        let ma = sa.or_else(|| self.lookup_method_uncached(&ca, na));
-                        let mb = sb.or_else(|| self.lookup_method_uncached(&cb, nb));
+            && matches!(&recv, Value::BoundMethod(_) | Value::UnboundMethod(_))
+        {
+            if args.len() != 1 {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 1)",
+                        args.len()
+                    ),
+                }));
+            }
+            let other = &args[0];
+            let eq = match (&recv, other) {
+                (Value::BoundMethod(a), Value::BoundMethod(b)) => {
+                    // Snapshot-first identity, mirroring the
+                    // UnboundMethod arm: same receiver AND the
+                    // underlying Method Rc must agree. After a
+                    // `def`/`remove_method` on the recv's class,
+                    // a fresh `obj.method(:foo)` captures a NEW
+                    // Method Rc — old and new BoundMethods then
+                    // compare unequal, matching CRuby's
+                    // iseq-aware Method#==. Two `.method(:foo)`
+                    // captures with no intervening redefine
+                    // share the same class-table Rc (clone of
+                    // the HashMap entry) → Rc::ptr_eq true. For
+                    // builtin / no-snapshot recvs both sides
+                    // resolve to None and fall back to name —
+                    // `7.method(:+) == 7.method(:+)` stays true.
+                    let (ra, na, sa) = self.heap.bound_method_full(*a);
+                    let ra = ra.clone();
+                    let (rb, nb, sb) = self.heap.bound_method_full(*b);
+                    let rb = rb.clone();
+                    let sa = sa.clone();
+                    let sb = sb.clone();
+                    if !method_recv_identity(&ra, &rb) {
+                        false
+                    } else {
+                        let ma = sa.or_else(|| match self.class_of(&ra) {
+                            Value::Class(c) => self.lookup_method_uncached(&c, na),
+                            _ => None,
+                        });
+                        let mb = sb.or_else(|| match self.class_of(&rb) {
+                            Value::Class(c) => self.lookup_method_uncached(&c, nb),
+                            _ => None,
+                        });
                         match (ma, mb) {
                             (Some(x), Some(y)) => Rc::ptr_eq(&x, &y),
-                            _ => na == nb && Rc::ptr_eq(&ca, &cb),
+                            _ => na == nb,
                         }
                     }
-                    _ => false,
-                };
-                let result = if &*name == "!=" { !eq } else { eq };
-                self.stack.push(Value::Bool(result));
-                return Ok(());
-            }
+                }
+                (Value::UnboundMethod(a), Value::UnboundMethod(b)) => {
+                    // Snapshot-first identity: prefer the
+                    // capture-time Method Rc — UnboundMethod
+                    // semantics pin to capture-time, matching
+                    // bind_call/source_location/hash, and avoids
+                    // an extra ancestor-chain walk per side.
+                    // Falls through to live lookup, then to
+                    // class-ptr identity, so the eql?/hash chain
+                    // stays in lock-step.
+                    let (ca, na, sa) = self.heap.unbound_method_full(*a);
+                    let (cb, nb, sb) = self.heap.unbound_method_full(*b);
+                    let ma = sa.or_else(|| self.lookup_method_uncached(&ca, na));
+                    let mb = sb.or_else(|| self.lookup_method_uncached(&cb, nb));
+                    match (ma, mb) {
+                        (Some(x), Some(y)) => Rc::ptr_eq(&x, &y),
+                        _ => na == nb && Rc::ptr_eq(&ca, &cb),
+                    }
+                }
+                _ => false,
+            };
+            let result = if &*name == "!=" { !eq } else { eq };
+            self.stack.push(Value::Bool(result));
+            return Ok(());
+        }
         // `Object#==` / `Object#!=` cross-type fallback. The
         // per-type primitive arms (`String == String`,
         // `Sym == Sym`, `Class == Class`, etc.) all fired earlier
@@ -13113,7 +13978,9 @@ impl Vm {
                             // BigInt-bounded range fails the to_f64
                             // pass and falls into the lex fallback,
                             // which also lacked BigInt support.
-                            Value::BigInt(id) => self.heap.bigint(*id).to_string().parse::<f64>().ok(),
+                            Value::BigInt(id) => {
+                                self.heap.bigint(*id).to_string().parse::<f64>().ok()
+                            }
                             _ => None,
                         }
                     };
@@ -13126,24 +13993,33 @@ impl Vm {
                         }
                     };
                     let excl = r.exclusive;
-                    
+
                     match (to_f64(&r.begin), to_f64(&r.end), to_f64(arg)) {
                         (Some(b), Some(e), Some(v)) => {
-                            if excl { v >= b && v < e }
-                            else { v >= b && v <= e }
+                            if excl {
+                                v >= b && v < e
+                            } else {
+                                v >= b && v <= e
+                            }
                         }
                         _ => {
                             // Non-numeric: fall back to lexicographic
                             // compare using value_cmp_v if both bounds
                             // and the arg are the same comparable type.
-                            let b = &r.begin; let e = &r.end;
+                            let b = &r.begin;
+                            let e = &r.end;
                             let ge_lo = value_cmp_v_heap(arg, b, &self.interner, &self.heap)
                                 .map(|o| o != std::cmp::Ordering::Less)
                                 .unwrap_or(false);
                             let cmp_hi = value_cmp_v_heap(arg, e, &self.interner, &self.heap);
                             let le_hi = match cmp_hi {
-                                Some(o) => if excl { o == std::cmp::Ordering::Less }
-                                           else { o != std::cmp::Ordering::Greater },
+                                Some(o) => {
+                                    if excl {
+                                        o == std::cmp::Ordering::Less
+                                    } else {
+                                        o != std::cmp::Ordering::Greater
+                                    }
+                                }
                                 None => false,
                             };
                             ge_lo && le_hi
@@ -13163,7 +14039,11 @@ impl Vm {
                         Value::Object(id) => Some(self.heap.class_of(*id)),
                         _ => {
                             let class_val = self.class_of(arg);
-                            if let Value::Class(c) = class_val { Some(c) } else { None }
+                            if let Value::Class(c) = class_val {
+                                Some(c)
+                            } else {
+                                None
+                            }
                         }
                     };
                     match start {
@@ -13182,7 +14062,7 @@ impl Vm {
                     Value::Str(s) => {
                         let bound = s.to_string_lossy();
                         self.regex_case_eq_on(re, &bound)?
-                    },
+                    }
                     // CRuby's Regexp#=== also accepts Symbols,
                     // matching against the symbol's name —
                     // `methods.grep(/^test_/)` (minitest's
@@ -13190,7 +14070,7 @@ impl Vm {
                     Value::Sym(sid) => {
                         let input = self.interner.resolve(*sid).to_string();
                         self.regex_case_eq_on(re, &input)?
-                    },
+                    }
                     _ => false,
                 },
                 _ => recv.ruby_eq(arg, &self.heap),
@@ -13205,7 +14085,8 @@ impl Vm {
         // branches on `regexp.names.any?` to decide whether `scan`
         // returns the raw matched string or a MatchData.
         #[cfg(feature = "regex")]
-        if &*name == "names" && args.is_empty()
+        if &*name == "names"
+            && args.is_empty()
             && let Value::Regex(re) = &recv
         {
             let names: Vec<Value> = re.names().into_iter().map(Value::new_str).collect();
@@ -13220,7 +14101,8 @@ impl Vm {
         // from `capture_group_names()` (index 0 = whole match → skipped).
         // mustermann's `Pattern#params` calls this on the route regexp.
         #[cfg(feature = "regex")]
-        if &*name == "named_captures" && args.is_empty()
+        if &*name == "named_captures"
+            && args.is_empty()
             && let Value::Regex(re) = &recv
         {
             // `capture_group_names()` is 0-indexed per group (no
@@ -13242,7 +14124,9 @@ impl Vm {
                 let aid = self.heap.alloc(HeapObj::Array(arr.into()));
                 pairs.push((Value::new_str(nm), Value::Array(aid)));
             }
-            let hid = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
+            let hid = self
+                .heap
+                .alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
             self.stack.push(Value::Hash(hid));
             return Ok(());
         }
@@ -13252,7 +14136,8 @@ impl Vm {
         // Jekyll spike — kramdown's header parser does
         // `HEADER_ID.match(text)`.
         #[cfg(feature = "regex")]
-        if &*name == "match" && args.len() == 1
+        if &*name == "match"
+            && args.len() == 1
             && let Value::Regex(re) = &recv
         {
             let result = match &args[0] {
@@ -13345,8 +14230,7 @@ impl Vm {
                     // UTF-8 engine when there's no byte engine (Unicode-
                     // needing pattern / fancy path). rack Lint's CGI
                     // env-value `value.b !~ /[\x80-\xff]/n` check.
-                    let is_binary =
-                        matches!(s.encoding.get(), crate::value::EncodingTag::Binary);
+                    let is_binary = matches!(s.encoding.get(), crate::value::EncodingTag::Binary);
                     let bytes_owned = if is_binary {
                         re.captures_owned_bytes(&s.content.borrow())
                     } else {
@@ -13460,9 +14344,7 @@ impl Vm {
         // model: same `ObjId`) and `nil` otherwise. User-defined
         // `<=>` on a class already fired via class-method-lookup
         // earlier, so we don't shadow.
-        if &*name == "<=>" && args.len() == 1
-            && !matches!(&recv, Value::Rational(_))
-        {
+        if &*name == "<=>" && args.len() == 1 && !matches!(&recv, Value::Rational(_)) {
             // Phase C.2 — `Int <=> Rational` and `Float <=> Rational`
             // are computed DIRECTLY here (no inversion): for Int
             // recv we cross-multiply as `n*den <=> num`; for Float
@@ -13569,14 +14451,22 @@ impl Vm {
         // surface — close enough for primitives that don't
         // accept the install at all).
         if &*name == "define_singleton_method"
-            && matches!(&recv,
-                Value::Object(_) | Value::Class(_)
-                | Value::Array(_) | Value::Hash(_) | Value::Block(_) | Value::Str(_))
+            && matches!(
+                &recv,
+                Value::Object(_)
+                    | Value::Class(_)
+                    | Value::Array(_)
+                    | Value::Hash(_)
+                    | Value::Block(_)
+                    | Value::Str(_)
+            )
         {
             match args.len() {
-                0 => return Err(self.trap(RubyError::ArgumentError {
-                    msg: "wrong number of arguments (given 0, expected 1..2)".into(),
-                })),
+                0 => {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: "wrong number of arguments (given 0, expected 1..2)".into(),
+                    }));
+                }
                 1 => {
                     // Validate the name argument so callers get
                     // TypeError on a non-Symbol/String name even
@@ -13584,12 +14474,14 @@ impl Vm {
                     // before complaining about the missing block.
                     match &args[0] {
                         Value::Sym(_) | Value::Str(_) => {}
-                        other => return Err(self.trap(RubyError::TypeError {
-                            msg: format!(
-                                "wrong argument type {} (expected Symbol or String)",
-                                other.type_name(),
-                            ),
-                        })),
+                        other => {
+                            return Err(self.trap(RubyError::TypeError {
+                                msg: format!(
+                                    "wrong argument type {} (expected Symbol or String)",
+                                    other.type_name(),
+                                ),
+                            }));
+                        }
                     }
                     return Err(self.trap(RubyError::ArgumentError {
                         msg: "tried to create Proc object without a block".into(),
@@ -13604,19 +14496,23 @@ impl Vm {
                         Value::Str(s) => {
                             let raw = s.to_string_lossy();
                             if let Some(max) = self.max_symbols
-                                && !self.interner.contains(&raw) && self.interner.len() >= max {
-                                    return Err(self.trap(RubyError::ResourceExhausted {
-                                        msg: format!("interner exhausted: {} symbols", max),
-                                    }));
-                                }
+                                && !self.interner.contains(&raw)
+                                && self.interner.len() >= max
+                            {
+                                return Err(self.trap(RubyError::ResourceExhausted {
+                                    msg: format!("interner exhausted: {} symbols", max),
+                                }));
+                            }
                             self.interner.intern(&raw)
                         }
-                        other => return Err(self.trap(RubyError::TypeError {
-                            msg: format!(
-                                "wrong argument type {} (expected Symbol or String)",
-                                other.type_name(),
-                            ),
-                        })),
+                        other => {
+                            return Err(self.trap(RubyError::TypeError {
+                                msg: format!(
+                                    "wrong argument type {} (expected Symbol or String)",
+                                    other.type_name(),
+                                ),
+                            }));
+                        }
                     };
                     let src = args[1].clone();
                     let installed = match &recv {
@@ -13641,9 +14537,7 @@ impl Vm {
                             // into cls.methods (instance methods)
                             // since the class itself has no
                             // singleton_target set.
-                            self.install_singleton_method_on_class_from_value(
-                                c, name_sym, &src,
-                            )
+                            self.install_singleton_method_on_class_from_value(c, name_sym, &src)
                         }
                         // Heap primitives (Array / Proc / Hash / String)
                         // install onto their per-instance eigenclass via
@@ -13654,20 +14548,29 @@ impl Vm {
                         Value::Array(_) | Value::Block(_) => {
                             let sc = self.ensure_heap_singleton(&recv);
                             self.install_method_from_value(
-                                &sc, name_sym, &src, crate::value::Visibility::Public,
+                                &sc,
+                                name_sym,
+                                &src,
+                                crate::value::Visibility::Public,
                             )
                         }
                         Value::Hash(hid) => {
                             let sc = self.ensure_hash_singleton(*hid);
                             self.install_method_from_value(
-                                &sc, name_sym, &src, crate::value::Visibility::Public,
+                                &sc,
+                                name_sym,
+                                &src,
+                                crate::value::Visibility::Public,
                             )
                         }
                         Value::Str(s) => {
                             let s = s.clone();
                             let sc = self.ensure_str_singleton(&s);
                             self.install_method_from_value(
-                                &sc, name_sym, &src, crate::value::Visibility::Public,
+                                &sc,
+                                name_sym,
+                                &src,
+                                crate::value::Visibility::Public,
                             )
                         }
                         _ => unreachable!(),
@@ -13676,9 +14579,11 @@ impl Vm {
                     self.stack.push(Value::Sym(installed));
                     return Ok(());
                 }
-                n => return Err(self.trap(RubyError::ArgumentError {
-                    msg: format!("wrong number of arguments (given {}, expected 1..2)", n),
-                })),
+                n => {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("wrong number of arguments (given {}, expected 1..2)", n),
+                    }));
+                }
             }
         }
         // `Object#dup` / `Object#clone` — universal shallow
@@ -13769,11 +14674,9 @@ impl Vm {
         }
         if matches!(&*name, "dup" | "clone") && args.is_empty() {
             let copied = match &recv {
-                Value::Int(_)
-                | Value::Float(_)
-                | Value::Sym(_)
-                | Value::Bool(_)
-                | Value::Nil => recv.clone(),
+                Value::Int(_) | Value::Float(_) | Value::Sym(_) | Value::Bool(_) | Value::Nil => {
+                    recv.clone()
+                }
                 // CRuby treats Integer as immediate-like for
                 // dup/clone regardless of Fixnum/Bignum
                 // representation — `(10**100).dup.equal?(...)`
@@ -13869,6 +14772,11 @@ impl Vm {
                     let mut copy = c.shallow_copy();
                     copy.name.clear();
                     *copy.assigned_name.borrow_mut() = None;
+                    // `shallow_copy` carries the frozen flag (correct for
+                    // `clone`); `dup` must produce an UNfrozen copy (CRuby).
+                    if &*name != "clone" {
+                        copy.frozen.set(false);
+                    }
                     Value::Class(std::rc::Rc::new(copy))
                 }
                 // Range/Block/Regex/etc.: no shallow-copy support
@@ -13943,9 +14851,12 @@ impl Vm {
         // (Class, BoundMethod, Method, Block, ...) returns false.
         if &*name == "frozen?" && args.is_empty() {
             let frozen = match &recv {
-                Value::Int(_) | Value::Float(_) | Value::Sym(_)
-                    | Value::Bool(_) | Value::Nil => true,
+                Value::Int(_) | Value::Float(_) | Value::Sym(_) | Value::Bool(_) | Value::Nil => {
+                    true
+                }
                 Value::Object(id) => self.heap.instance(*id).frozen.get(),
+                // A Class/Module IS an object; `freeze` flips its own Cell.
+                Value::Class(c) => c.frozen.get(),
                 _ => false,
             };
             self.stack.push(Value::Bool(frozen));
@@ -13962,8 +14873,14 @@ impl Vm {
         // freeze read/write surface is what unblocks gems that
         // call `EmptyMapping.new.freeze` on construction.
         if &*name == "freeze" && args.is_empty() {
-            if let Value::Object(id) = &recv {
-                self.heap.instance(*id).frozen.set(true);
+            match &recv {
+                Value::Object(id) => self.heap.instance(*id).frozen.set(true),
+                // Class/Module freeze — flip the Class's own frozen Cell so
+                // `frozen?` reports true (CRuby). Mutation guards (def / const
+                // set on a frozen module) are a follow-up, matching the
+                // Object-freeze note above.
+                Value::Class(c) => c.frozen.set(true),
+                _ => {}
             }
             self.stack.push(recv);
             return Ok(());
@@ -14089,8 +15006,7 @@ impl Vm {
                     (Value::Object(id), Some(def)) => {
                         let cls = self.heap.class_of(*id);
                         let real = self.heap.real_class_of(*id);
-                        !std::rc::Rc::ptr_eq(&cls, &real)
-                            && std::rc::Rc::ptr_eq(&cls, def)
+                        !std::rc::Rc::ptr_eq(&cls, &real) && std::rc::Rc::ptr_eq(&cls, def)
                     }
                     _ => false,
                 };
@@ -14117,7 +15033,10 @@ impl Vm {
                         Some(d) if d != recv_class => format!("{}({})", recv_class, d),
                         _ => recv_class,
                     };
-                    format!("#<Method: {}#{}({}){}>", class_part, method_name, params, src_suffix)
+                    format!(
+                        "#<Method: {}#{}({}){}>",
+                        class_part, method_name, params, src_suffix
+                    )
                 };
                 self.stack.push(Value::new_str(s));
                 return Ok(());
@@ -14146,7 +15065,8 @@ impl Vm {
                     // no snapshot was stored, so inspect's
                     // suffix stays consistent with
                     // source_location.
-                    let m_for_src = snap.clone()
+                    let m_for_src = snap
+                        .clone()
                         .or_else(|| self.lookup_method_uncached(&cls, nid));
                     let src_suffix = m_for_src
                         .map(|m| method_source_suffix(&m, &self.protos, &self.sources))
@@ -14165,7 +15085,8 @@ impl Vm {
                 Value::Class(c) => Some(c),
                 _ => None,
             };
-            let cls_name = cls_rc.as_ref()
+            let cls_name = cls_rc
+                .as_ref()
                 .map(|c| {
                     if c.effective_name().is_some() {
                         c.name.clone()
@@ -14244,7 +15165,8 @@ impl Vm {
                     return Ok(());
                 }
                 ("to_f", 0) => {
-                    self.stack.push(Value::Float(crate::heap::rational_to_f64(&r)));
+                    self.stack
+                        .push(Value::Float(crate::heap::rational_to_f64(&r)));
                     return Ok(());
                 }
                 // Arity guards for the readers — they take no args.
@@ -14311,7 +15233,10 @@ impl Vm {
                 // the whole Rational lives entirely in the numerator.
                 ("zero?", 0) => {
                     #[cfg(feature = "bignum")]
-                    let b = { use num_traits::Zero; r.num.is_zero() };
+                    let b = {
+                        use num_traits::Zero;
+                        r.num.is_zero()
+                    };
                     #[cfg(not(feature = "bignum"))]
                     let b = r.num == 0;
                     self.stack.push(Value::Bool(b));
@@ -14319,7 +15244,10 @@ impl Vm {
                 }
                 ("positive?", 0) => {
                     #[cfg(feature = "bignum")]
-                    let b = { use num_traits::Signed; r.num.is_positive() };
+                    let b = {
+                        use num_traits::Signed;
+                        r.num.is_positive()
+                    };
                     #[cfg(not(feature = "bignum"))]
                     let b = r.num > 0;
                     self.stack.push(Value::Bool(b));
@@ -14327,7 +15255,10 @@ impl Vm {
                 }
                 ("negative?", 0) => {
                     #[cfg(feature = "bignum")]
-                    let b = { use num_traits::Signed; r.num.is_negative() };
+                    let b = {
+                        use num_traits::Signed;
+                        r.num.is_negative()
+                    };
                     #[cfg(not(feature = "bignum"))]
                     let b = r.num < 0;
                     self.stack.push(Value::Bool(b));
@@ -14336,7 +15267,10 @@ impl Vm {
                 // `Numeric#nonzero?` — self if non-zero, else nil.
                 ("nonzero?", 0) => {
                     #[cfg(feature = "bignum")]
-                    let z = { use num_traits::Zero; r.num.is_zero() };
+                    let z = {
+                        use num_traits::Zero;
+                        r.num.is_zero()
+                    };
                     #[cfg(not(feature = "bignum"))]
                     let z = r.num == 0;
                     self.stack.push(if z { Value::Nil } else { recv.clone() });
@@ -14367,11 +15301,10 @@ impl Vm {
                         #[cfg(feature = "bignum")]
                         Value::BigInt(_) => {
                             use num_bigint::BigInt;
-                            let b = g
-                                .vm
-                                .as_bigint_ref(other)
-                                .expect("BigInt value coerces")
-                                .into_owned();
+                            let b =
+                                g.vm.as_bigint_ref(other)
+                                    .expect("BigInt value coerces")
+                                    .into_owned();
                             let or = g.vm.make_rational_bigint(b, BigInt::from(1))?;
                             vec![or, recv.clone()]
                         }
@@ -14417,7 +15350,9 @@ impl Vm {
                 ("floor" | "ceil" | "truncate" | "round", 1)
                     if matches!(&args[0], Value::Int(_)) =>
                 {
-                    let Value::Int(n) = &args[0] else { unreachable!() };
+                    let Value::Int(n) = &args[0] else {
+                        unreachable!()
+                    };
                     let v = self.rational_round_op(&r, &name, *n, RHalf::Up)?;
                     self.stack.push(v);
                     return Ok(());
@@ -14426,15 +15361,16 @@ impl Vm {
                 // positional. Bare `round(half: :even)` and the
                 // `round(n, half: :even)` form.
                 ("round", 1) if matches!(&args[0], Value::Hash(_)) => {
-                    let Value::Hash(hid) = &args[0] else { unreachable!() };
+                    let Value::Hash(hid) = &args[0] else {
+                        unreachable!()
+                    };
                     let half = self.rhalf_from_kwargs(*hid);
                     let v = self.rational_round_op(&r, "round", 0, half)?;
                     self.stack.push(v);
                     return Ok(());
                 }
                 ("round", 2)
-                    if matches!(&args[0], Value::Int(_))
-                        && matches!(&args[1], Value::Hash(_)) =>
+                    if matches!(&args[0], Value::Int(_)) && matches!(&args[1], Value::Hash(_)) =>
                 {
                     let (Value::Int(n), Value::Hash(hid)) = (&args[0], &args[1]) else {
                         unreachable!()
@@ -14447,8 +15383,11 @@ impl Vm {
                 }
                 // Arity guards (CRuby raises ArgumentError, not the
                 // NoMethodError the `_` fall-through would produce).
-                ("abs" | "magnitude" | "-@" | "+@" | "abs2" | "zero?" | "positive?"
-                    | "negative?" | "nonzero?", _) => {
+                (
+                    "abs" | "magnitude" | "-@" | "+@" | "abs2" | "zero?" | "positive?"
+                    | "negative?" | "nonzero?",
+                    _,
+                ) => {
                     return Err(self.trap(RubyError::ArgumentError {
                         msg: format!(
                             "wrong number of arguments (given {}, expected 0)",
@@ -14606,7 +15545,10 @@ impl Vm {
             // as method_missing / NoMethodError.
             if args.is_empty() || args.len() > 2 {
                 return Err(self.trap(RubyError::ArgumentError {
-                    msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 1..2)",
+                        args.len()
+                    ),
                 }));
             }
             // Type check matches the no-recv arm — CRuby raises
@@ -14615,12 +15557,14 @@ impl Vm {
             let lookup_name: SymId = match &args[0] {
                 Value::Sym(id) => *id,
                 Value::Str(s) => self.interner.intern(&s.to_string_lossy()),
-                other => return Err(self.trap(RubyError::TypeError {
-                    msg: format!(
-                        "{} is not a symbol nor a string",
-                        other.to_inspect(&self.heap, &self.interner),
-                    ),
-                })),
+                other => {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "{} is not a symbol nor a string",
+                            other.to_inspect(&self.heap, &self.interner),
+                        ),
+                    }));
+                }
             };
             let include_private = matches!(args.get(1), Some(Value::Bool(true)));
             if self.responds_to(&recv, lookup_name, include_private) {
@@ -14641,14 +15585,16 @@ impl Vm {
         // inside a method (the AST desugars that construct to
         // `self.singleton_class`), then drives define_method /
         // alias_method / undef_method through it.
-        if &*name == "singleton_class" && args.is_empty()
+        if &*name == "singleton_class"
+            && args.is_empty()
             && let Value::Object(id) = &recv
         {
             let eigen = self.heap.ensure_singleton_class(*id);
             self.stack.push(Value::Class(eigen));
             return Ok(());
         }
-        if &*name == "singleton_class" && args.is_empty()
+        if &*name == "singleton_class"
+            && args.is_empty()
             && let Value::Hash(hid) = &recv
         {
             let eigen = self.ensure_hash_singleton(*hid);
@@ -14659,7 +15605,8 @@ impl Vm {
         // side-table — twin of the Object/Hash/Str arms above). rack's
         // spec_response does `body.singleton_class.class_eval{alias <<
         // call}` on a Proc body so `response.write` can `<<` to it.
-        if &*name == "singleton_class" && args.is_empty()
+        if &*name == "singleton_class"
+            && args.is_empty()
             && matches!(&recv, Value::Block(_) | Value::Array(_))
         {
             let eigen = self.ensure_heap_singleton(&recv);
@@ -14668,7 +15615,8 @@ impl Vm {
         }
         // `class << self; self; end` with a String self desugars to
         // this call (minitest's Object#stub on a String value).
-        if &*name == "singleton_class" && args.is_empty()
+        if &*name == "singleton_class"
+            && args.is_empty()
             && let Value::Str(s) = &recv
         {
             let s = s.clone();
@@ -14715,7 +15663,8 @@ impl Vm {
         // `method(:eval).call(src)` route still works via the
         // no_recv `builtin_call` at the top of do_call.
         // (code-review #267 #3.)
-        if matches!(name.as_ref(),
+        if matches!(
+            name.as_ref(),
             "Array" | "Hash" | "Integer" | "Float" | "String"
             | "sprintf" | "format"
             // Kernel#raise via an explicit receiver only reaches
@@ -14723,7 +15672,8 @@ impl Vm {
             // exactly CRuby's order, so a stubbed raise still wins
             // through send(:raise).
             | "raise" | "fail"
-        ) && let Some(res) = self.builtin_call(name.as_ref(), &args) {
+        ) && let Some(res) = self.builtin_call(name.as_ref(), &args)
+        {
             let v = res?;
             // Mirror the flag handling in the no_recv builtin
             // path (line 452-459): clears
@@ -14739,13 +15689,17 @@ impl Vm {
         }
         Err(self.trap(RubyError::NoMethodError {
             kind: crate::error::NoMethodErrorKind::Missing,
-            method: name.to_string(), recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(&recv)),
+            method: name.to_string(),
+            recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(&recv)),
         }))
     }
 
-
-
-    pub(crate) fn invoke_method(&mut self, m: Rc<Method>, self_val: Value, args: Vec<Value>) -> Result<(), Trap> {
+    pub(crate) fn invoke_method(
+        &mut self,
+        m: Rc<Method>,
+        self_val: Value,
+        args: Vec<Value>,
+    ) -> Result<(), Trap> {
         self.invoke_method_with_block(m, self_val, args, None)
     }
 
@@ -14794,18 +15748,16 @@ impl Vm {
             // an INSTANCE method of the module's class (Tagged#extended),
             // resolved via class_tag — `m.extended(base)` is an ordinary
             // method call on the module value m.
-            let m = self.lookup_class_singleton_method(src, hook_id).or_else(|| {
-                src.class_tag
-                    .as_ref()
-                    .and_then(|t| self.lookup_method_uncached(t, hook_id))
-            });
+            let m = self
+                .lookup_class_singleton_method(src, hook_id)
+                .or_else(|| {
+                    src.class_tag
+                        .as_ref()
+                        .and_then(|t| self.lookup_method_uncached(t, hook_id))
+                });
             if let Some(m) = m {
                 let pre_frames = self.frames.len();
-                self.invoke_method(
-                    m,
-                    Value::Class(src.clone()),
-                    vec![target.clone()],
-                )?;
+                self.invoke_method(m, Value::Class(src.clone()), vec![target.clone()])?;
                 self.dispatch_until(pre_frames)?;
                 self.stack.pop();
             }
@@ -15071,11 +16023,7 @@ impl Vm {
     /// The `proto_idx` pre-filter (a cheap `usize` compare) keeps the
     /// `Rc::ptr_eq` off all the unrelated frames; the enclosing method
     /// frame is non-block so it never matches.
-    fn block_is_reentrant(
-        &self,
-        proto_idx: usize,
-        captured: &Rc<RefCell<Vec<Value>>>,
-    ) -> bool {
+    fn block_is_reentrant(&self, proto_idx: usize, captured: &Rc<RefCell<Vec<Value>>>) -> bool {
         self.frames.iter().any(|f| {
             f.is_block
                 && f.proto_idx == proto_idx
@@ -15148,9 +16096,7 @@ impl Vm {
     pub(crate) fn get_local_top(&self, slot: usize) -> Value {
         let frame = self.frames.last().expect("ICE: get_local_top no frame");
         match &frame.locals {
-            crate::vm::Locals::Stack(base) => {
-                self.locals_arena[*base as usize + slot].clone()
-            }
+            crate::vm::Locals::Stack(base) => self.locals_arena[*base as usize + slot].clone(),
             crate::vm::Locals::Shared(rc) => rc.borrow()[slot].clone(),
         }
     }
@@ -15182,7 +16128,10 @@ impl Vm {
     /// Effective `super` dispatch name: the lexical owner frame's
     /// runtime-stamped name (define_method bodies) when present,
     /// else the compile-time name the op carried.
-    pub(crate) fn super_runtime_name(&self, compiled: crate::intern::SymId) -> crate::intern::SymId {
+    pub(crate) fn super_runtime_name(
+        &self,
+        compiled: crate::intern::SymId,
+    ) -> crate::intern::SymId {
         self.lexical_owner_of_top()
             .and_then(|idx| self.frames[idx].aux.as_ref())
             .and_then(|aux| aux.invoked_name)
@@ -15300,10 +16249,7 @@ impl Vm {
         // Closures (define_method) share captured locals; builtins carry a
         // dummy `proto_idx` and re-dispatch in `invoke_method_with_block`;
         // both must take the full path.
-        if m.visibility.get() != Visibility::Public
-            || m.closure.is_some()
-            || m.builtin.is_some()
-        {
+        if m.visibility.get() != Visibility::Public || m.closure.is_some() || m.builtin.is_some() {
             return Ok(false);
         }
         // D Layer 4 (inline-cache step 1): if this method is ALREADY compiled,
@@ -15318,10 +16264,7 @@ impl Vm {
         // getter invoked as `obj.x(1)`) here would swallow the ArgumentError the
         // interpreter must raise. A mismatch falls through to that check.
         #[cfg(feature = "jit-native")]
-        if self.jit_native_on
-            && m.fixed_arity
-                .is_some_and(|f| f.required as usize == argc)
-        {
+        if self.jit_native_on && m.fixed_arity.is_some_and(|f| f.required as usize == argc) {
             let pidx = m.proto_idx;
             let vm_ptr = self as *const crate::vm::Vm;
             if argc == 1 {
@@ -15363,7 +16306,8 @@ impl Vm {
                     }
                     if let Some(Some(np)) = self.jit_native_fparam.get(&pidx) {
                         let vm_ptr = self as *const crate::vm::Vm;
-                        if let Some(r) = np.call(vm_ptr, &self.stack[recv_idx], f.to_bits() as i64) {
+                        if let Some(r) = np.call(vm_ptr, &self.stack[recv_idx], f.to_bits() as i64)
+                        {
                             let boxed = np.box_ret(r);
                             self.stack[recv_idx] = boxed;
                             self.stack.truncate(recv_idx + 1);
@@ -15441,8 +16385,10 @@ impl Vm {
             block_arg: None,
             defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
             lexical_cvar_class: None,
-            #[cfg(feature = "regex")] saved_last_match: None,
-            is_block: false, is_lambda: false,
+            #[cfg(feature = "regex")]
+            saved_last_match: None,
+            is_block: false,
+            is_lambda: false,
             n_given_positional: fixed.required,
             kw_given_mask: 0,
             aux: None,
@@ -15569,10 +16515,7 @@ impl Vm {
         // Same gates as the no-block template: closures share captured
         // locals, builtins re-dispatch via a dummy proto_idx, and
         // non-Public methods must take the full visibility path.
-        if m.visibility.get() != Visibility::Public
-            || m.closure.is_some()
-            || m.builtin.is_some()
-        {
+        if m.visibility.get() != Visibility::Public || m.closure.is_some() || m.builtin.is_some() {
             return Ok(false);
         }
         let fixed = match m.fixed_arity {
@@ -15622,8 +16565,10 @@ impl Vm {
             block_arg: Some(block_id),
             defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
             lexical_cvar_class: None,
-            #[cfg(feature = "regex")] saved_last_match: None,
-            is_block: false, is_lambda: false,
+            #[cfg(feature = "regex")]
+            saved_last_match: None,
+            is_block: false,
+            is_lambda: false,
             n_given_positional: fixed.required,
             kw_given_mask: 0,
             aux: None,
@@ -15745,8 +16690,10 @@ impl Vm {
             block_arg: None,
             defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
             lexical_cvar_class: None,
-            #[cfg(feature = "regex")] saved_last_match: None,
-            is_block: false, is_lambda: false,
+            #[cfg(feature = "regex")]
+            saved_last_match: None,
+            is_block: false,
+            is_lambda: false,
             n_given_positional: fixed.required,
             kw_given_mask: 0,
             aux: None,
@@ -15980,8 +16927,10 @@ impl Vm {
             block_arg: block,
             defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
             lexical_cvar_class: None,
-            #[cfg(feature = "regex")] saved_last_match: None,
-            is_block: false, is_lambda: false,
+            #[cfg(feature = "regex")]
+            saved_last_match: None,
+            is_block: false,
+            is_lambda: false,
             n_given_positional: fixed.required,
             kw_given_mask: 0,
             aux: None,
@@ -15993,8 +16942,6 @@ impl Vm {
         // the first last_match write inside this method scope.
         Ok(true)
     }
-
-
 
     /// Invoke the parent's `inherited(subclass)` hook on
     /// `new_cls`. Used by the `Class.new` no-block and
@@ -16022,7 +16969,12 @@ impl Vm {
     /// at top level). Enforced on explicit `Owner::Cname` reads in
     /// Op::LoadConst. `deprecate_constant` is ignored (rubyrs models no
     /// deprecation warnings, and it doesn't change visibility).
-    pub(crate) fn record_const_visibility(&mut self, owner: Rc<crate::value::Class>, name: &str, args: &[Value]) {
+    pub(crate) fn record_const_visibility(
+        &mut self,
+        owner: Rc<crate::value::Class>,
+        name: &str,
+        args: &[Value],
+    ) {
         let make_private = match name {
             "private_constant" => true,
             "public_constant" => false,
@@ -16048,18 +17000,22 @@ impl Vm {
         }
     }
 
-    pub(crate) fn fire_const_added(&mut self, owner: &Rc<crate::value::Class>, cname: SymId) -> Result<(), Trap> {
+    pub(crate) fn fire_const_added(
+        &mut self,
+        owner: &Rc<crate::value::Class>,
+        cname: SymId,
+    ) -> Result<(), Trap> {
         let ca_sym = self.interner.intern("const_added");
         // Resolve `owner.const_added` the way a normal call would: the
         // owner's SINGLETON methods first (`extend ConstTracker` /
         // `def self.const_added`), then the owner's class chain
         // (`Module.prepend(ConstAdded)` — zeitwerk).
-        let m = self.lookup_class_singleton_method(owner, ca_sym).or_else(|| {
-            match self.class_of(&Value::Class(owner.clone())) {
+        let m = self
+            .lookup_class_singleton_method(owner, ca_sym)
+            .or_else(|| match self.class_of(&Value::Class(owner.clone())) {
                 Value::Class(c) => self.lookup_method_uncached(&c, ca_sym),
                 _ => None,
-            }
-        });
+            });
         let Some(m) = m else {
             return Ok(());
         };
@@ -16070,9 +17026,14 @@ impl Vm {
         Ok(())
     }
 
-    pub(crate) fn invoke_inherited_hook(&mut self, new_cls: &Rc<crate::value::Class>) -> Result<(), Trap> {
+    pub(crate) fn invoke_inherited_hook(
+        &mut self,
+        new_cls: &Rc<crate::value::Class>,
+    ) -> Result<(), Trap> {
         let parent_rc = new_cls.superclass.borrow().clone();
-        let Some(parent) = parent_rc else { return Ok(()); };
+        let Some(parent) = parent_rc else {
+            return Ok(());
+        };
         // Fast-path: if `inherited` has never been interned,
         // no user code can have defined a hook, so skip the
         // lookup. Mirrors `fire_inclusion_hooks`'s gate.
@@ -16090,7 +17051,8 @@ impl Vm {
                 // code reopens Class — so the per-DefClass cost is
                 // a single is_empty check in the common case.
                 // (minitest's with_overridden_include.)
-                let via_class_obj = self.classes
+                let via_class_obj = self
+                    .classes
                     .get(&self.interner.intern("Class"))
                     .filter(|cc| !cc.methods.borrow().is_empty())
                     .cloned()
@@ -16362,7 +17324,8 @@ impl Vm {
             allow_zero_arg,
             false, // general method compile is not the obj-param variant
             false, // not a 2-arg method
-            None, None,
+            None,
+            None,
         );
         if let (Some(np), false) = (
             &compiled,
@@ -16379,7 +17342,10 @@ impl Vm {
     /// callees/getters so any cross-call/getter declines). The param binds as Float
     /// (i64 arg carries f64 bits); the result boxes per `returns_float` at the call.
     #[cfg(feature = "jit-native")]
-    fn compile_native_fparam(&mut self, proto_idx: usize) -> Option<crate::jit_native::NativeProto> {
+    fn compile_native_fparam(
+        &mut self,
+        proto_idx: usize,
+    ) -> Option<crate::jit_native::NativeProto> {
         let self_name = self.protos[proto_idx].name.clone();
         let self_name_id = self.interner.intern(&self_name);
         let callees = crate::intern::FxHashMap::default();
@@ -16395,11 +17361,12 @@ impl Vm {
             &syms,
             None,
             true,
-            true, // fparam: Float element; result-Float allowed via is_method too
+            true,  // fparam: Float element; result-Float allowed via is_method too
             false, // 1-arg fparam method — no 0-arg
             false, // fparam, not obj-param
             false, // not a 2-arg method
-            None, None,
+            None,
+            None,
         )
     }
 
@@ -16410,7 +17377,10 @@ impl Vm {
     /// `compile` (the `jit_obj_call` PIC); cross-calls/getters are empty here (a method
     /// that also self-recurses with an Object arg needs the cross-call ABI — deferred).
     #[cfg(feature = "jit-native")]
-    fn compile_native_objparam(&mut self, proto_idx: usize) -> Option<crate::jit_native::NativeProto> {
+    fn compile_native_objparam(
+        &mut self,
+        proto_idx: usize,
+    ) -> Option<crate::jit_native::NativeProto> {
         let self_name = self.protos[proto_idx].name.clone();
         let self_name_id = self.interner.intern(&self_name);
         let callees = crate::intern::FxHashMap::default();
@@ -16438,7 +17408,8 @@ impl Vm {
             false, // 1-arg
             true,  // obj-param: the param is an Object receiver pointer
             false, // not a 2-arg method
-            code_ovr, nloc_ovr,
+            code_ovr,
+            nloc_ovr,
         )
     }
 
@@ -16481,7 +17452,10 @@ impl Vm {
             return None;
         }
         if bp_code[..bp_code.len() - 1].iter().any(|op| {
-            matches!(op, Op::Return | Op::CreateBlock(..) | Op::CallBlock(..) | Op::CallNoRecvBlock(..))
+            matches!(
+                op,
+                Op::Return | Op::CreateBlock(..) | Op::CallBlock(..) | Op::CallNoRecvBlock(..)
+            )
         }) {
             return None;
         }
@@ -16503,25 +17477,29 @@ impl Vm {
         // Array was produced by the op before `cb` and is on the stack.
         let body = &bp_code[..bp_code.len() - 1]; // drop the trailing Return
         let mut loop_ops: Vec<Op> = Vec::with_capacity(body.len() + 13);
-        loop_ops.push(Op::StoreLocal(t_arr));                       // arr = <recv>
+        loop_ops.push(Op::StoreLocal(t_arr)); // arr = <recv>
         loop_ops.push(Op::LoadConstInt(0));
-        loop_ops.push(Op::StoreLocal(t_i));                         // i = 0
+        loop_ops.push(Op::StoreLocal(t_i)); // i = 0
         loop_ops.push(Op::LoadLocalCall(t_arr, length_sym, u32::MAX));
-        loop_ops.push(Op::StoreLocal(t_n));                         // n = arr.length
+        loop_ops.push(Op::StoreLocal(t_n)); // n = arr.length
         loop_ops.push(Op::EnterLoop);
         // loop head (index = head_idx within loop_ops):
         let head = loop_ops.len() as i64;
-        loop_ops.push(Op::BinOpLocalLocal(crate::bytecode::BinOpKind::Lt, t_i, t_n));
+        loop_ops.push(Op::BinOpLocalLocal(
+            crate::bytecode::BinOpKind::Lt,
+            t_i,
+            t_n,
+        ));
         // JumpIfFalse → past the loop body (patched below).
         let exit_jif = loop_ops.len();
         loop_ops.push(Op::JumpIfFalse(0)); // placeholder
         loop_ops.push(Op::LoadLocal(t_arr));
         loop_ops.push(Op::LoadLocal(t_i));
         loop_ops.push(Op::Call(bracket_sym, 1, u32::MAX));
-        loop_ops.push(Op::StoreLocal(param_start));                 // x = arr[i]
-        loop_ops.extend_from_slice(body);                           // spliced block body (relative jumps OK)
-        loop_ops.push(Op::Pop);                                     // discard the block's value
-        loop_ops.push(Op::IncLocalNoPush(t_i));                     // i += 1
+        loop_ops.push(Op::StoreLocal(param_start)); // x = arr[i]
+        loop_ops.extend_from_slice(body); // spliced block body (relative jumps OK)
+        loop_ops.push(Op::Pop); // discard the block's value
+        loop_ops.push(Op::IncLocalNoPush(t_i)); // i += 1
         // Jump back to head.
         let back_from = loop_ops.len() as i64;
         loop_ops.push(Op::Jump((head - back_from - 1) as i32));
@@ -16541,7 +17519,11 @@ impl Vm {
         let mut out: Vec<Op> = Vec::with_capacity(code.len() + loop_ops.len());
         // Helper: map an OLD method ip to its NEW ip.
         let map_ip = |old: i64| -> i64 {
-            if (old as usize) <= cb { old } else { old + delta }
+            if (old as usize) <= cb {
+                old
+            } else {
+                old + delta
+            }
         };
         for (i, op) in code.iter().enumerate() {
             if i == cb {
@@ -16579,7 +17561,10 @@ impl Vm {
     /// external callee, so callees/getters are empty — the proto is class-agnostic
     /// (the per-site PICs handle each receiver class), so no `guard_class` is set.
     #[cfg(feature = "jit-native")]
-    fn compile_native_objparam2(&mut self, proto_idx: usize) -> Option<crate::jit_native::NativeProto> {
+    fn compile_native_objparam2(
+        &mut self,
+        proto_idx: usize,
+    ) -> Option<crate::jit_native::NativeProto> {
         let self_name = self.protos[proto_idx].name.clone();
         let self_name_id = self.interner.intern(&self_name);
         let callees = crate::intern::FxHashMap::default();
@@ -16608,7 +17593,8 @@ impl Vm {
             false, // not 0-arg
             false, // not the 1-arg obj-param variant
             true,  // 2-arg method: param0=Object ptr, param1=Int
-            code_ovr, nloc_ovr,
+            code_ovr,
+            nloc_ovr,
         );
         r
     }
@@ -16631,7 +17617,14 @@ impl Vm {
         };
         let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+            (
+                bh.proto_idx,
+                bh.self_val.clone(),
+                bh.n_params,
+                bh.param_start,
+                bh.rest_slot,
+                bh.kw_rest_slot,
+            )
         };
         // Mirror invoke_block1's plain-1-param gate: exactly one param, no
         // rest/kw/block-param. Anything else stays on the interpreter path.
@@ -16645,7 +17638,8 @@ impl Vm {
         }
         if !self.jit_native_block.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block(proto_idx, param_start as u32, body_start as u32, false);
+            let compiled =
+                self.compile_native_block(proto_idx, param_start as u32, body_start as u32, false);
             self.jit_native_block.insert(proto_idx, compiled);
         }
         let np = match self.jit_native_block.get(&proto_idx) {
@@ -16665,13 +17659,25 @@ impl Vm {
     /// block is pure, so a part-way deopt leaves nothing observable to double when
     /// the generic loop redoes the sum from `init`.
     #[cfg(feature = "jit-native")]
-    pub(crate) fn try_native_sum_loop(&mut self, block_id: ObjId, array_id: ObjId, init: i64) -> Option<i64> {
+    pub(crate) fn try_native_sum_loop(
+        &mut self,
+        block_id: ObjId,
+        array_id: ObjId,
+        init: i64,
+    ) -> Option<i64> {
         if !self.jit_native_on {
             return None;
         }
         let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+            (
+                bh.proto_idx,
+                bh.self_val.clone(),
+                bh.n_params,
+                bh.param_start,
+                bh.rest_slot,
+                bh.kw_rest_slot,
+            )
         };
         if n_params != 1
             || rest_slot.is_some()
@@ -16684,7 +17690,8 @@ impl Vm {
         // Compile the block (shared with try_native_block1's per-proto cache).
         if !self.jit_native_block.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block(proto_idx, param_start as u32, body_start as u32, false);
+            let compiled =
+                self.compile_native_block(proto_idx, param_start as u32, body_start as u32, false);
             self.jit_native_block.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block.get(&proto_idx) {
@@ -16695,7 +17702,10 @@ impl Vm {
         // baked address stays valid: jit_native_block entries are insert-once and
         // never replaced for a proto's lifetime, so the block code outlives this.
         if !self.jit_native_sum_loop.contains_key(&proto_idx) {
-            let compiled = crate::jit_native::compile_native_loop(block_addr, crate::jit_native::LoopKind::Sum);
+            let compiled = crate::jit_native::compile_native_loop(
+                block_addr,
+                crate::jit_native::LoopKind::Sum,
+            );
             self.jit_native_sum_loop.insert(proto_idx, compiled);
         }
         let sl = match self.jit_native_sum_loop.get(&proto_idx) {
@@ -16722,14 +17732,25 @@ impl Vm {
     /// key includes the callee proto so a method redefinition (new proto) recompiles
     /// rather than calling a stale address. `None` = decline -> generic loop.
     #[cfg(feature = "jit-native")]
-    pub(crate) fn try_native_objmethod_sum_loop(&mut self, block_id: ObjId, array_id: ObjId, init: i64) -> Option<i64> {
+    pub(crate) fn try_native_objmethod_sum_loop(
+        &mut self,
+        block_id: ObjId,
+        array_id: ObjId,
+        init: i64,
+    ) -> Option<i64> {
         use crate::bytecode::Op;
         if !self.jit_native_on {
             return None;
         }
         let (block_proto_idx, n_params, param_start, rest_slot, kw_rest_slot) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+            (
+                bh.proto_idx,
+                bh.n_params,
+                bh.param_start,
+                bh.rest_slot,
+                bh.kw_rest_slot,
+            )
         };
         if n_params != 1
             || rest_slot.is_some()
@@ -16797,7 +17818,9 @@ impl Vm {
         let key = (block_proto_idx, class_ptr, callee_proto);
         if !self.jit_native_objmethod_sum_loop.contains_key(&key) {
             let compiled = crate::jit_native::compile_native_objmethod_sum_loop(
-                method_addr, class_ptr, arg_const,
+                method_addr,
+                class_ptr,
+                arg_const,
             );
             self.jit_native_objmethod_sum_loop.insert(key, compiled);
         }
@@ -16818,13 +17841,25 @@ impl Vm {
     /// `None` (non-Float element, ineligible block) -> generic sum. Caller pins the
     /// array + block.
     #[cfg(feature = "jit-native")]
-    pub(crate) fn try_native_floatsum_loop(&mut self, block_id: ObjId, array_id: ObjId, init_bits: i64) -> Option<i64> {
+    pub(crate) fn try_native_floatsum_loop(
+        &mut self,
+        block_id: ObjId,
+        array_id: ObjId,
+        init_bits: i64,
+    ) -> Option<i64> {
         if !self.jit_native_on {
             return None;
         }
         let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+            (
+                bh.proto_idx,
+                bh.self_val.clone(),
+                bh.n_params,
+                bh.param_start,
+                bh.rest_slot,
+                bh.kw_rest_slot,
+            )
         };
         if n_params != 1
             || rest_slot.is_some()
@@ -16842,7 +17877,13 @@ impl Vm {
         }
         if !self.jit_native_block_float.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32, false, true);
+            let compiled = self.compile_native_block_float(
+                proto_idx,
+                param_start as u32,
+                body_start as u32,
+                false,
+                true,
+            );
             self.jit_native_block_float.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block_float.get(&proto_idx) {
@@ -16870,13 +17911,25 @@ impl Vm {
     /// Int). The Float sum above declines first (its Float-result block rejects the
     /// Int conversion result). Returns the i64 sum.
     #[cfg(feature = "jit-native")]
-    pub(crate) fn try_native_floatint_sum_loop(&mut self, block_id: ObjId, array_id: ObjId, init: i64) -> Option<i64> {
+    pub(crate) fn try_native_floatint_sum_loop(
+        &mut self,
+        block_id: ObjId,
+        array_id: ObjId,
+        init: i64,
+    ) -> Option<i64> {
         if !self.jit_native_on {
             return None;
         }
         let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+            (
+                bh.proto_idx,
+                bh.self_val.clone(),
+                bh.n_params,
+                bh.param_start,
+                bh.rest_slot,
+                bh.kw_rest_slot,
+            )
         };
         if n_params != 1
             || rest_slot.is_some()
@@ -16888,7 +17941,13 @@ impl Vm {
         }
         if !self.jit_native_block_floatint.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32, false, false);
+            let compiled = self.compile_native_block_float(
+                proto_idx,
+                param_start as u32,
+                body_start as u32,
+                false,
+                false,
+            );
             self.jit_native_block_floatint.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block_floatint.get(&proto_idx) {
@@ -16896,8 +17955,12 @@ impl Vm {
             _ => return None,
         };
         if !self.jit_native_floatint_sum_loop.contains_key(&proto_idx) {
-            let compiled = crate::jit_native::compile_native_floatloop(block_addr, crate::jit_native::LoopKind::Sum);
-            self.jit_native_floatint_sum_loop.insert(proto_idx, compiled);
+            let compiled = crate::jit_native::compile_native_floatloop(
+                block_addr,
+                crate::jit_native::LoopKind::Sum,
+            );
+            self.jit_native_floatint_sum_loop
+                .insert(proto_idx, compiled);
         }
         let sl = match self.jit_native_floatint_sum_loop.get(&proto_idx) {
             Some(Some(sl)) => sl,
@@ -16918,13 +17981,23 @@ impl Vm {
     /// output and falls back to generic map — sound by the pure-block discard-and-redo
     /// invariant.
     #[cfg(feature = "jit-native")]
-    pub(crate) fn try_native_floatint_map_loop(&mut self, block_id: ObjId, in_id: ObjId) -> Option<ObjId> {
+    pub(crate) fn try_native_floatint_map_loop(
+        &mut self,
+        block_id: ObjId,
+        in_id: ObjId,
+    ) -> Option<ObjId> {
         if !self.jit_native_on {
             return None;
         }
         let (proto_idx, n_params, param_start, rest_slot, kw_rest_slot) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+            (
+                bh.proto_idx,
+                bh.n_params,
+                bh.param_start,
+                bh.rest_slot,
+                bh.kw_rest_slot,
+            )
         };
         if n_params != 1
             || rest_slot.is_some()
@@ -16936,7 +18009,13 @@ impl Vm {
         }
         if !self.jit_native_block_floatint.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32, false, false);
+            let compiled = self.compile_native_block_float(
+                proto_idx,
+                param_start as u32,
+                body_start as u32,
+                false,
+                false,
+            );
             self.jit_native_block_floatint.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block_floatint.get(&proto_idx) {
@@ -16944,26 +18023,38 @@ impl Vm {
             _ => return None,
         };
         if !self.jit_native_floatint_map_loop.contains_key(&proto_idx) {
-            let compiled = crate::jit_native::compile_native_floatloop(block_addr, crate::jit_native::LoopKind::Map);
-            self.jit_native_floatint_map_loop.insert(proto_idx, compiled);
+            let compiled = crate::jit_native::compile_native_floatloop(
+                block_addr,
+                crate::jit_native::LoopKind::Map,
+            );
+            self.jit_native_floatint_map_loop
+                .insert(proto_idx, compiled);
         }
-        if !matches!(self.jit_native_floatint_map_loop.get(&proto_idx), Some(Some(_))) {
+        if !matches!(
+            self.jit_native_floatint_map_loop.get(&proto_idx),
+            Some(Some(_))
+        ) {
             return None;
         }
         let len = self.heap.array(in_id).len();
         self.check_alloc().ok()?;
-        let out_id = self.heap.alloc(crate::heap::HeapObj::Array(vec![Value::Nil; len].into()));
+        let out_id = self
+            .heap
+            .alloc(crate::heap::HeapObj::Array(vec![Value::Nil; len].into()));
         self.pinned.push(Value::Array(out_id));
         let self_val = self.heap.block(block_id).self_val.clone();
         let vm_ptr = self as *const crate::vm::Vm;
-        let ml = self.jit_native_floatint_map_loop.get(&proto_idx).unwrap().as_ref().unwrap();
-        let ok = ml.call(vm_ptr, &self_val, in_id.0 as i64, out_id.0 as i64).is_some();
+        let ml = self
+            .jit_native_floatint_map_loop
+            .get(&proto_idx)
+            .unwrap()
+            .as_ref()
+            .unwrap();
+        let ok = ml
+            .call(vm_ptr, &self_val, in_id.0 as i64, out_id.0 as i64)
+            .is_some();
         self.pinned.pop();
-        if ok {
-            Some(out_id)
-        } else {
-            None
-        }
+        if ok { Some(out_id) } else { None }
     }
 
     /// Whole-loop fast path for `ints.sum { |x| <f64 expr in x> }` (ADR 0034 layer
@@ -16986,7 +18077,14 @@ impl Vm {
         }
         let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+            (
+                bh.proto_idx,
+                bh.self_val.clone(),
+                bh.n_params,
+                bh.param_start,
+                bh.rest_slot,
+                bh.kw_rest_slot,
+            )
         };
         if n_params != 1
             || rest_slot.is_some()
@@ -17002,16 +18100,24 @@ impl Vm {
         }
         if !self.jit_native_block_intelem_fa.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block_intelem_floatacc(proto_idx, param_start as u32, body_start as u32);
+            let compiled = self.compile_native_block_intelem_floatacc(
+                proto_idx,
+                param_start as u32,
+                body_start as u32,
+            );
             self.jit_native_block_intelem_fa.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block_intelem_fa.get(&proto_idx) {
             Some(Some(np)) => np.addr(),
             _ => return None,
         };
-        if !self.jit_native_intelem_floatsum_loop.contains_key(&proto_idx) {
+        if !self
+            .jit_native_intelem_floatsum_loop
+            .contains_key(&proto_idx)
+        {
             let compiled = crate::jit_native::compile_native_floatsum_loop_inner(block_addr, true);
-            self.jit_native_intelem_floatsum_loop.insert(proto_idx, compiled);
+            self.jit_native_intelem_floatsum_loop
+                .insert(proto_idx, compiled);
         }
         let sl = match self.jit_native_intelem_floatsum_loop.get(&proto_idx) {
             Some(Some(sl)) => sl,
@@ -17044,13 +18150,19 @@ impl Vm {
             &callees, // empty obj-param callees
             &getters,
             &syms,
-            Some((param_start, body_local_start, false, crate::jit_native::AccKind::None)),
+            Some((
+                param_start,
+                body_local_start,
+                false,
+                crate::jit_native::AccKind::None,
+            )),
             false, // Int element
             true,  // ...but Float accumulator/result
             false, // block (allow_zero_arg ignored)
             false, // not an obj-param method
             false, // not a 2-arg method
-            None, None,
+            None,
+            None,
         )
     }
 
@@ -17071,7 +18183,13 @@ impl Vm {
         // rooting; reading it AFTER the last alloc sidesteps that entirely.
         let (proto_idx, n_params, param_start, rest_slot, kw_rest_slot) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+            (
+                bh.proto_idx,
+                bh.n_params,
+                bh.param_start,
+                bh.rest_slot,
+                bh.kw_rest_slot,
+            )
         };
         if n_params != 1
             || rest_slot.is_some()
@@ -17083,7 +18201,8 @@ impl Vm {
         }
         if !self.jit_native_block.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block(proto_idx, param_start as u32, body_start as u32, false);
+            let compiled =
+                self.compile_native_block(proto_idx, param_start as u32, body_start as u32, false);
             self.jit_native_block.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block.get(&proto_idx) {
@@ -17091,7 +18210,10 @@ impl Vm {
             _ => return None,
         };
         if !self.jit_native_map_loop.contains_key(&proto_idx) {
-            let compiled = crate::jit_native::compile_native_loop(block_addr, crate::jit_native::LoopKind::Map);
+            let compiled = crate::jit_native::compile_native_loop(
+                block_addr,
+                crate::jit_native::LoopKind::Map,
+            );
             self.jit_native_map_loop.insert(proto_idx, compiled);
         }
         if !matches!(self.jit_native_map_loop.get(&proto_idx), Some(Some(_))) {
@@ -17101,21 +18223,26 @@ impl Vm {
         // store never grows it (no realloc, no GC, no element move mid-loop).
         let len = self.heap.array(in_id).len();
         self.check_alloc().ok()?;
-        let out_id = self.heap.alloc(crate::heap::HeapObj::Array(vec![Value::Nil; len].into()));
+        let out_id = self
+            .heap
+            .alloc(crate::heap::HeapObj::Array(vec![Value::Nil; len].into()));
         // Root the fresh result across the native call (defensive — the loop is
         // alloc-free, but the pin also covers any future change).
         self.pinned.push(Value::Array(out_id));
         // self_val is safe to read now: no allocation happens before the call.
         let self_val = self.heap.block(block_id).self_val.clone();
         let vm_ptr = self as *const crate::vm::Vm;
-        let ml = self.jit_native_map_loop.get(&proto_idx).unwrap().as_ref().unwrap();
-        let ok = ml.call(vm_ptr, &self_val, in_id.0 as i64, out_id.0 as i64).is_some();
+        let ml = self
+            .jit_native_map_loop
+            .get(&proto_idx)
+            .unwrap()
+            .as_ref()
+            .unwrap();
+        let ok = ml
+            .call(vm_ptr, &self_val, in_id.0 as i64, out_id.0 as i64)
+            .is_some();
         self.pinned.pop();
-        if ok {
-            Some(out_id)
-        } else {
-            None
-        }
+        if ok { Some(out_id) } else { None }
     }
 
     /// Whole-loop fast path for `array.map { |x| f(x) }` over an all-FLOAT array
@@ -17124,13 +18251,23 @@ impl Vm {
     /// `Some(out_id)` ran natively; `None` (non-Float element / ineligible block /
     /// mixed Int-Float-no-coercion) discards the output and falls back to generic map.
     #[cfg(feature = "jit-native")]
-    pub(crate) fn try_native_floatmap_loop(&mut self, block_id: ObjId, in_id: ObjId) -> Option<ObjId> {
+    pub(crate) fn try_native_floatmap_loop(
+        &mut self,
+        block_id: ObjId,
+        in_id: ObjId,
+    ) -> Option<ObjId> {
         if !self.jit_native_on {
             return None;
         }
         let (proto_idx, n_params, param_start, rest_slot, kw_rest_slot) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+            (
+                bh.proto_idx,
+                bh.n_params,
+                bh.param_start,
+                bh.rest_slot,
+                bh.kw_rest_slot,
+            )
         };
         if n_params != 1
             || rest_slot.is_some()
@@ -17142,7 +18279,13 @@ impl Vm {
         }
         if !self.jit_native_block_float.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32, false, true);
+            let compiled = self.compile_native_block_float(
+                proto_idx,
+                param_start as u32,
+                body_start as u32,
+                false,
+                true,
+            );
             self.jit_native_block_float.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block_float.get(&proto_idx) {
@@ -17158,18 +18301,23 @@ impl Vm {
         }
         let len = self.heap.array(in_id).len();
         self.check_alloc().ok()?;
-        let out_id = self.heap.alloc(crate::heap::HeapObj::Array(vec![Value::Nil; len].into()));
+        let out_id = self
+            .heap
+            .alloc(crate::heap::HeapObj::Array(vec![Value::Nil; len].into()));
         self.pinned.push(Value::Array(out_id));
         let self_val = self.heap.block(block_id).self_val.clone();
         let vm_ptr = self as *const crate::vm::Vm;
-        let ml = self.jit_native_floatmap_loop.get(&proto_idx).unwrap().as_ref().unwrap();
-        let ok = ml.call(vm_ptr, &self_val, in_id.0 as i64, out_id.0 as i64).is_some();
+        let ml = self
+            .jit_native_floatmap_loop
+            .get(&proto_idx)
+            .unwrap()
+            .as_ref()
+            .unwrap();
+        let ok = ml
+            .call(vm_ptr, &self_val, in_id.0 as i64, out_id.0 as i64)
+            .is_some();
         self.pinned.pop();
-        if ok {
-            Some(out_id)
-        } else {
-            None
-        }
+        if ok { Some(out_id) } else { None }
     }
 
     /// Int-element / Float-output `map` (ADR 0034 layer 3d): `ints.map { |x| x*1.5 }`
@@ -17179,13 +18327,23 @@ impl Vm {
     /// result). `None` on a non-Int element (deopt) or ineligible block. Same pure-
     /// block discard-and-redo soundness as the Float map.
     #[cfg(feature = "jit-native")]
-    pub(crate) fn try_native_intelem_floatmap_loop(&mut self, block_id: ObjId, in_id: ObjId) -> Option<ObjId> {
+    pub(crate) fn try_native_intelem_floatmap_loop(
+        &mut self,
+        block_id: ObjId,
+        in_id: ObjId,
+    ) -> Option<ObjId> {
         if !self.jit_native_on {
             return None;
         }
         let (proto_idx, n_params, param_start, rest_slot, kw_rest_slot) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+            (
+                bh.proto_idx,
+                bh.n_params,
+                bh.param_start,
+                bh.rest_slot,
+                bh.kw_rest_slot,
+            )
         };
         if n_params != 1
             || rest_slot.is_some()
@@ -17197,34 +18355,50 @@ impl Vm {
         }
         if !self.jit_native_block_intelem_fa.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block_intelem_floatacc(proto_idx, param_start as u32, body_start as u32);
+            let compiled = self.compile_native_block_intelem_floatacc(
+                proto_idx,
+                param_start as u32,
+                body_start as u32,
+            );
             self.jit_native_block_intelem_fa.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block_intelem_fa.get(&proto_idx) {
             Some(Some(np)) => np.addr(),
             _ => return None,
         };
-        if !self.jit_native_intelem_floatmap_loop.contains_key(&proto_idx) {
+        if !self
+            .jit_native_intelem_floatmap_loop
+            .contains_key(&proto_idx)
+        {
             let compiled = crate::jit_native::compile_native_floatmap_loop_inner(block_addr, true);
-            self.jit_native_intelem_floatmap_loop.insert(proto_idx, compiled);
+            self.jit_native_intelem_floatmap_loop
+                .insert(proto_idx, compiled);
         }
-        if !matches!(self.jit_native_intelem_floatmap_loop.get(&proto_idx), Some(Some(_))) {
+        if !matches!(
+            self.jit_native_intelem_floatmap_loop.get(&proto_idx),
+            Some(Some(_))
+        ) {
             return None;
         }
         let len = self.heap.array(in_id).len();
         self.check_alloc().ok()?;
-        let out_id = self.heap.alloc(crate::heap::HeapObj::Array(vec![Value::Nil; len].into()));
+        let out_id = self
+            .heap
+            .alloc(crate::heap::HeapObj::Array(vec![Value::Nil; len].into()));
         self.pinned.push(Value::Array(out_id));
         let self_val = self.heap.block(block_id).self_val.clone();
         let vm_ptr = self as *const crate::vm::Vm;
-        let ml = self.jit_native_intelem_floatmap_loop.get(&proto_idx).unwrap().as_ref().unwrap();
-        let ok = ml.call(vm_ptr, &self_val, in_id.0 as i64, out_id.0 as i64).is_some();
+        let ml = self
+            .jit_native_intelem_floatmap_loop
+            .get(&proto_idx)
+            .unwrap()
+            .as_ref()
+            .unwrap();
+        let ok = ml
+            .call(vm_ptr, &self_val, in_id.0 as i64, out_id.0 as i64)
+            .is_some();
         self.pinned.pop();
-        if ok {
-            Some(out_id)
-        } else {
-            None
-        }
+        if ok { Some(out_id) } else { None }
     }
 
     /// Whole-loop fast path for `array.count { pred }` (ADR 0034 layer 3): a count
@@ -17234,13 +18408,24 @@ impl Vm {
     /// back to the generic loop (non-comparison predicate — e.g. `x.even?` — or a
     /// deopt on a non-Int element). The caller must have pinned `array_id`.
     #[cfg(feature = "jit-native")]
-    pub(crate) fn try_native_count_loop(&mut self, block_id: ObjId, array_id: ObjId) -> Option<i64> {
+    pub(crate) fn try_native_count_loop(
+        &mut self,
+        block_id: ObjId,
+        array_id: ObjId,
+    ) -> Option<i64> {
         if !self.jit_native_on {
             return None;
         }
         let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+            (
+                bh.proto_idx,
+                bh.self_val.clone(),
+                bh.n_params,
+                bh.param_start,
+                bh.rest_slot,
+                bh.kw_rest_slot,
+            )
         };
         if n_params != 1
             || rest_slot.is_some()
@@ -17253,7 +18438,8 @@ impl Vm {
         // Predicate-mode compilation, cached separately from the value-mode block.
         if !self.jit_native_block_pred.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block(proto_idx, param_start as u32, body_start as u32, true);
+            let compiled =
+                self.compile_native_block(proto_idx, param_start as u32, body_start as u32, true);
             self.jit_native_block_pred.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block_pred.get(&proto_idx) {
@@ -17261,7 +18447,10 @@ impl Vm {
             _ => return None,
         };
         if !self.jit_native_count_loop.contains_key(&proto_idx) {
-            let compiled = crate::jit_native::compile_native_loop(block_addr, crate::jit_native::LoopKind::Sum);
+            let compiled = crate::jit_native::compile_native_loop(
+                block_addr,
+                crate::jit_native::LoopKind::Sum,
+            );
             self.jit_native_count_loop.insert(proto_idx, compiled);
         }
         let sl = match self.jit_native_count_loop.get(&proto_idx) {
@@ -17280,13 +18469,24 @@ impl Vm {
     /// non-Int element). The caller must have pinned `in_id` + the block. Sound:
     /// the predicate is pure, so a part-way deopt's partial `out` is discarded.
     #[cfg(feature = "jit-native")]
-    pub(crate) fn try_native_filter_loop(&mut self, block_id: ObjId, in_id: ObjId, keep_when_true: bool) -> Option<ObjId> {
+    pub(crate) fn try_native_filter_loop(
+        &mut self,
+        block_id: ObjId,
+        in_id: ObjId,
+        keep_when_true: bool,
+    ) -> Option<ObjId> {
         if !self.jit_native_on {
             return None;
         }
         let (proto_idx, n_params, param_start, rest_slot, kw_rest_slot) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+            (
+                bh.proto_idx,
+                bh.n_params,
+                bh.param_start,
+                bh.rest_slot,
+                bh.kw_rest_slot,
+            )
         };
         if n_params != 1
             || rest_slot.is_some()
@@ -17299,7 +18499,8 @@ impl Vm {
         // Predicate-mode block (shared with count's cache).
         if !self.jit_native_block_pred.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block(proto_idx, param_start as u32, body_start as u32, true);
+            let compiled =
+                self.compile_native_block(proto_idx, param_start as u32, body_start as u32, true);
             self.jit_native_block_pred.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block_pred.get(&proto_idx) {
@@ -17308,7 +18509,12 @@ impl Vm {
         };
         let key = (proto_idx, keep_when_true);
         if !self.jit_native_filter_loop.contains_key(&key) {
-            let compiled = crate::jit_native::compile_native_loop(block_addr, crate::jit_native::LoopKind::Filter { keep: keep_when_true });
+            let compiled = crate::jit_native::compile_native_loop(
+                block_addr,
+                crate::jit_native::LoopKind::Filter {
+                    keep: keep_when_true,
+                },
+            );
             self.jit_native_filter_loop.insert(key, compiled);
         }
         if !matches!(self.jit_native_filter_loop.get(&key), Some(Some(_))) {
@@ -17317,19 +18523,24 @@ impl Vm {
         // Reserve out capacity = input length so the native push never reallocs.
         let len = self.heap.array(in_id).len();
         self.check_alloc().ok()?;
-        let out_id = self.heap.alloc(crate::heap::HeapObj::Array(Vec::with_capacity(len).into()));
+        let out_id = self
+            .heap
+            .alloc(crate::heap::HeapObj::Array(Vec::with_capacity(len).into()));
         self.pinned.push(Value::Array(out_id));
         // self_val is safe to read now: no allocation before the native call.
         let self_val = self.heap.block(block_id).self_val.clone();
         let vm_ptr = self as *const crate::vm::Vm;
-        let fl = self.jit_native_filter_loop.get(&key).unwrap().as_ref().unwrap();
-        let ok = fl.call(vm_ptr, &self_val, in_id.0 as i64, out_id.0 as i64).is_some();
+        let fl = self
+            .jit_native_filter_loop
+            .get(&key)
+            .unwrap()
+            .as_ref()
+            .unwrap();
+        let ok = fl
+            .call(vm_ptr, &self_val, in_id.0 as i64, out_id.0 as i64)
+            .is_some();
         self.pinned.pop();
-        if ok {
-            Some(out_id)
-        } else {
-            None
-        }
+        if ok { Some(out_id) } else { None }
     }
 
     /// Whole-loop fast path for `array.find { pred }` / `detect` (ADR 0034 layer
@@ -17339,13 +18550,23 @@ impl Vm {
     /// ran natively, no element matched; `Some(Some(v))` = found `v`. The caller
     /// must have pinned `in_id` + the block.
     #[cfg(feature = "jit-native")]
-    pub(crate) fn try_native_find_loop(&mut self, block_id: ObjId, in_id: ObjId) -> Option<Option<Value>> {
+    pub(crate) fn try_native_find_loop(
+        &mut self,
+        block_id: ObjId,
+        in_id: ObjId,
+    ) -> Option<Option<Value>> {
         if !self.jit_native_on {
             return None;
         }
         let (proto_idx, n_params, param_start, rest_slot, kw_rest_slot) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+            (
+                bh.proto_idx,
+                bh.n_params,
+                bh.param_start,
+                bh.rest_slot,
+                bh.kw_rest_slot,
+            )
         };
         if n_params != 1
             || rest_slot.is_some()
@@ -17358,7 +18579,8 @@ impl Vm {
         // Predicate-mode block (shared with count/select's cache).
         if !self.jit_native_block_pred.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block(proto_idx, param_start as u32, body_start as u32, true);
+            let compiled =
+                self.compile_native_block(proto_idx, param_start as u32, body_start as u32, true);
             self.jit_native_block_pred.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block_pred.get(&proto_idx) {
@@ -17366,7 +18588,10 @@ impl Vm {
             _ => return None,
         };
         if !self.jit_native_find_loop.contains_key(&proto_idx) {
-            let compiled = crate::jit_native::compile_native_loop(block_addr, crate::jit_native::LoopKind::Find);
+            let compiled = crate::jit_native::compile_native_loop(
+                block_addr,
+                crate::jit_native::LoopKind::Find,
+            );
             self.jit_native_find_loop.insert(proto_idx, compiled);
         }
         if !matches!(self.jit_native_find_loop.get(&proto_idx), Some(Some(_))) {
@@ -17375,12 +18600,21 @@ impl Vm {
         // A capacity-1 result holds the first match (early-exit), so the push
         // never reallocs.
         self.check_alloc().ok()?;
-        let out_id = self.heap.alloc(crate::heap::HeapObj::Array(Vec::with_capacity(1).into()));
+        let out_id = self
+            .heap
+            .alloc(crate::heap::HeapObj::Array(Vec::with_capacity(1).into()));
         self.pinned.push(Value::Array(out_id));
         let self_val = self.heap.block(block_id).self_val.clone();
         let vm_ptr = self as *const crate::vm::Vm;
-        let fl = self.jit_native_find_loop.get(&proto_idx).unwrap().as_ref().unwrap();
-        let ran = fl.call(vm_ptr, &self_val, in_id.0 as i64, out_id.0 as i64).is_some();
+        let fl = self
+            .jit_native_find_loop
+            .get(&proto_idx)
+            .unwrap()
+            .as_ref()
+            .unwrap();
+        let ran = fl
+            .call(vm_ptr, &self_val, in_id.0 as i64, out_id.0 as i64)
+            .is_some();
         let found = if ran {
             Some(self.heap.array(out_id).first().cloned())
         } else {
@@ -17395,13 +18629,24 @@ impl Vm {
     /// counted through the int-sum-of-truthiness loop. Fires after the Int count
     /// declines on Float elements. `Some(count)` ran natively.
     #[cfg(feature = "jit-native")]
-    pub(crate) fn try_native_floatcount_loop(&mut self, block_id: ObjId, array_id: ObjId) -> Option<i64> {
+    pub(crate) fn try_native_floatcount_loop(
+        &mut self,
+        block_id: ObjId,
+        array_id: ObjId,
+    ) -> Option<i64> {
         if !self.jit_native_on {
             return None;
         }
         let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+            (
+                bh.proto_idx,
+                bh.self_val.clone(),
+                bh.n_params,
+                bh.param_start,
+                bh.rest_slot,
+                bh.kw_rest_slot,
+            )
         };
         if n_params != 1
             || rest_slot.is_some()
@@ -17413,7 +18658,13 @@ impl Vm {
         }
         if !self.jit_native_block_pred_float.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32, true, true);
+            let compiled = self.compile_native_block_float(
+                proto_idx,
+                param_start as u32,
+                body_start as u32,
+                true,
+                true,
+            );
             self.jit_native_block_pred_float.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block_pred_float.get(&proto_idx) {
@@ -17421,7 +18672,10 @@ impl Vm {
             _ => return None,
         };
         if !self.jit_native_floatcount_loop.contains_key(&proto_idx) {
-            let compiled = crate::jit_native::compile_native_floatloop(block_addr, crate::jit_native::LoopKind::Sum);
+            let compiled = crate::jit_native::compile_native_floatloop(
+                block_addr,
+                crate::jit_native::LoopKind::Sum,
+            );
             self.jit_native_floatcount_loop.insert(proto_idx, compiled);
         }
         let sl = match self.jit_native_floatcount_loop.get(&proto_idx) {
@@ -17436,13 +18690,24 @@ impl Vm {
     /// the matching FLOAT elements into a reserved result via `jit_array_push_float`.
     /// Fires after the Int filter declines. `Some(out)` ran natively.
     #[cfg(feature = "jit-native")]
-    pub(crate) fn try_native_floatfilter_loop(&mut self, block_id: ObjId, in_id: ObjId, keep_when_true: bool) -> Option<ObjId> {
+    pub(crate) fn try_native_floatfilter_loop(
+        &mut self,
+        block_id: ObjId,
+        in_id: ObjId,
+        keep_when_true: bool,
+    ) -> Option<ObjId> {
         if !self.jit_native_on {
             return None;
         }
         let (proto_idx, n_params, param_start, rest_slot, kw_rest_slot) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+            (
+                bh.proto_idx,
+                bh.n_params,
+                bh.param_start,
+                bh.rest_slot,
+                bh.kw_rest_slot,
+            )
         };
         if n_params != 1
             || rest_slot.is_some()
@@ -17454,7 +18719,13 @@ impl Vm {
         }
         if !self.jit_native_block_pred_float.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32, true, true);
+            let compiled = self.compile_native_block_float(
+                proto_idx,
+                param_start as u32,
+                body_start as u32,
+                true,
+                true,
+            );
             self.jit_native_block_pred_float.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block_pred_float.get(&proto_idx) {
@@ -17463,7 +18734,12 @@ impl Vm {
         };
         let key = (proto_idx, keep_when_true);
         if !self.jit_native_floatfilter_loop.contains_key(&key) {
-            let compiled = crate::jit_native::compile_native_floatloop(block_addr, crate::jit_native::LoopKind::Filter { keep: keep_when_true });
+            let compiled = crate::jit_native::compile_native_floatloop(
+                block_addr,
+                crate::jit_native::LoopKind::Filter {
+                    keep: keep_when_true,
+                },
+            );
             self.jit_native_floatfilter_loop.insert(key, compiled);
         }
         if !matches!(self.jit_native_floatfilter_loop.get(&key), Some(Some(_))) {
@@ -17471,30 +18747,45 @@ impl Vm {
         }
         let len = self.heap.array(in_id).len();
         self.check_alloc().ok()?;
-        let out_id = self.heap.alloc(crate::heap::HeapObj::Array(Vec::with_capacity(len).into()));
+        let out_id = self
+            .heap
+            .alloc(crate::heap::HeapObj::Array(Vec::with_capacity(len).into()));
         self.pinned.push(Value::Array(out_id));
         let self_val = self.heap.block(block_id).self_val.clone();
         let vm_ptr = self as *const crate::vm::Vm;
-        let fl = self.jit_native_floatfilter_loop.get(&key).unwrap().as_ref().unwrap();
-        let ok = fl.call(vm_ptr, &self_val, in_id.0 as i64, out_id.0 as i64).is_some();
+        let fl = self
+            .jit_native_floatfilter_loop
+            .get(&key)
+            .unwrap()
+            .as_ref()
+            .unwrap();
+        let ok = fl
+            .call(vm_ptr, &self_val, in_id.0 as i64, out_id.0 as i64)
+            .is_some();
         self.pinned.pop();
-        if ok {
-            Some(out_id)
-        } else {
-            None
-        }
+        if ok { Some(out_id) } else { None }
     }
 
     /// Float `find`/`detect { |x| <float predicate> }` (ADR 0034 layer 3d): early-exit
     /// on the first matching Float element. Fires after the Int find declines.
     #[cfg(feature = "jit-native")]
-    pub(crate) fn try_native_floatfind_loop(&mut self, block_id: ObjId, in_id: ObjId) -> Option<Option<Value>> {
+    pub(crate) fn try_native_floatfind_loop(
+        &mut self,
+        block_id: ObjId,
+        in_id: ObjId,
+    ) -> Option<Option<Value>> {
         if !self.jit_native_on {
             return None;
         }
         let (proto_idx, n_params, param_start, rest_slot, kw_rest_slot) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+            (
+                bh.proto_idx,
+                bh.n_params,
+                bh.param_start,
+                bh.rest_slot,
+                bh.kw_rest_slot,
+            )
         };
         if n_params != 1
             || rest_slot.is_some()
@@ -17506,7 +18797,13 @@ impl Vm {
         }
         if !self.jit_native_block_pred_float.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32, true, true);
+            let compiled = self.compile_native_block_float(
+                proto_idx,
+                param_start as u32,
+                body_start as u32,
+                true,
+                true,
+            );
             self.jit_native_block_pred_float.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block_pred_float.get(&proto_idx) {
@@ -17514,19 +18811,34 @@ impl Vm {
             _ => return None,
         };
         if !self.jit_native_floatfind_loop.contains_key(&proto_idx) {
-            let compiled = crate::jit_native::compile_native_floatloop(block_addr, crate::jit_native::LoopKind::Find);
+            let compiled = crate::jit_native::compile_native_floatloop(
+                block_addr,
+                crate::jit_native::LoopKind::Find,
+            );
             self.jit_native_floatfind_loop.insert(proto_idx, compiled);
         }
-        if !matches!(self.jit_native_floatfind_loop.get(&proto_idx), Some(Some(_))) {
+        if !matches!(
+            self.jit_native_floatfind_loop.get(&proto_idx),
+            Some(Some(_))
+        ) {
             return None;
         }
         self.check_alloc().ok()?;
-        let out_id = self.heap.alloc(crate::heap::HeapObj::Array(Vec::with_capacity(1).into()));
+        let out_id = self
+            .heap
+            .alloc(crate::heap::HeapObj::Array(Vec::with_capacity(1).into()));
         self.pinned.push(Value::Array(out_id));
         let self_val = self.heap.block(block_id).self_val.clone();
         let vm_ptr = self as *const crate::vm::Vm;
-        let fl = self.jit_native_floatfind_loop.get(&proto_idx).unwrap().as_ref().unwrap();
-        let ran = fl.call(vm_ptr, &self_val, in_id.0 as i64, out_id.0 as i64).is_some();
+        let fl = self
+            .jit_native_floatfind_loop
+            .get(&proto_idx)
+            .unwrap()
+            .as_ref()
+            .unwrap();
+        let ran = fl
+            .call(vm_ptr, &self_val, in_id.0 as i64, out_id.0 as i64)
+            .is_some();
         let found = if ran {
             Some(self.heap.array(out_id).first().cloned())
         } else {
@@ -17542,13 +18854,25 @@ impl Vm {
     /// (block not 2-param-compilable, or a deopt on a non-Int element / overflow).
     /// The caller must have pinned `array_id`. Sound: the block is pure.
     #[cfg(feature = "jit-native")]
-    pub(crate) fn try_native_inject_loop(&mut self, block_id: ObjId, array_id: ObjId, init: i64) -> Option<i64> {
+    pub(crate) fn try_native_inject_loop(
+        &mut self,
+        block_id: ObjId,
+        array_id: ObjId,
+        init: i64,
+    ) -> Option<i64> {
         if !self.jit_native_on {
             return None;
         }
         let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+            (
+                bh.proto_idx,
+                bh.self_val.clone(),
+                bh.n_params,
+                bh.param_start,
+                bh.rest_slot,
+                bh.kw_rest_slot,
+            )
         };
         // Exactly two params (acc, elem), no rest/kw/block-param.
         if n_params != 2
@@ -17561,7 +18885,13 @@ impl Vm {
         }
         if !self.jit_native_block2.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block2(proto_idx, param_start as u32, body_start as u32, false, false);
+            let compiled = self.compile_native_block2(
+                proto_idx,
+                param_start as u32,
+                body_start as u32,
+                false,
+                false,
+            );
             self.jit_native_block2.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block2.get(&proto_idx) {
@@ -17604,7 +18934,14 @@ impl Vm {
         }
         let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+            (
+                bh.proto_idx,
+                bh.self_val.clone(),
+                bh.n_params,
+                bh.param_start,
+                bh.rest_slot,
+                bh.kw_rest_slot,
+            )
         };
         if n_params != 2
             || rest_slot.is_some()
@@ -17619,7 +18956,13 @@ impl Vm {
             let body_start = self.protos[proto_idx].block_body_local_start;
             // float_elem marks the ELEMENT (arg3) Float -> only for Float elements;
             // float_acc marks the ACCUMULATOR (arg2) Float -> always here.
-            let compiled = self.compile_native_block2(proto_idx, param_start as u32, body_start as u32, !int_elem, true);
+            let compiled = self.compile_native_block2(
+                proto_idx,
+                param_start as u32,
+                body_start as u32,
+                !int_elem,
+                true,
+            );
             self.jit_native_block2_finject.insert(key, compiled);
         }
         let block_addr = match self.jit_native_block2_finject.get(&key) {
@@ -17655,13 +18998,35 @@ impl Vm {
     /// double-count. `Some(())` ran natively (slot updated); `None` declines.
     /// The caller must have pinned `array_id`.
     #[cfg(feature = "jit-native")]
-    pub(crate) fn try_native_each_acc_loop(&mut self, block_id: ObjId, array_id: ObjId) -> Option<()> {
+    pub(crate) fn try_native_each_acc_loop(
+        &mut self,
+        block_id: ObjId,
+        array_id: ObjId,
+    ) -> Option<()> {
         if !self.jit_native_on {
             return None;
         }
-        let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot, captured, captured_is_method_scope) = {
+        let (
+            proto_idx,
+            self_val,
+            n_params,
+            param_start,
+            rest_slot,
+            kw_rest_slot,
+            captured,
+            captured_is_method_scope,
+        ) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot, bh.captured.clone(), bh.captured_is_method_scope)
+            (
+                bh.proto_idx,
+                bh.self_val.clone(),
+                bh.n_params,
+                bh.param_start,
+                bh.rest_slot,
+                bh.kw_rest_slot,
+                bh.captured.clone(),
+                bh.captured_is_method_scope,
+            )
         };
         // Exactly one param (the element), no rest/kw/block-param.
         if n_params != 1
@@ -17708,7 +19073,9 @@ impl Vm {
                 }
             };
             match op {
-                Op::StoreLocal(s) | Op::IncLocal(s) | Op::IncLocalNoPush(s) => note(*s, true, &mut cap, &mut written),
+                Op::StoreLocal(s) | Op::IncLocal(s) | Op::IncLocalNoPush(s) => {
+                    note(*s, true, &mut cap, &mut written)
+                }
                 Op::LoadLocal(s) => note(*s, false, &mut cap, &mut written),
                 Op::BinOpLocalLocal(_, a, b) => {
                     note(*a, false, &mut cap, &mut written);
@@ -17727,7 +19094,14 @@ impl Vm {
             _ => return None,
         };
         if !self.jit_native_block_acc.contains_key(&proto_idx) {
-            let compiled = self.compile_native_block_acc(proto_idx, param_start as u32, body_start, acc_slot, false, false);
+            let compiled = self.compile_native_block_acc(
+                proto_idx,
+                param_start as u32,
+                body_start,
+                acc_slot,
+                false,
+                false,
+            );
             self.jit_native_block_acc.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block_acc.get(&proto_idx) {
@@ -17759,13 +19133,35 @@ impl Vm {
     /// the Int each-acc declines (the captured slot holds a Float, not an Int). Same
     /// two soundness gates (share-direct-only + write-back-on-full-success).
     #[cfg(feature = "jit-native")]
-    pub(crate) fn try_native_floateach_acc_loop(&mut self, block_id: ObjId, array_id: ObjId) -> Option<()> {
+    pub(crate) fn try_native_floateach_acc_loop(
+        &mut self,
+        block_id: ObjId,
+        array_id: ObjId,
+    ) -> Option<()> {
         if !self.jit_native_on {
             return None;
         }
-        let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot, captured, captured_is_method_scope) = {
+        let (
+            proto_idx,
+            self_val,
+            n_params,
+            param_start,
+            rest_slot,
+            kw_rest_slot,
+            captured,
+            captured_is_method_scope,
+        ) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot, bh.captured.clone(), bh.captured_is_method_scope)
+            (
+                bh.proto_idx,
+                bh.self_val.clone(),
+                bh.n_params,
+                bh.param_start,
+                bh.rest_slot,
+                bh.kw_rest_slot,
+                bh.captured.clone(),
+                bh.captured_is_method_scope,
+            )
         };
         if n_params != 1
             || rest_slot.is_some()
@@ -17801,7 +19197,9 @@ impl Vm {
                 }
             };
             match op {
-                Op::StoreLocal(s) | Op::IncLocal(s) | Op::IncLocalNoPush(s) => note(*s, true, &mut cap, &mut written),
+                Op::StoreLocal(s) | Op::IncLocal(s) | Op::IncLocalNoPush(s) => {
+                    note(*s, true, &mut cap, &mut written)
+                }
                 Op::LoadLocal(s) => note(*s, false, &mut cap, &mut written),
                 Op::BinOpLocalLocal(_, a, b) => {
                     note(*a, false, &mut cap, &mut written);
@@ -17821,7 +19219,14 @@ impl Vm {
             _ => return None,
         };
         if !self.jit_native_block_acc_float.contains_key(&proto_idx) {
-            let compiled = self.compile_native_block_acc(proto_idx, param_start as u32, body_start, acc_slot, true, true);
+            let compiled = self.compile_native_block_acc(
+                proto_idx,
+                param_start as u32,
+                body_start,
+                acc_slot,
+                true,
+                true,
+            );
             self.jit_native_block_acc_float.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block_acc_float.get(&proto_idx) {
@@ -17830,7 +19235,8 @@ impl Vm {
         };
         if !self.jit_native_floateach_acc_loop.contains_key(&proto_idx) {
             let compiled = crate::jit_native::compile_native_floatinject_loop(block_addr);
-            self.jit_native_floateach_acc_loop.insert(proto_idx, compiled);
+            self.jit_native_floateach_acc_loop
+                .insert(proto_idx, compiled);
         }
         let il = match self.jit_native_floateach_acc_loop.get(&proto_idx) {
             Some(Some(il)) => il,
@@ -17852,13 +19258,35 @@ impl Vm {
     /// with (float_elem=false, float_acc=true): Int element param, Float accumulator.
     /// The Float each-acc declines first (its Float reader deopts on the Int element).
     #[cfg(feature = "jit-native")]
-    pub(crate) fn try_native_intelem_floateach_acc_loop(&mut self, block_id: ObjId, array_id: ObjId) -> Option<()> {
+    pub(crate) fn try_native_intelem_floateach_acc_loop(
+        &mut self,
+        block_id: ObjId,
+        array_id: ObjId,
+    ) -> Option<()> {
         if !self.jit_native_on {
             return None;
         }
-        let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot, captured, captured_is_method_scope) = {
+        let (
+            proto_idx,
+            self_val,
+            n_params,
+            param_start,
+            rest_slot,
+            kw_rest_slot,
+            captured,
+            captured_is_method_scope,
+        ) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot, bh.captured.clone(), bh.captured_is_method_scope)
+            (
+                bh.proto_idx,
+                bh.self_val.clone(),
+                bh.n_params,
+                bh.param_start,
+                bh.rest_slot,
+                bh.kw_rest_slot,
+                bh.captured.clone(),
+                bh.captured_is_method_scope,
+            )
         };
         if n_params != 1
             || rest_slot.is_some()
@@ -17894,7 +19322,9 @@ impl Vm {
                 }
             };
             match op {
-                Op::StoreLocal(s) | Op::IncLocal(s) | Op::IncLocalNoPush(s) => note(*s, true, &mut cap, &mut written),
+                Op::StoreLocal(s) | Op::IncLocal(s) | Op::IncLocalNoPush(s) => {
+                    note(*s, true, &mut cap, &mut written)
+                }
                 Op::LoadLocal(s) => note(*s, false, &mut cap, &mut written),
                 Op::BinOpLocalLocal(_, a, b) => {
                     note(*a, false, &mut cap, &mut written);
@@ -17913,17 +19343,32 @@ impl Vm {
             Some(Value::Float(f)) => f.to_bits() as i64,
             _ => return None,
         };
-        if !self.jit_native_block_acc_intelem_fa.contains_key(&proto_idx) {
-            let compiled = self.compile_native_block_acc(proto_idx, param_start as u32, body_start, acc_slot, false, true);
-            self.jit_native_block_acc_intelem_fa.insert(proto_idx, compiled);
+        if !self
+            .jit_native_block_acc_intelem_fa
+            .contains_key(&proto_idx)
+        {
+            let compiled = self.compile_native_block_acc(
+                proto_idx,
+                param_start as u32,
+                body_start,
+                acc_slot,
+                false,
+                true,
+            );
+            self.jit_native_block_acc_intelem_fa
+                .insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block_acc_intelem_fa.get(&proto_idx) {
             Some(Some(np)) => np.addr(),
             _ => return None,
         };
-        if !self.jit_native_intelem_floateach_acc_loop.contains_key(&proto_idx) {
+        if !self
+            .jit_native_intelem_floateach_acc_loop
+            .contains_key(&proto_idx)
+        {
             let compiled = crate::jit_native::compile_native_inject_loop(block_addr);
-            self.jit_native_intelem_floateach_acc_loop.insert(proto_idx, compiled);
+            self.jit_native_intelem_floateach_acc_loop
+                .insert(proto_idx, compiled);
         }
         let il = match self.jit_native_intelem_floateach_acc_loop.get(&proto_idx) {
             Some(Some(il)) => il,
@@ -17944,13 +19389,36 @@ impl Vm {
     /// write-back-on-success (commit the captured accumulator only on full native
     /// completion) and share-direct-only. The caller must have pinned `array_id`.
     #[cfg(feature = "jit-native")]
-    pub(crate) fn try_native_eachidx_loop(&mut self, block_id: ObjId, array_id: ObjId, float_acc: bool) -> Option<()> {
+    pub(crate) fn try_native_eachidx_loop(
+        &mut self,
+        block_id: ObjId,
+        array_id: ObjId,
+        float_acc: bool,
+    ) -> Option<()> {
         if !self.jit_native_on {
             return None;
         }
-        let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot, captured, captured_is_method_scope) = {
+        let (
+            proto_idx,
+            self_val,
+            n_params,
+            param_start,
+            rest_slot,
+            kw_rest_slot,
+            captured,
+            captured_is_method_scope,
+        ) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot, bh.captured.clone(), bh.captured_is_method_scope)
+            (
+                bh.proto_idx,
+                bh.self_val.clone(),
+                bh.n_params,
+                bh.param_start,
+                bh.rest_slot,
+                bh.kw_rest_slot,
+                bh.captured.clone(),
+                bh.captured_is_method_scope,
+            )
         };
         // Exactly two params (element, index), no rest/kw/block-param.
         if n_params != 2
@@ -17990,7 +19458,9 @@ impl Vm {
                 }
             };
             match op {
-                Op::StoreLocal(s) | Op::IncLocal(s) | Op::IncLocalNoPush(s) => note(*s, true, &mut cap, &mut written),
+                Op::StoreLocal(s) | Op::IncLocal(s) | Op::IncLocalNoPush(s) => {
+                    note(*s, true, &mut cap, &mut written)
+                }
                 Op::LoadLocal(s) => note(*s, false, &mut cap, &mut written),
                 Op::BinOpLocalLocal(_, a, b) => {
                     note(*a, false, &mut cap, &mut written);
@@ -18014,7 +19484,13 @@ impl Vm {
         let key = (proto_idx, float_acc);
         if !self.jit_native_block_eachidx_k.contains_key(&key) {
             // float_acc=false -> Int acc/element block; true -> Int element, Float acc.
-            let compiled = self.compile_native_block_eachidx(proto_idx, param_start as u32, body_start, acc_slot, float_acc);
+            let compiled = self.compile_native_block_eachidx(
+                proto_idx,
+                param_start as u32,
+                body_start,
+                acc_slot,
+                float_acc,
+            );
             self.jit_native_block_eachidx_k.insert(key, compiled);
         }
         let block_addr = match self.jit_native_block_eachidx_k.get(&key) {
@@ -18047,7 +19523,12 @@ impl Vm {
     /// empty array — the generic returns nil — or an ineligible block). The caller
     /// must have pinned `array_id`. `is_min` picks min vs max.
     #[cfg(feature = "jit-native")]
-    pub(crate) fn try_native_minmax_loop(&mut self, block_id: ObjId, array_id: ObjId, is_min: bool) -> Option<Value> {
+    pub(crate) fn try_native_minmax_loop(
+        &mut self,
+        block_id: ObjId,
+        array_id: ObjId,
+        is_min: bool,
+    ) -> Option<Value> {
         if !self.jit_native_on {
             return None;
         }
@@ -18058,7 +19539,14 @@ impl Vm {
         }
         let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+            (
+                bh.proto_idx,
+                bh.self_val.clone(),
+                bh.n_params,
+                bh.param_start,
+                bh.rest_slot,
+                bh.kw_rest_slot,
+            )
         };
         if n_params != 1
             || rest_slot.is_some()
@@ -18071,7 +19559,8 @@ impl Vm {
         // Value-mode key block (shared with sum/map's cache).
         if !self.jit_native_block.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block(proto_idx, param_start as u32, body_start as u32, false);
+            let compiled =
+                self.compile_native_block(proto_idx, param_start as u32, body_start as u32, false);
             self.jit_native_block.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block.get(&proto_idx) {
@@ -18088,7 +19577,8 @@ impl Vm {
             _ => return None,
         };
         let vm_ptr = self as *const crate::vm::Vm;
-        ml.call(vm_ptr, &self_val, array_id.0 as i64, 0).map(Value::Int)
+        ml.call(vm_ptr, &self_val, array_id.0 as i64, 0)
+            .map(Value::Int)
     }
 
     /// Float variant of `try_native_minmax_loop` (ADR 0034 layer 3d): an all-Float
@@ -18096,7 +19586,12 @@ impl Vm {
     /// compare with ordered fcmp; a NaN key deopts -> generic (which raises like
     /// CRuby). Returns `Value::Float(best_elem)`. Fires after the Int min/max declines.
     #[cfg(feature = "jit-native")]
-    pub(crate) fn try_native_floatminmax_loop(&mut self, block_id: ObjId, array_id: ObjId, is_min: bool) -> Option<Value> {
+    pub(crate) fn try_native_floatminmax_loop(
+        &mut self,
+        block_id: ObjId,
+        array_id: ObjId,
+        is_min: bool,
+    ) -> Option<Value> {
         if !self.jit_native_on {
             return None;
         }
@@ -18105,7 +19600,14 @@ impl Vm {
         }
         let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+            (
+                bh.proto_idx,
+                bh.self_val.clone(),
+                bh.n_params,
+                bh.param_start,
+                bh.rest_slot,
+                bh.kw_rest_slot,
+            )
         };
         if n_params != 1
             || rest_slot.is_some()
@@ -18117,7 +19619,13 @@ impl Vm {
         }
         if !self.jit_native_block_float.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32, false, true);
+            let compiled = self.compile_native_block_float(
+                proto_idx,
+                param_start as u32,
+                body_start as u32,
+                false,
+                true,
+            );
             self.jit_native_block_float.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block_float.get(&proto_idx) {
@@ -18145,7 +19653,12 @@ impl Vm {
     /// function; the loop reads Int elements but compares Float keys (ordered fcmp,
     /// NaN-deopt). Returns the best `Value::Int` element. Empty declines (-> nil).
     #[cfg(feature = "jit-native")]
-    pub(crate) fn try_native_intelem_floatminmax_loop(&mut self, block_id: ObjId, array_id: ObjId, is_min: bool) -> Option<Value> {
+    pub(crate) fn try_native_intelem_floatminmax_loop(
+        &mut self,
+        block_id: ObjId,
+        array_id: ObjId,
+        is_min: bool,
+    ) -> Option<Value> {
         if !self.jit_native_on {
             return None;
         }
@@ -18154,7 +19667,14 @@ impl Vm {
         }
         let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+            (
+                bh.proto_idx,
+                bh.self_val.clone(),
+                bh.n_params,
+                bh.param_start,
+                bh.rest_slot,
+                bh.kw_rest_slot,
+            )
         };
         if n_params != 1
             || rest_slot.is_some()
@@ -18166,7 +19686,11 @@ impl Vm {
         }
         if !self.jit_native_block_intelem_fa.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block_intelem_floatacc(proto_idx, param_start as u32, body_start as u32);
+            let compiled = self.compile_native_block_intelem_floatacc(
+                proto_idx,
+                param_start as u32,
+                body_start as u32,
+            );
             self.jit_native_block_intelem_fa.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block_intelem_fa.get(&proto_idx) {
@@ -18175,15 +19699,18 @@ impl Vm {
         };
         let key = (proto_idx, is_min);
         if !self.jit_native_intelem_floatminmax_loop.contains_key(&key) {
-            let compiled = crate::jit_native::compile_native_intelem_floatminmax_loop(block_addr, is_min);
-            self.jit_native_intelem_floatminmax_loop.insert(key, compiled);
+            let compiled =
+                crate::jit_native::compile_native_intelem_floatminmax_loop(block_addr, is_min);
+            self.jit_native_intelem_floatminmax_loop
+                .insert(key, compiled);
         }
         let ml = match self.jit_native_intelem_floatminmax_loop.get(&key) {
             Some(Some(ml)) => ml,
             _ => return None,
         };
         let vm_ptr = self as *const crate::vm::Vm;
-        ml.call(vm_ptr, &self_val, array_id.0 as i64, 0).map(Value::Int)
+        ml.call(vm_ptr, &self_val, array_id.0 as i64, 0)
+            .map(Value::Int)
     }
 
     /// Build the `JitSyms` table the native codegen recognises (interns each name
@@ -18238,13 +19765,19 @@ impl Vm {
             &callees, // empty obj-param callees
             &getters,
             &syms,
-            Some((param_start, body_local_start, predicate, crate::jit_native::AccKind::None)),
+            Some((
+                param_start,
+                body_local_start,
+                predicate,
+                crate::jit_native::AccKind::None,
+            )),
             false,
             false,
             false, // block (allow_zero_arg ignored)
             false, // not an obj-param method
             false, // not a 2-arg method
-            None, None,
+            None,
+            None,
         )
     }
 
@@ -18272,13 +19805,19 @@ impl Vm {
             &callees, // empty obj-param callees
             &getters,
             &syms,
-            Some((param_start, body_local_start, predicate, crate::jit_native::AccKind::None)),
+            Some((
+                param_start,
+                body_local_start,
+                predicate,
+                crate::jit_native::AccKind::None,
+            )),
             true, // float element
             float_acc,
             false, // block (allow_zero_arg ignored)
             false, // not an obj-param method
             false, // not a 2-arg method
-            None, None,
+            None,
+            None,
         )
     }
 
@@ -18306,13 +19845,19 @@ impl Vm {
             &callees, // empty obj-param callees
             &getters,
             &syms,
-            Some((param_start, body_local_start, false, crate::jit_native::AccKind::Inject)),
+            Some((
+                param_start,
+                body_local_start,
+                false,
+                crate::jit_native::AccKind::Inject,
+            )),
             float_elem,
             float_acc,
             false, // block (allow_zero_arg ignored)
             false, // not an obj-param method
             false, // not a 2-arg method
-            None, None,
+            None,
+            None,
         )
     }
 
@@ -18355,7 +19900,8 @@ impl Vm {
             false, // block (allow_zero_arg ignored)
             false, // not an obj-param method
             false, // not a 2-arg method
-            None, None,
+            None,
+            None,
         )
     }
 
@@ -18394,7 +19940,8 @@ impl Vm {
             false, // block (allow_zero_arg ignored)
             false, // not an obj-param method
             false, // not a 2-arg method
-            None, None,
+            None,
+            None,
         )
     }
 
@@ -18433,7 +19980,8 @@ impl Vm {
             false, // block (allow_zero_arg ignored)
             false, // not an obj-param method
             false, // not a 2-arg method
-            None, None,
+            None,
+            None,
         )
     }
 
@@ -18475,7 +20023,8 @@ impl Vm {
             false, // block (allow_zero_arg ignored)
             false, // not an obj-param method
             false, // not a 2-arg method
-            None, None,
+            None,
+            None,
         )
     }
 
@@ -18488,13 +20037,25 @@ impl Vm {
     /// generically (write-back-on-success). The caller must have pinned the array +
     /// `memo`. `memo_id` must be an Array.
     #[cfg(feature = "jit-native")]
-    pub(crate) fn try_native_eachobj_loop(&mut self, block_id: ObjId, array_id: ObjId, memo_id: ObjId) -> Option<()> {
+    pub(crate) fn try_native_eachobj_loop(
+        &mut self,
+        block_id: ObjId,
+        array_id: ObjId,
+        memo_id: ObjId,
+    ) -> Option<()> {
         if !self.jit_native_on {
             return None;
         }
         let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+            (
+                bh.proto_idx,
+                bh.self_val.clone(),
+                bh.n_params,
+                bh.param_start,
+                bh.rest_slot,
+                bh.kw_rest_slot,
+            )
         };
         // Exactly two params (elem, memo), no rest/kw/block-param.
         if n_params != 2
@@ -18507,7 +20068,12 @@ impl Vm {
         }
         if !self.jit_native_block_eachobj.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block_eachobj(proto_idx, param_start as u32, body_start as u32, false);
+            let compiled = self.compile_native_block_eachobj(
+                proto_idx,
+                param_start as u32,
+                body_start as u32,
+                false,
+            );
             self.jit_native_block_eachobj.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block_eachobj.get(&proto_idx) {
@@ -18542,13 +20108,25 @@ impl Vm {
     /// success: a deopt discards the scratch and the real memo (untouched) is redone
     /// generically.
     #[cfg(feature = "jit-native")]
-    pub(crate) fn try_native_float_eachobj_loop(&mut self, block_id: ObjId, array_id: ObjId, memo_id: ObjId) -> Option<()> {
+    pub(crate) fn try_native_float_eachobj_loop(
+        &mut self,
+        block_id: ObjId,
+        array_id: ObjId,
+        memo_id: ObjId,
+    ) -> Option<()> {
         if !self.jit_native_on {
             return None;
         }
         let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+            (
+                bh.proto_idx,
+                bh.self_val.clone(),
+                bh.n_params,
+                bh.param_start,
+                bh.rest_slot,
+                bh.kw_rest_slot,
+            )
         };
         if n_params != 2
             || rest_slot.is_some()
@@ -18560,7 +20138,12 @@ impl Vm {
         }
         if !self.jit_native_block_eachobj_f.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block_eachobj(proto_idx, param_start as u32, body_start as u32, true);
+            let compiled = self.compile_native_block_eachobj(
+                proto_idx,
+                param_start as u32,
+                body_start as u32,
+                true,
+            );
             self.jit_native_block_eachobj_f.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block_eachobj_f.get(&proto_idx) {
@@ -18598,7 +20181,13 @@ impl Vm {
     /// mid-loop deopt leaves the memo untouched for the generic redo. `None` on any gate
     /// miss / deopt.
     #[cfg(feature = "jit-native")]
-    pub(crate) fn try_native_eachobjhash_loop(&mut self, block_id: ObjId, array_id: ObjId, memo_id: ObjId, float_elem: bool) -> Option<()> {
+    pub(crate) fn try_native_eachobjhash_loop(
+        &mut self,
+        block_id: ObjId,
+        array_id: ObjId,
+        memo_id: ObjId,
+        float_elem: bool,
+    ) -> Option<()> {
         if !self.jit_native_on {
             return None;
         }
@@ -18616,7 +20205,14 @@ impl Vm {
         };
         let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+            (
+                bh.proto_idx,
+                bh.self_val.clone(),
+                bh.n_params,
+                bh.param_start,
+                bh.rest_slot,
+                bh.kw_rest_slot,
+            )
         };
         if n_params != 2
             || rest_slot.is_some()
@@ -18629,7 +20225,13 @@ impl Vm {
         let key = (proto_idx, float_elem, float_val);
         if !self.jit_native_block_eachobjhash.contains_key(&key) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block_eachobj_hash(proto_idx, param_start as u32, body_start as u32, float_elem, float_val);
+            let compiled = self.compile_native_block_eachobj_hash(
+                proto_idx,
+                param_start as u32,
+                body_start as u32,
+                float_elem,
+                float_val,
+            );
             self.jit_native_block_eachobjhash.insert(key, compiled);
         }
         let block_addr = match self.jit_native_block_eachobjhash.get(&key) {
@@ -18637,7 +20239,8 @@ impl Vm {
             _ => return None,
         };
         if !self.jit_native_eachobjhash_loop.contains_key(&key) {
-            let compiled = crate::jit_native::compile_native_eachobjhash_loop(block_addr, float_elem);
+            let compiled =
+                crate::jit_native::compile_native_eachobjhash_loop(block_addr, float_elem);
             self.jit_native_eachobjhash_loop.insert(key, compiled);
         }
         let el = match self.jit_native_eachobjhash_loop.get(&key) {
@@ -18665,13 +20268,24 @@ impl Vm {
     /// have pinned the array + block. The value-mode key block is shared with the
     /// sum/map/min_by block cache.
     #[cfg(feature = "jit-native")]
-    pub(crate) fn try_native_groupby_loop(&mut self, block_id: ObjId, array_id: ObjId) -> Option<Value> {
+    pub(crate) fn try_native_groupby_loop(
+        &mut self,
+        block_id: ObjId,
+        array_id: ObjId,
+    ) -> Option<Value> {
         if !self.jit_native_on {
             return None;
         }
         let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+            (
+                bh.proto_idx,
+                bh.self_val.clone(),
+                bh.n_params,
+                bh.param_start,
+                bh.rest_slot,
+                bh.kw_rest_slot,
+            )
         };
         if n_params != 1
             || rest_slot.is_some()
@@ -18684,7 +20298,8 @@ impl Vm {
         // Value-mode key block (shared with sum/map/min_by's cache).
         if !self.jit_native_block.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block(proto_idx, param_start as u32, body_start as u32, false);
+            let compiled =
+                self.compile_native_block(proto_idx, param_start as u32, body_start as u32, false);
             self.jit_native_block.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block.get(&proto_idx) {
@@ -18713,13 +20328,24 @@ impl Vm {
     /// out-of-range conversion key / ineligible block) discards the fresh Hash and
     /// redoes the generic group_by (write-back-on-success).
     #[cfg(feature = "jit-native")]
-    pub(crate) fn try_native_floatint_groupby_loop(&mut self, block_id: ObjId, array_id: ObjId) -> Option<Value> {
+    pub(crate) fn try_native_floatint_groupby_loop(
+        &mut self,
+        block_id: ObjId,
+        array_id: ObjId,
+    ) -> Option<Value> {
         if !self.jit_native_on {
             return None;
         }
         let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+            (
+                bh.proto_idx,
+                bh.self_val.clone(),
+                bh.n_params,
+                bh.param_start,
+                bh.rest_slot,
+                bh.kw_rest_slot,
+            )
         };
         if n_params != 1
             || rest_slot.is_some()
@@ -18732,16 +20358,26 @@ impl Vm {
         // Float-elem / Int-result key block (shared with float->int sum/map).
         if !self.jit_native_block_floatint.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32, false, false);
+            let compiled = self.compile_native_block_float(
+                proto_idx,
+                param_start as u32,
+                body_start as u32,
+                false,
+                false,
+            );
             self.jit_native_block_floatint.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block_floatint.get(&proto_idx) {
             Some(Some(np)) => np.addr(),
             _ => return None,
         };
-        if !self.jit_native_floatint_groupby_loop.contains_key(&proto_idx) {
+        if !self
+            .jit_native_floatint_groupby_loop
+            .contains_key(&proto_idx)
+        {
             let compiled = crate::jit_native::compile_native_floatint_groupby_loop(block_addr);
-            self.jit_native_floatint_groupby_loop.insert(proto_idx, compiled);
+            self.jit_native_floatint_groupby_loop
+                .insert(proto_idx, compiled);
         }
         let gl = match self.jit_native_floatint_groupby_loop.get(&proto_idx) {
             Some(Some(gl)) => gl,
@@ -18761,13 +20397,24 @@ impl Vm {
     /// rejects the Float key). `None` (non-Float element / ineligible block) discards the
     /// fresh Hash and redoes the generic group_by (write-back-on-success).
     #[cfg(feature = "jit-native")]
-    pub(crate) fn try_native_floatkey_groupby_loop(&mut self, block_id: ObjId, array_id: ObjId) -> Option<Value> {
+    pub(crate) fn try_native_floatkey_groupby_loop(
+        &mut self,
+        block_id: ObjId,
+        array_id: ObjId,
+    ) -> Option<Value> {
         if !self.jit_native_on {
             return None;
         }
         let (proto_idx, self_val, n_params, param_start, rest_slot, kw_rest_slot) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.self_val.clone(), bh.n_params, bh.param_start, bh.rest_slot, bh.kw_rest_slot)
+            (
+                bh.proto_idx,
+                bh.self_val.clone(),
+                bh.n_params,
+                bh.param_start,
+                bh.rest_slot,
+                bh.kw_rest_slot,
+            )
         };
         if n_params != 1
             || rest_slot.is_some()
@@ -18780,16 +20427,26 @@ impl Vm {
         // Float value key block (shared with float sum/map/predicates).
         if !self.jit_native_block_float.contains_key(&proto_idx) {
             let body_start = self.protos[proto_idx].block_body_local_start;
-            let compiled = self.compile_native_block_float(proto_idx, param_start as u32, body_start as u32, false, true);
+            let compiled = self.compile_native_block_float(
+                proto_idx,
+                param_start as u32,
+                body_start as u32,
+                false,
+                true,
+            );
             self.jit_native_block_float.insert(proto_idx, compiled);
         }
         let block_addr = match self.jit_native_block_float.get(&proto_idx) {
             Some(Some(np)) => np.addr(),
             _ => return None,
         };
-        if !self.jit_native_floatkey_groupby_loop.contains_key(&proto_idx) {
+        if !self
+            .jit_native_floatkey_groupby_loop
+            .contains_key(&proto_idx)
+        {
             let compiled = crate::jit_native::compile_native_floatkey_groupby_loop(block_addr);
-            self.jit_native_floatkey_groupby_loop.insert(proto_idx, compiled);
+            self.jit_native_floatkey_groupby_loop
+                .insert(proto_idx, compiled);
         }
         let gl = match self.jit_native_floatkey_groupby_loop.get(&proto_idx) {
             Some(Some(gl)) => gl,
@@ -18800,7 +20457,13 @@ impl Vm {
         Some(Value::Hash(crate::value::ObjId(hash_objid as u32)))
     }
 
-    pub(crate) fn invoke_method_with_block(&mut self, m: Rc<Method>, self_val: Value, args: Vec<Value>, block: Option<ObjId>) -> Result<(), Trap> {
+    pub(crate) fn invoke_method_with_block(
+        &mut self,
+        m: Rc<Method>,
+        self_val: Value,
+        args: Vec<Value>,
+        block: Option<ObjId>,
+    ) -> Result<(), Trap> {
         // GC rooting for the pre-frame window: receiver, args, and
         // the block arrive as Rust locals (popped off the operand
         // stack by the caller), and the param-binding work below
@@ -18829,7 +20492,13 @@ impl Vm {
         }
     }
 
-    fn invoke_method_with_block_inner(&mut self, m: Rc<Method>, self_val: Value, args: Vec<Value>, block: Option<ObjId>) -> Result<(), Trap> {
+    fn invoke_method_with_block_inner(
+        &mut self,
+        m: Rc<Method>,
+        self_val: Value,
+        args: Vec<Value>,
+        block: Option<ObjId>,
+    ) -> Result<(), Trap> {
         // Builtin-method short-circuit: synthesised Methods on
         // Kernel (and any future host class with similar
         // reflection records) carry a `builtin: Some(...)` payload
@@ -18850,11 +20519,15 @@ impl Vm {
             self.stack.push(self_val);
             if let Some(bid) = block {
                 self.stack.push(Value::Block(bid));
-                for a in args { self.stack.push(a); }
-                return self.do_call_block(name_id, argc, /*no_recv=*/false, u32::MAX);
+                for a in args {
+                    self.stack.push(a);
+                }
+                return self.do_call_block(name_id, argc, /*no_recv=*/ false, u32::MAX);
             } else {
-                for a in args { self.stack.push(a); }
-                return self.do_call(name_id, argc, /*no_recv=*/false, u32::MAX);
+                for a in args {
+                    self.stack.push(a);
+                }
+                return self.do_call(name_id, argc, /*no_recv=*/ false, u32::MAX);
             }
         }
         // Native-JIT hook (ADR 0030 finding #4, `jit-native` feature): a
@@ -18966,11 +20639,8 @@ impl Vm {
             if !self.jit_value.contains_key(&proto_idx) {
                 let ivg_sym = self.interner.intern("instance_variable_get");
                 let bracket_sym = self.interner.intern("[]");
-                let compiled = crate::jit_native::compile_value(
-                    &self.protos[proto_idx],
-                    ivg_sym,
-                    bracket_sym,
-                );
+                let compiled =
+                    crate::jit_native::compile_value(&self.protos[proto_idx], ivg_sym, bracket_sym);
                 self.jit_value.insert(proto_idx, compiled);
             }
             let vm_ptr = self as *const crate::vm::Vm;
@@ -18999,9 +20669,14 @@ impl Vm {
             let has_kw_rest = self.protos[m.proto_idx].kw_rest_param.is_some();
             let kw_trailing_positional = std::mem::take(&mut self.trailing_hash_positional);
             let mut args = args;
-            let kw_hash_id: Option<crate::value::ObjId> = if has_kw_rest && !kw_trailing_positional {
+            let kw_hash_id: Option<crate::value::ObjId> = if has_kw_rest && !kw_trailing_positional
+            {
                 match args.last() {
-                    Some(Value::Hash(hid)) => { let h = *hid; args.pop(); Some(h) }
+                    Some(Value::Hash(hid)) => {
+                        let h = *hid;
+                        args.pop();
+                        Some(h)
+                    }
                     _ => None,
                 }
             } else {
@@ -19039,11 +20714,16 @@ impl Vm {
                     format!("{}", n_req)
                 };
                 return Err(self.trap(RubyError::ArgumentError {
-                    msg: format!("wrong number of arguments (given {}, expected {})", given, expected),
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected {})",
+                        given, expected
+                    ),
                 }));
             }
             self.check_frames()?;
-            let rest_slot: Option<usize> = self.protos[proto_idx].rest_param.as_ref()
+            let rest_slot: Option<usize> = self.protos[proto_idx]
+                .rest_param
+                .as_ref()
                 .and_then(|name| self.protos[proto_idx].params.iter().position(|p| p == name))
                 .map(|idx| param_start + idx);
             // M27 A1: when the underlying block proto has a `|&blk|`
@@ -19053,11 +20733,19 @@ impl Vm {
             // obj.m { ... }` idiom (Sinatra's route table) needs this
             // — without it the slot stayed Nil because the closure
             // path skipped the method-style trailing-slot binder.
-            let block_arg_slot: Option<usize> = self.protos[proto_idx].block_param.as_ref()
-                .and_then(|bname| self.protos[proto_idx].params.iter()
-                    .position(|p| p == bname))
+            let block_arg_slot: Option<usize> = self.protos[proto_idx]
+                .block_param
+                .as_ref()
+                .and_then(|bname| {
+                    self.protos[proto_idx]
+                        .params
+                        .iter()
+                        .position(|p| p == bname)
+                })
                 .map(|idx| param_start + idx);
-            let kw_rest_slot: Option<usize> = self.protos[proto_idx].kw_rest_param.as_ref()
+            let kw_rest_slot: Option<usize> = self.protos[proto_idx]
+                .kw_rest_param
+                .as_ref()
                 .and_then(|name| self.protos[proto_idx].params.iter().position(|p| p == name))
                 .map(|idx| param_start + idx);
             // Block params live *after* the captured frame's n_locals
@@ -19076,43 +20764,50 @@ impl Vm {
             // Empty rest is still a fresh `[]` so the body sees an
             // Array (not Nil) at the slot — matches CRuby's
             // `*args` arity contract.
-            let (head_args, rest_arr_id): (Vec<Value>, Option<crate::value::ObjId>) = if rest_slot.is_some() {
-                let mut args = args;
-                let rest_vec: Vec<Value> = if given > n_params {
-                    args.split_off(n_params)
+            let (head_args, rest_arr_id): (Vec<Value>, Option<crate::value::ObjId>) =
+                if rest_slot.is_some() {
+                    let mut args = args;
+                    let rest_vec: Vec<Value> = if given > n_params {
+                        args.split_off(n_params)
+                    } else {
+                        Vec::new()
+                    };
+                    // Pin `self_val` (and the heap-ref args) across this
+                    // rest-Array allocation's `maybe_gc`. The frame that
+                    // will root `self_val` isn't pushed until below, and a
+                    // `define_method(:initialize) do |*a| … end` reaches
+                    // here from `Class#new` AFTER that path dropped its own
+                    // PinGuard — so without this, a sweep frees the
+                    // freshly-allocated receiver and the closure body runs
+                    // on a dangling `self`. Found via STRESS_GC on a
+                    // `define_method`-defined `initialize` with `*args`.
+                    let mut g = crate::vm::PinGuard::new(self);
+                    g.pin(self_val.clone());
+                    // Pin the peeled kwargs Hash too — it was popped out of
+                    // `args`, so without this the rest-Array alloc's maybe_gc
+                    // sweeps it and the later kwrest bind hits a dangling slot
+                    // (STRESS_GC: "heap slot is not a Hash").
+                    if let Some(hid) = kw_hash_id {
+                        g.pin(Value::Hash(hid));
+                    }
+                    for a in &args {
+                        if a.is_gc_heap_ref() {
+                            g.pin(a.clone());
+                        }
+                    }
+                    for a in &rest_vec {
+                        if a.is_gc_heap_ref() {
+                            g.pin(a.clone());
+                        }
+                    }
+                    g.vm.maybe_gc();
+                    g.vm.check_alloc()?;
+                    let id = g.vm.heap.alloc(HeapObj::Array(rest_vec.into()));
+                    drop(g);
+                    (args, Some(id))
                 } else {
-                    Vec::new()
+                    (args, None)
                 };
-                // Pin `self_val` (and the heap-ref args) across this
-                // rest-Array allocation's `maybe_gc`. The frame that
-                // will root `self_val` isn't pushed until below, and a
-                // `define_method(:initialize) do |*a| … end` reaches
-                // here from `Class#new` AFTER that path dropped its own
-                // PinGuard — so without this, a sweep frees the
-                // freshly-allocated receiver and the closure body runs
-                // on a dangling `self`. Found via STRESS_GC on a
-                // `define_method`-defined `initialize` with `*args`.
-                let mut g = crate::vm::PinGuard::new(self);
-                g.pin(self_val.clone());
-                // Pin the peeled kwargs Hash too — it was popped out of
-                // `args`, so without this the rest-Array alloc's maybe_gc
-                // sweeps it and the later kwrest bind hits a dangling slot
-                // (STRESS_GC: "heap slot is not a Hash").
-                if let Some(hid) = kw_hash_id { g.pin(Value::Hash(hid)); }
-                for a in &args {
-                    if a.is_gc_heap_ref() { g.pin(a.clone()); }
-                }
-                for a in &rest_vec {
-                    if a.is_gc_heap_ref() { g.pin(a.clone()); }
-                }
-                g.vm.maybe_gc();
-                g.vm.check_alloc()?;
-                let id = g.vm.heap.alloc(HeapObj::Array(rest_vec.into()));
-                drop(g);
-                (args, Some(id))
-            } else {
-                (args, None)
-            };
             // Resolve the kwrest Hash to bind: the peeled one, or a fresh
             // empty `{}` when the slot exists but no kwargs were passed
             // (CRuby's `|**k|` defaults to `{}`, not nil). Allocate the
@@ -19125,11 +20820,19 @@ impl Vm {
                     None => {
                         let mut g = crate::vm::PinGuard::new(self);
                         g.pin(self_val.clone());
-                        if let Some(rid) = rest_arr_id { g.pin(Value::Array(rid)); }
-                        for a in &head_args { if a.is_gc_heap_ref() { g.pin(a.clone()); } }
+                        if let Some(rid) = rest_arr_id {
+                            g.pin(Value::Array(rid));
+                        }
+                        for a in &head_args {
+                            if a.is_gc_heap_ref() {
+                                g.pin(a.clone());
+                            }
+                        }
                         g.vm.maybe_gc();
                         g.vm.check_alloc()?;
-                        let id = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::new())));
+                        let id =
+                            g.vm.heap
+                                .alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::new())));
                         drop(g);
                         Some(id)
                     }
@@ -19175,7 +20878,15 @@ impl Vm {
                 // the explicit-capture idiom working without polluting
                 // the implicit-yield surface. Setting `block_arg:
                 // None` here is what enforces both.
-                is_class_body: false, swap_return: None, block_arg: None, defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()), lexical_cvar_class: None, #[cfg(feature = "regex")] saved_last_match: None, is_block: false, is_lambda: false,
+                is_class_body: false,
+                swap_return: None,
+                block_arg: None,
+                defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
+                lexical_cvar_class: None,
+                #[cfg(feature = "regex")]
+                saved_last_match: None,
+                is_block: false,
+                is_lambda: false,
                 // `define_method` enforces exact arity (no
                 // defaults), so all params are "given".
                 n_given_positional: given as u16,
@@ -19232,8 +20943,10 @@ impl Vm {
                 block_arg: block,
                 defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
                 lexical_cvar_class: None,
-                #[cfg(feature = "regex")] saved_last_match: None,
-                is_block: false, is_lambda: false,
+                #[cfg(feature = "regex")]
+                saved_last_match: None,
+                is_block: false,
+                is_lambda: false,
                 n_given_positional: fixed.required,
                 kw_given_mask: 0,
                 aux: None,
@@ -19291,16 +21004,17 @@ impl Vm {
         // the bug that made `merge_data!({ "categories" => … })` (Liquid
         // / Jekyll) raise `wrong number of arguments (given 0, …)`.
         let trailing_positional = std::mem::take(&mut self.trailing_hash_positional);
-        let kw_hash: Option<Vec<(Value, Value)>> = if (kw_count > 0 || has_kw_rest) && !trailing_positional {
-            if let Some(Value::Hash(hid)) = args.last().cloned() {
-                args.pop();
-                Some(self.heap.hash(hid).clone())
+        let kw_hash: Option<Vec<(Value, Value)>> =
+            if (kw_count > 0 || has_kw_rest) && !trailing_positional {
+                if let Some(Value::Hash(hid)) = args.last().cloned() {
+                    args.pop();
+                    Some(self.heap.hash(hid).clone())
+                } else {
+                    None
+                }
             } else {
                 None
-            }
-        } else {
-            None
-        };
+            };
         let given = args.len();
         let arity_ok = if has_rest {
             given >= required
@@ -19316,7 +21030,10 @@ impl Vm {
                 format!("{}..{}", required, positional_max)
             };
             return Err(self.trap(RubyError::ArgumentError {
-                msg: format!("wrong number of arguments (given {}, expected {})", given, expected),
+                msg: format!(
+                    "wrong number of arguments (given {}, expected {})",
+                    given, expected
+                ),
             }));
         }
         self.check_frames()?;
@@ -19365,8 +21082,8 @@ impl Vm {
         // Bind up to (positional_max - n_required_post) args into the
         // pre+optional slots; any overflow flows into the rest slot.
         let positional_take = pre_take; // legacy name still used by the
-                                        // frame's n_given_positional
-                                        // record + default-arg prologue
+        // frame's n_given_positional
+        // record + default-arg prologue
         let mut args_iter = args.into_iter();
         for slot in locals.iter_mut().take(pre_take) {
             *slot = args_iter.next().unwrap();
@@ -19406,10 +21123,16 @@ impl Vm {
             let rest_slot = positional_max;
             let arr_id = {
                 let mut g = PinGuard::new(self);
-                for v in &locals { g.pin(v.clone()); }
-                for v in &rest_vec { g.pin(v.clone()); }
+                for v in &locals {
+                    g.pin(v.clone());
+                }
+                for v in &rest_vec {
+                    g.pin(v.clone());
+                }
                 g.pin(self_val.clone());
-                if let Some(id) = block { g.pin(Value::Block(id)); }
+                if let Some(id) = block {
+                    g.pin(Value::Block(id));
+                }
                 if let Some(kw) = &kw_hash {
                     for (k, v) in kw {
                         g.pin(k.clone());
@@ -19439,14 +21162,16 @@ impl Vm {
         // → ArgumentError. Missing optional → use literal default.
         let kw_start = positional_max + if has_rest { 1 } else { 0 };
         if kw_count > 0 {
-            for (i, (default, kw_name)) in kw_defaults_snapshot.iter()
+            for (i, (default, kw_name)) in kw_defaults_snapshot
+                .iter()
                 .zip(m.params[kw_start..kw_start + kw_count].iter())
                 .enumerate()
             {
                 let key_sym = self.interner.intern(kw_name);
                 let key_val = Value::Sym(key_sym);
                 let found = kw_hash.as_ref().and_then(|h| {
-                    h.iter().find(|(k, _)| k.ruby_eql(&key_val, &self.heap))
+                    h.iter()
+                        .find(|(k, _)| k.ruby_eql(&key_val, &self.heap))
                         .map(|(_, v)| v.clone())
                 });
                 let has_computed = kw_has_computed_snapshot.get(i).copied().unwrap_or(false);
@@ -19474,12 +21199,14 @@ impl Vm {
                     // `(None, Some, true)` is structurally impossible
                     // — computed defaults set the snapshot entry to
                     // `None` (compiler emission, ast.rs lowering).
-                    (None, None, false) => return Err(self.trap(RubyError::ArgumentError {
-                        msg: format!("missing keyword: :{}", kw_name),
-                    })),
-                    (None, Some(_), true) => unreachable!(
-                        "computed kwarg default must also have None literal snapshot"
-                    ),
+                    (None, None, false) => {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: format!("missing keyword: :{}", kw_name),
+                        }));
+                    }
+                    (None, Some(_), true) => {
+                        unreachable!("computed kwarg default must also have None literal snapshot")
+                    }
                 }
             }
         }
@@ -19497,7 +21224,8 @@ impl Vm {
                 .map(|nm| Value::Sym(self.interner.intern(nm)))
                 .collect();
             let leftover: Vec<(Value, Value)> = match &kw_hash {
-                Some(h) => h.iter()
+                Some(h) => h
+                    .iter()
                     .filter(|(k, _)| !known_keys.iter().any(|kk| kk.ruby_eql(k, &self.heap)))
                     .cloned()
                     .collect(),
@@ -19518,9 +21246,13 @@ impl Vm {
             // `anon_kwrest` and `kwrest_args` were the canary.
             let hid = {
                 let mut g = PinGuard::new(self);
-                for v in &locals { g.pin(v.clone()); }
+                for v in &locals {
+                    g.pin(v.clone());
+                }
                 g.pin(self_val.clone());
-                if let Some(id) = block { g.pin(Value::Block(id)); }
+                if let Some(id) = block {
+                    g.pin(Value::Block(id));
+                }
                 if let Some(kw) = &kw_hash {
                     for (k, v) in kw {
                         g.pin(k.clone());
@@ -19533,7 +21265,8 @@ impl Vm {
                 }
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(leftover)))
+                g.vm.heap
+                    .alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(leftover)))
             };
             locals[kw_rest_slot] = Value::Hash(hid);
         }
@@ -19567,7 +21300,15 @@ impl Vm {
             locals,
             self_val,
             base_sp: self.stack.len(),
-            is_class_body: false, swap_return: None, block_arg: block, defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()), lexical_cvar_class: None, #[cfg(feature = "regex")] saved_last_match: None, is_block: false, is_lambda: false,
+            is_class_body: false,
+            swap_return: None,
+            block_arg: block,
+            defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
+            lexical_cvar_class: None,
+            #[cfg(feature = "regex")]
+            saved_last_match: None,
+            is_block: false,
+            is_lambda: false,
             // Drives the body's default-arg prologue. Slots
             // `[0, positional_take)` came from the caller; slots
             // `[positional_take, positional_max)` are left Nil
@@ -19576,7 +21317,8 @@ impl Vm {
             // the latter.
             n_given_positional: positional_take as u16,
             kw_given_mask,
-            aux: None, pending_yield: false,
+            aux: None,
+            pending_yield: false,
             block_writeback: None,
             captured_yield_block: None,
         });
@@ -19584,8 +21326,6 @@ impl Vm {
         // the first last_match write inside this method scope.
         Ok(())
     }
-
-
 
     /// `module M; refine(Target) do … end; end` — record a refinement.
     /// Build an anonymous holder class, run the block on it as a class
@@ -19618,6 +21358,7 @@ impl Vm {
             consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             assigned_name: std::cell::RefCell::new(None),
             class_tag: None,
+            frozen: std::cell::Cell::new(false),
             #[cfg(feature = "cext")]
             cext_alloc_func: std::cell::Cell::new(None),
         });
@@ -19654,11 +21395,14 @@ impl Vm {
         // activate, not just M's own.
         for anc in super::flatten_ancestors(module) {
             let key = std::rc::Rc::as_ptr(&anc) as usize;
-            let Some(refs) = self.module_refinements.get(&key).cloned() else { continue };
+            let Some(refs) = self.module_refinements.get(&key).cloned() else {
+                continue;
+            };
             for (target, holder) in &refs {
                 let target_name = self.interner.intern(&target.name);
                 for (mname, m) in holder.methods.borrow().iter() {
-                    self.active_refinements.insert((target_name, *mname), m.clone());
+                    self.active_refinements
+                        .insert((target_name, *mname), m.clone());
                     self.refined_method_names.insert(*mname);
                 }
             }
@@ -19703,7 +21447,14 @@ impl Vm {
         self.check_frames()?;
         let (proto_idx, captured, param_start, n_params, rest_slot, bh_lexical_cvar_class) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params, bh.rest_slot, bh.lexical_cvar_class.clone())
+            (
+                bh.proto_idx,
+                bh.captured.clone(),
+                bh.param_start,
+                bh.n_params,
+                bh.rest_slot,
+                bh.lexical_cvar_class.clone(),
+            )
         };
         // Bind args into the block's param slots, same auto-splat
         // shape as `invoke_block`. For instance_eval/class_eval
@@ -19722,15 +21473,15 @@ impl Vm {
         // `a` to the whole array — rss's `|name, occurs, type, *args|`
         // over `[name, occurs, type, *rest]` rows then sent
         // `install__element` (empty `type`).
-        let args: Vec<Value> = if args.len() == 1
-            && (n_params > 1 || (n_params >= 1 && rest_slot.is_some())) {
-            match &args[0] {
-                Value::Array(aid) => self.heap.array(*aid).clone(),
-                _ => args,
-            }
-        } else {
-            args
-        };
+        let args: Vec<Value> =
+            if args.len() == 1 && (n_params > 1 || (n_params >= 1 && rest_slot.is_some())) {
+                match &args[0] {
+                    Value::Array(aid) => self.heap.array(*aid).clone(),
+                    _ => args,
+                }
+            } else {
+                args
+            };
         // `|*a|` / `|x, *rest|`: collect the args past the fixed
         // positional params into the rest slot as an Array. Built
         // before the locals borrow (heap.alloc needs &mut heap) and
@@ -19742,7 +21493,9 @@ impl Vm {
             let mut g = crate::vm::PinGuard::new(self);
             g.pin(Value::Block(block_id));
             let rest_args: Vec<Value> = args.iter().skip(n_params as usize).cloned().collect();
-            for a in &rest_args { g.pin(a.clone()); }
+            for a in &rest_args {
+                g.pin(a.clone());
+            }
             g.vm.maybe_gc();
             g.vm.check_alloc()?;
             let id = g.vm.heap.alloc(HeapObj::Array(rest_args.into()));
@@ -19755,7 +21508,9 @@ impl Vm {
         {
             let mut locals = captured.borrow_mut();
             if locals.len() < needed {
-                while locals.len() < needed { locals.push(Value::Nil); }
+                while locals.len() < needed {
+                    locals.push(Value::Nil);
+                }
             }
             for (i, a) in args.into_iter().enumerate() {
                 if i < n_params as usize {
@@ -19763,9 +21518,10 @@ impl Vm {
                 }
             }
             if let Some((slot, val)) = rest_binding
-                && slot < locals.len() {
-                    locals[slot] = val;
-                }
+                && slot < locals.len()
+            {
+                locals[slot] = val;
+            }
         }
         if as_class_body {
             // class_eval: re-use the class-body machinery so
@@ -19776,13 +21532,16 @@ impl Vm {
             // frame returns, keyed off `is_class_body: true`.
             if let Value::Class(cls) = &new_self {
                 self.class_stack.push(cls.clone());
-                self.class_visibility_stack.push(crate::value::Visibility::Public);
+                self.class_visibility_stack
+                    .push(crate::value::Visibility::Public);
             } else {
                 // Caller checked Type before getting here, so
                 // this is a programmer-error path. ICE rather
                 // than silent-corruption: the class_stack pop
                 // on frame return would underflow.
-                panic!("ICE: invoke_block_with_self as_class_body=true requires Value::Class new_self");
+                panic!(
+                    "ICE: invoke_block_with_self as_class_body=true requires Value::Class new_self"
+                );
             }
         }
         self.frames.push(Frame {
@@ -19800,8 +21559,13 @@ impl Vm {
             // class_eval instead re-roots the cref at the eval'd class —
             // that's `new_self`, which the self_val rule already returns,
             // so leave this None for the class-body case.
-            lexical_cvar_class: if as_class_body { None } else { bh_lexical_cvar_class },
-            #[cfg(feature = "regex")] saved_last_match: None,
+            lexical_cvar_class: if as_class_body {
+                None
+            } else {
+                bh_lexical_cvar_class
+            },
+            #[cfg(feature = "regex")]
+            saved_last_match: None,
             // class_eval's frame is BOTH `is_block: true` and
             // `is_class_body: true`. That dual role matters for
             // non-local `return`: per the unwind loop in
@@ -19820,7 +21584,8 @@ impl Vm {
             is_lambda: false,
             n_given_positional: 0,
             kw_given_mask: 0,
-            aux: None, pending_yield: false,
+            aux: None,
+            pending_yield: false,
             block_writeback: None,
             captured_yield_block: None,
         });
@@ -19833,7 +21598,11 @@ impl Vm {
         if !as_class_body {
             let recv = self.frames.last().map(|f| f.self_val.clone());
             if let Some(recv) = recv {
-                self.frames.last_mut().unwrap().aux_mut().instance_eval_definee = Some(recv);
+                self.frames
+                    .last_mut()
+                    .unwrap()
+                    .aux_mut()
+                    .instance_eval_definee = Some(recv);
             }
         }
         Ok(())
@@ -19860,22 +21629,25 @@ impl Vm {
         let to_proc_id = self.interner.intern("to_proc");
         self.stack.push(Value::Sym(sid));
         let pre_frames = self.frames.len();
-        self.do_call(to_proc_id, 0, /*no_recv=*/false, u32::MAX)?;
+        self.do_call(to_proc_id, 0, /*no_recv=*/ false, u32::MAX)?;
         self.dispatch_until(pre_frames)?;
         match self.stack.pop() {
             Some(Value::Block(bid)) => Ok(bid),
             other => Err(self.trap(RubyError::TypeError {
                 msg: format!(
                     "wrong argument type Symbol (expected Proc; to_proc returned {})",
-                    other.map(|v| v.type_name().to_string()).unwrap_or_else(|| "nothing".into()),
+                    other
+                        .map(|v| v.type_name().to_string())
+                        .unwrap_or_else(|| "nothing".into()),
                 ),
             })),
         }
     }
 
-    pub(crate) fn coerce_callable_to_block(&mut self, callable: Value)
-        -> Result<crate::value::ObjId, Trap>
-    {
+    pub(crate) fn coerce_callable_to_block(
+        &mut self,
+        callable: Value,
+    ) -> Result<crate::value::ObjId, Trap> {
         use crate::bytecode::{Op, Proto};
         use crate::error::Span;
         use crate::heap::HeapObj;
@@ -19899,7 +21671,7 @@ impl Vm {
                 kw_has_computed_default: Vec::new(),
                 kw_rest_param: None,
                 block_kw_params: vec![],
-            block_param_slot: None,
+                block_param_slot: None,
                 block_param: None,
                 n_locals: 2,
                 // Not literally true (no Op::CreateBlock in the body),
@@ -19908,7 +21680,9 @@ impl Vm {
                 // for the Locals::Stack representation.
                 creates_block: true,
                 getter_ivar: None,
-                frozen_string_literal: false, line_base: 1, source_encoding: None,
+                frozen_string_literal: false,
+                line_base: 1,
+                source_encoding: None,
                 code: vec![
                     Op::LoadLocal(0),
                     Op::LoadLocal(1),
@@ -20008,7 +21782,7 @@ impl Vm {
                 kw_has_computed_default: Vec::new(),
                 kw_rest_param: None,
                 block_kw_params: vec![],
-            block_param_slot: None,
+                block_param_slot: None,
                 block_param: None,
                 n_locals: 3,
                 // Same as the callable-forwarder: closure-run proto,
@@ -20016,13 +21790,15 @@ impl Vm {
                 // Stack-eligible.
                 creates_block: true,
                 getter_ivar: None,
-                frozen_string_literal: false, line_base: 1, source_encoding: None,
+                frozen_string_literal: false,
+                line_base: 1,
+                source_encoding: None,
                 code: vec![
-                    Op::LoadLocal(0),                   // [outer]
-                    Op::LoadLocal(1),                   // [outer, inner]
-                    Op::LoadLocal(2),                   // [outer, inner, args]
-                    Op::ApplyCall(call_id, u32::MAX),   // [outer, inner_result]
-                    Op::Call(call_id, 1, u32::MAX),     // [outer_result]
+                    Op::LoadLocal(0),                 // [outer]
+                    Op::LoadLocal(1),                 // [outer, inner]
+                    Op::LoadLocal(2),                 // [outer, inner, args]
+                    Op::ApplyCall(call_id, u32::MAX), // [outer, inner_result]
+                    Op::Call(call_id, 1, u32::MAX),   // [outer_result]
                     Op::Return,
                 ],
                 op_spans: vec![Span::ZERO; 6],
@@ -20088,7 +21864,10 @@ impl Vm {
     /// `< frame.block_writeback.1` (i.e. an outer-scope write
     /// from inside a block frame).
     pub(crate) fn propagate_outer_write(&self, slot: usize, v: &Value) {
-        let frame = self.frames.last().expect("ICE: propagate_outer_write no frame");
+        let frame = self
+            .frames
+            .last()
+            .expect("ICE: propagate_outer_write no frame");
         let mut target = match &frame.block_writeback {
             Some((p, _)) => p.clone(),
             None => return,
@@ -20103,15 +21882,9 @@ impl Vm {
             // Is `target` the locals of another block frame still
             // on the stack? If so AND `slot` is still in THAT
             // frame's outer scope, walk further; otherwise stop.
-            let outer = self
-                .frames
-                .iter()
-                .rposition(|f| {
-                    f.is_block
-                        && f.locals
-                            .as_shared()
-                            .is_some_and(|l| Rc::ptr_eq(l, &target))
-                });
+            let outer = self.frames.iter().rposition(|f| {
+                f.is_block && f.locals.as_shared().is_some_and(|l| Rc::ptr_eq(l, &target))
+            });
             match outer {
                 Some(idx) => match &self.frames[idx].block_writeback {
                     Some((parent, ps)) if slot < *ps as usize => {
@@ -20140,36 +21913,20 @@ impl Vm {
     /// Returns the frame index, or `None` if the lexical owner
     /// isn't on the stack (the block escaped its scope — stored
     /// as a Proc and invoked from elsewhere).
-    pub(crate) fn find_lexical_owner_frame(
-        &self,
-        seed: &Rc<RefCell<Vec<Value>>>,
-    ) -> Option<usize> {
+    pub(crate) fn find_lexical_owner_frame(&self, seed: &Rc<RefCell<Vec<Value>>>) -> Option<usize> {
         let mut target = seed.clone();
         loop {
-            if let Some(idx) = self
-                .frames
-                .iter()
-                .rposition(|f| {
-                    !f.is_block
-                        && f.locals
-                            .as_shared()
-                            .is_some_and(|l| Rc::ptr_eq(l, &target))
-                })
-            {
+            if let Some(idx) = self.frames.iter().rposition(|f| {
+                !f.is_block && f.locals.as_shared().is_some_and(|l| Rc::ptr_eq(l, &target))
+            }) {
                 return Some(idx);
             }
             // Not a method frame match — see if the target Rc
             // corresponds to a still-live block frame whose
             // writeback points one more scope outward.
-            let outer_idx = self
-                .frames
-                .iter()
-                .rposition(|f| {
-                    f.is_block
-                        && f.locals
-                            .as_shared()
-                            .is_some_and(|l| Rc::ptr_eq(l, &target))
-                });
+            let outer_idx = self.frames.iter().rposition(|f| {
+                f.is_block && f.locals.as_shared().is_some_and(|l| Rc::ptr_eq(l, &target))
+            });
             match outer_idx {
                 Some(idx) => match &self.frames[idx].block_writeback {
                     Some((parent, _)) => target = parent.clone(),
@@ -20187,10 +21944,7 @@ impl Vm {
     /// method. Returns the index of the nearest returnable scope — a
     /// lambda block frame OR a method frame. Used ONLY by the return
     /// unwind (NOT by `yield`, which must keep walking past lambdas).
-    pub(crate) fn find_return_target(
-        &self,
-        seed: &Rc<RefCell<Vec<Value>>>,
-    ) -> Option<usize> {
+    pub(crate) fn find_return_target(&self, seed: &Rc<RefCell<Vec<Value>>>) -> Option<usize> {
         let mut target = seed.clone();
         loop {
             // A method frame (non-block) matching `target` is the owner.
@@ -20227,21 +21981,52 @@ impl Vm {
     /// the Frame it pushes are byte-identical to the general path.
     pub(crate) fn invoke_block1(&mut self, block_id: ObjId, arg: Value) -> Result<(), Trap> {
         self.check_frames()?;
-        let (proto_idx, captured, self_val, param_start, n_params, rest_slot, kw_rest_slot, bh_lexical_cvar_class, captured_is_method_scope, captured_yield_block, bh_is_lambda) = {
+        let (
+            proto_idx,
+            captured,
+            self_val,
+            param_start,
+            n_params,
+            rest_slot,
+            kw_rest_slot,
+            bh_lexical_cvar_class,
+            captured_is_method_scope,
+            captured_yield_block,
+            bh_is_lambda,
+        ) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.captured.clone(), bh.self_val.clone(),
-             bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot, bh.lexical_cvar_class.clone(), bh.captured_is_method_scope, bh.captured_yield_block, bh.is_lambda)
+            (
+                bh.proto_idx,
+                bh.captured.clone(),
+                bh.self_val.clone(),
+                bh.param_start,
+                bh.n_params,
+                bh.rest_slot,
+                bh.kw_rest_slot,
+                bh.lexical_cvar_class.clone(),
+                bh.captured_is_method_scope,
+                bh.captured_yield_block,
+                bh.is_lambda,
+            )
         };
-        if rest_slot.is_some() || kw_rest_slot.is_some() || n_params > 1
+        if rest_slot.is_some()
+            || kw_rest_slot.is_some()
+            || n_params > 1
             || !self.protos[proto_idx].block_kw_params.is_empty()
-            || self.protos[proto_idx].block_param_slot.is_some() {
+            || self.protos[proto_idx].block_param_slot.is_some()
+        {
             return self.invoke_block(block_id, vec![arg]);
         }
         let proto = &self.protos[proto_idx];
         let needed = proto.n_locals as usize;
         let body_local_start = proto.block_body_local_start;
-        let (block_cell, writeback) =
-            self.block_frame_locals(&captured, proto_idx, needed, param_start, captured_is_method_scope);
+        let (block_cell, writeback) = self.block_frame_locals(
+            &captured,
+            proto_idx,
+            needed,
+            param_start,
+            captured_is_method_scope,
+        );
         {
             let mut locals = block_cell.borrow_mut();
             if (body_local_start as usize) < needed {
@@ -20259,10 +22044,19 @@ impl Vm {
             locals: crate::vm::Locals::Shared(block_cell),
             self_val,
             base_sp: self.stack.len(),
-            is_class_body: false, swap_return: None, block_arg: None, defining_class: None,
+            is_class_body: false,
+            swap_return: None,
+            block_arg: None,
+            defining_class: None,
             lexical_cvar_class: bh_lexical_cvar_class,
-            #[cfg(feature = "regex")] saved_last_match: None,
-            is_block: true, is_lambda: bh_is_lambda, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
+            #[cfg(feature = "regex")]
+            saved_last_match: None,
+            is_block: true,
+            is_lambda: bh_is_lambda,
+            n_given_positional: 0,
+            kw_given_mask: 0,
+            aux: None,
+            pending_yield: false,
             block_writeback: writeback,
             captured_yield_block,
         });
@@ -20277,23 +22071,59 @@ impl Vm {
     /// (Hash#each paid three allocations per pair). Anything else
     /// (rest / kw-rest / n_params != 2) falls back to the general
     /// path with the exact Vec the old call sites built.
-    pub(crate) fn invoke_block2(&mut self, block_id: ObjId, a: Value, b: Value) -> Result<(), Trap> {
+    pub(crate) fn invoke_block2(
+        &mut self,
+        block_id: ObjId,
+        a: Value,
+        b: Value,
+    ) -> Result<(), Trap> {
         self.check_frames()?;
-        let (proto_idx, captured, self_val, param_start, n_params, rest_slot, kw_rest_slot, bh_lexical_cvar_class, captured_is_method_scope, captured_yield_block, bh_is_lambda) = {
+        let (
+            proto_idx,
+            captured,
+            self_val,
+            param_start,
+            n_params,
+            rest_slot,
+            kw_rest_slot,
+            bh_lexical_cvar_class,
+            captured_is_method_scope,
+            captured_yield_block,
+            bh_is_lambda,
+        ) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.captured.clone(), bh.self_val.clone(),
-             bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot, bh.lexical_cvar_class.clone(), bh.captured_is_method_scope, bh.captured_yield_block, bh.is_lambda)
+            (
+                bh.proto_idx,
+                bh.captured.clone(),
+                bh.self_val.clone(),
+                bh.param_start,
+                bh.n_params,
+                bh.rest_slot,
+                bh.kw_rest_slot,
+                bh.lexical_cvar_class.clone(),
+                bh.captured_is_method_scope,
+                bh.captured_yield_block,
+                bh.is_lambda,
+            )
         };
-        if rest_slot.is_some() || kw_rest_slot.is_some() || n_params != 2
+        if rest_slot.is_some()
+            || kw_rest_slot.is_some()
+            || n_params != 2
             || !self.protos[proto_idx].block_kw_params.is_empty()
-            || self.protos[proto_idx].block_param_slot.is_some() {
+            || self.protos[proto_idx].block_param_slot.is_some()
+        {
             return self.invoke_block(block_id, vec![a, b]);
         }
         let proto = &self.protos[proto_idx];
         let needed = proto.n_locals as usize;
         let body_local_start = proto.block_body_local_start;
-        let (block_cell, writeback) =
-            self.block_frame_locals(&captured, proto_idx, needed, param_start, captured_is_method_scope);
+        let (block_cell, writeback) = self.block_frame_locals(
+            &captured,
+            proto_idx,
+            needed,
+            param_start,
+            captured_is_method_scope,
+        );
         {
             let mut locals = block_cell.borrow_mut();
             if (body_local_start as usize) < needed {
@@ -20310,25 +22140,61 @@ impl Vm {
             locals: crate::vm::Locals::Shared(block_cell),
             self_val,
             base_sp: self.stack.len(),
-            is_class_body: false, swap_return: None, block_arg: None, defining_class: None,
+            is_class_body: false,
+            swap_return: None,
+            block_arg: None,
+            defining_class: None,
             lexical_cvar_class: bh_lexical_cvar_class,
-            #[cfg(feature = "regex")] saved_last_match: None,
-            is_block: true, is_lambda: bh_is_lambda, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
+            #[cfg(feature = "regex")]
+            saved_last_match: None,
+            is_block: true,
+            is_lambda: bh_is_lambda,
+            n_given_positional: 0,
+            kw_given_mask: 0,
+            aux: None,
+            pending_yield: false,
             block_writeback: writeback,
             captured_yield_block,
         });
         Ok(())
     }
 
-    pub(crate) fn invoke_block(&mut self, block_id: ObjId, mut args: Vec<Value>) -> Result<(), Trap> {
+    pub(crate) fn invoke_block(
+        &mut self,
+        block_id: ObjId,
+        mut args: Vec<Value>,
+    ) -> Result<(), Trap> {
         self.check_frames()?;
         // Snapshot what we need out of the block's heap slot before
         // taking any `&mut self` action. BlockHandle.captured is a
         // shared `Rc<RefCell<Vec<Value>>>` — cheap to clone.
-        let (proto_idx, captured, self_val, param_start, n_params, rest_slot, kw_rest_slot, bh_lexical_cvar_class, captured_is_method_scope, captured_yield_block, bh_is_lambda) = {
+        let (
+            proto_idx,
+            captured,
+            self_val,
+            param_start,
+            n_params,
+            rest_slot,
+            kw_rest_slot,
+            bh_lexical_cvar_class,
+            captured_is_method_scope,
+            captured_yield_block,
+            bh_is_lambda,
+        ) = {
             let bh = self.heap.block(block_id);
-            (bh.proto_idx, bh.captured.clone(), bh.self_val.clone(),
-             bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot, bh.lexical_cvar_class.clone(), bh.captured_is_method_scope, bh.captured_yield_block, bh.is_lambda)
+            (
+                bh.proto_idx,
+                bh.captured.clone(),
+                bh.self_val.clone(),
+                bh.param_start,
+                bh.n_params,
+                bh.rest_slot,
+                bh.kw_rest_slot,
+                bh.lexical_cvar_class.clone(),
+                bh.captured_is_method_scope,
+                bh.captured_yield_block,
+                bh.is_lambda,
+            )
         };
         // `|**opts|` keyword-rest: peel the trailing kwargs Hash off
         // the args BEFORE positional binding (so it doesn't land in
@@ -20489,8 +22355,10 @@ impl Vm {
                 }));
             }
         }
-        let args: Vec<Value> = if !bh_is_lambda && args.len() == 1
-            && (n_params > 1 || (n_params >= 1 && rest_slot.is_some())) {
+        let args: Vec<Value> = if !bh_is_lambda
+            && args.len() == 1
+            && (n_params > 1 || (n_params >= 1 && rest_slot.is_some()))
+        {
             match &args[0] {
                 Value::Array(aid) => self.heap.array(*aid).clone(),
                 _ => args,
@@ -20538,10 +22406,14 @@ impl Vm {
         } else {
             let mut g = crate::vm::PinGuard::new(self);
             g.pin(Value::Block(block_id));
-            if let Some(v) = &kw_rest_value { g.pin(v.clone()); }
+            if let Some(v) = &kw_rest_value {
+                g.pin(v.clone());
+            }
             let rest = if let Some(slot) = rest_slot {
                 let rest_args: Vec<Value> = args.iter().skip(n_params as usize).cloned().collect();
-                for a in &rest_args { g.pin(a.clone()); }
+                for a in &rest_args {
+                    g.pin(a.clone());
+                }
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
                 let id = g.vm.heap.alloc(HeapObj::Array(rest_args.into()));
@@ -20563,16 +22435,25 @@ impl Vm {
                                 if kw_params.iter().any(|(n, _, _)| &**g.vm.interner.resolve(*s) == n.as_str())))
                             .cloned()
                             .collect();
-                        for (k, v) in &leftover { g.pin(k.clone()); g.pin(v.clone()); }
+                        for (k, v) in &leftover {
+                            g.pin(k.clone());
+                            g.pin(v.clone());
+                        }
                         g.vm.maybe_gc();
                         g.vm.check_alloc()?;
-                        Value::Hash(g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(leftover))))
+                        Value::Hash(
+                            g.vm.heap
+                                .alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(leftover))),
+                        )
                     }
                     (Some(h), false) => h.clone(),
                     (None, _) => {
                         g.vm.maybe_gc();
                         g.vm.check_alloc()?;
-                        Value::Hash(g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::new()))))
+                        Value::Hash(
+                            g.vm.heap
+                                .alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::new()))),
+                        )
                     }
                 };
                 Some((slot, v))
@@ -20614,8 +22495,13 @@ impl Vm {
         // cell sized to `needed` — or share the captured Vec directly
         // for a non-capturing, non-re-entrant block (no per-iteration
         // copy). See `block_frame_locals`.
-        let (block_cell, writeback) =
-            self.block_frame_locals(&captured, proto_idx, needed, param_start, captured_is_method_scope);
+        let (block_cell, writeback) = self.block_frame_locals(
+            &captured,
+            proto_idx,
+            needed,
+            param_start,
+            captured_is_method_scope,
+        );
         {
             let mut locals = block_cell.borrow_mut();
             // Reset body-introduced block-local slots before
@@ -20674,19 +22560,32 @@ impl Vm {
             locals: crate::vm::Locals::Shared(block_cell),
             self_val,
             base_sp: self.stack.len(),
-            is_class_body: false, swap_return: None, block_arg: None, defining_class: None,
+            is_class_body: false,
+            swap_return: None,
+            block_arg: None,
+            defining_class: None,
             lexical_cvar_class: bh_lexical_cvar_class,
-            #[cfg(feature = "regex")] saved_last_match: None,
-            is_block: true, is_lambda: bh_is_lambda, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
+            #[cfg(feature = "regex")]
+            saved_last_match: None,
+            is_block: true,
+            is_lambda: bh_is_lambda,
+            n_given_positional: 0,
+            kw_given_mask: 0,
+            aux: None,
+            pending_yield: false,
             block_writeback: writeback,
             captured_yield_block,
         });
         Ok(())
     }
 
-
-
-    pub(crate) fn do_call_block(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u32) -> Result<(), Trap> {
+    pub(crate) fn do_call_block(
+        &mut self,
+        name_id: SymId,
+        argc: usize,
+        no_recv: bool,
+        cache_id: u32,
+    ) -> Result<(), Trap> {
         let name = self.interner.resolve(name_id).clone();
         // Consume `bypass_visibility_once` at the dispatch boundary
         // — same reasoning as `do_call`. `do_call_block` itself
@@ -20735,7 +22634,9 @@ impl Vm {
             // `m.call(*args)`. See `coerce_callable_to_block`.
             Value::BoundMethod(bm_id) => {
                 let mut g = crate::vm::PinGuard::new(self);
-                for a in &args { g.pin(a.clone()); }
+                for a in &args {
+                    g.pin(a.clone());
+                }
                 g.vm.coerce_callable_to_block(Value::BoundMethod(bm_id))?
             }
             // `&curried_proc` — a curried proc is still a Proc in
@@ -20746,7 +22647,9 @@ impl Vm {
             // application from there.
             Value::CurriedProc(cp_id) => {
                 let mut g = crate::vm::PinGuard::new(self);
-                for a in &args { g.pin(a.clone()); }
+                for a in &args {
+                    g.pin(a.clone());
+                }
                 g.vm.coerce_callable_to_block(Value::CurriedProc(cp_id))?
             }
             // `&sym_variable` — Symbol#to_proc coercion. The literal
@@ -20757,7 +22660,9 @@ impl Vm {
             // primitive so semantics can't drift from the literal form.
             Value::Sym(sym_id) => {
                 let mut g = crate::vm::PinGuard::new(self);
-                for a in &args { g.pin(a.clone()); }
+                for a in &args {
+                    g.pin(a.clone());
+                }
                 g.vm.symbol_block_via_to_proc(sym_id)?
             }
             // `foo(&nil)` in CRuby is equivalent to `foo` without
@@ -20773,7 +22678,9 @@ impl Vm {
                 // raise NoMethodError on a private method because
                 // its own bypass slot is now `false`.
                 self.bypass_visibility_once = bypass_visibility;
-                for a in args { self.stack.push(a); }
+                for a in args {
+                    self.stack.push(a);
+                }
                 return self.do_call(name_id, argc, no_recv, cache_id);
             }
             // Anything else (Int / Str / ...) is a real type error
@@ -20789,17 +22696,18 @@ impl Vm {
                     _ => other.type_name().to_string(),
                 };
                 return Err(self.trap(RubyError::TypeError {
-                    msg: format!(
-                        "wrong argument type {} (expected Proc)",
-                        class_name,
-                    ),
+                    msg: format!("wrong argument type {} (expected Proc)", class_name,),
                 }));
             }
         };
         let recv = if no_recv {
             None
         } else {
-            Some(self.stack.pop().expect("ICE: stack underflow before block receiver"))
+            Some(
+                self.stack
+                    .pop()
+                    .expect("ICE: stack underflow before block receiver"),
+            )
         };
 
         // `Dir.glob(pat) { |f| … }` block form. The no-block dispatch returns
@@ -20831,14 +22739,20 @@ impl Vm {
                     self.stack.push(arr);
                     return Ok(());
                 }
-                let arr_id = match arr { Value::Array(id) => id, _ => unreachable!("glob returns Array") };
+                let arr_id = match arr {
+                    Value::Array(id) => id,
+                    _ => unreachable!("glob returns Array"),
+                };
                 let paths: Vec<Value> = g.vm.heap.array(arr_id).clone();
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for p in paths {
                     match g.vm.step_block1(block, p, pre_frames)? {
                         super::iter::BlockStep::MethodReturn => break,
-                        super::iter::BlockStep::Break(r) => { early = Some(r); break; }
+                        super::iter::BlockStep::Break(r) => {
+                            early = Some(r);
+                            break;
+                        }
                         super::iter::BlockStep::Value(_) => {}
                     }
                 }
@@ -20906,7 +22820,12 @@ impl Vm {
         // `instance_eval(&block)` inside its initialize when the
         // user passes a configuration block.
         if no_recv && matches!(&*name, "instance_exec" | "instance_eval") {
-            let self_val = self.frames.last().expect("ICE: do_call_block no frame").self_val.clone();
+            let self_val = self
+                .frames
+                .last()
+                .expect("ICE: do_call_block no frame")
+                .self_val
+                .clone();
             let user_override = match &self_val {
                 Value::Object(id) => {
                     let cls = self.heap.class_of(*id);
@@ -20914,12 +22833,14 @@ impl Vm {
                 }
                 Value::Class(c) => self.lookup_class_singleton_method(c, name_id).is_some(),
                 _ => match self.class_of(&self_val) {
-                    Value::Class(cls) => self.lookup_method_cached(&cls, name_id, cache_id).is_some(),
+                    Value::Class(cls) => {
+                        self.lookup_method_cached(&cls, name_id, cache_id).is_some()
+                    }
                     _ => false,
                 },
             };
             if !user_override {
-                self.invoke_block_with_self(block, self_val, /*as_class_body=*/false, args)?;
+                self.invoke_block_with_self(block, self_val, /*as_class_body=*/ false, args)?;
                 return Ok(());
             }
             // User override exists — re-shape stack as receiver form
@@ -20928,8 +22849,10 @@ impl Vm {
             let argc = args.len();
             self.stack.push(self_val);
             self.stack.push(Value::Block(block));
-            for a in args { self.stack.push(a); }
-            return self.do_call_block(name_id, argc, /*no_recv=*/false, u32::MAX);
+            for a in args {
+                self.stack.push(a);
+            }
+            return self.do_call_block(name_id, argc, /*no_recv=*/ false, u32::MAX);
         }
 
         // `proc.call(args, &blk)` — Proc invocation WITH a
@@ -20958,7 +22881,9 @@ impl Vm {
                 let mut g = crate::vm::PinGuard::new(self);
                 g.pin(Value::Block(target));
                 g.pin(Value::Block(block));
-                for a in &args { g.pin(a.clone()); }
+                for a in &args {
+                    g.pin(a.clone());
+                }
                 g.vm.pending_block_arg = Some(block);
                 g.vm.invoke_block(target, args)?;
             }
@@ -20988,11 +22913,14 @@ impl Vm {
         // dispatch through `do_call_block` so the underlying
         // method receives the block argument.
         if let Some(Value::BoundMethod(bid)) = &recv
-            && matches!(&*name, "call" | "[]" | "()") {
+            && matches!(&*name, "call" | "[]" | "()")
+        {
             let (bm_recv, bm_name_id, bm_method) = match self.heap.get(*bid) {
-                HeapObj::BoundMethod { recv, name_id, method } => {
-                    (recv.clone(), *name_id, method.clone())
-                }
+                HeapObj::BoundMethod {
+                    recv,
+                    name_id,
+                    method,
+                } => (recv.clone(), *name_id, method.clone()),
                 _ => panic!("ICE: BoundMethod slot holds non-BoundMethod"),
             };
             // Snapshot fast path — invoke directly with the
@@ -21008,7 +22936,9 @@ impl Vm {
             let argc_new = args.len();
             self.stack.push(bm_recv);
             self.stack.push(Value::Block(block));
-            for a in args { self.stack.push(a); }
+            for a in args {
+                self.stack.push(a);
+            }
             return self.do_call_block(bm_name_id, argc_new, false, u32::MAX);
         }
         // `ubm.bind_call(recv, *args, &block)` — block-form parallel
@@ -21019,16 +22949,20 @@ impl Vm {
         // ~392) passes one, which lands here. Without this arm
         // the call raises NoMethodError even though the blockless
         // shape succeeds.
-        if let Some(Value::UnboundMethod(uid)) = &recv && &*name == "bind_call" {
+        if let Some(Value::UnboundMethod(uid)) = &recv
+            && &*name == "bind_call"
+        {
             if args.is_empty() {
                 return Err(self.trap(RubyError::ArgumentError {
                     msg: "wrong number of arguments (given 0, expected 1..)".into(),
                 }));
             }
             let (cap_class, cap_name_id, cap_method) = match self.heap.get(*uid) {
-                HeapObj::UnboundMethod { class, name_id, method } => {
-                    (class.clone(), *name_id, method.clone())
-                }
+                HeapObj::UnboundMethod {
+                    class,
+                    name_id,
+                    method,
+                } => (class.clone(), *name_id, method.clone()),
                 _ => panic!("ICE: UnboundMethod slot holds non-UnboundMethod"),
             };
             let mut args = args;
@@ -21041,9 +22975,14 @@ impl Vm {
                 Value::Object(id) => self.heap.class_of(*id),
                 _ => match self.class_of(&target) {
                     Value::Class(c) => c,
-                    _ => return Err(self.trap(RubyError::TypeError {
-                        msg: format!("bind_call argument must have a class (got {})", target.type_name()),
-                    })),
+                    _ => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "bind_call argument must have a class (got {})",
+                                target.type_name()
+                            ),
+                        }));
+                    }
                 },
             };
             // Same is_a fence as the no-block path: Kernel sentinel
@@ -21051,7 +22990,8 @@ impl Vm {
             // capture is strict.
             if !matches!(cap_class.name.as_str(), "Kernel" | "Object" | "BasicObject")
                 && !cap_class.is_module
-                && !super::class_is_a(&target_class, &cap_class) {
+                && !super::class_is_a(&target_class, &cap_class)
+            {
                 return Err(self.trap(RubyError::TypeError {
                     msg: format!(
                         "bind_call argument must be an instance of {} (got {})",
@@ -21059,15 +22999,19 @@ impl Vm {
                     ),
                 }));
             }
-            let m = match cap_method.or_else(|| self.lookup_method_uncached(&cap_class, cap_name_id)) {
-                Some(m) => m,
-                None => {
-                    let mname = self.interner.resolve(cap_name_id).to_string();
-                    return Err(self.trap(RubyError::NameError {
-                        msg: format!("undefined method '{}' for class '{}'", mname, cap_class.name),
-                    }));
-                }
-            };
+            let m =
+                match cap_method.or_else(|| self.lookup_method_uncached(&cap_class, cap_name_id)) {
+                    Some(m) => m,
+                    None => {
+                        let mname = self.interner.resolve(cap_name_id).to_string();
+                        return Err(self.trap(RubyError::NameError {
+                            msg: format!(
+                                "undefined method '{}' for class '{}'",
+                                mname, cap_class.name
+                            ),
+                        }));
+                    }
+                };
             self.invoke_method_with_block(m, target, args, Some(block))?;
             return Ok(());
         }
@@ -21128,12 +23072,17 @@ impl Vm {
                 [Value::Class(sc)] if !sc.is_module => Some(sc.clone()),
                 [Value::Class(_)] => {
                     return Err(self.trap(RubyError::TypeError {
-                        msg: "superclass must be an instance of Class (given an instance of Module)".to_string(),
+                        msg:
+                            "superclass must be an instance of Class (given an instance of Module)"
+                                .to_string(),
                     }));
                 }
                 [other] => {
                     return Err(self.trap(RubyError::TypeError {
-                        msg: format!("superclass must be an instance of Class (given an instance of {})", other.type_name()),
+                        msg: format!(
+                            "superclass must be an instance of Class (given an instance of {})",
+                            other.type_name()
+                        ),
                     }));
                 }
                 _ => {
@@ -21166,9 +23115,10 @@ impl Vm {
                 singleton_view: std::cell::RefCell::new(None),
                 singleton_target: std::cell::RefCell::new(None),
                 class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
-            consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
-            assigned_name: std::cell::RefCell::new(None),
-            class_tag: None,
+                consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+                assigned_name: std::cell::RefCell::new(None),
+                class_tag: None,
+                frozen: std::cell::Cell::new(false),
                 #[cfg(feature = "cext")]
                 cext_alloc_func: std::cell::Cell::new(None),
             });
@@ -21233,9 +23183,10 @@ impl Vm {
                 singleton_view: std::cell::RefCell::new(None),
                 singleton_target: std::cell::RefCell::new(None),
                 class_vars: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
-            consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
-            assigned_name: std::cell::RefCell::new(None),
-            class_tag: None,
+                consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
+                assigned_name: std::cell::RefCell::new(None),
+                class_tag: None,
+                frozen: std::cell::Cell::new(false),
                 #[cfg(feature = "cext")]
                 cext_alloc_func: std::cell::Cell::new(None),
             });
@@ -21301,9 +23252,9 @@ impl Vm {
         // `send` arm in dispatch.rs:513) applied to the whole
         // built-in install family — tracked as Tier-2 follow-up.
         if &*name == "define_singleton_method" {
-            let target_recv = recv.clone().or_else(|| {
-                self.frames.last().map(|f| f.self_val.clone())
-            });
+            let target_recv = recv
+                .clone()
+                .or_else(|| self.frames.last().map(|f| f.self_val.clone()));
             // Arity matches `define_method`:
             //   1 → install the block (path below)
             //   2 → install args[1] (Proc/Method/UnboundMethod);
@@ -21311,28 +23262,34 @@ impl Vm {
             let two_arg_form = args.len() == 2;
             match args.len() {
                 1 | 2 => {}
-                n => return Err(self.trap(RubyError::ArgumentError {
-                    msg: format!("wrong number of arguments (given {}, expected 1..2)", n),
-                })),
+                n => {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("wrong number of arguments (given {}, expected 1..2)", n),
+                    }));
+                }
             }
             let name_sym = match &args[0] {
                 Value::Sym(s) => *s,
                 Value::Str(s) => {
                     let raw = s.to_string_lossy();
                     if let Some(max) = self.max_symbols
-                        && !self.interner.contains(&raw) && self.interner.len() >= max {
-                            return Err(self.trap(RubyError::ResourceExhausted {
-                                msg: format!("interner exhausted: {} symbols", max),
-                            }));
-                        }
+                        && !self.interner.contains(&raw)
+                        && self.interner.len() >= max
+                    {
+                        return Err(self.trap(RubyError::ResourceExhausted {
+                            msg: format!("interner exhausted: {} symbols", max),
+                        }));
+                    }
                     self.interner.intern(&raw)
                 }
-                other => return Err(self.trap(RubyError::TypeError {
-                    msg: format!(
-                        "wrong argument type {} (expected Symbol or String)",
-                        other.type_name(),
-                    ),
-                })),
+                other => {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "wrong argument type {} (expected Symbol or String)",
+                            other.type_name(),
+                        ),
+                    }));
+                }
             };
             // 2-arg form: skip the block payload and install
             // args[1] via the shared helpers. For Object recv
@@ -21351,11 +23308,9 @@ impl Vm {
                             crate::value::Visibility::Public,
                         ))
                     }
-                    Some(Value::Class(c)) => Some(
-                        self.install_singleton_method_on_class_from_value(
-                            c, name_sym, &src,
-                        ),
-                    ),
+                    Some(Value::Class(c)) => {
+                        Some(self.install_singleton_method_on_class_from_value(c, name_sym, &src))
+                    }
                     _ => None,
                 };
                 if let Some(res) = install_result {
@@ -21382,7 +23337,13 @@ impl Vm {
             }
             let (proto_idx, captured, param_start, n_params, captured_yield_block) = {
                 let bh = self.heap.block(block);
-                (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params, bh.captured_yield_block)
+                (
+                    bh.proto_idx,
+                    bh.captured.clone(),
+                    bh.param_start,
+                    bh.n_params,
+                    bh.captured_yield_block,
+                )
             };
             let proto = &self.protos[proto_idx];
             let params = proto.params.clone();
@@ -21405,7 +23366,12 @@ impl Vm {
                         fixed_arity: None,
                         defining_class: Some(std::rc::Rc::downgrade(&sc)),
                         visibility: std::cell::Cell::new(crate::value::Visibility::Public),
-                        closure: Some(crate::value::MethodClosure { captured, param_start, n_params, captured_yield_block }),
+                        closure: Some(crate::value::MethodClosure {
+                            captured,
+                            param_start,
+                            n_params,
+                            captured_yield_block,
+                        }),
                         builtin: None,
                         original_name: Some(name_sym),
                     });
@@ -21419,21 +23385,30 @@ impl Vm {
                         fixed_arity: None,
                         defining_class: Some(std::rc::Rc::downgrade(&c)),
                         visibility: std::cell::Cell::new(crate::value::Visibility::Public),
-                        closure: Some(crate::value::MethodClosure { captured, param_start, n_params, captured_yield_block }),
+                        closure: Some(crate::value::MethodClosure {
+                            captured,
+                            param_start,
+                            n_params,
+                            captured_yield_block,
+                        }),
                         builtin: None,
                         original_name: Some(name_sym),
                     });
                     c.singleton_methods.borrow_mut().insert(name_sym, m);
                     Value::Class(c)
                 }
-                Some(other) => return Err(self.trap(RubyError::NoMethodError {
-                    kind: crate::error::NoMethodErrorKind::Missing,
-                    method: format!("undefined method '{}' called", &*name),
-                    recv_type: std::borrow::Cow::Borrowed(other.type_name()),
-                })),
-                None => return Err(self.trap(RubyError::ArgumentError {
-                    msg: "no receiver for define_singleton_method".into(),
-                })),
+                Some(other) => {
+                    return Err(self.trap(RubyError::NoMethodError {
+                        kind: crate::error::NoMethodErrorKind::Missing,
+                        method: format!("undefined method '{}' called", &*name),
+                        recv_type: std::borrow::Cow::Borrowed(other.type_name()),
+                    }));
+                }
+                None => {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: "no receiver for define_singleton_method".into(),
+                    }));
+                }
             };
             self.method_gen = self.method_gen.wrapping_add(1);
             // `singleton_method_added` fires on the receiver after
@@ -21461,11 +23436,17 @@ impl Vm {
             let (target_cls, explicit_recv) = match &recv {
                 Some(Value::Class(c)) => (Some(c.clone()), true),
                 None => {
-                    let self_val = self.frames.last()
+                    let self_val = self
+                        .frames
+                        .last()
                         .expect("ICE: define_method no_recv with empty frames")
                         .self_val
                         .clone();
-                    if let Value::Class(c) = self_val { (Some(c), false) } else { (None, false) }
+                    if let Value::Class(c) = self_val {
+                        (Some(c), false)
+                    } else {
+                        (None, false)
+                    }
                 }
                 _ => (None, false),
             };
@@ -21478,7 +23459,8 @@ impl Vm {
             // fall through to normal dispatch (which will raise
             // NoMethodError on the non-Class receiver).
             if let Some(cls) = &target_cls
-                && let Some(m) = self.lookup_class_singleton_method(cls, name_id) {
+                && let Some(m) = self.lookup_class_singleton_method(cls, name_id)
+            {
                 let recv_val = Value::Class(cls.clone());
                 return self.invoke_method_with_block(m, recv_val, args, Some(block));
             }
@@ -21501,9 +23483,11 @@ impl Vm {
                 let two_arg_form = args.len() == 2;
                 match args.len() {
                     1 | 2 => {}
-                    n => return Err(self.trap(RubyError::ArgumentError {
-                        msg: format!("wrong number of arguments (given {}, expected 1..2)", n),
-                    })),
+                    n => {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: format!("wrong number of arguments (given {}, expected 1..2)", n),
+                        }));
+                    }
                 }
                 let name_sym = match &args[0] {
                     Value::Sym(s) => *s,
@@ -21517,19 +23501,23 @@ impl Vm {
                         // fresh names count against the cap.
                         let raw = s.to_string_lossy();
                         if let Some(max) = self.max_symbols
-                            && !self.interner.contains(&raw) && self.interner.len() >= max {
-                                return Err(self.trap(RubyError::ResourceExhausted {
-                                    msg: format!("interner exhausted: {} symbols", max),
-                                }));
-                            }
+                            && !self.interner.contains(&raw)
+                            && self.interner.len() >= max
+                        {
+                            return Err(self.trap(RubyError::ResourceExhausted {
+                                msg: format!("interner exhausted: {} symbols", max),
+                            }));
+                        }
                         self.interner.intern(&raw)
                     }
-                    other => return Err(self.trap(RubyError::TypeError {
-                        msg: format!(
-                            "wrong argument type {} (expected Symbol or String)",
-                            other.type_name(),
-                        ),
-                    })),
+                    other => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "wrong argument type {} (expected Symbol or String)",
+                                other.type_name(),
+                            ),
+                        }));
+                    }
                 };
                 // Explicit-receiver path: visibility defaults to
                 // Public (the new method's target class doesn't
@@ -21541,7 +23529,9 @@ impl Vm {
                 let vis = if explicit_recv {
                     crate::value::Visibility::Public
                 } else {
-                    self.class_visibility_stack.last().copied()
+                    self.class_visibility_stack
+                        .last()
+                        .copied()
                         .unwrap_or(crate::value::Visibility::Public)
                 };
                 // 2-arg form (with or without an attached block —
@@ -21559,7 +23549,13 @@ impl Vm {
                 }
                 let (proto_idx, captured, param_start, n_params, captured_yield_block) = {
                     let bh = self.heap.block(block);
-                    (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params, bh.captured_yield_block)
+                    (
+                        bh.proto_idx,
+                        bh.captured.clone(),
+                        bh.param_start,
+                        bh.n_params,
+                        bh.captured_yield_block,
+                    )
                 };
                 let proto = &self.protos[proto_idx];
                 let params = proto.params.clone();
@@ -21574,9 +23570,16 @@ impl Vm {
                     // resolve to the same real class so `super`
                     // walks the right ancestor chain.
                     // (Code-review #253 round 1 #1.)
-                    defining_class: Some(std::rc::Rc::downgrade(&target_cls.effective_install_class())),
+                    defining_class: Some(std::rc::Rc::downgrade(
+                        &target_cls.effective_install_class(),
+                    )),
                     visibility: std::cell::Cell::new(vis),
-                    closure: Some(crate::value::MethodClosure { captured, param_start, n_params, captured_yield_block }),
+                    closure: Some(crate::value::MethodClosure {
+                        captured,
+                        param_start,
+                        n_params,
+                        captured_yield_block,
+                    }),
                     builtin: None,
                     original_name: Some(name_sym),
                 });
@@ -21608,7 +23611,10 @@ impl Vm {
             }
             if !args.is_empty() {
                 return Err(self.trap(RubyError::ArgumentError {
-                    msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 0)",
+                        args.len()
+                    ),
                 }));
             }
             self.stack.push(Value::Block(block));
@@ -21647,13 +23653,20 @@ impl Vm {
             if self.lookup_method_uncached(cls, init_id).is_none() {
                 if !args.is_empty() {
                     return Err(self.trap(RubyError::ArgumentError {
-                        msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 0)",
+                            args.len()
+                        ),
                     }));
                 }
                 // A subclass constructs a TAGGED instance of itself (so
                 // `Rack::Headers.new { |h,k| ... }['x']` runs the
                 // default block); the literal Hash class tags None.
-                let class_tag = if cls.name.as_str() == "Hash" { None } else { Some(cls.clone()) };
+                let class_tag = if cls.name.as_str() == "Hash" {
+                    None
+                } else {
+                    Some(cls.clone())
+                };
                 // GC rooting: `block` was popped from the stack into a
                 // Rust-local ObjId above. Until `hash_set_default_block`
                 // installs it into the new Hash (which IS a GC root via
@@ -21701,13 +23714,17 @@ impl Vm {
                 let target_self = Value::Class(cls.clone());
                 return self.invoke_method_with_block(m, target_self, args, Some(block));
             }
-            let size: i64 = match args.as_slice() {
-                [] => 0,
-                [Value::Int(n)] => *n,
-                _ => return Err(self.trap(RubyError::ArgumentError {
-                    msg: format!("wrong number of arguments (given {}, expected 0..1 for block form)", args.len()),
-                })),
-            };
+            let size: i64 =
+                match args.as_slice() {
+                    [] => 0,
+                    [Value::Int(n)] => *n,
+                    _ => return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 0..1 for block form)",
+                            args.len()
+                        ),
+                    })),
+                };
             if size < 0 {
                 return Err(self.trap(RubyError::ArgumentError {
                     msg: format!("negative array size ({})", size),
@@ -21729,10 +23746,9 @@ impl Vm {
             let mut g = PinGuard::new(self);
             g.pin(Value::Block(block));
             g.vm.check_alloc()?;
-            let aid = g
-                .vm
-                .heap
-                .alloc(HeapObj::Array(Vec::with_capacity(size.max(0) as usize).into()));
+            let aid = g.vm.heap.alloc(HeapObj::Array(
+                Vec::with_capacity(size.max(0) as usize).into(),
+            ));
             g.pin(Value::Array(aid));
             // pre_frames captures the frame depth so step_block can
             // detect non-local return / break correctly.
@@ -21787,12 +23803,19 @@ impl Vm {
                     // `Integer`). Mirrors the primitive-receiver
                     // fallback in `do_call` at ~line 3066.
                     _ => match self.class_of(r) {
-                        Value::Class(cls) => self.lookup_method_cached(&cls, name_id, cache_id).is_some(),
+                        Value::Class(cls) => {
+                            self.lookup_method_cached(&cls, name_id, cache_id).is_some()
+                        }
                         _ => false,
                     },
                 };
                 if !user_override {
-                    self.invoke_block_with_self(block, r.clone(), /*as_class_body=*/false, args)?;
+                    self.invoke_block_with_self(
+                        block,
+                        r.clone(),
+                        /*as_class_body=*/ false,
+                        args,
+                    )?;
                     return Ok(());
                 }
             }
@@ -21812,7 +23835,7 @@ impl Vm {
                 && let Value::Class(c) = r
                 && self.lookup_class_singleton_method(c, name_id).is_none()
             {
-                self.invoke_block_with_self(block, r.clone(), /*as_class_body=*/true, args)?;
+                self.invoke_block_with_self(block, r.clone(), /*as_class_body=*/ true, args)?;
                 return Ok(());
             }
             let is_instance_eval = &*name == "instance_eval";
@@ -21824,10 +23847,7 @@ impl Vm {
                     // are consistent across the Module-receiver
                     // family.
                     return Err(self.trap(RubyError::TypeError {
-                        msg: format!(
-                            "wrong argument type {} (expected Module)",
-                            r.type_name(),
-                        ),
+                        msg: format!("wrong argument type {} (expected Module)", r.type_name(),),
                     }));
                 }
                 // CRuby passes `self` as the sole block arg (so
@@ -21855,7 +23875,8 @@ impl Vm {
             // ArgumentError "wrong number of arguments (given N,
             // expected 0)". Without this guard, passing both
             // would fall through to NoMethodError.
-            if is_class_eval && let Value::Class(cls) = r
+            if is_class_eval
+                && let Value::Class(cls) = r
                 && !args.is_empty()
                 && self.lookup_class_singleton_method(cls, name_id).is_none()
             {
@@ -21868,10 +23889,11 @@ impl Vm {
             }
         }
         if let Some(r) = &recv
-            && let Some(v) = self.collection_call_block(r, &name, &args, block, false)? {
-                self.stack.push(v);
-                return Ok(());
-            }
+            && let Some(v) = self.collection_call_block(r, &name, &args, block, false)?
+        {
+            self.stack.push(v);
+            return Ok(());
+        }
 
         if no_recv {
             // Bare `tap { … }` / `then { … }` / `yield_self { … }`
@@ -21883,10 +23905,15 @@ impl Vm {
             // no-block bare-universal routing in `do_call` (which can't
             // carry the block).
             if matches!(&*name, "tap" | "then" | "yield_self") {
-                let self_val = self.frames.last()
+                let self_val = self
+                    .frames
+                    .last()
                     .expect("ICE: do_call_block(no_recv) empty frames for tap routing")
-                    .self_val.clone();
-                if let Some(v) = self.collection_call_block(&self_val, &name, &args, block, false)? {
+                    .self_val
+                    .clone();
+                if let Some(v) =
+                    self.collection_call_block(&self_val, &name, &args, block, false)?
+                {
                     self.stack.push(v);
                     return Ok(());
                 }
@@ -21926,9 +23953,11 @@ impl Vm {
             }
             // `refine(Target) do … end` inside a module body. self is the
             // defining module; record the refinement against it.
-            if &*name == "refine" && args.len() == 1
+            if &*name == "refine"
+                && args.len() == 1
                 && let Value::Class(target) = &args[0]
-                && let Some(Value::Class(module)) = self.frames.last().map(|f| f.self_val.clone()).as_ref()
+                && let Some(Value::Class(module)) =
+                    self.frames.last().map(|f| f.self_val.clone()).as_ref()
             {
                 let (target, module) = (target.clone(), module.clone());
                 return self.do_refine(target, module, block);
@@ -21954,17 +23983,21 @@ impl Vm {
             // `do_call`. See there for the override + visibility
             // rationale.
             if matches!(&*name, "send" | "__send__" | "public_send") {
-                let frame_self = self.frames.last()
+                let frame_self = self
+                    .frames
+                    .last()
                     .expect("ICE: do_call_block(no_recv) with empty frames")
-                    .self_val.clone();
-                let user_override = matches!(&*name, "send" | "public_send") && match &frame_self {
-                    Value::Object(id) => {
-                        let cls = self.heap.class_of(*id);
-                        self.lookup_method_cached(&cls, name_id, cache_id).is_some()
-                    }
-                    Value::Class(c) => self.lookup_class_singleton_method(c, name_id).is_some(),
-                    _ => false,
-                };
+                    .self_val
+                    .clone();
+                let user_override = matches!(&*name, "send" | "public_send")
+                    && match &frame_self {
+                        Value::Object(id) => {
+                            let cls = self.heap.class_of(*id);
+                            self.lookup_method_cached(&cls, name_id, cache_id).is_some()
+                        }
+                        Value::Class(c) => self.lookup_class_singleton_method(c, name_id).is_some(),
+                        _ => false,
+                    };
                 if !user_override {
                     let target_sym = self.parse_send_target(&args)?;
                     let new_argc = args.len() - 1;
@@ -21976,7 +24009,12 @@ impl Vm {
                     return self.do_call_block(target_sym, new_argc, true, u32::MAX);
                 }
             }
-            let self_val = self.frames.last().expect("ICE: do_call_block no frame").self_val.clone();
+            let self_val = self
+                .frames
+                .last()
+                .expect("ICE: do_call_block no frame")
+                .self_val
+                .clone();
             if let Value::Object(id) = &self_val {
                 let cls = self.heap.class_of(*id);
                 if let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) {
@@ -22028,11 +24066,14 @@ impl Vm {
                 let argc = args.len();
                 self.stack.push(self_val.clone());
                 self.stack.push(Value::Block(block));
-                for a in args { self.stack.push(a); }
-                return self.do_call_block(name_id, argc, /*no_recv=*/false, u32::MAX);
+                for a in args {
+                    self.stack.push(a);
+                }
+                return self.do_call_block(name_id, argc, /*no_recv=*/ false, u32::MAX);
             }
             if let Value::Class(c) = &self_val
-                && let Some(m) = self.lookup_class_singleton_method(c, name_id) {
+                && let Some(m) = self.lookup_class_singleton_method(c, name_id)
+            {
                 self.invoke_method_with_block(m, self_val.clone(), args, Some(block))?;
                 return Ok(());
             }
@@ -22048,23 +24089,40 @@ impl Vm {
             // sees the receiver-form layout it expects.
             // PR #196 code-review #3.
             if let Value::Class(cls) = &self_val {
-                let in_set = matches!(&*name,
-                    "new" | "name" | "to_s" | "inspect"
-                    | "method_defined?" | "instance_method" | "undef_method" | "remove_method"
-                    | "superclass" | "ancestors" | "include?"
-                    | "instance_methods" | "public_instance_methods"
-                    | "private_instance_methods" | "protected_instance_methods"
-                    | "constants"
-                    | "autoload" | "autoload?" | "const_defined?" | "const_get" | "const_set" | "private_constant" | "public_constant"
-                    | "deprecate_constant"
-                    | "private_class_method" | "public_class_method"
-                    | "singleton_class"
-                    | "class_eval" | "module_eval"
+                let in_set = matches!(
+                    &*name,
+                    "new"
+                        | "name"
+                        | "to_s"
+                        | "inspect"
+                        | "method_defined?"
+                        | "instance_method"
+                        | "undef_method"
+                        | "remove_method"
+                        | "superclass"
+                        | "ancestors"
+                        | "include?"
+                        | "instance_methods"
+                        | "public_instance_methods"
+                        | "private_instance_methods"
+                        | "protected_instance_methods"
+                        | "constants"
+                        | "autoload"
+                        | "autoload?"
+                        | "const_defined?"
+                        | "const_get"
+                        | "const_set"
+                        | "private_constant"
+                        | "public_constant"
+                        | "deprecate_constant"
+                        | "private_class_method"
+                        | "public_class_method"
+                        | "singleton_class"
+                        | "class_eval"
+                        | "module_eval"
                 );
                 let allocate_allowed =
-                    &*name == "allocate"
-                        && !cls.is_module
-                        && cls.name != "Module";
+                    &*name == "allocate" && !cls.is_module && cls.name != "Module";
                 if in_set || allocate_allowed {
                     // `class_eval` / `module_eval` / `new` are the
                     // bridge-set members whose block is load-
@@ -22089,8 +24147,15 @@ impl Vm {
                         let argc = args.len();
                         self.stack.push(self_val.clone());
                         self.stack.push(Value::Block(block));
-                        for a in args { self.stack.push(a); }
-                        return self.do_call_block(name_id, argc, /*no_recv=*/false, u32::MAX);
+                        for a in args {
+                            self.stack.push(a);
+                        }
+                        return self.do_call_block(
+                            name_id,
+                            argc,
+                            /*no_recv=*/ false,
+                            u32::MAX,
+                        );
                     }
                     // Route through the blockless `do_call`, NOT
                     // `do_call_block` — CRuby silently discards the
@@ -22108,9 +24173,11 @@ impl Vm {
                     // outcome, simpler routing.
                     let argc = args.len();
                     self.stack.push(self_val.clone());
-                    for a in args { self.stack.push(a); }
+                    for a in args {
+                        self.stack.push(a);
+                    }
                     let _ = block; // explicitly discarded per CRuby
-                    return self.do_call(name_id, argc, /*no_recv=*/false, u32::MAX);
+                    return self.do_call(name_id, argc, /*no_recv=*/ false, u32::MAX);
                 }
             }
             // Bare call WITH a block on a real `nil` receiver inside a
@@ -22121,7 +24188,10 @@ impl Vm {
             // calls on the toplevel path; see do_call's Nil arm for the
             // full main-self-is-Nil rationale.
             if matches!(&self_val, Value::Nil)
-                && self.frames.last().is_some_and(|f| f.defining_class.is_some())
+                && self
+                    .frames
+                    .last()
+                    .is_some_and(|f| f.defining_class.is_some())
                 && let Value::Class(cls) = self.class_of(&self_val)
                 && let Some(m) = self.lookup_method_uncached(&cls, name_id)
             {
@@ -22150,8 +24220,10 @@ impl Vm {
                 let argc = args.len();
                 self.stack.push(self_val.clone());
                 self.stack.push(Value::Block(block));
-                for a in args { self.stack.push(a); }
-                return self.do_call_block(name_id, argc, /*no_recv=*/false, u32::MAX);
+                for a in args {
+                    self.stack.push(a);
+                }
+                return self.do_call_block(name_id, argc, /*no_recv=*/ false, u32::MAX);
             }
             if let Some(m) = self.toplevel_methods.get(&name_id).cloned() {
                 self.invoke_method_with_block(m, self_val, args, Some(block))?;
@@ -22179,15 +24251,18 @@ impl Vm {
                 let argc = args.len();
                 self.stack.push(self_val.clone());
                 self.stack.push(Value::Block(block));
-                for a in args { self.stack.push(a); }
-                return self.do_call_block(name_id, argc, /*no_recv=*/false, u32::MAX);
+                for a in args {
+                    self.stack.push(a);
+                }
+                return self.do_call_block(name_id, argc, /*no_recv=*/ false, u32::MAX);
             }
             if self.try_method_missing(&self_val, name_id, args, Some(block))? {
                 return Ok(());
             }
             return Err(self.trap(RubyError::NoMethodError {
                 kind: crate::error::NoMethodErrorKind::Missing,
-                method: name.to_string(), recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(&self_val)),
+                method: name.to_string(),
+                recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(&self_val)),
             }));
         }
         let recv = recv.expect("ICE: receiver missing for block call");
@@ -22253,18 +24328,19 @@ impl Vm {
         // the block-less arm. User-`def send` override + visibility
         // bypass parity — same rules as the block-less arm; see
         // there for the rationale.
-        let user_send_override = matches!(&*name, "send" | "public_send") && match &recv {
-            Value::Object(id) => {
-                let cls = self.heap.class_of(*id);
-                self.lookup_method_cached(&cls, name_id, cache_id).is_some()
-            }
-            // `def self.send` on a class — singleton-method lookup
-            // walking the class's superclass chain. Falls through to
-            // the existing `Value::Class` arm which invokes the
-            // user's singleton `send`.
-            Value::Class(c) => self.lookup_class_singleton_method(c, name_id).is_some(),
-            _ => false,
-        };
+        let user_send_override = matches!(&*name, "send" | "public_send")
+            && match &recv {
+                Value::Object(id) => {
+                    let cls = self.heap.class_of(*id);
+                    self.lookup_method_cached(&cls, name_id, cache_id).is_some()
+                }
+                // `def self.send` on a class — singleton-method lookup
+                // walking the class's superclass chain. Falls through to
+                // the existing `Value::Class` arm which invokes the
+                // user's singleton `send`.
+                Value::Class(c) => self.lookup_class_singleton_method(c, name_id).is_some(),
+                _ => false,
+            };
         if matches!(&*name, "send" | "__send__" | "public_send") && !user_send_override {
             let target_sym = self.parse_send_target(&args)?;
             let new_argc = args.len() - 1;
@@ -22287,13 +24363,16 @@ impl Vm {
             && matches!(&recv, Value::Int(_))
             && matches!(&args[0], Value::Int(_))
             && let Some(kind) = crate::bytecode::BinOpKind::from_op_name(&name)
-            && matches!(kind,
+            && matches!(
+                kind,
                 crate::bytecode::BinOpKind::Add
-                | crate::bytecode::BinOpKind::Sub
-                | crate::bytecode::BinOpKind::Mul
+                    | crate::bytecode::BinOpKind::Sub
+                    | crate::bytecode::BinOpKind::Mul
             )
         {
-            let (Value::Int(x), Value::Int(y)) = (&recv, &args[0]) else { unreachable!() };
+            let (Value::Int(x), Value::Int(y)) = (&recv, &args[0]) else {
+                unreachable!()
+            };
             let v = self.apply_int_promote(kind, *x, *y)?;
             self.stack.push(v);
             return Ok(());
@@ -22311,8 +24390,16 @@ impl Vm {
         if self.try_push_string_encoding(&recv, &name, &args) {
             return Ok(());
         }
-        if let Some(v) = primitive_call(&recv, &name, &args, self.max_value_bytes).map_err(|e| self.trap(e))? { self.stack.push(v); return Ok(()); }
-        if let Some(v) = self.sym_primitive(&recv, &name, &args)? { self.stack.push(v); return Ok(()); }
+        if let Some(v) =
+            primitive_call(&recv, &name, &args, self.max_value_bytes).map_err(|e| self.trap(e))?
+        {
+            self.stack.push(v);
+            return Ok(());
+        }
+        if let Some(v) = self.sym_primitive(&recv, &name, &args)? {
+            self.stack.push(v);
+            return Ok(());
+        }
         // Mirror do_call's bigint_primitive hook. Without this,
         // block-form calls on BigInt receivers (`big.send(:to_s) { ... }`)
         // raise NoMethodError because primitive_call/sym_primitive
@@ -22358,10 +24445,14 @@ impl Vm {
         // symmetric: user override wins in both no-block and
         // block forms.
         if &*name == "allocate"
-            && let Value::Class(cls) = &recv {
+            && let Value::Class(cls) = &recv
+        {
             if !args.is_empty() {
                 return Err(self.trap(RubyError::ArgumentError {
-                    msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 0)",
+                        args.len()
+                    ),
                 }));
             }
             // Eigenclass-shell fence — CRuby:
@@ -22393,57 +24484,63 @@ impl Vm {
         }
         let new_id = self.interner.intern("new");
         if name_id == new_id
-            && let Value::Class(cls) = &recv {
-                // Eigenclass-shell fence (block-form parallel of
-                // the no-block fence in
-                // `try_dispatch_class_intrinsics`). CRuby raises
-                // TypeError for `A.singleton_class.new { … }` too.
-                // (Code-review #253 round 9 #1.)
-                if cls.singleton_target.borrow().is_some() {
-                    return Err(self.trap(RubyError::TypeError {
-                        msg: "can't create instance of singleton class".into(),
-                    }));
-                }
-                // Pin args + obj + block across the WHOLE alloc +
-                // invoke window. Pre-fix the PinGuard was scoped to
-                // just the `alloc_default_instance` call, leaving
-                // `obj` AND `block` as bare Rust locals before
-                // `invoke_method_with_block` ran — its rest-arg
-                // alloc / arity-binding can trigger maybe_gc with
-                // the new Frame not yet on the stack, sweeping the
-                // block ObjId before its Frame.block_arg slot got
-                // rooted. STRESS_GC repro:
-                // `class Foo; def initialize(&blk); blk.call; end;
-                // end; Foo.new { 42 }` ICE'd at "heap slot is not a
-                // Block" in the block_given? → blk.call window.
-                // Pin everything heap-shaped (args entries, the
-                // fresh obj, the block) for the duration of the
-                // invoke; the guard releases on `Ok(())` return
-                // BELOW where the new Frame is already pushed +
-                // GC-rooted via Frame.block_arg + Frame.self_val.
-                let mut g = PinGuard::new(self);
-                for a in &args { g.pin(a.clone()); }
-                g.pin(Value::Block(block));
-                let obj = g.vm.alloc_default_instance(cls)?;
-                g.pin(obj.clone());
-                let init_id = g.vm.sym_initialize;
-                let ruby_init = g.vm.lookup_method_uncached(cls, init_id);
-                if let Some(m) = ruby_init {
-                    g.vm.invoke_method_with_block(m, obj.clone(), args, Some(block))?;
-                    // Drop the guard before mutating the new
-                    // frame's swap_return — by this point the
-                    // new Frame is on `g.vm.frames` and rooting
-                    // both obj (as self_val) and block (as
-                    // block_arg) on its own, so the pin
-                    // tracking is no longer load-bearing.
-                    drop(g);
-                    self.frames.last_mut().expect("ICE: frames empty after new").swap_return = Some(obj);
-                } else {
-                    drop(g);
-                    self.stack.push(obj);
-                }
-                return Ok(());
+            && let Value::Class(cls) = &recv
+        {
+            // Eigenclass-shell fence (block-form parallel of
+            // the no-block fence in
+            // `try_dispatch_class_intrinsics`). CRuby raises
+            // TypeError for `A.singleton_class.new { … }` too.
+            // (Code-review #253 round 9 #1.)
+            if cls.singleton_target.borrow().is_some() {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: "can't create instance of singleton class".into(),
+                }));
             }
+            // Pin args + obj + block across the WHOLE alloc +
+            // invoke window. Pre-fix the PinGuard was scoped to
+            // just the `alloc_default_instance` call, leaving
+            // `obj` AND `block` as bare Rust locals before
+            // `invoke_method_with_block` ran — its rest-arg
+            // alloc / arity-binding can trigger maybe_gc with
+            // the new Frame not yet on the stack, sweeping the
+            // block ObjId before its Frame.block_arg slot got
+            // rooted. STRESS_GC repro:
+            // `class Foo; def initialize(&blk); blk.call; end;
+            // end; Foo.new { 42 }` ICE'd at "heap slot is not a
+            // Block" in the block_given? → blk.call window.
+            // Pin everything heap-shaped (args entries, the
+            // fresh obj, the block) for the duration of the
+            // invoke; the guard releases on `Ok(())` return
+            // BELOW where the new Frame is already pushed +
+            // GC-rooted via Frame.block_arg + Frame.self_val.
+            let mut g = PinGuard::new(self);
+            for a in &args {
+                g.pin(a.clone());
+            }
+            g.pin(Value::Block(block));
+            let obj = g.vm.alloc_default_instance(cls)?;
+            g.pin(obj.clone());
+            let init_id = g.vm.sym_initialize;
+            let ruby_init = g.vm.lookup_method_uncached(cls, init_id);
+            if let Some(m) = ruby_init {
+                g.vm.invoke_method_with_block(m, obj.clone(), args, Some(block))?;
+                // Drop the guard before mutating the new
+                // frame's swap_return — by this point the
+                // new Frame is on `g.vm.frames` and rooting
+                // both obj (as self_val) and block (as
+                // block_arg) on its own, so the pin
+                // tracking is no longer load-bearing.
+                drop(g);
+                self.frames
+                    .last_mut()
+                    .expect("ICE: frames empty after new")
+                    .swap_return = Some(obj);
+            } else {
+                drop(g);
+                self.stack.push(obj);
+            }
+            return Ok(());
+        }
         // `try_class_of` — same class-less-slot (HeapObj::Fiber)
         // fall-through as do_call's Object arm.
         if let Value::Object(id) = &recv
@@ -22505,11 +24602,10 @@ impl Vm {
         }
         Err(self.trap(RubyError::NoMethodError {
             kind: crate::error::NoMethodErrorKind::Missing,
-            method: name.to_string(), recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(&recv)),
+            method: name.to_string(),
+            recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(&recv)),
         }))
     }
-
-
 }
 
 /// Identity comparison for Method receivers — heap-managed
@@ -22682,10 +24778,7 @@ impl Vm {
                     && !crate::vm::class_is_a(target_cls, &defining)
                 {
                     return Err(RubyError::TypeError {
-                        msg: format!(
-                            "bind argument must be a subclass of {}",
-                            defining.name,
-                        ),
+                        msg: format!("bind argument must be a subclass of {}", defining.name,),
                     });
                 }
                 match snap {
@@ -22701,7 +24794,8 @@ impl Vm {
                 }
             }
             Value::CurriedProc(_) => Err(RubyError::TypeError {
-                msg: "CurriedProc as define_method source is not yet supported by rubyrs Tier-1".into(),
+                msg: "CurriedProc as define_method source is not yet supported by rubyrs Tier-1"
+                    .into(),
             }),
             other => Err(RubyError::TypeError {
                 msg: format!(
@@ -22729,30 +24823,30 @@ impl Vm {
     ) -> Result<std::rc::Rc<crate::value::Method>, RubyError> {
         let source = self.method_source_from(src, defining_class)?;
         let m = match source {
-            MethodSource::Proc { proto_idx, params, closure } => {
-                std::rc::Rc::new(crate::value::Method {
-                    params,
-                    proto_idx,
-                    fixed_arity: None,
-                    defining_class: Some(std::rc::Rc::downgrade(defining_class)),
-                    visibility: std::cell::Cell::new(visibility),
-                    closure: Some(closure),
-                    builtin: None,
-                    original_name: Some(name_id),
-                })
-            }
-            MethodSource::Snapshot(snap) => {
-                std::rc::Rc::new(crate::value::Method {
-                    params: snap.params.clone(),
-                    proto_idx: snap.proto_idx,
-                    fixed_arity: snap.fixed_arity,
-                    defining_class: Some(std::rc::Rc::downgrade(defining_class)),
-                    visibility: std::cell::Cell::new(visibility),
-                    closure: snap.closure.clone(),
-                    original_name: snap.original_name,
-                    builtin: snap.builtin.clone(),
-                })
-            }
+            MethodSource::Proc {
+                proto_idx,
+                params,
+                closure,
+            } => std::rc::Rc::new(crate::value::Method {
+                params,
+                proto_idx,
+                fixed_arity: None,
+                defining_class: Some(std::rc::Rc::downgrade(defining_class)),
+                visibility: std::cell::Cell::new(visibility),
+                closure: Some(closure),
+                builtin: None,
+                original_name: Some(name_id),
+            }),
+            MethodSource::Snapshot(snap) => std::rc::Rc::new(crate::value::Method {
+                params: snap.params.clone(),
+                proto_idx: snap.proto_idx,
+                fixed_arity: snap.fixed_arity,
+                defining_class: Some(std::rc::Rc::downgrade(defining_class)),
+                visibility: std::cell::Cell::new(visibility),
+                closure: snap.closure.clone(),
+                original_name: snap.original_name,
+                builtin: snap.builtin.clone(),
+            }),
         };
         Ok(m)
     }
@@ -22835,12 +24929,8 @@ impl Vm {
         name_sym: crate::intern::SymId,
         src: &Value,
     ) -> Result<crate::intern::SymId, RubyError> {
-        let m = self.build_method_from_value(
-            src,
-            cls,
-            crate::value::Visibility::Public,
-            name_sym,
-        )?;
+        let m =
+            self.build_method_from_value(src, cls, crate::value::Visibility::Public, name_sym)?;
         cls.singleton_methods.borrow_mut().insert(name_sym, m);
         self.method_gen = self.method_gen.wrapping_add(1);
         // `singleton_method_added` fires on the class itself — same
@@ -22996,7 +25086,11 @@ impl Vm {
     /// is left untouched (CRuby keeps the first name a constant gets
     /// — a later `D = C` alias doesn't rename). Singleton-class
     /// shells (`singleton_target` set) are never stamped.
-    pub(crate) fn name_anon_class(&mut self, cls: &std::rc::Rc<crate::value::Class>, qualified: &str) {
+    pub(crate) fn name_anon_class(
+        &mut self,
+        cls: &std::rc::Rc<crate::value::Class>,
+        qualified: &str,
+    ) {
         // Already named (structurally or via a prior assignment), or
         // an eigenclass shell — don't re-stamp.
         if !cls.name.is_empty()
@@ -23019,7 +25113,11 @@ impl Vm {
         // constant (via `self.constants` below at the StoreConst site);
         // we only decline to globally re-home it under a name a
         // different class already owns.
-        if self.classes.get(&key).is_some_and(|existing| !std::rc::Rc::ptr_eq(existing, cls)) {
+        if self
+            .classes
+            .get(&key)
+            .is_some_and(|existing| !std::rc::Rc::ptr_eq(existing, cls))
+        {
             return;
         }
         *cls.assigned_name.borrow_mut() = Some(qualified.to_string());
@@ -23117,10 +25215,10 @@ impl Vm {
         // Shape 13 of the fixture which exercises CRuby's
         // canonical short-path shapes.
         // (Code-review #277 round 6 #2.)
-        if split_on_double_colon
-            && (path.ends_with("::") || path.contains(":::"))
-        {
-            return ConstPathOutcome::WrongName { name: path.to_string() };
+        if split_on_double_colon && (path.ends_with("::") || path.contains(":::")) {
+            return ConstPathOutcome::WrongName {
+                name: path.to_string(),
+            };
         }
         // Build an ancestor-walk: scope_name first, then each
         // named superclass up the chain, ending at Object (the
@@ -23161,10 +25259,7 @@ impl Vm {
         // consulted via the bare `segment.to_string()` lookup the
         // existing `scope_name == "Object"` branch handles.
         for anc in super::flatten_ancestors(start_cls) {
-            if !anc.name.is_empty()
-                && anc.name != "Object"
-                && anc.name != scope_name
-            {
+            if !anc.name.is_empty() && anc.name != "Object" && anc.name != scope_name {
                 scope_chain.push(anc.name.clone());
             }
         }
@@ -23172,7 +25267,9 @@ impl Vm {
         let mut segments_remaining: usize = segments.len();
         for segment in segments {
             if !is_valid_const_name(segment) {
-                return ConstPathOutcome::WrongName { name: segment.to_string() };
+                return ConstPathOutcome::WrongName {
+                    name: segment.to_string(),
+                };
             }
             // For the FIRST segment, walk the inheritance chain
             // looking for any scope that has the constant. For
@@ -23226,9 +25323,49 @@ impl Vm {
                 && let Some(qid) = direct_qid_opt
             {
                 if let Some(c) = self.classes.get(&qid).cloned() {
-                    hit = Some((Value::Class(c.clone()), c.effective_name().unwrap_or_default()));
+                    hit = Some((
+                        Value::Class(c.clone()),
+                        c.effective_name().unwrap_or_default(),
+                    ));
                 } else if let Some(v) = self.constants.get(&qid).cloned() {
                     hit = Some((v.clone(), const_scope_name(&v)));
+                }
+            }
+            // A pending SCOPED autoload on the START scope itself
+            // (`scope::segment`, first segment only) must fire BEFORE the
+            // ancestor-chain fallback below — the receiver's OWN autoload beats
+            // an inherited same-named const/autoload (CRuby ancestry order).
+            // The direct classes/constants probe above only sees a LOADED
+            // const; without this the pending own-scope autoload stayed unfired
+            // and the ancestor loop fired a superclass's `A::X` instead. This
+            // is the start-scope twin of the ancestor-scope firing further
+            // down. Forcing case: `B::X` where `B < A`, `A::X` is defined and
+            // `B::X` is autoloaded — must load `B::X` (zeitwerk
+            // test_explicit_namespace "same cname in the superclass").
+            #[cfg(not(target_os = "wasi"))]
+            if hit.is_none()
+                && current_value.is_none()
+                && let Some(qid) = direct_qid_opt
+                && let Some(p) = self.autoloads_scoped.remove(&qid)
+            {
+                self.consumed_autoloads.insert(qid);
+                match self.invoke_require_for_autoload(Value::new_str(p)) {
+                    Ok(_) => {
+                        if self.classes.contains_key(&qid)
+                            || self.constants.contains_key(&qid)
+                        {
+                            self.consumed_autoloads.remove(&qid);
+                        }
+                        if let Some(c) = self.classes.get(&qid).cloned() {
+                            hit = Some((
+                                Value::Class(c.clone()),
+                                c.effective_name().unwrap_or_default(),
+                            ));
+                        } else if let Some(v) = self.constants.get(&qid).cloned() {
+                            hit = Some((v.clone(), const_scope_name(&v)));
+                        }
+                    }
+                    Err(t) => return ConstPathOutcome::Trap(t),
                 }
             }
             // Inheritance-chain fallback: only for the first
@@ -23242,7 +25379,10 @@ impl Vm {
                     }
                     let chain_qid = self.interner.intern(&chain_lookup);
                     if let Some(c) = self.classes.get(&chain_qid).cloned() {
-                        hit = Some((Value::Class(c.clone()), c.effective_name().unwrap_or_default()));
+                        hit = Some((
+                            Value::Class(c.clone()),
+                            c.effective_name().unwrap_or_default(),
+                        ));
                         break;
                     } else if let Some(v) = self.constants.get(&chain_qid).cloned() {
                         hit = Some((v.clone(), const_scope_name(&v)));
@@ -23263,7 +25403,10 @@ impl Vm {
                                     self.consumed_autoloads.remove(&chain_qid);
                                 }
                                 if let Some(c) = self.classes.get(&chain_qid).cloned() {
-                                    hit = Some((Value::Class(c.clone()), c.effective_name().unwrap_or_default()));
+                                    hit = Some((
+                                        Value::Class(c.clone()),
+                                        c.effective_name().unwrap_or_default(),
+                                    ));
                                     break;
                                 }
                                 if let Some(v) = self.constants.get(&chain_qid).cloned() {
@@ -23311,14 +25454,19 @@ impl Vm {
                 // `String` SHOULD reach `::String`) is unaffected.
                 #[cfg(not(target_os = "wasi"))]
                 let scoped_pending = self.interner.contains(&lookup)
-                    && self.autoloads_scoped.contains_key(&self.interner.intern(&lookup));
+                    && self
+                        .autoloads_scoped
+                        .contains_key(&self.interner.intern(&lookup));
                 #[cfg(target_os = "wasi")]
                 let scoped_pending = false;
                 let suppress_toplevel = prefer_own_autoload && scoped_pending;
                 if hit.is_none() && !suppress_toplevel && self.interner.contains(segment) {
                     let tl_qid = self.interner.intern(segment);
                     if let Some(c) = self.classes.get(&tl_qid).cloned() {
-                        hit = Some((Value::Class(c.clone()), c.effective_name().unwrap_or_default()));
+                        hit = Some((
+                            Value::Class(c.clone()),
+                            c.effective_name().unwrap_or_default(),
+                        ));
                     } else if let Some(v) = self.constants.get(&tl_qid).cloned() {
                         hit = Some((v.clone(), const_scope_name(&v)));
                     }
@@ -23346,8 +25494,10 @@ impl Vm {
             if hit.is_none() {
                 let scope_cls = match &current_value {
                     Some(Value::Class(c)) => Some(c.clone()),
-                    _ if !scope_name.is_empty() && self.interner.contains(&scope_name) =>
-                        self.classes.get(&self.interner.intern(&scope_name)).cloned(),
+                    _ if !scope_name.is_empty() && self.interner.contains(&scope_name) => self
+                        .classes
+                        .get(&self.interner.intern(&scope_name))
+                        .cloned(),
                     _ => None,
                 };
                 if let Some(scope_cls) = scope_cls {
@@ -23364,14 +25514,23 @@ impl Vm {
                         }
                         // effective_name: an autovivified zeitwerk namespace has
                         // an empty structural name but a real effective name.
-                        let Some(anc_name) = anc.effective_name() else { continue };
-                        if anc_name.is_empty() { continue; }
+                        let Some(anc_name) = anc.effective_name() else {
+                            continue;
+                        };
+                        if anc_name.is_empty() {
+                            continue;
+                        }
                         let qual = format!("{}::{}", anc_name, segment);
-                        if !self.interner.contains(&qual) { continue; }
+                        if !self.interner.contains(&qual) {
+                            continue;
+                        }
                         let qid = self.interner.intern(&qual);
                         // (2) qualified global key (already defined)
                         if let Some(c) = self.classes.get(&qid).cloned() {
-                            hit = Some((Value::Class(c.clone()), c.effective_name().unwrap_or_default()));
+                            hit = Some((
+                                Value::Class(c.clone()),
+                                c.effective_name().unwrap_or_default(),
+                            ));
                             break;
                         }
                         if let Some(v) = self.constants.get(&qid).cloned() {
@@ -23384,11 +25543,16 @@ impl Vm {
                             self.consumed_autoloads.insert(qid);
                             match self.invoke_require_for_autoload(Value::new_str(p)) {
                                 Ok(_) => {
-                                    if self.classes.contains_key(&qid) || self.constants.contains_key(&qid) {
+                                    if self.classes.contains_key(&qid)
+                                        || self.constants.contains_key(&qid)
+                                    {
                                         self.consumed_autoloads.remove(&qid);
                                     }
                                     if let Some(c) = self.classes.get(&qid).cloned() {
-                                        hit = Some((Value::Class(c.clone()), c.effective_name().unwrap_or_default()));
+                                        hit = Some((
+                                            Value::Class(c.clone()),
+                                            c.effective_name().unwrap_or_default(),
+                                        ));
                                         break;
                                     }
                                     if let Some(v) = self.constants.get(&qid).cloned() {
@@ -23444,7 +25608,10 @@ impl Vm {
                         Ok(_) => {
                             if let Some(c) = self.classes.get(&lookup_id).cloned() {
                                 self.consumed_autoloads.remove(&lookup_id);
-                                hit = Some((Value::Class(c.clone()), c.effective_name().unwrap_or_default()));
+                                hit = Some((
+                                    Value::Class(c.clone()),
+                                    c.effective_name().unwrap_or_default(),
+                                ));
                             } else if let Some(v) = self.constants.get(&lookup_id).cloned() {
                                 self.consumed_autoloads.remove(&lookup_id);
                                 hit = Some((v.clone(), const_scope_name(&v)));
@@ -23471,8 +25638,10 @@ impl Vm {
             if hit.is_none() {
                 let scope_cls = match &current_value {
                     Some(Value::Class(c)) => Some(c.clone()),
-                    _ if !scope_name.is_empty() && self.interner.contains(&scope_name) =>
-                        self.classes.get(&self.interner.intern(&scope_name)).cloned(),
+                    _ if !scope_name.is_empty() && self.interner.contains(&scope_name) => self
+                        .classes
+                        .get(&self.interner.intern(&scope_name))
+                        .cloned(),
                     _ => None,
                 };
                 if let Some(scope_cls) = scope_cls {
@@ -23483,16 +25652,24 @@ impl Vm {
                         // autovivified zeitwerk namespace has an EMPTY
                         // structural name but a real effective name, and its
                         // child autoloads are keyed under it.
-                        let Some(anc_name) = anc.effective_name() else { continue };
-                        if anc_name.is_empty() { continue; }
+                        let Some(anc_name) = anc.effective_name() else {
+                            continue;
+                        };
+                        if anc_name.is_empty() {
+                            continue;
+                        }
                         let key = format!("{}::{}", anc_name, segment);
-                        if !self.interner.contains(&key) { continue; }
+                        if !self.interner.contains(&key) {
+                            continue;
+                        }
                         let kid = self.interner.intern(&key);
                         if let Some(p) = self.autoloads_scoped.remove(&kid) {
                             self.consumed_autoloads.insert(kid);
                             match self.invoke_require_for_autoload(Value::new_str(p)) {
                                 Ok(_) => {
-                                    if self.classes.contains_key(&kid) || self.constants.contains_key(&kid) {
+                                    if self.classes.contains_key(&kid)
+                                        || self.constants.contains_key(&kid)
+                                    {
                                         self.consumed_autoloads.remove(&kid);
                                     }
                                     fired = true;
@@ -23502,8 +25679,7 @@ impl Vm {
                             }
                         }
                     }
-                    if fired
-                        && let Some(v) = self.const_via_ancestors(&scope_cls, seg_id) {
+                    if fired && let Some(v) = self.const_via_ancestors(&scope_cls, seg_id) {
                         hit = Some((v.clone(), const_scope_name(&v)));
                     }
                 }
@@ -23515,17 +25691,23 @@ impl Vm {
                     current_value = Some(value);
                 } else {
                     if segments_remaining > 0 {
-                        return ConstPathOutcome::NotClass { full_path: path.to_string() };
+                        return ConstPathOutcome::NotClass {
+                            full_path: path.to_string(),
+                        };
                     }
                     current_value = Some(value);
                 }
                 continue;
             }
-            return ConstPathOutcome::Missing { missing_qualified: lookup };
+            return ConstPathOutcome::Missing {
+                missing_qualified: lookup,
+            };
         }
         match current_value {
             Some(v) => ConstPathOutcome::Found(v),
-            None => ConstPathOutcome::Missing { missing_qualified: path.to_string() },
+            None => ConstPathOutcome::Missing {
+                missing_qualified: path.to_string(),
+            },
         }
     }
 
@@ -23560,11 +25742,21 @@ impl Vm {
         let kw_count = proto.kw_param_defaults.len();
         let kw_rest_count = proto.kw_rest_param.is_some() as usize;
         let block_count = proto.block_param.is_some() as usize;
-        let positional_total = proto.params.len()
+        let positional_total = proto
+            .params
+            .len()
             .saturating_sub(rest_count + kw_count + kw_rest_count + block_count);
         let n_opt_pos = positional_total.saturating_sub(n_req_pos);
-        let n_req_kw = proto.kw_param_defaults.iter().filter(|d| d.is_none()).count();
-        let n_opt_kw = proto.kw_param_defaults.iter().filter(|d| d.is_some()).count();
+        let n_req_kw = proto
+            .kw_param_defaults
+            .iter()
+            .filter(|d| d.is_none())
+            .count();
+        let n_opt_kw = proto
+            .kw_param_defaults
+            .iter()
+            .filter(|d| d.is_some())
+            .count();
         let req_kw_present = n_req_kw > 0;
         let effective_req = n_req_pos + req_kw_present as usize;
         let has_pos_optional = n_opt_pos > 0 || rest_count > 0;
@@ -23687,7 +25879,8 @@ impl Vm {
         // gated, so it doesn't re-find the override). ActiveSupport's
         // Dependencies::Autoload#autoload does `super const, path`.
         if matches!(class_name, "Module" | "Class") {
-            return matches!(self.interner.resolve(sid).as_ref(),
+            return matches!(
+                self.interner.resolve(sid).as_ref(),
                 "autoload" | "autoload?" | "const_get" | "const_set"
                 | "const_defined?" | "private_constant" | "public_constant"
                 | "deprecate_constant" | "attr_accessor" | "attr_reader"
@@ -23702,7 +25895,8 @@ impl Vm {
                 // `extend_object`: the singleton-insert primitive `extend`
                 // dispatches to. A module overriding it (Mutex_m) calls
                 // `super` to do the real insert — same force-dispatch path.
-                | "extend_object");
+                | "extend_object"
+            );
         }
         let sentinel: Option<Value> = match class_name {
             "Integer" => Some(Value::Int(0)),
@@ -23757,12 +25951,14 @@ impl Vm {
                 kw_has_computed_default: vec![],
                 kw_rest_param: None,
                 block_kw_params: vec![],
-            block_param_slot: None,
+                block_param_slot: None,
                 block_param: None,
                 n_locals: 0,
                 creates_block: false,
                 getter_ivar: Some(ivar_id),
-                frozen_string_literal: false, line_base: 1, source_encoding: None,
+                frozen_string_literal: false,
+                line_base: 1,
+                source_encoding: None,
                 code: vec![Op::LoadIvar(ivar_id), Op::Return],
                 op_spans: vec![Span::ZERO; 2],
                 filename: "<attr_accessor>".into(),
@@ -23775,16 +25971,19 @@ impl Vm {
             let idx = self.protos.len();
             self.protos.push(proto);
             let nid = self.interner.intern(sym_name);
-            cls.install_method(nid, Rc::new(crate::value::Method {
-                params: vec![],
-                proto_idx: idx,
-                fixed_arity: None,
-                defining_class: Some(Rc::downgrade(&anchor)),
-                visibility: std::cell::Cell::new(crate::value::Visibility::Public),
-                closure: None,
-                builtin: None,
-                original_name: Some(nid),
-            }));
+            cls.install_method(
+                nid,
+                Rc::new(crate::value::Method {
+                    params: vec![],
+                    proto_idx: idx,
+                    fixed_arity: None,
+                    defining_class: Some(Rc::downgrade(&anchor)),
+                    visibility: std::cell::Cell::new(crate::value::Visibility::Public),
+                    closure: None,
+                    builtin: None,
+                    original_name: Some(nid),
+                }),
+            );
             created.push(nid);
         }
         if do_writer {
@@ -23800,13 +25999,20 @@ impl Vm {
                 kw_has_computed_default: vec![],
                 kw_rest_param: None,
                 block_kw_params: vec![],
-            block_param_slot: None,
+                block_param_slot: None,
                 block_param: None,
                 n_locals: 1,
                 creates_block: false,
                 getter_ivar: None,
-                frozen_string_literal: false, line_base: 1, source_encoding: None,
-                code: vec![Op::LoadLocal(0), Op::Dup, Op::StoreIvar(ivar_id), Op::Return],
+                frozen_string_literal: false,
+                line_base: 1,
+                source_encoding: None,
+                code: vec![
+                    Op::LoadLocal(0),
+                    Op::Dup,
+                    Op::StoreIvar(ivar_id),
+                    Op::Return,
+                ],
                 op_spans: vec![Span::ZERO; 4],
                 filename: "<attr_accessor>".into(),
                 block_body_local_start: u16::MAX,
@@ -23818,16 +26024,19 @@ impl Vm {
             let idx = self.protos.len();
             self.protos.push(proto);
             let nid = self.interner.intern(&setter);
-            cls.install_method(nid, Rc::new(crate::value::Method {
-                params: vec!["val".to_string()],
-                proto_idx: idx,
-                fixed_arity: None,
-                defining_class: Some(Rc::downgrade(&anchor)),
-                visibility: std::cell::Cell::new(crate::value::Visibility::Public),
-                closure: None,
-                builtin: None,
-                original_name: Some(nid),
-            }));
+            cls.install_method(
+                nid,
+                Rc::new(crate::value::Method {
+                    params: vec!["val".to_string()],
+                    proto_idx: idx,
+                    fixed_arity: None,
+                    defining_class: Some(Rc::downgrade(&anchor)),
+                    visibility: std::cell::Cell::new(crate::value::Visibility::Public),
+                    closure: None,
+                    builtin: None,
+                    original_name: Some(nid),
+                }),
+            );
             created.push(nid);
         }
         self.method_gen = self.method_gen.wrapping_add(1);
@@ -23842,7 +26051,11 @@ impl Vm {
     /// primitive call via the rest-Array slot. The forwarder
     /// Proto is appended to `self.protos` and the index is
     /// stamped into the returned Method.
-    pub(crate) fn synth_primitive_forwarder(&mut self, cls: &Rc<Class>, orig_id: SymId) -> Rc<crate::value::Method> {
+    pub(crate) fn synth_primitive_forwarder(
+        &mut self,
+        cls: &Rc<Class>,
+        orig_id: SymId,
+    ) -> Rc<crate::value::Method> {
         use crate::bytecode::{Op, Proto};
         use crate::error::Span;
         // Kernel GLOBAL builtins (require/puts/print/...) are dispatched
@@ -23856,11 +26069,27 @@ impl Vm {
             let name = self.interner.resolve(orig_id);
             matches!(
                 name.as_ref(),
-                "sleep" | "rand" | "srand" | "exit" | "exit!" | "abort"
-                | "puts" | "print" | "p" | "pp" | "warn"
-                | "sprintf" | "format" | "caller" | "at_exit"
-                | "require" | "require_relative" | "load" | "system"
-                | "raise" | "fail"
+                "sleep"
+                    | "rand"
+                    | "srand"
+                    | "exit"
+                    | "exit!"
+                    | "abort"
+                    | "puts"
+                    | "print"
+                    | "p"
+                    | "pp"
+                    | "warn"
+                    | "sprintf"
+                    | "format"
+                    | "caller"
+                    | "at_exit"
+                    | "require"
+                    | "require_relative"
+                    | "load"
+                    | "system"
+                    | "raise"
+                    | "fail"
             )
         };
         if is_kernel_global {
@@ -23879,7 +26108,8 @@ impl Vm {
         // force-primitive snapshot semantics are unchanged.
         {
             let name = self.interner.resolve(orig_id).to_string();
-            if matches!(name.as_str(),
+            if matches!(
+                name.as_str(),
                 "define_singleton_method" | "instance_eval" | "instance_exec"
             ) {
                 let meta = Rc::new(crate::value::BuiltinMeta {
@@ -23902,7 +26132,10 @@ impl Vm {
             }
         }
         let proto = Proto {
-            name: format!("<primitive-alias-forwarder:{}>", self.interner.resolve(orig_id)),
+            name: format!(
+                "<primitive-alias-forwarder:{}>",
+                self.interner.resolve(orig_id)
+            ),
             // `args` is the rest-arg name; proto.params lists it so
             // `invoke_method`'s arg-binding loop treats slot 0 as
             // the rest collector. n_required_positional = 0 keeps
@@ -23922,7 +26155,9 @@ impl Vm {
             n_locals: 1,
             creates_block: false,
             getter_ivar: None,
-            frozen_string_literal: false, line_base: 1, source_encoding: None,
+            frozen_string_literal: false,
+            line_base: 1,
+            source_encoding: None,
             code: vec![
                 Op::LoadSelf,
                 Op::LoadLocal(0),
@@ -23936,7 +26171,7 @@ impl Vm {
             op_spans: vec![Span::ZERO; 4],
             filename: "<primitive-alias>".into(),
             block_body_local_start: u16::MAX,
-                n_optional_params: 0,
+            n_optional_params: 0,
             byte_literals: vec![],
             const_chains: vec![],
             lexical_scope: vec![],
@@ -23990,6 +26225,7 @@ impl Vm {
             consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             assigned_name: std::cell::RefCell::new(None),
             class_tag: None,
+            frozen: std::cell::Cell::new(false),
             #[cfg(feature = "cext")]
             cext_alloc_func: std::cell::Cell::new(None),
         });
@@ -24007,7 +26243,10 @@ impl Vm {
     /// eigenclass pointer — see the field doc). Superclass = the
     /// String builtin class so `super` / undef-resolvable walks
     /// reach the primitives. Sets the `any_str_singletons` gate.
-    pub(crate) fn ensure_str_singleton(&mut self, s: &std::rc::Rc<crate::value::RStr>) -> Rc<Class> {
+    pub(crate) fn ensure_str_singleton(
+        &mut self,
+        s: &std::rc::Rc<crate::value::RStr>,
+    ) -> Rc<Class> {
         let key = std::rc::Rc::as_ptr(s) as usize;
         if let Some((_, sc)) = self.str_singletons.get(&key) {
             return sc.clone();
@@ -24032,6 +26271,7 @@ impl Vm {
             consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             assigned_name: std::cell::RefCell::new(None),
             class_tag: None,
+            frozen: std::cell::Cell::new(false),
             #[cfg(feature = "cext")]
             cext_alloc_func: std::cell::Cell::new(None),
         });
@@ -24077,6 +26317,7 @@ impl Vm {
             consts: std::cell::RefCell::new(crate::intern::FxHashMap::default()),
             assigned_name: std::cell::RefCell::new(None),
             class_tag: None,
+            frozen: std::cell::Cell::new(false),
             #[cfg(feature = "cext")]
             cext_alloc_func: std::cell::Cell::new(None),
         });
@@ -24093,11 +26334,18 @@ impl Vm {
     /// `metaclass.send :alias_method, save, :sleep`). Body:
     /// `ApplyCallNoRecv(orig)` over the collected rest args — the
     /// no-recv dispatch is exactly how a bare `sleep(...)` resolves.
-    pub(crate) fn synth_kernel_forwarder(&mut self, cls: &Rc<Class>, orig_id: SymId) -> Rc<crate::value::Method> {
+    pub(crate) fn synth_kernel_forwarder(
+        &mut self,
+        cls: &Rc<Class>,
+        orig_id: SymId,
+    ) -> Rc<crate::value::Method> {
         use crate::bytecode::{Op, Proto};
         use crate::error::Span;
         let proto = Proto {
-            name: format!("<kernel-alias-forwarder:{}>", self.interner.resolve(orig_id)),
+            name: format!(
+                "<kernel-alias-forwarder:{}>",
+                self.interner.resolve(orig_id)
+            ),
             params: vec!["args".to_string()],
             local_names: vec!["args".to_string()],
             n_required_positional: 0,
@@ -24112,7 +26360,9 @@ impl Vm {
             n_locals: 1,
             creates_block: false,
             getter_ivar: None,
-            frozen_string_literal: false, line_base: 1, source_encoding: None,
+            frozen_string_literal: false,
+            line_base: 1,
+            source_encoding: None,
             code: vec![
                 Op::LoadLocal(0),
                 // Direct builtin call — bypasses `do_call` so the alias
@@ -24125,7 +26375,7 @@ impl Vm {
             op_spans: vec![Span::ZERO; 3],
             filename: "<kernel-alias>".into(),
             block_body_local_start: u16::MAX,
-                n_optional_params: 0,
+            n_optional_params: 0,
             byte_literals: vec![],
             const_chains: vec![],
             lexical_scope: vec![],
@@ -24188,15 +26438,18 @@ impl Vm {
             .and_then(std::rc::Weak::upgrade);
         let include_redirect = is_include && shell_real.is_some();
         for idx in 0..n_args {
-            let a = if reverse_args { &args[n_args - 1 - idx] } else { &args[idx] };
+            let a = if reverse_args {
+                &args[n_args - 1 - idx]
+            } else {
+                &args[idx]
+            };
             let src = match a {
                 Value::Class(c) => c.clone(),
-                _ => return Err(self.trap(RubyError::TypeError {
-                    msg: format!(
-                        "wrong argument type {} (expected Module)",
-                        a.type_name(),
-                    ),
-                })),
+                _ => {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!("wrong argument type {} (expected Module)", a.type_name(),),
+                    }));
+                }
             };
             // CRuby last-{included,prepended}-wins: push to the front so
             // it's checked first by the lookup walk. Idempotency is
@@ -24211,9 +26464,11 @@ impl Vm {
             // fall through to the shared hook push. Skipped for `extend`
             // (extend_object) and the eigenclass-shell include-redirect.
             let feature_override = if !is_extend && !include_redirect {
-                let fs = self
-                    .interner
-                    .intern(if is_prepend { "prepend_features" } else { "append_features" });
+                let fs = self.interner.intern(if is_prepend {
+                    "prepend_features"
+                } else {
+                    "append_features"
+                });
                 self.lookup_class_singleton_method(&src, fs)
             } else {
                 None
@@ -24228,11 +26483,19 @@ impl Vm {
                 continue;
             }
             let already_reachable = if include_redirect {
-                shell_real.as_ref().unwrap()
-                    .singleton_includes.borrow().iter()
+                shell_real
+                    .as_ref()
+                    .unwrap()
+                    .singleton_includes
+                    .borrow()
+                    .iter()
                     .any(|m| std::rc::Rc::ptr_eq(m, &src))
             } else if is_extend {
-                target_cls.singleton_includes.borrow().iter().any(|m| std::rc::Rc::ptr_eq(m, &src))
+                target_cls
+                    .singleton_includes
+                    .borrow()
+                    .iter()
+                    .any(|m| std::rc::Rc::ptr_eq(m, &src))
             } else {
                 super::class_reaches_via_chain(&target_cls, &src, is_prepend)
             };
@@ -24269,7 +26532,11 @@ impl Vm {
         Ok(())
     }
 
-    pub(crate) fn synth_noop_method(&mut self, cls: &Rc<Class>, orig_id: SymId) -> Rc<crate::value::Method> {
+    pub(crate) fn synth_noop_method(
+        &mut self,
+        cls: &Rc<Class>,
+        orig_id: SymId,
+    ) -> Rc<crate::value::Method> {
         use crate::bytecode::{Op, Proto};
         use crate::error::Span;
         let proto = Proto {
@@ -24288,12 +26555,14 @@ impl Vm {
             n_locals: 1,
             creates_block: false,
             getter_ivar: None,
-            frozen_string_literal: false, line_base: 1, source_encoding: None,
+            frozen_string_literal: false,
+            line_base: 1,
+            source_encoding: None,
             code: vec![Op::LoadNil, Op::Return],
             op_spans: vec![Span::ZERO; 2],
             filename: "<lifecycle-noop>".into(),
             block_body_local_start: u16::MAX,
-                n_optional_params: 0,
+            n_optional_params: 0,
             byte_literals: vec![],
             const_chains: vec![],
             lexical_scope: vec![],
@@ -24444,9 +26713,15 @@ fn method_recv_identity(a: &Value, b: &Value) -> bool {
 /// must collide here.
 fn method_recv_hash(v: &Value) -> i64 {
     match v {
-        Value::Object(id) | Value::Array(id) | Value::Hash(id) | Value::Range(id)
-        | Value::Block(id) | Value::BoundMethod(id) | Value::UnboundMethod(id)
-        | Value::CurriedProc(id) | Value::Rational(id) => id.0 as i64,
+        Value::Object(id)
+        | Value::Array(id)
+        | Value::Hash(id)
+        | Value::Range(id)
+        | Value::Block(id)
+        | Value::BoundMethod(id)
+        | Value::UnboundMethod(id)
+        | Value::CurriedProc(id)
+        | Value::Rational(id) => id.0 as i64,
         // Two BigInts that hash-equal must collide via ObjId since
         // the heap-side bigint value identity is the ObjId (we
         // never share an ObjId across different BigInt values).
@@ -24494,7 +26769,9 @@ fn is_valid_ivar_name(s: &str) -> bool {
     }
     // Remaining: letter / digit / `_`. Rejects `@foo?`, `@foo=`,
     // `@foo!`, `@foo-bar`.
-    bytes[2..].iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+    bytes[2..]
+        .iter()
+        .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
 }
 
 /// Compute a stable integer id for any `Value`. Backs both
@@ -24684,12 +26961,29 @@ fn object_hash_inner(
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     match v {
-        Value::Int(n) => { 1u8.hash(&mut h); n.hash(&mut h); }
-        Value::Float(f) => { 2u8.hash(&mut h); f.to_bits().hash(&mut h); }
-        Value::Str(s) => { 3u8.hash(&mut h); s.content.borrow().hash(&mut h); }
-        Value::Sym(sid) => { 4u8.hash(&mut h); sid.0.hash(&mut h); }
-        Value::Bool(b) => { 5u8.hash(&mut h); b.hash(&mut h); }
-        Value::Nil => { 6u8.hash(&mut h); }
+        Value::Int(n) => {
+            1u8.hash(&mut h);
+            n.hash(&mut h);
+        }
+        Value::Float(f) => {
+            2u8.hash(&mut h);
+            f.to_bits().hash(&mut h);
+        }
+        Value::Str(s) => {
+            3u8.hash(&mut h);
+            s.content.borrow().hash(&mut h);
+        }
+        Value::Sym(sid) => {
+            4u8.hash(&mut h);
+            sid.0.hash(&mut h);
+        }
+        Value::Bool(b) => {
+            5u8.hash(&mut h);
+            b.hash(&mut h);
+        }
+        Value::Nil => {
+            6u8.hash(&mut h);
+        }
         Value::Range(id) => {
             let (begin, end, excl) = {
                 let r = heap.range(*id);
@@ -24747,9 +27041,7 @@ fn object_hash_inner(
                     // so swapping key with value changes the
                     // pair's contribution; XOR across pairs
                     // keeps overall ordering irrelevant.
-                    let pair_h = (kh as i128)
-                        .wrapping_mul(31)
-                        .wrapping_add(vh as i128) as i64;
+                    let pair_h = (kh as i128).wrapping_mul(31).wrapping_add(vh as i128) as i64;
                     acc ^= pair_h;
                 }
                 acc.hash(&mut h);
@@ -24768,7 +27060,10 @@ fn object_hash_inner(
             r.num.hash(&mut h);
             r.den.hash(&mut h);
         }
-        _ => { 7u8.hash(&mut h); object_id_for(v).hash(&mut h); }
+        _ => {
+            7u8.hash(&mut h);
+            object_id_for(v).hash(&mut h);
+        }
     }
     h.finish() as i64
 }
@@ -24836,10 +27131,16 @@ fn format_method_params(proto: &crate::bytecode::Proto) -> String {
     let mut parts: Vec<String> = Vec::new();
     let n_total = proto.params.len();
     let mut tail = 0usize;
-    if proto.rest_param.is_some() { tail += 1; }
+    if proto.rest_param.is_some() {
+        tail += 1;
+    }
     tail += proto.kw_param_defaults.len();
-    if proto.kw_rest_param.is_some() { tail += 1; }
-    if proto.block_param.is_some() { tail += 1; }
+    if proto.kw_rest_param.is_some() {
+        tail += 1;
+    }
+    if proto.block_param.is_some() {
+        tail += 1;
+    }
     let n_pos = n_total.saturating_sub(tail);
     let n_req = (proto.n_required_positional as usize).min(n_pos);
 
@@ -24900,8 +27201,7 @@ fn scramble_ptr(ptr: usize) -> u64 {
     use std::sync::OnceLock;
     static SEED: OnceLock<RandomState> = OnceLock::new();
     let rs = SEED.get_or_init(RandomState::new);
-    
-    
+
     rs.hash_one(ptr)
 }
 
@@ -24919,12 +27219,18 @@ fn scramble_ptr(ptr: usize) -> u64 {
 fn integer_valued_exp(exp: &Value, heap: &crate::heap::Heap) -> Option<i64> {
     match exp {
         Value::Float(g) => {
-            if !g.is_finite() { return None; }
-            if g.fract() != 0.0 { return None; }
+            if !g.is_finite() {
+                return None;
+            }
+            if g.fract() != 0.0 {
+                return None;
+            }
             // Bracket against i64 limits — `g as i64` saturates on
             // out-of-range f64 (i64::MAX or i64::MIN), but the caller
             // wants None there so it falls back to Float pow.
-            if *g < i64::MIN as f64 || *g > i64::MAX as f64 { return None; }
+            if *g < i64::MIN as f64 || *g > i64::MAX as f64 {
+                return None;
+            }
             Some(*g as i64)
         }
         Value::Rational(eid) => {
@@ -24932,12 +27238,16 @@ fn integer_valued_exp(exp: &Value, heap: &crate::heap::Heap) -> Option<i64> {
             #[cfg(feature = "bignum")]
             {
                 use num_traits::One;
-                if !r.den.is_one() { return None; }
+                if !r.den.is_one() {
+                    return None;
+                }
                 i64::try_from(&r.num).ok()
             }
             #[cfg(not(feature = "bignum"))]
             {
-                if r.den != 1 { return None; }
+                if r.den != 1 {
+                    return None;
+                }
                 Some(r.num)
             }
         }
