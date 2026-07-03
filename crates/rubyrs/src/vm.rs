@@ -3821,9 +3821,6 @@ impl Vm {
         }
     }
 
-    /// Dump the `RUBYRS_JIT_STATS` counters to stderr (called from
-    /// `Runtime::drop`). Silent unless the env var is set.
-    #[cfg(feature = "jit-native")]
     /// Dump the block-frame phase profile (`RUBYRS_BLOCK_PROF`).
     pub(crate) fn dump_block_prof(&self) {
         if !self.block_prof_on {
@@ -3874,6 +3871,16 @@ impl Vm {
         );
     }
 
+    /// Dump the `RUBYRS_JIT_STATS` counters to stderr (called from
+    /// `Runtime::drop`). Silent unless the env var is set.
+    ///
+    /// jit-native-gated like every field it reads: this cfg attr
+    /// was previously orphaned onto `dump_block_prof` (the
+    /// docblock-orientation bug class `lint-doc-orientation.sh`
+    /// guards), which broke EVERY non-jit-native build target that
+    /// compiles this fn (default-feature `cargo test --lib`,
+    /// `clippy --all-targets`) with 29 missing-field errors.
+    #[cfg(feature = "jit-native")]
     pub(crate) fn dump_jit_stats(&self) {
         if !self.jit_stats_on {
             return;
