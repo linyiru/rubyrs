@@ -120,6 +120,25 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
                 backtrace: vec![],
             });
         }
+        // Bignum guard: serde_json (without arbitrary_precision)
+        // parses integer literals past u64 range via visit_f64 —
+        // SILENT precision loss where CRuby produces an exact
+        // Integer/Bignum. Any document containing a ≥19-digit run
+        // declines to the pure canon (which folds digits with
+        // promoting Integer arithmetic). ≤18-digit integers always
+        // fit i64, so the fast path keeps exact semantics. False
+        // positives (long digit runs inside strings / float
+        // fractions) only cost speed, never correctness. The scan
+        // strides 19 bytes and only expands around digit hits —
+        // ~n/19 byte touches on non-numeric payloads.
+        if has_long_digit_run(&s.content.borrow()) {
+            return Err(Trap {
+                err: RubyError::RuntimeError {
+                    msg: "json_native: bigint-range number".to_string(),
+                },
+                backtrace: vec![],
+            });
+        }
         // Direct-visitor parse: skip the `serde_json::Value`
         // intermediate tree (the obvious-but-slow shape that
         // allocates twice — once into Rust, once into Ruby).
@@ -221,6 +240,9 @@ fn write_value(vm: &crate::vm::Vm, v: &Value, out: &mut Vec<u8>, depth: u32) -> 
             crate::json_float::write_json_float(*f, out);
         }
         Value::Str(s) => {
+            if str_needs_canon(s) {
+                return Err(str_decline());
+            }
             let b = s.content.borrow();
             write_escaped_bytes(&b, out);
         }
@@ -274,6 +296,9 @@ fn write_value(vm: &crate::vm::Vm, v: &Value, out: &mut Vec<u8>, depth: u32) -> 
                 // canon, whose `k.to_s` handles the long tail.
                 match k {
                     Value::Str(s) => {
+                        if str_needs_canon(s) {
+                            return Err(str_decline());
+                        }
                         let b = s.content.borrow();
                         write_escaped_bytes(&b, out);
                     }
@@ -332,6 +357,65 @@ fn write_value(vm: &crate::vm::Vm, v: &Value, out: &mut Vec<u8>, depth: u32) -> 
         }
     }
     Ok(())
+}
+
+/// Strings CRuby's generator wouldn't emit verbatim: BINARY
+/// (ASCII-8BIT) with non-ASCII content — CRuby warns-and-emits
+/// when the bytes happen to be valid UTF-8, raises
+/// `JSON::GeneratorError` ('"\xNN" from ASCII-8BIT to UTF-8')
+/// otherwise — and any string whose content is malformed UTF-8
+/// ("source sequence is illegal/malformed utf-8"). Both decline
+/// to the pure canon, whose `escape_string` reproduces the exact
+/// CRuby class + message. The checks are O(1) after the RStr's
+/// ascii/utf8 caches warm (parse-produced strings are pre-marked
+/// valid at construction).
+fn str_needs_canon(s: &crate::value::RStr) -> bool {
+    match s.encoding.get() {
+        crate::value::EncodingTag::Binary => !s.content.is_ascii_cached(),
+        _ => !s.content.is_utf8_cached(),
+    }
+}
+
+fn str_decline() -> Trap {
+    Trap {
+        err: RubyError::RuntimeError {
+            msg: "json_native: string needs canon encoding handling".to_string(),
+        },
+        backtrace: vec![],
+    }
+}
+
+/// True when `bytes` contains a run of ≥19 consecutive ASCII
+/// digits (the shortest run that can overflow an i64 with a
+/// leading `-`). Strided scan: a 19-byte window always contains
+/// exactly one position ≡ 18 (mod 19), so checking every 19th
+/// byte and expanding around digit hits finds every qualifying
+/// run while touching ~n/19 bytes on non-numeric content.
+fn has_long_digit_run(bytes: &[u8]) -> bool {
+    let n = bytes.len();
+    let mut i = 18usize;
+    while i < n {
+        if bytes[i].is_ascii_digit() {
+            let mut lo = i;
+            while lo > 0 && bytes[lo - 1].is_ascii_digit() {
+                lo -= 1;
+            }
+            let mut hi = i + 1;
+            while hi < n && bytes[hi].is_ascii_digit() {
+                hi += 1;
+            }
+            if hi - lo >= 19 {
+                return true;
+            }
+            // Next possible 19-run starts after this run's end
+            // (bytes[hi] is a non-digit); its last byte is at
+            // hi + 19.
+            i = hi + 19;
+        } else {
+            i += 19;
+        }
+    }
+    false
 }
 
 /// Write a signed integer as ASCII decimal directly into `out`.

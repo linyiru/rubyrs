@@ -131,10 +131,13 @@ module JSON
         if e.message.include?("recursion limit") || e.message.include?("too deep")
           raise NestingError, e.message
         end
-        unless e.message.include?("non-utf8")
+        unless e.message.include?("non-utf8") || e.message.include?("bigint") || e.message.include?("out of range")
           raise ParserError, e.message
         end
-        # fall through to the pure canon
+        # fall through to the pure canon: non-UTF-8 input (CRuby
+        # parses raw bytes), bigint-range integers (serde would
+        # lose precision), float-overflow literals like 1e999
+        # (CRuby yields Infinity; serde errors "out of range").
       end
     end
     raise ParserError, "input must be a String" unless str.is_a?(String)
@@ -171,10 +174,11 @@ module JSON
         if e.message.include?("recursion limit") || e.message.include?("too deep")
           raise NestingError, e.message
         end
-        unless e.message.include?("non-utf8")
+        unless e.message.include?("non-utf8") || e.message.include?("bigint") || e.message.include?("out of range")
           raise ParserError, e.message
         end
-        # fall through to the pure canon
+        # fall through to the pure canon (see the no-opts fast
+        # path above for the three decline conditions).
       end
     end
 
@@ -521,7 +525,25 @@ module JSON
         buf += @chars[i]
         i += 1
       end
-      is_float ? buf.to_f : buf.to_i
+      if is_float
+        buf.to_f
+      elsif buf.length <= 17
+        # ≤17 chars (sign included) always fits i64.
+        buf.to_i
+      else
+        # rubyrs String#to_i WRAPS past i64 (core gap — tracked
+        # separately); Integer arithmetic promotes to Bignum
+        # exactly, so fold long literals digit-wise. CRuby parses
+        # big JSON integers as exact Integer (probed json 2.20).
+        neg = buf[0] == "-"
+        n = 0
+        i = neg ? 1 : 0
+        while i < buf.length
+          n = n * 10 + (buf[i].ord - 48)
+          i += 1
+        end
+        neg ? -n : n
+      end
     end
 
     def parse_bool
@@ -752,6 +774,28 @@ module JSON
   end
 
   def self.escape_string(s)
+    # CRuby's generator (json 2.20, probed) validates encodings:
+    #   - BINARY (ASCII-8BIT) with non-ASCII bytes: if the bytes
+    #     happen to be valid UTF-8, emit them (CRuby warns that
+    #     json 3.0 will raise; warning skipped — stderr-only and
+    #     its wording ties to CRuby internals); otherwise raise
+    #     GeneratorError '"\xNN" from ASCII-8BIT to UTF-8' naming
+    #     the first non-ASCII byte.
+    #   - any other encoding with malformed UTF-8 content: raise
+    #     GeneratorError "source sequence is illegal/malformed
+    #     utf-8".
+    if s.encoding == Encoding::ASCII_8BIT
+      unless s.ascii_only?
+        t = s.dup
+        t.force_encoding("UTF-8")
+        unless t.valid_encoding?
+          b = s.bytes.find { |x| x >= 0x80 }
+          raise GeneratorError, "\"\\x#{sprintf("%02X", b)}\" from ASCII-8BIT to UTF-8"
+        end
+      end
+    elsif !s.valid_encoding?
+      raise GeneratorError, "source sequence is illegal/malformed utf-8"
+    end
     out = "\""
     s.chars.each do |c|
       case c

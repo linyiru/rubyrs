@@ -293,8 +293,14 @@ impl RStr {
     /// content isn't later overwritten with non-UTF-8 bytes by
     /// `borrow_mut()` callers (e.g. cext binary input).
     pub fn new(s: String) -> Self {
+        let content = StrCell::new(s.into_bytes());
+        // A Rust `String` is valid UTF-8 by type — pre-mark the
+        // cache so the first validity-dependent op (String#[],
+        // JSON generate's malformed-content check, …) skips the
+        // O(n) scan. `borrow_mut` still invalidates on any write.
+        content.utf8_cache.set(1);
         Self {
-            content: StrCell::new(s.into_bytes()),
+            content,
             frozen: Cell::new(false),
             encoding: Cell::new(EncodingTag::Utf8),
             class_tag: std::cell::RefCell::new(None),
