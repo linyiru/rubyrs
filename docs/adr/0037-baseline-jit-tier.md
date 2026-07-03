@@ -868,10 +868,13 @@ arrives in one step.
 
 ## Known gaps / notes
 
-- `check_fuel` is not run for the 12 specialized simple ops (calls and all
-  generic ops still count — the wave-2 `t2_call`/`t2_return` helpers charge
-  the same fuel tick `step()` would, before any stack effect); fuel-capped
-  runs count slightly fewer ops with the tier on. Default runs unaffected.
+- `check_fuel` is not run for the 12 specialized simple ops, the framed
+  IC-HIT const reads (`t2_const_flat`/`t2_const_chain` — a const MISS runs
+  the interpreter arm and charges exactly one tick, like the generic
+  helper), or the `LoadConstStr` push helper (calls and all generic ops
+  still count — the wave-2 `t2_call`/`t2_return` helpers charge the same
+  fuel tick `step()` would, before any stack effect); fuel-capped runs
+  count slightly fewer ops with the tier on. Default runs unaffected.
 - SIGINT safe-points inside a native body are deferred to the next
   interpreted segment (bounded by body length; same property as the existing
   loop templates and unchanged by wave 2 — tier-2 call ops never ran the
@@ -1004,3 +1007,121 @@ block/closure/litecall/framelite battery green under tier2+THRESHOLD=1
 and STRESS_GC; rubocop f1 + big1 byte-identical ×3 configs and the
 20-file prism batch vs FRESH CRuby oracles; thread_coop_* stdout
 parity (blocks are thread bodies); lib tests 234/0.
+
+### Tier-2 tail (2026-07-03; LITE REST-BLOCKS + const IC serves + the
+`&:sym` direct dispatch — Apple Silicon dev box, interleaved best-of vs
+a pristine 1a051e5a baseline binary, canonical feature set)
+
+The named tail items, census-first as always.
+
+**Census 1 — rest-block argc distribution** (the follow-on's named
+question; permanent stats-gated `restblk-census` counters, walkonly
+big1 ×10): argc 1 = **355,525**, argc 2 = 22, everything else 0 — the
+`invoke_block1` 1-arg site IS the population, so the
+alloc-before-native design was built (the empty-splat-only option would
+have served nothing). Per-proto census: `block in cop_rules` 72.3k +
+`legacy_cop_names` 72.3k + `modifier_locations` 56.9k — 57% of all
+rest-block invocations are ONE shape: the `&:sym` symbol-to-proc
+desugar `{ |*a| a[0].sym(*a.drop(1)) }`; then Enumerable's `|*x|`
+capture blocks (`to_a` 25.5k, `any?` 25.8k, `with_index` 15.9k).
+
+**Piece 1 — LITE REST-BLOCKS.** `t2_admit_lite_block` admits the
+rest-only `|*a|` shape: by `compile_block`'s layout its rest slot is
+exactly `ps` with the body region at `ps + 1`, so the entry compiles as
+a plain 1-param binder whose one arg is the rest Array — binding, spill
+classification and `push_lite_block_frame` (which writes the array at
+`ps == rest_slot`, exactly where the framed rest arm binds it) are the
+1-param entry's verbatim. The serve site allocates the rest Array
+BEFORE entering native state — the wave-4 no-GC-under-native invariant
+holds because the interpreter still owns the world at that point: pin
+`block_id` + `arg` across a due collection (GC only runs inside
+`maybe_gc`, never `heap.alloc`), alloc, and the operand-stack push
+roots the array for the whole frameless window. STRESS_GC's every-alloc
+discipline is fully preserved (no frameless allocation was introduced).
+`is_rest` rides in the `t2_lite_blk_ptrs` tuple; the ib1 guard becomes
+`n_params == 0 && rest_slot == Some(ps)` (rest-only lambda arity is
+`0+`, so lambdas serve too).
+
+**Piece 2 — const serves.** (a) FRAMED tier: `Op::LoadConst` /
+`Op::LoadConstChain` now route to `t2_const_flat`/`t2_const_chain` —
+IC hit (generation-tagged; the flat helper mirrors the arm's
+private_constant pre-check) clone-pushes and continues, a miss runs
+exactly one generic-helper iteration (`t2_const_miss`: ip stamp, the
+interpreter's full arm — autoload / qualified walk / const_missing /
+NameError / refill — then `t2_finish`). (b) LITE tier: flat
+`LoadConst` admitted via `t2_lite_const_flat` (hit → push, miss/
+private → materialize), joining the existing chain-const read. (c)
+`Op::LoadConstStr` admitted in BOTH tiers via the shared
+`t2_push_const_str` — the arm byte-for-byte (fresh `Value::Str` per
+execution, source-encoding retag, frozen stamp); it is raise-free and
+GC-heap-free (`Value::Str` is `Rc`-backed), so the lite tier serves it
+unconditionally. t2op census, walkonly big1 ×10: `LoadConst` 442K +
+`LoadConstChain` 372K + `LoadConstStr` 287K generic round-trips → **all
+zero** (~110K/walk absorbed).
+
+**Piece 3 — the `&:sym` sym-proc DIRECT SERVE (the census's real
+finding).** The dominant rest-block population cannot complete
+frameless: its body is `a[0].sym(*a.drop(1))` — `Array#drop` and
+`ApplyCall` are outside the lite envelope (and `drop` allocates, which
+a frameless window must not). But the shape is the compiler's OWN
+desugar, and for a 1-arg invocation the whole body is exactly
+`arg.sym()` (`a.drop(1)` == `[]`). So: `compile_block` stamps
+`Proto::sym_proc = (m, cid)` when the built bytecode matches the
+desugar pattern AND the rest param is the synthesized `__sp_a` (a
+user-written look-alike keeps its full body, so reopened
+`Array#[]`/`#drop` still fire there — CRuby's native `Symbol#to_proc`
+never consults them, which is exactly what the served path matches);
+`invoke_block1` serves the stamped shape as `push arg; do_call(m, 0,
+false, cid)` — no rest Array, no `drop` Array, no block frame (CRuby
+dispatches sym-procs frame-free too, `vm_call_symbol`). The `cid` is
+the body ApplyCall's own IC slot — the same call site. Visibility /
+method_missing / raise / redefinition semantics are `do_call`'s
+verbatim; tier-INDEPENDENT (fires on default config too). 268.9K
+serves per 10-walk set (76% of the former rest-block pool); the framed
+rest arm keeps the 86.6K residue (Enumerable `|*x|` bodies whose
+`result << x` / `x.length` shapes are outside the lite envelope — the
+honest wall, unchanged).
+
+| measurement | baseline (1a051e5a) | this work |
+|---|---:|---:|
+| symproc-map micro (ns/elem, tier2 / tier off) | 216.7 / 250.4 | **48.3 / 47.2 (−78%; YJIT 32.0)** |
+| restblk-each `\|*a\|` servable body (ns/inv, tier2) | 132.5 | **81.3 (−39%)** |
+| const-in-body loop (ns/call, tier2) | 172.7 | **123.7 (−28%)** |
+| strlit-in-body loop (ns/call, tier2) | 183.8 | **162.4 (−12%)** |
+| walkonly big1 ×20 (tier2, interleaved, 3 rounds) | 235.0–235.3 | **226.8–229.4 (−3%, all pairs)** |
+| walkonly big1 ×20 (tier OFF — sym-proc serve is tier-free) | 232.4–247.3 | **225.2–227.7 (all pairs)** |
+| f1 / big1 e2e (tier2) | 1.50–1.58 / 2.02–2.14 s | 1.48 / 1.95–1.96 s |
+| fib canary (default / jit-native / tier2) | 0.30 / 0.0075 / 0.0076 s | identical band |
+| tier-2 compile bill (walk set) | 196.7ms / 473 protos | 196.7ms / 464 (sym-proc'd protos stay cooler) |
+
+Measurement gotcha (reproduced twice): an INCREMENTAL rebuild of the
+same source produced a binary ~10ms/walk slower than a fresh full
+build (239 vs 226 — code-placement luck in the huge dispatch TU);
+walk A/B numbers are only comparable between fresh full builds.
+
+Serve census (walkonly big1 ×10, stats build): lite serves 1,118.0k →
+1,144.4k, lite→lite chains 114.3k → **276.2k** (the admitted consts
+compound through call-bearing lite bodies), lite const serves 86.8k;
+sym-proc direct serves 268.9k/set; framed-rest residue 355.5k → 86.6k.
+The rest-tier lesson: the mechanism converts the shapes whose BODIES
+fit the envelope (micro −39%), but the walk's rest-block pool was
+dominated by one compiler-synthesized shape better served by
+recognizing it than by frame elision — the census, not the mechanism,
+found the money.
+
+Gates: diff_cruby **1082/0** ×4 configs (default / RUBYRS_JIT_NATIVE=1
+/ tier2 / tier2+THRESHOLD=1; +3 new fixtures: tier2_restblock_lite —
+splat identity/freshness, no auto-splat, rest+next/break,
+capture-writes, lambda arity, 0/2-arg yields through the general
+binder, STRESS_GC rooting, re-entrant recursion;
+tier2_const_battery — redefinition/removal/private_constant/
+autoload-pending invalidation after warm native bodies, fresh-string
+literal semantics; symbol_to_proc_serve — visibility, method_missing,
+raises, redefinition-after-warm, multi-arg forwarding, user-written
+look-alike blocks). All 17 block/closure/litecall/liteblock/framelite/
+walk-bucket batteries green under tier2+THRESHOLD=1 + STRESS_GC=1
+(the rest-Array rooting acid case). rubocop f1 + big1 byte-identical
+×3 configs vs FRESH CRuby oracles; 20-file prism batch byte-identical
+(stdout AND stderr) tier on/off vs a FRESH CRuby oracle (the batch
+harness needed the rubocop-1.88 `ps.config`/`ps.registry` wiring to
+produce offenses at all — regenerated and re-verified first).
