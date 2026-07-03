@@ -971,14 +971,18 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-json-perf-
 
       - name: Build (release, _json_native enabled)
-        # Same feature set the framework-parity job uses for the
-        # json_canon fixture — keeps the binary under perf gate
-        # byte-identical to the one under parity gate, so a
-        # parity-side fix and a perf-side fix can't accidentally
-        # be measuring different binaries.
+        # Parity-job feature set + `mimalloc`: the perf gate
+        # measures what `cli-defaults` (the `cargo install rubyrs`
+        # bundle) ships — mimalloc is in that bundle by ADR 0019 v3
+        # policy, and the JSON workload is alloc/free-bound (the
+        # 2026-07 parse-side GC safe point made sweep cost an
+        # honest part of parse; mimalloc keeps parse ahead of
+        # CRuby with bounded RSS). Byte-level parity is still
+        # gated by the framework/stdlib jobs on the allocator-
+        # neutral build — the allocator cannot change bytes.
         run: |
           cargo build --release --locked -p rubyrs \
-            --features default,stdlib,_http_server,_fiber,_json_native
+            --features default,stdlib,_http_server,_fiber,_json_native,mimalloc
 
       - name: Check JSON bench per-iter budgets
         # Runs bench/json_bench.rb 3× under reduced ITERS (2000

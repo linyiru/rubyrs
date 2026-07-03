@@ -3,13 +3,28 @@
 Workload: 100-key Object with mixed-type values + 20-element nested
 Array of Hashes (~3.4 KB JSON). Driver: `bench/json_bench.rb`.
 
-## Current (2026-07-03, ARM macOS / Apple Silicon, ITERS=3000 RUNS=5, best of 3 interleaved rounds)
+## Current (2026-07-03 verifier round, ARM macOS / Apple Silicon, ITERS=3000 RUNS=5, best of 3 interleaved rounds)
+
+Gate build = parity feature set + `mimalloc` (the `cli-defaults`
+bundle allocator, ADR 0019 v3) with the parse-side GC safe point
+active: parse loops now COLLECT their discarded trees (bounded RSS
+— 1000 discarded 830 KB parses peak at ~45 MB, previously
+unbounded), so sweep/free cost is an honest part of every number
+below.
 
 | Operation   | CRuby 3.4.1 + json 2.20 | Oj :strict | rubyrs `_json_native` | vs CRuby |
 |-------------|-------------------------|------------|------------------------|----------|
-| `parse`     | 14.3 µs/iter            | 24.3 µs/iter | **12.8 µs/iter**     | **0.90×** |
-| `generate`  |  6.2 µs/iter            | 11.6 µs/iter | **5.8 µs/iter**      | **0.94×** |
-| `round_trip`| 21.0 µs/iter            | 35.7 µs/iter | **18.9 µs/iter**     | **0.90×** |
+| `parse`     | 14.2 µs/iter            | 25.8 µs/iter | **13.2 µs/iter**     | **0.93×** |
+| `generate`  |  6.0 µs/iter            | 11.8 µs/iter | **5.7 µs/iter**      | **0.95×** |
+| `round_trip`| 20.5 µs/iter            | 36.9 µs/iter | **18.8 µs/iter**     | **0.92×** |
+| `parse_sids`| 19.6 µs/iter            | —          | 32.5 µs/iter          | 1.66× (see below) |
+
+`parse_sids` (200 records of `{"sid":"<19-digit id>","n":i}`) is
+reported, not yet won: the string-aware pre-scan costs ~3 µs and
+the rest is the record-shape structural gap (Hash-alloc side, the
+same residual as keys_repeated) that predates this work. It exists
+as a metric because a context-BLIND bigint scan briefly made this
+shape decline to the pure canon — a 160× regression, now gated.
 
 **rubyrs beats CRuby stdlib AND Oj on all three metrics.** Byte
 parity with CRuby is pinned by `tests/diff/json_parity_battery.rb`
@@ -132,6 +147,19 @@ Differential micro-fixtures (µs/iter, rubyrs vs CRuby):
    Infinity, duplicate-key last-wins, CRuby nesting limits +
    messages, invalid-UTF-8 generate errors (exact class +
    message).
+7. **2026-07 verifier round** — four blocking fixes (non-empty
+   nesting rule, strict number grammar + exponent saturation with
+   the canon as the single error authority, tier-2 canon stack
+   headroom, string-aware bigint pre-scan) plus the parse-side GC
+   safe point: `loop { JSON.parse(s) }` previously never collected
+   (7.6 GB RSS on a 830 KB-doc loop; now ~45 MB) because maybe_gc
+   only lived at interpreter alloc sites. Honest sweep cost moved
+   parse 12.8 → 16.1 µs on the system allocator; the gate build
+   now includes `mimalloc` per the `cli-defaults` policy (JSON GC
+   is alloc/free-bound), landing at 13.2 vs CRuby 14.2 with
+   bounded memory. NestingError re-parented under ParserError;
+   canon key cache made persistent (cross-parse `.equal?` parity
+   on the kill-switch path).
 
 ## Reproducing
 

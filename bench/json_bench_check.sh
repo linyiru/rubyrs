@@ -29,7 +29,7 @@ JSON_BENCH_RUNS="${JSON_BENCH_RUNS:-3}"
 
 if [[ ! -x "$RUBYRS_BIN" ]]; then
   echo "json_bench_check: rubyrs binary not found at $RUBYRS_BIN" >&2
-  echo "json_bench_check: build with \`cargo build --release -p rubyrs --features default,stdlib,_http_server,_fiber,_json_native\` first" >&2
+  echo "json_bench_check: build with \`cargo build --release -p rubyrs --features default,stdlib,_http_server,_fiber,_json_native,mimalloc\` first" >&2
   exit 2
 fi
 if [[ ! -r "$BASELINES" ]]; then

@@ -159,6 +159,18 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
         // for the deserialize call's synchronous duration and
         // isn't stashed anywhere.
         let vm = unsafe { &mut *ptr };
+        // GC safe point: the interpreter's maybe_gc only lives at
+        // ITS alloc sites, and a `loop { JSON.parse(s) }` allocs
+        // almost nothing interpreter-side — the parse trees this
+        // host fn allocates would pile up unbounded (measured:
+        // 1000 discarded 830 KB parses grew RSS into the GBs).
+        // Right here is safe: no Values are held by this call yet
+        // (the input is an Rc-managed Str, not a GC-heap object),
+        // and everything else live is rooted from the VM stack.
+        // The generate host fn deliberately does NOT do this — its
+        // argument Value may only be rooted by the caller's frame,
+        // and it allocates no GC-heap objects anyway.
+        vm.maybe_gc();
         // Borrow the input bytes directly (no copy). The `Ref`
         // lives across the visitor's `&mut vm` use — that's fine:
         // the RStr is Rc-owned by the caller's argument slot (not
