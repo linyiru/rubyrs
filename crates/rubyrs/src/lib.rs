@@ -3432,6 +3432,98 @@ self.eval_inner(
         rows
     }
 
+    /// TEMPORARY census accessor (env `RUBYRS_T2_FALLBACK_STATS=1`,
+    /// ADR 0037 fallback census): the tier-2 in-body call-fallback
+    /// rows as (reason label, method name, receiver-shape label,
+    /// argc, count), count-descending. Reason codes:
+    ///   0  gate            — dispatch-boundary gate skipped the probe
+    ///   2  underflow       — stack shape underflow (anomaly)
+    ///   3  hostfn          — host-fn precedence (no_recv)
+    ///   4  toplevel-miss   — toplevel-method IC miss (main/nil self)
+    ///   5  classless       — receiver heap slot has no class
+    ///   6  lookup-miss     — no method on the chain (method_missing
+    ///                        or a universal-arm name)
+    ///   7  nonpublic       — resolved but private/protected
+    ///   8  closure         — define_method closure
+    ///   9  builtin         — builtin-backed method
+    ///   10 arity           — fixed arity, wrong argc
+    ///   11 eligible        — public plain fixed-arity MATCH that the
+    ///                        matrix still declined (route-to-hook /
+    ///                        native deopt)
+    ///   12 nfa-kw          — non-fixed: kwargs/kwrest shape
+    ///   13 nfa-rest        — non-fixed: splat shape
+    ///   14 nfa-blk         — non-fixed: &blk shape
+    ///   15 nfa-opt         — non-fixed: optionals/post shape
+    ///   16 class-recv      — Class/Module receiver (singleton declined)
+    ///   17 prim-recv       — primitive receiver (shape column says which)
+    ///   18 block-form      — every in-body block-form call (CallBlock)
+    ///   19 block-generic   — block-form call that fell past the block IC
+    ///   20 slow-cascade    — fell through every do_call fast bucket
+    ///   30..=44            — LITE materialize-bail reasons (gates,
+    ///                        underflow, prim-recv, classless,
+    ///                        lookup-miss, vis/closure/builtin, arity,
+    ///                        nfa, native-deopt, no-family,
+    ///                        chain-depth, const-cold, hostfn,
+    ///                        toplevel-miss, self-not-object)
+    #[cfg(feature = "jit-native")]
+    pub fn t2_fallback_stats_rows(&self) -> Vec<(&'static str, String, &'static str, u8, u64)> {
+        const SHAPES: [&str; 16] = [
+            "Int", "Float", "Str", "Sym", "Bool", "Nil", "Array", "Hash", "Class", "Object",
+            "Block", "Other", "NoRecv", "?", "?", "-",
+        ];
+        const REASONS: [&str; 45] = [
+            "gate", "?", "underflow", "hostfn", "toplevel-miss", "classless", "lookup-miss",
+            "nonpublic", "closure", "builtin", "arity", "eligible", "nfa-kw", "nfa-rest",
+            "nfa-blk", "nfa-opt", "class-recv", "prim-recv", "block-form", "block-generic",
+            "slow-cascade", "?", "?", "?", "?", "?", "?", "?", "?", "?",
+            "lite-gates", "lite-underflow", "lite-prim-recv", "lite-classless",
+            "lite-lookup-miss", "lite-vis-closure-builtin", "lite-arity", "lite-nfa",
+            "lite-native-deopt", "lite-no-family", "lite-chain-depth", "lite-const-cold",
+            "lite-hostfn", "lite-toplevel-miss", "lite-self-not-object",
+        ];
+        let mut rows: Vec<(&'static str, String, &'static str, u8, u64)> =
+            match &self.vm.t2_fb_stats {
+                Some(m) => m
+                    .iter()
+                    .map(|((reason, name_id, shape, argc), n)| {
+                        (
+                            REASONS.get(*reason as usize).copied().unwrap_or("?"),
+                            self.vm.interner.resolve(*name_id).to_string(),
+                            SHAPES.get(*shape as usize).copied().unwrap_or("?"),
+                            *argc,
+                            *n,
+                        )
+                    })
+                    .collect(),
+                None => Vec::new(),
+            };
+        rows.sort_by(|a, b| b.4.cmp(&a.4).then_with(|| a.1.cmp(&b.1)));
+        rows
+    }
+
+    /// TEMPORARY census accessor (same gate): generic-helper op
+    /// executions inside tier-2 bodies as (op tag, call name or "",
+    /// count), count-descending.
+    #[cfg(feature = "jit-native")]
+    pub fn t2_op_stats_rows(&self) -> Vec<(String, String, u64)> {
+        let mut rows: Vec<(String, String, u64)> = match &self.vm.t2_op_stats {
+            Some(m) => m
+                .iter()
+                .map(|((tag, name), n)| {
+                    (
+                        tag.clone(),
+                        name.map(|id| self.vm.interner.resolve(id).to_string())
+                            .unwrap_or_default(),
+                        *n,
+                    )
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        rows.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+        rows
+    }
+
     /// Register a host function callable from Ruby code with `name(args)`.
     /// The function receives evaluated argument values and returns either
     /// a `Value` or a `Trap`.

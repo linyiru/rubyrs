@@ -2129,6 +2129,17 @@ pub(crate) struct Vm {
     pub(crate) sym_kernel_array: SymId,
     pub(crate) sym_eq_op: SymId,
     pub(crate) sym_to_sym: SymId,
+    /// Pre-interned names for the 2026-07 fallback-census buckets
+    /// (`Array#drop`/`freeze`/`dup`, `Hash#fetch`, `String#dup`,
+    /// `Object#class`, bare `block_given?` — together ~45K sends per
+    /// RuboCop walk from tier-2 compiled bodies, all previously
+    /// paying the full slow cascade).
+    pub(crate) sym_drop: SymId,
+    pub(crate) sym_fetch: SymId,
+    pub(crate) sym_freeze: SymId,
+    pub(crate) sym_dup: SymId,
+    pub(crate) sym_class_name: SymId,
+    pub(crate) sym_block_given_q: SymId,
     /// Pre-interned send-family names for the send-family fast
     /// buckets (RuboCop cop-walk census 2026-07: `respond_to?` is
     /// the single hottest slow-cascade name at ~24.7K sends per
@@ -2229,6 +2240,15 @@ pub(crate) struct Vm {
     /// the NilClass chain.
     pub(crate) fast_is_a_nil_safe: bool,
     pub(crate) fast_eq_nil_safe: bool,
+    /// 2026-07 fallback-census bucket twins (ADR 0037), same
+    /// method_gen-revalidated discipline:
+    ///   - `fast_arr_misc_safe`: no user `drop` / `freeze` / `dup`
+    ///     on the Array chain.
+    ///   - `fast_hash_fetch_safe`: no user `fetch` on the Hash chain.
+    ///   - `fast_str_dup_safe`: no user `dup` on the String chain.
+    pub(crate) fast_arr_misc_safe: bool,
+    pub(crate) fast_hash_fetch_safe: bool,
+    pub(crate) fast_str_dup_safe: bool,
     /// TEMPORARY diagnostics (env-gated, `RUBYRS_CASCADE_STATS=1`):
     /// per-(name, receiver-shape) counters of do_call sends that
     /// reach the slow cascade (i.e. fell through every fast bucket
@@ -2246,6 +2266,28 @@ pub(crate) struct Vm {
     /// closure:1 | non_public:1. Dumped as `nfa-stats` rows by the
     /// CLI at exit alongside `cascade-stats`.
     pub(crate) nfa_stats: Option<Box<FxHashMap<(SymId, u16, u32, bool), u64>>>,
+    /// TEMPORARY census (env `RUBYRS_T2_FALLBACK_STATS=1`, ADR 0037
+    /// fallback census): where the in-body calls of tier-2 compiled
+    /// frames fall back to, and why. Key = (reason code, method
+    /// name, receiver-shape code, min(argc,15)); the reason-code
+    /// decode table lives on `Runtime::t2_fallback_stats_rows`.
+    /// `None` (the default) costs one branch per t2_call fallback.
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_fb_stats: Option<Box<FxHashMap<(u8, SymId, u8, u8), u64>>>,
+    /// Companion census (same gate): every op a tier-2 body executes
+    /// through the GENERIC helper (`t2_op`) — i.e. the op forms with
+    /// no specialized serve, including the kw/splat/super call
+    /// family. Key = (op variant tag, call name when one exists).
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_op_stats: Option<Box<FxHashMap<(String, Option<SymId>), u64>>>,
+    /// One-shot marker: the NEXT `do_call`/`do_call_kw`/
+    /// `do_call_block` entry is the direct fallback dispatch of a
+    /// tier-2 in-body call (set at the fallback edges, taken at the
+    /// dispatch entries — exact first-level attribution, nested
+    /// dispatches under a served call are NOT tagged). Only ever set
+    /// while `t2_fb_stats` is Some.
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_fb_from: bool,
     /// ADR 0031 increment 2 (plan-based): per-proto precomputed
     /// binding plans for NON-fixed-arity methods (optionals / splat
     /// / post-required / `&blk` — NOT kwargs), lazily populated by
@@ -2689,6 +2731,12 @@ impl Vm {
         let sym_kernel_array = interner.intern("Array");
         let sym_eq_op = interner.intern("==");
         let sym_to_sym = interner.intern("to_sym");
+        let sym_drop = interner.intern("drop");
+        let sym_fetch = interner.intern("fetch");
+        let sym_freeze = interner.intern("freeze");
+        let sym_dup = interner.intern("dup");
+        let sym_class_name = interner.intern("class");
+        let sym_block_given_q = interner.intern("block_given?");
         let sym_respond_to = interner.intern("respond_to?");
         let sym_respond_to_missing = interner.intern("respond_to_missing?");
         let sym_send = interner.intern("send");
@@ -3067,6 +3115,12 @@ impl Vm {
             sym_kernel_array,
             sym_eq_op,
             sym_to_sym,
+            sym_drop,
+            sym_fetch,
+            sym_freeze,
+            sym_dup,
+            sym_class_name,
+            sym_block_given_q,
             sym_respond_to,
             sym_respond_to_missing,
             rtm_default_stub: None,
@@ -3092,6 +3146,9 @@ impl Vm {
             fast_hash_read_safe: false,
             fast_is_a_nil_safe: false,
             fast_eq_nil_safe: false,
+            fast_arr_misc_safe: false,
+            fast_hash_fetch_safe: false,
+            fast_str_dup_safe: false,
             cascade_stats: if std::env::var_os("RUBYRS_CASCADE_STATS").is_some() {
                 Some(Box::default())
             } else {
@@ -3102,6 +3159,20 @@ impl Vm {
             } else {
                 None
             },
+            #[cfg(feature = "jit-native")]
+            t2_fb_stats: if std::env::var_os("RUBYRS_T2_FALLBACK_STATS").is_some() {
+                Some(Box::default())
+            } else {
+                None
+            },
+            #[cfg(feature = "jit-native")]
+            t2_op_stats: if std::env::var_os("RUBYRS_T2_FALLBACK_STATS").is_some() {
+                Some(Box::default())
+            } else {
+                None
+            },
+            #[cfg(feature = "jit-native")]
+            t2_fb_from: false,
             nfa_plans: Vec::new(),
             rest_preds: Vec::new(),
             rest_pred_deps_ok: false,

@@ -554,6 +554,22 @@ fn main() {
             );
         }
     }
+    // TEMPORARY census (`RUBYRS_T2_FALLBACK_STATS=1`, ADR 0037
+    // fallback census): dump the tier-2 in-body call-fallback rows
+    // (reason × name × receiver shape × argc) and the generic-helper
+    // op census. Same debug-knob shape as `RUBYRS_CASCADE_STATS`.
+    #[cfg(feature = "jit-native")]
+    if std::env::var_os("RUBYRS_T2_FALLBACK_STATS").is_some() {
+        for (reason, name, shape, argc, n) in rt.t2_fallback_stats_rows() {
+            eprintln!(
+                "t2fb-stats\t{}\t{}\t{}\targc={}\t{}",
+                reason, name, shape, argc, n
+            );
+        }
+        for (tag, name, n) in rt.t2_op_stats_rows() {
+            eprintln!("t2op-stats\t{}\t{}\t{}", tag, name, n);
+        }
+    }
     #[cfg(feature = "ic-stats")]
     if env_lookup("RUBYRS_IC_STATS").is_some() {
         let s = rt.ic_stats();
