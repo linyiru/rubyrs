@@ -891,3 +891,116 @@ arrives in one step.
   `jit_native.rs`'s PIC fill/lookup.
 - One flaky default-config diff_cruby failure was observed once under heavy
   machine load and did not reproduce (green on immediate re-run, twice).
+
+### Block-frame residue follow-on (2026-07-03; the binder fast arms +
+LITE BLOCKS — Apple Silicon dev box, interleaved best-of vs a pristine
+5ec68cd8 baseline binary, canonical feature set)
+
+Blocks are ~25% of the RuboCop walk and their frames cost ~3.5× a
+method frame. Wave 5 compiled block BODIES; this follow-on attacked the
+frame BUILD itself, measure-first.
+
+**Item 1 — the prologue breakdown.** New env-gated profiler
+(`RUBYRS_BLOCK_PROF`, cntvct-tick phase counters in the
+`invoke_block` family; ~0 cost when unset). Walkonly big1 ×10 + warm
+(2.95M block invocations), pre-change:
+
+| phase | total (10-walk set) | ns/inv avg |
+|---|---:|---:|
+| handle snapshot | 30.3 ms | 10.3 |
+| gates | 3.2 ms | 1.1 |
+| argprep (general binder) | 97.6 ms | 33.1 |
+| locals (share/copy decision) | 55.0 ms | 18.7 |
+| — of which reentrancy scan | 34.4 ms | 11.7 (19.2 frames examined/scan) |
+| param bind | 21.7 ms | 7.3 |
+| frame push | 16.9 ms | 5.7 |
+| **prologue sum** | **224.6 ms** | **76.1** (~9.3% of walk time) |
+
+The decisive census: 882k of the 933k general-binder runs were
+`invoke_block1` FALLBACKS paying a double handle-snapshot + args-Vec +
+the full kw/rest/autosplat preamble — and the population was exactly
+two shapes: rest-only `|*a|` (501,201, all `n_params == 0`) and
+single-Array auto-splat into `|a, b, …|` (380,913, all Array args).
+
+**Item 2 — cheapened pushes (a117a481).** (a) ib1 fast arms for both
+census shapes (bind in place; the rest arm pins only when a GC is
+actually due — GC can only run inside `maybe_gc`, never `heap.alloc`);
+(b) `block_is_reentrant` walks TOP-DOWN with an owner early-stop
+(cells are per-invocation and never pool-recycled while a BlockHandle
+holds them → exactly one owning non-block frame can be live, every
+same-cell block frame sits above it; dm_share frames and share-direct
+sibling blocks alias without owning and don't stop the walk). Post:
+fallbacks 882,154 → 40; argprep 97.6 → 76.6 ms (the residue is almost
+purely the rest-Array alloc CRuby semantics require); reent scan
+34.4 → 6.3 ms; prologue sum 224.6 → 169.3 ms/set. Micro: each `|*a|`
+221.0 → 170.9 ns/inv (−23%), each-pairs `|a,b|` 167.1 → 116.1 (−31%).
+
+**Item 3 — LITE BLOCKS (cd0644fa).** The frameless tier extended to
+block protos; design as shipped:
+
+- `Proto::block_shape` (compile_block-stamped `param_start`/`n_params`/
+  rest/kw-rest) gives admission/codegen the slot classification without
+  a handle. Admission: plain interface (np ≤ 2, no rest/kw/&param/
+  optionals, `block_body_local_start == ps + np`), `creates_block`
+  declines, own region ≤ 12 slots, the wave-4 op envelope + calls.
+- Entry `(vm, self_w0, self_w1, block_id)`: args pushed by the serve
+  site (rooted; `n_pop = np` baked), own region in a native spill,
+  self borrowed from the handle. CAPTURED-OUTER slots (< param_start)
+  route through the canonical cells (`captured` / `chain_owner_cell`)
+  via three raise-free/GC-free helpers — push-clone read, pop-store
+  write, and an effect-free register read for fused `BinOpLocalLocal`
+  operands (guards must run with no stack effect so a guard-fail can
+  materialize at the op boundary); outer slots are never SSA-cached.
+- Materialize pushes a real BLOCK frame through the interpreter's own
+  `block_frame_locals` (share/copy + routing + writeback identity),
+  own region bound from the spill under the wave-4 ownership
+  accounting. `T2LitePending` records carry `blk`/`ps`, so a lite
+  block suspended behind a lite→lite call chain drains as a block
+  frame in exact interpreter order.
+- `next` = the block's `Return` (frameless); `break`/`return`-from-
+  block decline `t2_admit` wholesale and stay interpreted; `$~` needs
+  nothing (blocks share the method's match data and no admitted op
+  writes it). Serving lives INSIDE `invoke_block1/2` (covers the
+  step_block drivers + yield argc 1–2); on a serve the sites skip
+  `t2_enter_block` — the framed entry always starts at op 0. The 1-arg
+  site requires `np ≤ 1`: a lone Array arg into a 2-param entry is the
+  AUTO-SPLAT shape and must keep the general binder (the
+  tier2_block_family battery caught exactly this).
+
+| measurement (tier2 on) | baseline | this work |
+|---|---:|---:|
+| each-empty 1-param block (ns/inv, whole driver loop) | 48.6 | **24.2 (−50%)** |
+| each-accumulate `t += x` (outer-cell write per elem) | 79.1 | **33.2 (−58%)** |
+| hash-each `\|k, v\|` (ns/pair) | 67.1 | **36.6 (−45%)** |
+| yield-driven 1-param | 120.4 | **101.8 (−15%)** |
+| copy-path / re-entrant visit shapes | 78.2 / 859 | unchanged (decline correctly) |
+| walkonly big1 ×15 (interleaved, 3 rounds) | 243.7–248.4 | **240.3–243.0 (−1..2%, all pairs favour)** |
+| walkonly, tier OFF (binder arms + scan only) | 253.1–253.9 | 249.1–250.4 |
+| f1 e2e (tier2) | 1.618–1.639 s | 1.599–1.603 s |
+| fib canary (default / jit-native / tier2) | 0.126/0.004/0.030 s | 0.123/0.003/0.031 s |
+
+Serve census (walkonly big1 ×10, stats build): 34 block protos admit
+(54 decline: 24 non-plain params — the rest-blocks — 12 creates_block,
+tail op-set); **126k frameless block serves**/set (124.3k DONE, 1.7k
+materialize-bails), lite→lite chains 96k → 145k (block bodies chaining
+into callees natively). The walk-level lesson repeats wave 4: the
+mechanism wins big exactly where it fires (−45..58% on the served
+micro-shapes) but the walk's block pool is dominated by shapes outside
+the envelope — rest-blocks (whose Array alloc is semantic), splat
+binds, and op-set declines. The named follow-ons: a rest-arm lite
+entry (needs a frameless heap alloc — sound since `heap.alloc` never
+collects, but weakens STRESS_GC's every-alloc discipline; decide
+deliberately), `IncLocal` on outer cells, and absorbing the
+`LoadConstStr` declines.
+
+Gates: diff_cruby **1078/0** ×4 configs (default / RUBYRS_JIT_NATIVE=1
+/ tier2 / tier2+THRESHOLD=1; +2 new fixtures: block_binder_fast_arms,
+tier2_liteblock_battery — the latter covering capture-write visibility
+from frameless blocks to sibling blocks + the defining scope,
+value-carrying break through framed yielders, next-with-value, `$~`
+scoping, deep re-entrant recursion, redo, non-local return, escaped
+procs, mixed-tag bails, and the 2-param/auto-splat mix); every
+block/closure/litecall/framelite battery green under tier2+THRESHOLD=1
+and STRESS_GC; rubocop f1 + big1 byte-identical ×3 configs and the
+20-file prism batch vs FRESH CRuby oracles; thread_coop_* stdout
+parity (blocks are thread bodies); lib tests 234/0.

@@ -131,9 +131,13 @@ impl Locals {
     }
 }
 
-/// TEMP (block-frame residue profiling): env-gated (`RUBYRS_BLOCK_PROF`)
-/// phase counters for the block frame push path. Ticks are cntvct_el0
-/// (24MHz on this box — coarse but unbiased over ~1M invocations).
+/// Env-gated (`RUBYRS_BLOCK_PROF`) phase counters for the block
+/// frame-push path (ADR 0037 block-frame residue), in the
+/// `RUBYRS_JIT_STATS` family of always-compiled diagnostics: with the
+/// env unset every site is a predicted-untaken branch (measured below
+/// walk noise). Ticks are cntvct_el0 (24 MHz on Apple Silicon — coarse
+/// per read, but unbiased accumulated over ~1M invocations); dumped at
+/// Runtime drop by `Vm::dump_block_prof`.
 #[derive(Default)]
 pub(crate) struct BlockProf {
     /// invocation counts: [ib1, ib2, general, ib1/2→general fallbacks]
@@ -2455,7 +2459,7 @@ pub(crate) struct Vm {
     /// allocation instead of minting a fresh one. Bounded so a deep
     /// recursion that unwinds doesn't park an unbounded pool.
     pub(crate) locals_pool: Vec<Rc<RefCell<Vec<Value>>>>,
-    /// TEMP block-frame profiling (see `BlockProf`).
+    /// Block-frame phase profiling (see `BlockProf`).
     pub(crate) block_prof_on: bool,
     pub(crate) block_prof: BlockProf,
     /// Single-entry memo for `Op::CreateBlock`'s ancestor-chain
@@ -3790,7 +3794,7 @@ impl Vm {
     /// Dump the `RUBYRS_JIT_STATS` counters to stderr (called from
     /// `Runtime::drop`). Silent unless the env var is set.
     #[cfg(feature = "jit-native")]
-    /// TEMP: dump the block-frame phase profile (`RUBYRS_BLOCK_PROF`).
+    /// Dump the block-frame phase profile (`RUBYRS_BLOCK_PROF`).
     pub(crate) fn dump_block_prof(&self) {
         if !self.block_prof_on {
             return;
