@@ -213,12 +213,13 @@ f1/big1/20-file, diff_cruby 3-config green, STRESS_GC, fib canary)
    of immediates without helper calls, locals cached in native slots BETWEEN
    effectful ops with write-back at bail/call boundaries. This is where the
    leaf/branchy −3..−9% grows.
-4. **Wave 4 — frame-lite entry (the (i) endgame).** For bodies whose prefix
-   is call-free, enter native BEFORE materializing the frame and materialize
-   lazily at the first call/raise — generalizing the zeroarg tier's measured
-   −21..34%/call to the broad-admission population. Requires arg binding into
-   native slots + a shadow-frame recipe for `caller`/raise; land per shape
-   class (leaf predicates first).
+4. **Wave 4 — frame-lite entry (the (i) endgame) (SHIPPED, leaf tier — see
+   "Wave 4 results" below).** For bodies whose prefix is call-free, enter
+   native BEFORE materializing the frame and materialize lazily at the first
+   call/raise — generalizing the zeroarg tier's measured −21..34%/call to
+   the broad-admission population. Requires arg binding into native slots +
+   a shadow-frame recipe for `caller`/raise; land per shape class (leaf
+   predicates first).
 5. **Wave 5 — blocks (25% of the walk) (SHIPPED — see "Wave 5 results"
    below).** Compile block protos on the same substrate, served from
    `invoke_block` (the frame model is identical); then `each`-driver →
@@ -518,6 +519,127 @@ STRESS_GC) identical; rubocop f1/big1 tier-on/off byte-identical + a
 fresh CRuby oracle; 20-file prism batch == the CRuby expectation;
 4-file `--parallel` == `--no-parallel`; STRESS_GC on the
 `jit_*_walk` fixtures with the tier forced on.
+
+### Wave 4 results (2026-07-02; FRAME-LITE — same box/method; a loaded
+machine for part of the window, so every headline number is interleaved
+best-of against the unmodified-HEAD baseline binary)
+
+Design as shipped in `jit_tier2.rs` (wave 4 = "frame-lite entry", the
+conservative leaf tier — option (a) of the wave plan):
+
+- **A second, frameless entry per admitted proto.** `compile_tier2` emits a
+  sibling function `t2lite(vm, self_w0, self_w1, n_pop) -> status` into the
+  same module. The fixed-arity dispatch fast paths
+  (`try_invoke_explicit_recv_cached`, `try_invoke_fixed_method_from_stack`
+  — covering explicit-recv, self-recv, and toplevel calls; block-form and
+  class-singleton sites keep the framed path) serve it INSTEAD of the
+  bind+push+`t2_enter` sequence, gated on a dense `JFLAG_TIER2_LITE` byte:
+  recv+args stay ON the operand stack (rooted, owned by their slots) for
+  the whole run, self's raw words pass in registers as a borrowing view,
+  and locals live in a native spill slot — the canonical local store while
+  frameless (the wave-3 write-through discipline, retargeted). The wave-3
+  virtual-stack codegen runs unchanged on top; `vm.stack` doubles as the
+  GC-visible spill area for flushed temporaries and non-trivial values.
+- **Admission (`t2_admit_lite`)**: method protos only, `creates_block ==
+  false`, plain fixed argc ≤ 4, ≤ 48 ops, ≤ 12 locals, and every op in an
+  enumerated frameless set — literals, `Locals` reads/writes/`IncLocal`,
+  `LoadSelf`, `LoadIvar`/`StoreIvar` (lean register-passing lite helpers),
+  `Dup`/`Pop`/`Swap`, inlineable Int binops, `CaseEqLit`, `Jump`/
+  `JumpIfFalse`, `Return`, and the zero-arg `nil?` fusion. Every call form,
+  constant read, block op, `$~`-writing op, and optional/kw prologue
+  declines the whole body.
+- **The shadow-record answer: there are no shadow records.** Any edge the
+  lite mode can't finish — a failed tag/Int guard, a frozen store, a
+  non-trivial ivar value, a fired back-edge poll gate, a generic op —
+  MATERIALIZES the real frame (`t2_lite_materialize`: the deferred push,
+  binding the CURRENT native locals into the arena, consuming recv+args off
+  the stack, `base_sp`/`ip` exact) and returns BAIL; the serve site's
+  caller continues the fresh frame like any interpreter push. Because
+  guards run before their op's effects, this is the established mode-switch
+  contract — never a replay. The soundness invariant making raise-fidelity
+  trivial: **no foreign code can observe the VM while an activation is
+  frameless** — the five `t2_lite_*` helpers touch only
+  stack/heap/arena-append and never raise, never allocate a GC object, and
+  never call Ruby (so no GC runs under native state, and `caller`/
+  backtrace/binding/fiber machinery can only ever see materialized frames,
+  which are canonical). Raises therefore always come from the interpreter
+  re-running the op against a real frame — backtraces are byte-identical
+  by construction (verified: raise-through-lite at depth 1..3, frozen
+  store, ensure-in-caller-on-unwind, re-raise; the permanent
+  `tier2_framelite_battery` fixture, green ×4 configs + STRESS_GC).
+- **Ownership accounting at materialize** (the one subtle transfer): a
+  non-trivially-tagged word in a native local slot is necessarily the
+  UNTOUCHED borrow of that slot's caller-supplied arg (lite StoreLocal
+  guards decline overwriting — or moving in — non-trivial values), so
+  transmuting the slot words into the arena takes exactly the ownership the
+  forgotten stack slot held; trivial slots carry no obligations; the recv
+  slot transfers into `frame.self_val` (implicit-self entries clone through
+  the borrowed words instead). Verified leak/double-free-clean under
+  STRESS_GC with Str args crossing the transfer.
+- **Breaker**: 32 CONSECUTIVE materialize-bails disable the proto's lite
+  entry (chronic shape mismatch = wasted entry + materialize per call); a
+  completed serve resets the streak. Env `RUBYRS_JIT_TIER2_NOLITE` for A/B;
+  stats family `t2lite` + `tier2 lite serves/materialize_bails/kills`.
+- **Found + fixed a latent wave-3 bug** (caught by the acid battery, then
+  reproduced on the pristine baseline binary): `t2_ivar_set_v` raised
+  FrozenError without stamping `frame.ip`, so the backtrace line pointed at
+  the last ip-synced op (in practice the class line) instead of the store.
+  The helper now stamps `ip` like every other raising helper.
+
+| measurement | baseline (tier2) | wave-4 (tier2+lite) |
+|---|---:|---:|
+| setter (`@v = v`) explicit-recv, ns/call raw (incl. ~47ns driver) | 118.9 | **97.1 (net ≈ −30%/call)** |
+| zeroarg-declined predicate (`@loc.nil?`) | 122.4 | **103.5 (net ≈ −25%/call)** |
+| leaf/branchy/getter/1-arg-Int shapes | — | unchanged (already served frameless by the getter/zeroarg/int/value tiers; lite never fires) |
+| walkonly big1 ×20 (interleaved pairs, three sessions) | 255–294ms band | **neutral** — pairs mixed within the ±4% noise band, best-of 255.1 vs 259.1; the −5..−15ms target NOT met |
+| f1.rb e2e (adaptive) | 1.91–1.97s | 1.93–1.95s (neutral) |
+| big1.rb e2e | 2.52–2.65s | 2.55–2.60s (neutral) |
+| tier-2 compile bill, f1 e2e | 43.3ms / 71 protos | 46.7ms / 71 (+3.4ms for the lite sibling functions) |
+| fib canary (default / jit-native / tier2) | 0.31s / 0.01s / 0.01s | 0.31s / 0.01s / 0.01s (identical) |
+
+Serve/decline census (walkonly big1 ×10, adaptive threshold): 253 protos
+reach tier-2 compile; **20 admit to frame-lite**; decline histogram of the
+rest: `CallNoRecv` 75, block proto 41, `Call` 27, `creates_block` 22,
+`LoadLocalCall` 19, `LoadConstChain` 19, non-plain params 12, tail others
+23. Of the 20 admitted, **3 actually serve** through the hooked sites —
+`cop_rule?` (10.5k/walk) + two generated `send_type?` variants (8.2k/walk)
+— ≈20.5k serves/walk, **0 materialize-bails, 0 breaker kills**. f1 e2e
+serves 117k lite calls (config/registry-phase leaves), also bail-free.
+
+**Finding (the precedence lesson).** The wave plan projected the zeroarg
+tier's −21..34%/call onto "the walk's hot leaf population (2-op getters,
+`*_type?` predicates)" — but that population was ALREADY frameless before
+wave 4: the getter fast paths serve `getter_ivar` protos on both
+explicit- and self-recv, and the zeroarg/int/value NativeProto families
+take the predicates and 1-arg leaves (serving precedence: specialized
+frameless → frame-lite → framed tier-2). Frame-lite's DIFFERENTIAL
+population is the leaves those tiers decline — StoreIvar setters,
+non-Int-shaped predicates (`x.nil?`, Sym compares the value tier won't
+take) — where it wins −25..30%/call, but on the walk that residue is
+~20.5k frames (≤2ms, under the noise floor). The walk's remaining frame
+pool sits in CALL-BEARING small bodies (the 121 `Call*`-family declines)
+and constant-reading bodies (`LoadConstChain` 19): reaching them frameless
+means admitting calls — a lite `t2_call` whose callee dispatch runs
+against a caller-link the backtrace/`caller` walkers can see, i.e. the
+mission's option (b) shadow-activation design (or materialize-before-call,
+which surrenders exactly the frames that matter). That — plus const-read
+admission via the IC-hit path — is the named wave-4 follow-on; the
+mechanism, gates, and breaker shipped here are its substrate.
+
+Gates: diff_cruby **1069/0** ×4 configs (default / `RUBYRS_JIT_NATIVE=1` /
+tier2 / tier2+`THRESHOLD=1`; includes the newly REGISTERED wave-3
+`tier2_writeback_battery` + `tier2_own_capture_rebind` — present on disk
+since wave 3 but never wired into the suite — and the new
+`tier2_framelite_battery`); STRESS_GC=1 green on the `jit_*_walk`
+fixtures, both wave-3 batteries, the block battery, the closure fixtures,
+and the frame-lite battery with the tier forced on (`THRESHOLD=1`);
+rubocop f1/big1 byte-identical tier-on/off AND == a fresh CRuby oracle;
+20-file prism batch == CRuby run in the same environment (the stored
+`/tmp/poca_cruby20.txt` no longer matches CRUBY ITSELF on this box — every
+cop errors under the direct `Team.mobilize` harness on both engines, an
+environment drift predating this wave; the full-CLI runs above carry the
+offense-level parity gate); 4-file `--parallel` == `--no-parallel` (p311
+harness, cache root under `/private/tmp`); fib canary identical.
 
 ### Amdahl honesty
 
