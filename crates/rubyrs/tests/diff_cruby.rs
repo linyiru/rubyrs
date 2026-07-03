@@ -466,6 +466,14 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // redefinition + a visibility flip) landing AFTER 200-call warm
 // loops — a stale-IC bucket would keep serving the builtin shape.
 #[test] fn send_family_warm_override() { run_diff("send_family_warm_override"); }
+// The respond_to? (class, name, method_gen) memo's invalidation
+// matrix: include/prepend/undef/remove/extend/singleton-def/plain-def
+// landing AFTER 200-call warm loops, the implicit class-body
+// `private :m` Cell flip (the one visibility path that historically
+// skipped the method_gen bump), a mutable-state respond_to_missing?
+// hook (result must never be memoized), deep-ancestry chains, and
+// anonymous-class ptr-reuse churn (Weak guard).
+#[test] fn respond_to_memo_invalidation() { run_diff("respond_to_memo_invalidation"); }
 #[test] fn require_caller_dir_isolation() { run_diff("require_caller_dir_isolation"); }
 #[test] fn string_chomp() { run_diff("string_chomp"); }
 #[test] fn multiwrite_global() { run_diff("multiwrite_global"); }
