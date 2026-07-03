@@ -131,6 +131,45 @@ impl Locals {
     }
 }
 
+/// TEMP (block-frame residue profiling): env-gated (`RUBYRS_BLOCK_PROF`)
+/// phase counters for the block frame push path. Ticks are cntvct_el0
+/// (24MHz on this box — coarse but unbiased over ~1M invocations).
+#[derive(Default)]
+pub(crate) struct BlockProf {
+    /// invocation counts: [ib1, ib2, general, ib1/2→general fallbacks]
+    pub(crate) n: [u64; 4],
+    /// phase tick totals: [snapshot, gates, argprep, locals, bind, push, reent, recycle]
+    pub(crate) t: [u64; 8],
+    pub(crate) n_share: u64,
+    pub(crate) n_copy: u64,
+    pub(crate) copy_slots: u64,
+    pub(crate) reent_frames: u64,
+    pub(crate) n_recycle: u64,
+    /// ib1 fallback reasons: [rest, kw_rest, nparams>1, lambda_arity,
+    /// kw_params, block_param_slot]; ib2 reasons fold into the same slots.
+    pub(crate) fb: [u64; 6],
+    /// general-path shape census: [autosplat_fired, rest_built, kw_any,
+    /// blockparam_any, plain_n0, plain_n1]
+    pub(crate) gshape: [u64; 6],
+}
+
+#[inline(always)]
+pub(crate) fn bp_now(on: bool) -> u64 {
+    if !on {
+        return 0;
+    }
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        let t: u64;
+        std::arch::asm!("mrs {t}, cntvct_el0", t = out(reg) t, options(nomem, nostack, preserves_flags));
+        t
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        0
+    }
+}
+
 pub(crate) struct Frame {
     pub(crate) proto_idx: usize,
     pub(crate) ip: usize,
@@ -2390,6 +2429,9 @@ pub(crate) struct Vm {
     /// allocation instead of minting a fresh one. Bounded so a deep
     /// recursion that unwinds doesn't park an unbounded pool.
     pub(crate) locals_pool: Vec<Rc<RefCell<Vec<Value>>>>,
+    /// TEMP block-frame profiling (see `BlockProf`).
+    pub(crate) block_prof_on: bool,
+    pub(crate) block_prof: BlockProf,
     /// Single-entry memo for `Op::CreateBlock`'s ancestor-chain
     /// flatten (only needed for depth ≥ 2 creations — a block created
     /// inside a chain-carrying frame), keyed by the creating frame's
@@ -3192,6 +3234,8 @@ impl Vm {
             dispatch_until_depths: Vec::new(),
             method_return_locals: None,
             locals_pool: Vec::new(),
+            block_prof_on: std::env::var_os("RUBYRS_BLOCK_PROF").is_some(),
+            block_prof: BlockProf::default(),
             chain_memo: None,
             dm_share_depth: 0,
             locals_arena: Vec::new(),
@@ -3659,6 +3703,56 @@ impl Vm {
     /// Dump the `RUBYRS_JIT_STATS` counters to stderr (called from
     /// `Runtime::drop`). Silent unless the env var is set.
     #[cfg(feature = "jit-native")]
+    /// TEMP: dump the block-frame phase profile (`RUBYRS_BLOCK_PROF`).
+    pub(crate) fn dump_block_prof(&self) {
+        if !self.block_prof_on {
+            return;
+        }
+        let p = &self.block_prof;
+        let total_inv = p.n[0] + p.n[1] + p.n[2];
+        if total_inv == 0 {
+            return;
+        }
+        // cntvct ticks → ns (24MHz ⇒ 41.67 ns/tick).
+        let freq: u64;
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            std::arch::asm!("mrs {f}, cntfrq_el0", f = out(reg) freq);
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            freq = 1;
+        }
+        let ns = |ticks: u64| ticks as f64 * 1e9 / freq as f64;
+        let per = |ticks: u64| ns(ticks) / total_inv as f64;
+        eprintln!("== RUBYRS_BLOCK_PROF ==");
+        eprintln!(
+            "invocations ib1={} ib2={} general={} (fast→general fallbacks {})",
+            p.n[0], p.n[1], p.n[2], p.n[3]
+        );
+        eprintln!("locals: share={} copy={} copy_slots_avg={:.1}",
+            p.n_share, p.n_copy,
+            if p.n_copy > 0 { p.copy_slots as f64 / p.n_copy as f64 } else { 0.0 });
+        eprintln!("reent scan: frames_examined_avg={:.1}",
+            if p.n_share + p.n_copy > 0 { p.reent_frames as f64 / (p.n_share + p.n_copy) as f64 } else { 0.0 });
+        let names = ["snapshot", "gates", "argprep", "locals", "bind", "push", "  (reent)", "recycle(all frames)"];
+        let mut tot = 0u64;
+        for (i, nm) in names.iter().enumerate() {
+            if i < 6 { tot += p.t[i]; }
+            eprintln!("  {:<20} {:>10.1} ms total  {:>7.1} ns/inv", nm, ns(p.t[i]) / 1e6, per(p.t[i]));
+        }
+        eprintln!("  {:<20} {:>10.1} ms total  {:>7.1} ns/inv", "PROLOGUE SUM", ns(tot) / 1e6, per(tot));
+        eprintln!("  recycle calls (all frame pops) = {}", p.n_recycle);
+        eprintln!(
+            "ib1/2 fallback reasons: rest_n0={} rest_n1p={} splat_arr={} splat_nonarr={} lambda_arity={} other={}",
+            p.fb[0], p.fb[1], p.fb[2], p.fb[3], p.fb[4], p.fb[5]
+        );
+        eprintln!(
+            "general shapes: autosplat={} rest_built={} kw_any={} blockparam={} plain_n0={} plain_n1={}",
+            p.gshape[0], p.gshape[1], p.gshape[2], p.gshape[3], p.gshape[4], p.gshape[5]
+        );
+    }
+
     pub(crate) fn dump_jit_stats(&self) {
         if !self.jit_stats_on {
             return;

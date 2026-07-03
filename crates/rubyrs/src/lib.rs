@@ -4067,6 +4067,7 @@ impl Drop for Runtime {
         // Env-gated JIT counters (`RUBYRS_JIT_STATS`) — silent no-op unless set.
         #[cfg(feature = "jit-native")]
         self.vm.dump_jit_stats();
+        self.vm.dump_block_prof();
         #[cfg(all(feature = "cext", not(target_os = "wasi")))]
         rubyrs_cext::reset_state();
     }

@@ -16328,10 +16328,22 @@ impl Vm {
         // hit the method scope directly; identity-only otherwise),
         // and the frame's `BlockRouting` (`none()` for the share
         // path: the cell owns everything).
-        if captured_is_method_scope
-            && !self.protos[proto_idx].creates_block
-            && !self.block_is_reentrant(proto_idx, captured)
-        {
+        let bp = self.block_prof_on;
+        let share_eligible = captured_is_method_scope && !self.protos[proto_idx].creates_block;
+        let reentrant = if share_eligible {
+            let bp_r0 = crate::vm::bp_now(bp);
+            let r = self.block_is_reentrant(proto_idx, captured);
+            if bp {
+                let bp_r1 = crate::vm::bp_now(true);
+                self.block_prof.t[6] += bp_r1 - bp_r0;
+                self.block_prof.reent_frames += self.frames.len() as u64;
+            }
+            r
+        } else {
+            false
+        };
+        if share_eligible && !reentrant {
+            if bp { self.block_prof.n_share += 1; }
             // Grow once so the block's body slots exist; the method
             // only ever reads `[0, method_n_locals)` so the extra
             // tail is invisible to it.
@@ -16343,6 +16355,10 @@ impl Vm {
             }
             (captured.clone(), None, BlockRouting::none())
         } else {
+            if bp {
+                self.block_prof.n_copy += 1;
+                self.block_prof.copy_slots += captured.borrow().len() as u64;
+            }
             // COPY path: this invocation owns `[param_start, needed)`
             // (params + body locals, fresh per invocation); slots
             // below `param_start` are captured outer locals whose
@@ -16378,21 +16394,42 @@ impl Vm {
     /// frame on the stack? Such re-entrancy means a share-direct frame
     /// would clobber the suspended invocation's param / body-local
     /// scratch, so the caller must fall back to a per-invocation copy.
-    /// The `proto_idx` pre-filter (a cheap `usize` compare) keeps the
-    /// `Rc::ptr_eq` off all the unrelated frames; the enclosing method
-    /// frame is non-block so it never matches.
+    ///
+    /// The walk is TOP-DOWN with an owner early-stop (the block-frame
+    /// residue profile showed the old full `any()` scan examining 19+
+    /// frames per share-eligible invocation): scope cells are
+    /// per-invocation and never pool-recycled while a `BlockHandle`
+    /// still references them (`recycle_frame_locals`' `strong_count ==
+    /// 1` guard), so exactly ONE owning non-block frame for `captured`
+    /// can ever be live — and every same-cell block frame is
+    /// necessarily ABOVE it (the cell didn't exist before that frame
+    /// pushed, and a later invocation of the same method gets a fresh
+    /// cell). Meeting the owner therefore proves no match sits below.
+    /// In the common shape (block invoked while its defining method
+    /// runs a few frames up) this stops after 1–3 frames. Two frame
+    /// kinds ALIAS a method cell without owning it and must NOT stop
+    /// the walk: share-direct sibling block frames (`is_block`, first
+    /// arm) and `define_method` share-direct frames (`dm_share`).
     fn block_is_reentrant(
         &self,
         proto_idx: usize,
         captured: &Rc<RefCell<Vec<Value>>>,
     ) -> bool {
-        self.frames.iter().any(|f| {
-            f.is_block
-                && f.proto_idx == proto_idx
-                && f.locals
-                    .as_shared()
-                    .is_some_and(|l| Rc::ptr_eq(l, captured))
-        })
+        for f in self.frames.iter().rev() {
+            if f.is_block {
+                if f.proto_idx == proto_idx
+                    && f.locals.as_shared().is_some_and(|l| Rc::ptr_eq(l, captured))
+                {
+                    return true;
+                }
+            } else if !f.dm_share
+                && f.locals.as_shared().is_some_and(|l| Rc::ptr_eq(l, captured))
+            {
+                // `captured`'s owner — nothing below can match.
+                return false;
+            }
+        }
+        false
     }
 
     /// Return a popped frame's locals cell to the pool, IFF nothing else
@@ -16404,9 +16441,16 @@ impl Vm {
     /// their refs); the buffer capacity is kept for the next call.
     pub(crate) fn recycle_frame_locals(&mut self, locals: Rc<RefCell<Vec<Value>>>) {
         const LOCALS_POOL_CAP: usize = 256;
+        let bp = self.block_prof_on;
+        let bp_t0 = crate::vm::bp_now(bp);
         if self.locals_pool.len() < LOCALS_POOL_CAP && Rc::strong_count(&locals) == 1 {
             locals.borrow_mut().clear();
             self.locals_pool.push(locals);
+        }
+        if bp {
+            let bp_t1 = crate::vm::bp_now(true);
+            self.block_prof.t[7] += bp_t1 - bp_t0;
+            self.block_prof.n_recycle += 1;
         }
     }
 
@@ -22715,6 +22759,44 @@ impl Vm {
         }
     }
 
+    /// The block-frame push shared by the `invoke_block` family: every
+    /// field except the ones threaded through is the block-frame
+    /// constant shape (`is_block: true`, no defining class, no arity
+    /// model). `#[inline]` so the fast paths keep their store-only
+    /// codegen.
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    fn push_block_frame(
+        &mut self,
+        proto_idx: usize,
+        block_cell: Rc<RefCell<Vec<Value>>>,
+        self_val: Value,
+        lexical_cvar_class: Option<Rc<Class>>,
+        is_lambda: bool,
+        writeback: BlockWriteback,
+        routing: BlockRouting,
+        captured_yield_block: Option<ObjId>,
+    ) {
+        self.frames.push(Frame {
+            proto_idx,
+            ip: 0,
+            locals: crate::vm::Locals::Shared(block_cell),
+            self_val,
+            base_sp: self.stack.len(),
+            is_class_body: false, swap_return: None, block_arg: None, defining_class: None,
+            lexical_cvar_class,
+            #[cfg(feature = "regex")] saved_last_match: None,
+            is_block: true, is_lambda, n_given_positional: 0, kw_given_mask: 0, aux: None, pending_yield: false,
+            block_writeback: writeback,
+            dm_share: false,
+            own_start: routing.own_start,
+            outer_cell_start: routing.outer_cell_start,
+            outer_cell: routing.outer_cell,
+            outer_rest: routing.outer_rest,
+            captured_yield_block,
+        });
+    }
+
     /// Single-positional-arg fast path for the hot Rust-level iter
     /// drivers (`times` / Array `each`/`map`/filter / Hash key-value
     /// walks): skips the per-iteration args-Vec allocation, the
@@ -22725,12 +22807,15 @@ impl Vm {
     /// handle, which is fine for that rare shape. Locals setup and
     /// the Frame it pushes are byte-identical to the general path.
     pub(crate) fn invoke_block1(&mut self, block_id: ObjId, arg: Value) -> Result<(), Trap> {
+        let bp = self.block_prof_on;
+        let bp_t0 = crate::vm::bp_now(bp);
         self.check_frames()?;
         let (proto_idx, captured, self_val, param_start, n_params, rest_slot, kw_rest_slot, bh_lexical_cvar_class, captured_is_method_scope, captured_yield_block, bh_is_lambda) = {
             let bh = self.heap.block(block_id);
             (bh.proto_idx, bh.captured.clone(), bh.self_val.clone(),
              bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot, bh.lexical_cvar_class.clone(), bh.captured_is_method_scope, bh.captured_yield_block, bh.is_lambda)
         };
+        let bp_t1 = crate::vm::bp_now(bp);
         // A LAMBDA with any arity other than exactly one falls back so the
         // general path's strict positional-arity check raises CRuby's
         // ArgumentError (`[1].each(&->() {})` / `yield 1` to a 0-param
@@ -22742,13 +22827,127 @@ impl Vm {
             || (bh_is_lambda && n_params != 1)
             || !self.protos[proto_idx].block_kw_params.is_empty()
             || self.protos[proto_idx].block_param_slot.is_some() {
+            // Walk-census fast arms (the two shapes that were ~95% of the
+            // ib1→general fallbacks on the RuboCop walk — 0.9M/walk-set
+            // paying a double handle-snapshot + args-Vec + the general
+            // binder). Both bind byte-identically to the general path.
+            if kw_rest_slot.is_none()
+                && self.protos[proto_idx].block_kw_params.is_empty()
+                && self.protos[proto_idx].block_param_slot.is_none()
+            {
+                // (a) rest-only `|*a|`: binds `a = [arg]`. No auto-splat
+                // (CRuby keeps a lone Array intact for a rest-only block);
+                // lambda arity `0+` is always in range, so lambdas take
+                // this arm too. The rest Array is the one unavoidable
+                // alloc — CRuby exposes it to the block.
+                if n_params == 0 && rest_slot.is_some() {
+                    let rest_slot = rest_slot.unwrap() as usize;
+                    // Pin arg + block across the collection — but only
+                    // when one is actually due (the caller popped both
+                    // off the operand stack, so this fn's locals are
+                    // their only references; GC can only run inside
+                    // `maybe_gc`, never in `heap.alloc` itself, so the
+                    // not-due case needs no pins at all).
+                    if self.stress_gc || self.heap.should_gc() {
+                        let mut g = crate::vm::PinGuard::new(self);
+                        g.pin(Value::Block(block_id));
+                        g.pin(arg.clone());
+                        g.vm.maybe_gc();
+                    }
+                    self.check_alloc()?;
+                    let rest_val =
+                        Value::Array(self.heap.alloc(HeapObj::Array(vec![arg].into())));
+                    let bp_t2 = crate::vm::bp_now(bp);
+                    let proto = &self.protos[proto_idx];
+                    let needed = proto.n_locals as usize;
+                    let body_local_start = proto.block_body_local_start;
+                    let (block_cell, writeback, routing) =
+                        self.block_frame_locals(&captured, proto_idx, needed, param_start, captured_is_method_scope, block_id);
+                    let bp_t3 = crate::vm::bp_now(bp);
+                    {
+                        let mut locals = block_cell.borrow_mut();
+                        if (body_local_start as usize) < needed {
+                            for s in body_local_start as usize..needed {
+                                locals[s] = Value::Nil;
+                            }
+                        }
+                        locals[rest_slot] = rest_val;
+                    }
+                    let bp_t4 = crate::vm::bp_now(bp);
+                    self.push_block_frame(
+                        proto_idx, block_cell, self_val, bh_lexical_cvar_class,
+                        bh_is_lambda, writeback, routing, captured_yield_block,
+                    );
+                    if bp {
+                        let bp_t5 = crate::vm::bp_now(true);
+                        let p = &mut self.block_prof;
+                        p.n[0] += 1;
+                        p.t[0] += bp_t1 - bp_t0;
+                        p.t[2] += bp_t2 - bp_t1;
+                        p.t[3] += bp_t3 - bp_t2;
+                        p.t[4] += bp_t4 - bp_t3;
+                        p.t[5] += bp_t5 - bp_t4;
+                    }
+                    return Ok(());
+                }
+                // (b) auto-splat: a single Array arg into a plain
+                // multi-param PROC block (`|a, b[, ...]|`) — bind the
+                // param slots straight from the heap array, no clone
+                // into an intermediate args Vec. Lambdas keep the
+                // general path (strict arity must raise); a non-Array
+                // arg falls through to the general binder (rare).
+                if !bh_is_lambda && n_params > 1 && rest_slot.is_none()
+                    && let Value::Array(aid) = &arg
+                {
+                    let aid = *aid;
+                    let bp_t2 = crate::vm::bp_now(bp);
+                    let proto = &self.protos[proto_idx];
+                    let needed = proto.n_locals as usize;
+                    let body_local_start = proto.block_body_local_start;
+                    let (block_cell, writeback, routing) =
+                        self.block_frame_locals(&captured, proto_idx, needed, param_start, captured_is_method_scope, block_id);
+                    let bp_t3 = crate::vm::bp_now(bp);
+                    {
+                        let mut locals = block_cell.borrow_mut();
+                        if (body_local_start as usize) < needed {
+                            for s in body_local_start as usize..needed {
+                                locals[s] = Value::Nil;
+                            }
+                        }
+                        let src = self.heap.array(aid);
+                        for i in 0..n_params as usize {
+                            locals[param_start as usize + i] =
+                                src.get(i).cloned().unwrap_or(Value::Nil);
+                        }
+                    }
+                    let bp_t4 = crate::vm::bp_now(bp);
+                    self.push_block_frame(
+                        proto_idx, block_cell, self_val, bh_lexical_cvar_class,
+                        bh_is_lambda, writeback, routing, captured_yield_block,
+                    );
+                    if bp {
+                        let bp_t5 = crate::vm::bp_now(true);
+                        let p = &mut self.block_prof;
+                        p.n[0] += 1;
+                        p.t[0] += bp_t1 - bp_t0;
+                        p.t[2] += bp_t2 - bp_t1;
+                        p.t[3] += bp_t3 - bp_t2;
+                        p.t[4] += bp_t4 - bp_t3;
+                        p.t[5] += bp_t5 - bp_t4;
+                    }
+                    return Ok(());
+                }
+            }
+            if bp { self.block_prof.n[3] += 1; }
             return self.invoke_block(block_id, vec![arg]);
         }
         let proto = &self.protos[proto_idx];
         let needed = proto.n_locals as usize;
         let body_local_start = proto.block_body_local_start;
+        let bp_t2 = crate::vm::bp_now(bp);
         let (block_cell, writeback, routing) =
             self.block_frame_locals(&captured, proto_idx, needed, param_start, captured_is_method_scope, block_id);
+        let bp_t3 = crate::vm::bp_now(bp);
         {
             let mut locals = block_cell.borrow_mut();
             if (body_local_start as usize) < needed {
@@ -22760,6 +22959,7 @@ impl Vm {
                 locals[param_start as usize] = arg;
             }
         }
+        let bp_t4 = crate::vm::bp_now(bp);
         self.frames.push(Frame {
             proto_idx,
             ip: 0,
@@ -22778,6 +22978,16 @@ impl Vm {
             outer_rest: routing.outer_rest,
             captured_yield_block,
         });
+        if bp {
+            let bp_t5 = crate::vm::bp_now(true);
+            let p = &mut self.block_prof;
+            p.n[0] += 1;
+            p.t[0] += bp_t1 - bp_t0;
+            p.t[1] += bp_t2 - bp_t1;
+            p.t[3] += bp_t3 - bp_t2;
+            p.t[4] += bp_t4 - bp_t3;
+            p.t[5] += bp_t5 - bp_t4;
+        }
         Ok(())
     }
 
@@ -22790,22 +23000,28 @@ impl Vm {
     /// (rest / kw-rest / n_params != 2) falls back to the general
     /// path with the exact Vec the old call sites built.
     pub(crate) fn invoke_block2(&mut self, block_id: ObjId, a: Value, b: Value) -> Result<(), Trap> {
+        let bp = self.block_prof_on;
+        let bp_t0 = crate::vm::bp_now(bp);
         self.check_frames()?;
         let (proto_idx, captured, self_val, param_start, n_params, rest_slot, kw_rest_slot, bh_lexical_cvar_class, captured_is_method_scope, captured_yield_block, bh_is_lambda) = {
             let bh = self.heap.block(block_id);
             (bh.proto_idx, bh.captured.clone(), bh.self_val.clone(),
              bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot, bh.lexical_cvar_class.clone(), bh.captured_is_method_scope, bh.captured_yield_block, bh.is_lambda)
         };
+        let bp_t1 = crate::vm::bp_now(bp);
         if rest_slot.is_some() || kw_rest_slot.is_some() || n_params != 2
             || !self.protos[proto_idx].block_kw_params.is_empty()
             || self.protos[proto_idx].block_param_slot.is_some() {
+            if bp { self.block_prof.n[3] += 1; }
             return self.invoke_block(block_id, vec![a, b]);
         }
         let proto = &self.protos[proto_idx];
         let needed = proto.n_locals as usize;
         let body_local_start = proto.block_body_local_start;
+        let bp_t2 = crate::vm::bp_now(bp);
         let (block_cell, writeback, routing) =
             self.block_frame_locals(&captured, proto_idx, needed, param_start, captured_is_method_scope, block_id);
+        let bp_t3 = crate::vm::bp_now(bp);
         {
             let mut locals = block_cell.borrow_mut();
             if (body_local_start as usize) < needed {
@@ -22815,6 +23031,15 @@ impl Vm {
             }
             locals[param_start as usize] = a;
             locals[param_start as usize + 1] = b;
+        }
+        let bp_t4 = crate::vm::bp_now(bp);
+        if bp {
+            let p = &mut self.block_prof;
+            p.n[1] += 1;
+            p.t[0] += bp_t1 - bp_t0;
+            p.t[1] += bp_t2 - bp_t1;
+            p.t[3] += bp_t3 - bp_t2;
+            p.t[4] += bp_t4 - bp_t3;
         }
         self.frames.push(Frame {
             proto_idx,
@@ -22834,10 +23059,16 @@ impl Vm {
             outer_rest: routing.outer_rest,
             captured_yield_block,
         });
+        if bp {
+            let bp_t5 = crate::vm::bp_now(true);
+            self.block_prof.t[5] += bp_t5 - bp_t4;
+        }
         Ok(())
     }
 
     pub(crate) fn invoke_block(&mut self, block_id: ObjId, mut args: Vec<Value>) -> Result<(), Trap> {
+        let bp = self.block_prof_on;
+        let bp_t0 = crate::vm::bp_now(bp);
         self.check_frames()?;
         // Snapshot what we need out of the block's heap slot before
         // taking any `&mut self` action. BlockHandle.captured is a
@@ -22847,6 +23078,7 @@ impl Vm {
             (bh.proto_idx, bh.captured.clone(), bh.self_val.clone(),
              bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot, bh.lexical_cvar_class.clone(), bh.captured_is_method_scope, bh.captured_yield_block, bh.is_lambda)
         };
+        let bp_t1 = crate::vm::bp_now(bp);
         // `|**opts|` keyword-rest: peel the trailing kwargs Hash off
         // the args BEFORE positional binding (so it doesn't land in
         // a positional slot or the auto-splat), defaulting to an
@@ -23006,10 +23238,11 @@ impl Vm {
                 }));
             }
         }
+        let mut bp_splat = false;
         let args: Vec<Value> = if !bh_is_lambda && args.len() == 1
             && (n_params > 1 || (n_params >= 1 && rest_slot.is_some())) {
             match &args[0] {
-                Value::Array(aid) => self.heap.array(*aid).clone(),
+                Value::Array(aid) => { bp_splat = true; self.heap.array(*aid).clone() }
                 _ => args,
             }
         } else {
@@ -23098,6 +23331,7 @@ impl Vm {
             };
             (rest, kwr)
         };
+        let bp_t2 = crate::vm::bp_now(bp);
         let proto = &self.protos[proto_idx];
         let needed = proto.n_locals as usize;
         let body_local_start = proto.block_body_local_start;
@@ -23131,6 +23365,7 @@ impl Vm {
         // copy). See `block_frame_locals`.
         let (block_cell, writeback, routing) =
             self.block_frame_locals(&captured, proto_idx, needed, param_start, captured_is_method_scope, block_id);
+        let bp_t3 = crate::vm::bp_now(bp);
         {
             let mut locals = block_cell.borrow_mut();
             // Reset body-introduced block-local slots before
@@ -23183,6 +23418,7 @@ impl Vm {
                 };
             }
         }
+        let bp_t4 = crate::vm::bp_now(bp);
         self.frames.push(Frame {
             proto_idx,
             ip: 0,
@@ -23201,6 +23437,24 @@ impl Vm {
             outer_rest: routing.outer_rest,
             captured_yield_block,
         });
+        if bp {
+            let bp_t5 = crate::vm::bp_now(true);
+            let p = &mut self.block_prof;
+            p.n[2] += 1;
+            p.t[0] += bp_t1 - bp_t0;
+            p.t[2] += bp_t2 - bp_t1;
+            p.t[3] += bp_t3 - bp_t2;
+            p.t[4] += bp_t4 - bp_t3;
+            p.t[5] += bp_t5 - bp_t4;
+            if bp_splat { p.gshape[0] += 1; }
+            if rest_slot.is_some() { p.gshape[1] += 1; }
+            if kw_rest_slot.is_some() || !kw_params.is_empty() { p.gshape[2] += 1; }
+            if block_param_slot.is_some() { p.gshape[3] += 1; }
+            if !bp_splat && rest_slot.is_none() && kw_rest_slot.is_none()
+                && kw_params.is_empty() && block_param_slot.is_none() {
+                if n_params == 0 { p.gshape[4] += 1; } else { p.gshape[5] += 1; }
+            }
+        }
         Ok(())
     }
 
