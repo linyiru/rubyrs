@@ -59,6 +59,15 @@ fn ruby_available() -> bool {
 const JIT_KNOWN_DIVERGENCES: &[&str] = &["tier2_call_refined"];
 
 fn run_diff(name: &str) {
+    run_diff_env(name, &[]);
+}
+
+/// `run_diff` with extra env vars set on the RUBYRS side only —
+/// for fixtures that must run under a rubyrs feature kill switch
+/// (e.g. `RUBYRS_JSON_NO_NATIVE=1` forces the pure-Ruby JSON canon
+/// so the same fixture pins BOTH the accelerator and the canon
+/// against the CRuby oracle).
+fn run_diff_env(name: &str, envs: &[(&str, &str)]) {
     if !ruby_available() {
         eprintln!("skipping diff_cruby::{} — `ruby` not on PATH", name);
         return;
@@ -79,9 +88,12 @@ fn run_diff(name: &str) {
     // (with a local/utc FLAVOUR bit matching TZ=UTC CRuby), so a
     // host-local CRuby would render different zone suffixes and make
     // time fixtures host-dependent.
-    let ours = Command::new(rubyrs_bin())
-        .current_dir(manifest_dir())
-        .env("TZ", "UTC")
+    let mut ours_cmd = Command::new(rubyrs_bin());
+    ours_cmd.current_dir(manifest_dir()).env("TZ", "UTC");
+    for (k, v) in envs {
+        ours_cmd.env(k, v);
+    }
+    let ours = ours_cmd
         .arg(&rb_rel)
         .output()
         .expect("failed to spawn rubyrs");
@@ -138,6 +150,82 @@ fn gem_available(gem_probe: &str) -> bool {
 /// so contributors without the gem installed aren't blocked. CI pins
 /// and installs the gem, so the gate is live there.
 #[cfg(feature = "stdlib")]
+/// True iff the system `ruby` (with rubygems) activates a json gem in
+/// the fpconv float-emission era (>= 2.10, < 3) — the byte-format the
+/// `json_parity_battery` fixture pins. The default gem bundled with
+/// ruby 3.4 is json 2.9.x (Float#to_s float emission, different
+/// nesting messages); the parity target is the maintained json 2.x
+/// line that `bundle install` / plain `ruby` resolve in practice.
+fn json2_gem_available() -> bool {
+    Command::new("ruby")
+        .args([
+            "-rjson",
+            "-e",
+            "v = Gem::Version.new(JSON::VERSION); exit(v >= Gem::Version.new('2.10') && v < Gem::Version.new('3.0') ? 0 : 1)",
+        ])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// `run_diff_gem` + env vars on the rubyrs side, gated on the json-2.x
+/// oracle probe — the runner for the JSON parity battery (native and
+/// RUBYRS_JSON_NO_NATIVE=1 canon variants).
+fn run_diff_json_battery(envs: &[(&str, &str)]) {
+    let name = "json_parity_battery";
+    if !ruby_available() {
+        eprintln!("skipping diff_cruby::{} — `ruby` not on PATH", name);
+        return;
+    }
+    if !json2_gem_available() {
+        eprintln!(
+            "skipping diff_cruby::{} — json gem >= 2.10, < 3 not activatable on system ruby",
+            name
+        );
+        return;
+    }
+    let rb_rel = PathBuf::from("tests/diff").join(format!("{name}.rb"));
+    let rb_abs = manifest_dir().join(&rb_rel);
+    assert!(rb_abs.exists(), "missing diff fixture: {}", rb_abs.display());
+
+    let mut ours_cmd = Command::new(rubyrs_bin());
+    ours_cmd.current_dir(manifest_dir());
+    for (k, v) in envs {
+        ours_cmd.env(k, v);
+    }
+    let ours = ours_cmd
+        .arg(&rb_rel)
+        .output()
+        .expect("failed to spawn rubyrs");
+    // No `--disable=gems`: the maintained json gem must load on the
+    // oracle side (the bundled default gem is the older 2.9 format).
+    let theirs = Command::new("ruby")
+        .current_dir(manifest_dir())
+        .arg(&rb_rel)
+        .output()
+        .expect("failed to spawn ruby");
+
+    assert!(
+        theirs.status.success(),
+        "CRuby itself failed on {} (probably a fixture bug):\n{}",
+        name,
+        String::from_utf8_lossy(&theirs.stderr)
+    );
+    assert!(
+        ours.status.success(),
+        "rubyrs failed on {} but CRuby succeeded:\nstderr:\n{}",
+        name,
+        String::from_utf8_lossy(&ours.stderr)
+    );
+    let ours_stdout = String::from_utf8_lossy(&ours.stdout);
+    let theirs_stdout = String::from_utf8_lossy(&theirs.stdout);
+    assert_eq!(
+        ours_stdout, theirs_stdout,
+        "stdout mismatch for {}:\n--- rubyrs:\n{}\n--- CRuby:\n{}",
+        name, ours_stdout, theirs_stdout,
+    );
+}
+
 fn run_diff_gem(name: &str, gem_probe: &str) {
     if !ruby_available() {
         eprintln!("skipping diff_cruby::{} — `ruby` not on PATH", name);
@@ -1265,6 +1353,19 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn stdlib_strscan() { run_diff("stdlib_strscan"); }
 #[cfg(feature = "stdlib")]
 #[test] fn json_roundtrip() { run_diff("json_roundtrip"); }
+// JSON byte-parity battery (2026-07 `_json_native` pass): fpconv float
+// emission, exact bigints, frozen/deduped keys, duplicate-key last-wins,
+// nesting-limit messages, invalid-UTF-8 generate errors. Runs twice —
+// native accelerator and RUBYRS_JSON_NO_NATIVE=1 (pure canon) — so
+// neither path can drift from the CRuby oracle or from the other.
+// Oracle is the maintained json 2.x gem (>= 2.10 for the fpconv float
+// format; skips when only the bundled 2.9 default gem is available).
+#[cfg(feature = "stdlib")]
+#[test] fn json_parity_battery() { run_diff_json_battery(&[]); }
+#[cfg(feature = "stdlib")]
+#[test] fn json_parity_battery_no_native() { run_diff_json_battery(&[("RUBYRS_JSON_NO_NATIVE", "1")]); }
+#[cfg(feature = "stdlib")]
+#[test] fn json_roundtrip_no_native() { run_diff_env("json_roundtrip", &[("RUBYRS_JSON_NO_NATIVE", "1")]); }
 // ActiveSupport-lite core-ext (ADR 0026 menu item 3). Oracle is the
 // real `activesupport` gem (RubyGems enabled) — pinned + installed in
 // CI; skips locally when the gem isn't present.

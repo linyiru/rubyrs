@@ -1321,6 +1321,13 @@ jobs:
           gem install activesupport -v 8.0.1
           gem install sqlite3
           gem install multi_json
+          # `json` 2.x (>= 2.10): oracle for `json_parity_battery`.
+          # The default gem bundled with ruby is the older 2.9 line
+          # (Float#to_s float emission); the battery pins the
+          # maintained fpconv format — the fixture runner probes the
+          # activatable version and skips if only 2.9 is present, so
+          # this install is what makes the battery bite in CI.
+          gem install json -v 2.20.0
           # `sinatra-cors` is the parity oracle for the
           # `sinatra_cors_smoke` fixture — real gem source vendored
           # 1:1 under `vendor/sinatra/cors.rb`. Both runtimes load
