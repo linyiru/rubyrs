@@ -4924,7 +4924,9 @@ impl Vm {
         if crate::compiler::detect_frozen_string_literal(&source) {
             crate::compiler::mark_frozen_string_literal(&mut self.protos, fsl_start);
         }
-        let cc = self.cache_counter as usize;
+        let cc = self.cache_counter.call as usize;
+        let ivc = self.cache_counter.ivar as usize;
+        self.ensure_ivar_caches(ivc);
         self.ensure_call_caches(cc);
         // Push a fresh top-level frame for the loaded body and run
         // the inner dispatch loop until it returns. dispatch_until
@@ -5555,7 +5557,9 @@ impl Vm {
                 msg: format!("eval grew interner past cap: {} symbols", max),
             }));
         }
-        let cc = self.cache_counter as usize;
+        let cc = self.cache_counter.call as usize;
+        let ivc = self.cache_counter.ivar as usize;
+        self.ensure_ivar_caches(ivc);
         self.ensure_call_caches(cc);
         let depth_before = self.frames.len();
         let stack_before = self.stack.len();

@@ -1636,7 +1636,7 @@ impl Vm {
                 let coerced = self.massign_coerce_to_array(v)?;
                 self.stack.push(coerced);
             }
-            Op::LoadIvar(name_id) => {
+            Op::LoadIvar(name_id, cid) => {
                 // `@foo` reads route to whichever table `self`
                 // carries: instance ivars for `Value::Object`,
                 // class-level ivars for `Value::Class` (the
@@ -1646,7 +1646,16 @@ impl Vm {
                 // "uninitialized ivar reads as nil" rule.
                 let self_val = self.frames.last().expect("ICE: LoadIvar no frame").self_val.clone();
                 let v = match &self_val {
-                    Value::Object(id) => self.heap.instance(*id).ivar_get(name_id).cloned().unwrap_or(Value::Nil),
+                    // ADR 0035 Ph4/5 — class-ptr-guarded slot cache →
+                    // direct slot load (holes read Nil = CRuby's
+                    // undefined-ivar rule, no defined-set consulted).
+                    Value::Object(id) => {
+                        let inst = self.heap.instance(*id);
+                        let slot = crate::vm::lookup::ivar_slot_cached(
+                            &mut self.ivar_caches, inst, name_id, cid,
+                        );
+                        inst.ivars.read_slot_raw(slot)
+                    }
                     Value::Class(c) => c.ivars.borrow().get(&name_id).cloned().unwrap_or(Value::Nil),
                     // Hash-subclass instances carry their own ivar table.
                     Value::Hash(id) => self.heap.hash_ivar_get(*id, name_id).unwrap_or(Value::Nil),
@@ -1666,12 +1675,21 @@ impl Vm {
                 };
                 self.stack.push(v);
             }
-            Op::StoreIvar(name_id) => {
+            Op::StoreIvar(name_id, cid) => {
                 let v = self.stack.pop().expect("ICE: StoreIvar stack underflow");
                 let self_val = self.frames.last().expect("ICE: StoreIvar no frame").self_val.clone();
                 self.frozen_ivar_guard(&self_val)?;
                 match &self_val {
-                    Value::Object(id) => { self.heap.instance_mut(*id).ivar_set(name_id, v); }
+                    // ADR 0035 Ph4/5 — guarded slot cache → direct
+                    // slot store (write_slot handles lazy growth +
+                    // first-assignment order tracking).
+                    Value::Object(id) => {
+                        let inst = self.heap.instance_mut(*id);
+                        let slot = crate::vm::lookup::ivar_slot_cached(
+                            &mut self.ivar_caches, inst, name_id, cid,
+                        );
+                        inst.ivars.write_slot(slot, v);
+                    }
                     Value::Class(c) => { c.ivars.borrow_mut().insert(name_id, v); }
                     // Hash-subclass instances carry their own ivar table.
                     Value::Hash(id) => { self.heap.hash_ivar_set(*id, name_id, v); }
@@ -1730,16 +1748,29 @@ impl Vm {
                     None => { self.toplevel_cvars.insert(name_id, v); }
                 }
             }
-            Op::IncIvarNoPush(name_id) => {
+            Op::IncIvarNoPush(name_id, cid) => {
                 // `@x = @x + 1` fast path, statement form. Mirrors
                 // Op::IncIvar but discards the result. Class-level
                 // ivars routed via `Value::Class` so the same
                 // pattern in a class method bumps the right table.
+                // One slot cache serves the read AND the write
+                // (same site, same slot — ADR 0035 Ph4/5).
                 let self_val = self.frames.last().expect("ICE: IncIvarNoPush no frame").self_val.clone();
                 self.frozen_ivar_guard(&self_val)?;
-                let cur = match &self_val {
-                    Value::Object(id) => self.heap.instance(*id).ivar_get(name_id).cloned(),
-                    Value::Class(c) => c.ivars.borrow().get(&name_id).cloned(),
+                let obj_slot = match &self_val {
+                    Value::Object(id) => {
+                        let inst = self.heap.instance(*id);
+                        Some(crate::vm::lookup::ivar_slot_cached(
+                            &mut self.ivar_caches, inst, name_id, cid,
+                        ))
+                    }
+                    _ => None,
+                };
+                let cur = match (&self_val, obj_slot) {
+                    (Value::Object(id), Some(slot)) => {
+                        self.heap.instance(*id).ivars.read_slot(slot).cloned()
+                    }
+                    (Value::Class(c), _) => c.ivars.borrow().get(&name_id).cloned(),
                     _ => None,
                 };
                 let new_v = match cur {
@@ -1755,29 +1786,44 @@ impl Vm {
                     }
                 };
                 if let Some(v) = new_v {
-                    match &self_val {
-                        Value::Object(id) => { self.heap.instance_mut(*id).ivar_set(name_id, v); }
-                        Value::Class(c) => { c.ivars.borrow_mut().insert(name_id, v); }
+                    match (&self_val, obj_slot) {
+                        (Value::Object(id), Some(slot)) => {
+                            self.heap.instance_mut(*id).ivars.write_slot(slot, v);
+                        }
+                        (Value::Class(c), _) => { c.ivars.borrow_mut().insert(name_id, v); }
                         _ => { /* drop */ }
                     }
                 }
             }
-            Op::IncIvar(name_id) => {
+            Op::IncIvar(name_id, cid) => {
                 // `@x = @x + 1` fast path, expression form. Same as
                 // IncIvarNoPush but leaves the new value on stack.
                 let self_val = self.frames.last().expect("ICE: IncIvar no frame").self_val.clone();
                 self.frozen_ivar_guard(&self_val)?;
-                let cur = match &self_val {
-                    Value::Object(id) => self.heap.instance(*id).ivar_get(name_id).cloned(),
-                    Value::Class(c) => c.ivars.borrow().get(&name_id).cloned(),
+                let obj_slot = match &self_val {
+                    Value::Object(id) => {
+                        let inst = self.heap.instance(*id);
+                        Some(crate::vm::lookup::ivar_slot_cached(
+                            &mut self.ivar_caches, inst, name_id, cid,
+                        ))
+                    }
+                    _ => None,
+                };
+                let cur = match (&self_val, obj_slot) {
+                    (Value::Object(id), Some(slot)) => {
+                        self.heap.instance(*id).ivars.read_slot(slot).cloned()
+                    }
+                    (Value::Class(c), _) => c.ivars.borrow().get(&name_id).cloned(),
                     _ => None,
                 };
                 let new_v: Value = match cur {
                     Some(Value::Int(n)) => {
                         let nv = Value::Int(n.wrapping_add(1));
-                        match &self_val {
-                            Value::Object(id) => { self.heap.instance_mut(*id).ivar_set(name_id, nv.clone()); }
-                            Value::Class(c) => { c.ivars.borrow_mut().insert(name_id, nv.clone()); }
+                        match (&self_val, obj_slot) {
+                            (Value::Object(id), Some(slot)) => {
+                                self.heap.instance_mut(*id).ivars.write_slot(slot, nv.clone());
+                            }
+                            (Value::Class(c), _) => { c.ivars.borrow_mut().insert(name_id, nv.clone()); }
                             _ => {}
                         }
                         nv
@@ -1790,9 +1836,11 @@ impl Vm {
                         let plus_id = self.interner.intern("+");
                         self.do_call(plus_id, 1, false, u32::MAX)?;
                         let v = self.stack.last().expect("ICE: IncIvar slow path no result").clone();
-                        match &self_val {
-                            Value::Object(id) => { self.heap.instance_mut(*id).ivar_set(name_id, v.clone()); }
-                            Value::Class(c) => { c.ivars.borrow_mut().insert(name_id, v.clone()); }
+                        match (&self_val, obj_slot) {
+                            (Value::Object(id), Some(slot)) => {
+                                self.heap.instance_mut(*id).ivars.write_slot(slot, v.clone());
+                            }
+                            (Value::Class(c), _) => { c.ivars.borrow_mut().insert(name_id, v.clone()); }
                             _ => {}
                         }
                         // Slow path already left value on stack via do_call result.

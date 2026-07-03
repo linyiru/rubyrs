@@ -23,7 +23,7 @@ mod gc;
 mod hash;
 mod iter;
 mod kernel;
-mod lookup;
+pub(crate) mod lookup;
 #[cfg(feature = "regex")]
 mod match_data;
 mod numeric;
@@ -1517,9 +1517,11 @@ pub(crate) struct Vm {
     /// gets a unique u16 slot id; the Vm side allocates
     /// `call_caches[id]` lazily. Lives on the Vm so kernel
     /// builtins (e.g. `require_relative`) that compile new Ruby
-    /// source at runtime can advance the counter without
-    /// round-tripping through Runtime.
-    pub(crate) cache_counter: u32,
+    /// source at runtime can advance the counters without
+    /// round-tripping through Runtime. `.call` = method-call sites
+    /// (`call_caches`), `.ivar` = ivar-access sites (`ivar_caches`,
+    /// ADR 0035 Ph4/5) — separate id spaces, see `CidGen`.
+    pub(crate) cache_counter: crate::compiler::CidGen,
     /// User-defined global variables (`$foo = 1; puts $foo`).
     /// Keyed by SymId of the name including the leading `$`.
     /// Reads of unknown globals return Nil (matches CRuby's
@@ -1973,6 +1975,10 @@ pub(crate) struct Vm {
     /// which effectively invalidates every cache entry — re-fill is
     /// lazy on the next call at each site.
     pub(crate) call_caches: Vec<CallCache>,
+    /// Per-ivar-site inline caches (ADR 0035 Ph4/5), dense by the
+    /// `Op::LoadIvar`/`StoreIvar`/`IncIvar*` cid (`CidGen::ivar`
+    /// space). See `IvarSiteCache` for the no-invalidation contract.
+    pub(crate) ivar_caches: Vec<crate::vm::lookup::IvarSiteCache>,
     pub(crate) method_gen: u32,
     /// Inline constant caches. `Op::LoadConst` resolution depends only
     /// on the GLOBAL classes/constants tables, so one entry per SymId
@@ -2823,7 +2829,7 @@ impl Vm {
             consumed_autoloads: std::collections::HashSet::new(),
             private_consts: std::collections::HashSet::new(),
             autoload_paths: std::collections::HashMap::new(),
-            cache_counter: 0,
+            cache_counter: crate::compiler::CidGen::default(),
             globals: FxHashMap::default(),
             toplevel_methods: FxHashMap::default(),
             main_obj: None,
@@ -2929,6 +2935,7 @@ impl Vm {
             max_symbols: None,
             max_value_bytes: None,
             call_caches: Vec::new(),
+            ivar_caches: Vec::new(),
             method_gen: 0,
             const_cache_flat: FxHashMap::default(),
             const_cache_chain: FxHashMap::default(),

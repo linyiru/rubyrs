@@ -796,7 +796,7 @@ pub(crate) fn pregate(
             | Op::Dup
             | Op::EnterLoop
             | Op::ExitLoop
-            | Op::LoadIvar(_)
+            | Op::LoadIvar(..)
             | Op::LoadSymbol(_)
             | Op::LoadConst(_)
             | Op::LoadNil => {}
@@ -991,7 +991,7 @@ pub(crate) fn compile(
             | Op::Dup
             | Op::EnterLoop
             | Op::ExitLoop
-            | Op::LoadIvar(_)
+            | Op::LoadIvar(..)
             // Key push for a fused `@h[:k]`; standalone use rejected in codegen.
             | Op::LoadSymbol(_)
             // Class constant for a fused `x.class == Const` guard (piece 3); a
@@ -1661,7 +1661,7 @@ pub(crate) fn compile(
         // a latent crash that never fired while such methods compiled but were never
         // SERVED (the pre-serving-fix state); the RuboCop predicates hit it immediately.
         let reads_self_ivar = code.iter().any(|op| {
-            matches!(op, Op::LoadIvar(_))
+            matches!(op, Op::LoadIvar(..))
                 || matches!(op, Op::CallNoRecv(name, 0, _) if getters.contains_key(name))
         });
         let self_ivars_base = fb.declare_var(types::I64);
@@ -1817,7 +1817,7 @@ pub(crate) fn compile(
                 // `@arr.length`/`@arr.size` fuses into one Array-length call;
                 // otherwise read an Int ivar. A non-matching heap shape sets ovf
                 // → deopt. The fused Call op is skipped (`ip += 1`).
-                Op::LoadIvar(s) => {
+                Op::LoadIvar(s, _) => {
                     // A Symbol ivar compared to a Symbol literal (`@type == :send`, the
                     // predicate body of ADR 0034 piece 5): `LoadIvar, LoadSymbol, BinOp(Eq|Ne)`
                     // → read the ivar as a Symbol (`jit_ivar_get_sym`). A non-Symbol ivar
@@ -5789,7 +5789,7 @@ pub(crate) unsafe extern "C" fn jit_obj_call_bool(
 /// BinOp(Eq), Return]`) → `(ivar, sym)`. The inlinable predicate shape (ADR 0034 piece 5).
 fn predicate_ivar_eq_sym(code: &[Op]) -> Option<(u32, u32)> {
     match code {
-        [Op::LoadIvar(iv), Op::LoadSymbol(s), Op::BinOp(crate::bytecode::BinOpKind::Eq), Op::Return] => {
+        [Op::LoadIvar(iv, _), Op::LoadSymbol(s), Op::BinOp(crate::bytecode::BinOpKind::Eq), Op::Return] => {
             Some((iv.0, s.0))
         }
         _ => None,
@@ -6939,7 +6939,7 @@ pub(crate) fn compile_value(
         return None;
     }
     let pat = match proto.code.as_slice() {
-        [Op::LoadIvar(s), Op::Return] => ValuePat::IvarGet { sym: *s, read_arg0: false },
+        [Op::LoadIvar(s, _), Op::Return] => ValuePat::IvarGet { sym: *s, read_arg0: false },
         [Op::LoadLocal(0), Op::LoadSymbol(s), Op::Call(name, 1, _), Op::Return]
             if *name == ivg_sym =>
         {
@@ -6955,7 +6955,7 @@ pub(crate) fn compile_value(
         // the whole run aborted. Run these interpreted until the value-JIT can deopt
         // on a defaulted-Hash miss. (Plain non-defaulted `@h[k]` readers lose this
         // micro-opt; the hot rubocop shapes — the AST walk — don't use it.)
-        [Op::LoadIvar(_), Op::LoadLocal(0), Op::Call(name, 1, _), Op::Return]
+        [Op::LoadIvar(_, _), Op::LoadLocal(0), Op::Call(name, 1, _), Op::Return]
             if *name == bracket_sym =>
         {
             return None;

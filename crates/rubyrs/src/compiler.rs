@@ -193,7 +193,7 @@ impl Drop for SpanGuard<'_> {
 /// cross-wired methods; the `u16` was first capped, leaving sites beyond 65535 uncached,
 /// then widened here so they cache too.)
 #[inline]
-fn alloc_cid(cc: &mut u32) -> u32 {
+pub(crate) fn alloc_cid(cc: &mut u32) -> u32 {
     if *cc >= u32::MAX {
         u32::MAX
     } else {
@@ -201,6 +201,20 @@ fn alloc_cid(cc: &mut u32) -> u32 {
         *cc += 1;
         id
     }
+}
+
+/// The compile-time inline-cache id generators, threaded through every
+/// compile path (one per `Vm`, persisted across evals + preamble cache +
+/// snapshot). `call` numbers method-call sites (`Vm::call_caches`);
+/// `ivar` numbers ivar-access sites (`Vm::ivar_caches`, ADR 0035
+/// Ph4/5). SEPARATE spaces so each side's dense cache vector is sized
+/// by its own site count — sharing one counter would inflate both
+/// (`call_caches` is ~128B/slot; interleaved ivar sites would cost
+/// megabytes of dead slots on a RuboCop-sized program).
+#[derive(Clone, Copy, Default, Debug)]
+pub(crate) struct CidGen {
+    pub(crate) call: u32,
+    pub(crate) ivar: u32,
 }
 
 /// Each intercept short-circuits only when every relevant arg
@@ -213,7 +227,7 @@ fn try_call_compile_time_intercept(
     args: &[SExpr],
     protos: &mut Vec<Proto>,
     interner: &mut Interner,
-    cc: &mut u32,
+    cc: &mut CidGen,
 ) -> bool {
     // Legacy `attr :name, true` (1.8 accessor form): single
     // Symbol arg followed by a literal `true` / `false`. Treated
@@ -332,7 +346,7 @@ fn try_call_with_block_compile_time_intercept(
     block_body: &[SExpr],
     protos: &mut Vec<Proto>,
     interner: &mut Interner,
-    cc: &mut u32,
+    cc: &mut CidGen,
 ) -> bool {
     // define_method(:foo) { |args| ... }
     if receiver.is_none()
@@ -382,7 +396,7 @@ fn compile_while_arm(
     post: bool,
     protos: &mut Vec<Proto>,
     interner: &mut Interner,
-    cc: &mut u32,
+    cc: &mut CidGen,
 ) {
     b.emit(Op::EnterLoop);
     b.loop_break_jumps.push(vec![]);
@@ -457,7 +471,7 @@ fn compile_def_arm(
     body: &[SExpr],
     protos: &mut Vec<Proto>,
     interner: &mut Interner,
-    cc: &mut u32,
+    cc: &mut CidGen,
 ) {
     // `defaults` is laid out as `[pre_rest_required..., optionals...,
     // post_rest_required...]` — both required runs carry `None`, only
@@ -642,7 +656,7 @@ fn compile_class_arm(
     absolute: bool,
     protos: &mut Vec<Proto>,
     interner: &mut Interner,
-    cc: &mut u32,
+    cc: &mut CidGen,
 ) {
     // An ABSOLUTE path (`class ::Foo` / `module ::Bar`) defines at top
     // level, ignoring the enclosing lexical scope — so the body's
@@ -725,7 +739,7 @@ fn compile_multiwrite_arm(
     value: &SExpr,
     protos: &mut Vec<Proto>,
     interner: &mut Interner,
-    cc: &mut u32,
+    cc: &mut CidGen,
 ) {
     use crate::ast::MultiWriteTarget as MWT;
     // Store one target, consuming the value on TOP of the stack. A
@@ -736,7 +750,7 @@ fn compile_multiwrite_arm(
         t: &MWT,
         protos: &mut Vec<Proto>,
         interner: &mut Interner,
-        cc: &mut u32,
+        cc: &mut CidGen,
     ) {
         match t {
             MWT::Local(name) => {
@@ -745,7 +759,7 @@ fn compile_multiwrite_arm(
             }
             MWT::Ivar(name) => {
                 let id = interner.intern(name);
-                b.emit(Op::StoreIvar(id));
+                b.emit(Op::StoreIvar(id, alloc_cid(&mut cc.ivar)));
             }
             MWT::Global(name) => {
                 let id = interner.intern(name);
@@ -760,7 +774,7 @@ fn compile_multiwrite_arm(
             }
             MWT::SplatIvar(name) => {
                 let id = interner.intern(name);
-                b.emit(Op::StoreIvar(id));
+                b.emit(Op::StoreIvar(id, alloc_cid(&mut cc.ivar)));
             }
             MWT::SplatGlobal(name) => {
                 let id = interner.intern(name);
@@ -870,7 +884,7 @@ fn compile_multiwrite_arm(
         targets: &[MWT],
         protos: &mut Vec<Proto>,
         interner: &mut Interner,
-        cc: &mut u32,
+        cc: &mut CidGen,
     ) {
         b.emit(Op::MassignSplat);
         let bracket_id = interner.intern("[]");
@@ -951,7 +965,7 @@ fn compile_begin_arm(
     ensure: &Option<Vec<SExpr>>,
     protos: &mut Vec<Proto>,
     interner: &mut Interner,
-    cc: &mut u32,
+    cc: &mut CidGen,
 ) {
     let pe = ensure.as_ref().map(|_| b.emit(Op::PushEnsure(0)));
 
@@ -1105,7 +1119,7 @@ fn compile_call_arm(
     kwargs_trailing: bool,
     protos: &mut Vec<Proto>,
     interner: &mut Interner,
-    cc: &mut u32,
+    cc: &mut CidGen,
 ) {
     if receiver.is_none() && name == "__seq__" {
         compile_body(b, args, protos, interner, cc);
@@ -1220,7 +1234,7 @@ fn compile_call_arm(
         };
         if let Some(lit) = lit {
             compile_expr(b, &args[0], protos, interner, cc);
-            let cid = alloc_cid(cc);
+            let cid = alloc_cid(&mut cc.call);
             b.emit(Op::CaseEqLit(lit, cid));
             return;
         }
@@ -1263,7 +1277,7 @@ fn compile_call_arm(
         && let Expr::LVarRead(lname) = &r.node
     {
         let slot = b.local_slot(lname);
-        let cid = alloc_cid(cc);
+        let cid = alloc_cid(&mut cc.call);
         b.emit(Op::LoadLocalCall(slot, name_id, cid));
         return;
     }
@@ -1307,9 +1321,9 @@ fn emit_method_call(
     has_recv: bool,
     has_block: bool,
     has_kwargs: bool,
-    cc: &mut u32,
+    cc: &mut CidGen,
 ) {
-    let cid = alloc_cid(cc);
+    let cid = alloc_cid(&mut cc.call);
     // The block+kwargs combo (`foo(**kw, &blk)`) emits a dedicated
     // `CallKwBlock*` op so the trailing keyword-splat Hash is treated
     // as kwargs (an empty/nil one dropped), not smuggled in as a
@@ -1418,7 +1432,7 @@ impl ProtoBuilder {
         // body of exactly `[LoadIvar(sym), Return]` — so the cached
         // dispatch fast path can serve it without a frame.
         let getter_ivar = if params.is_empty()
-            && let [Op::LoadIvar(sym), Op::Return] = self.code.as_slice()
+            && let [Op::LoadIvar(sym, _), Op::Return] = self.code.as_slice()
         {
             Some(*sym)
         } else {
@@ -1591,7 +1605,7 @@ fn build_const_chain(
 
 pub(crate) fn compile_body(
     b: &mut ProtoBuilder, exprs: &[SExpr],
-    protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut u32,
+    protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut CidGen,
 ) {
     if exprs.is_empty() {
         b.emit(Op::LoadNil);
@@ -1616,7 +1630,7 @@ pub(crate) fn compile_body(
 /// falls back to `compile_expr` + `Pop`.
 fn compile_stmt(
     b: &mut ProtoBuilder, e: &SExpr,
-    protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut u32,
+    protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut CidGen,
 ) {
     let prev_span = b.current_span;
     b.current_span = e.span;
@@ -1647,13 +1661,13 @@ fn compile_stmt(
                     && let (Expr::IVarRead(rn), Expr::IntLit(1)) = (&r.node, &args[0].node)
                         && rn == name {
                             let id = interner.intern(name);
-                            b.emit(Op::IncIvarNoPush(id));
+                            b.emit(Op::IncIvarNoPush(id, alloc_cid(&mut cc.ivar)));
                             b.current_span = prev_span;
                             return;
                         }
             compile_expr(b, val, protos, interner, cc);
             let id = interner.intern(name);
-            b.emit(Op::StoreIvar(id));
+            b.emit(Op::StoreIvar(id, alloc_cid(&mut cc.ivar)));
         }
         Expr::ConstWrite(name, absolute, val) => {
             // Statement-position const write: skip the Dup the
@@ -1713,7 +1727,7 @@ fn compile_stmt(
 
 pub(crate) fn compile_expr(
     b: &mut ProtoBuilder, e: &SExpr,
-    protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut u32,
+    protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut CidGen,
 ) {
     let mut _span_guard = SpanGuard::enter(b, e.span);
     let b = &mut *_span_guard.b;
@@ -1756,7 +1770,7 @@ pub(crate) fn compile_expr(
                             // String part skips to_s entirely; see
                             // Op::InterpToS. Consumes a cache id for
                             // the non-String dispatch path.
-                            let cid = alloc_cid(cc);
+                            let cid = alloc_cid(&mut cc.call);
                             b.emit(Op::InterpToS(cid));
                         }
                     }
@@ -1784,7 +1798,7 @@ pub(crate) fn compile_expr(
                             compile_expr(b, p, protos, interner, cc);
                             // Same InterpToS contract as
                             // InterpolatedStr above.
-                            let cid = alloc_cid(cc);
+                            let cid = alloc_cid(&mut cc.call);
                             b.emit(Op::InterpToS(cid));
                         }
                     }
@@ -1825,7 +1839,7 @@ pub(crate) fn compile_expr(
         }
         Expr::IVarRead(name) => {
             let id = interner.intern(name);
-            b.emit(Op::LoadIvar(id));
+            b.emit(Op::LoadIvar(id, alloc_cid(&mut cc.ivar)));
         }
         Expr::IVarWrite(name, val) => {
             // Fast path: @name = @name + 1
@@ -1834,13 +1848,13 @@ pub(crate) fn compile_expr(
                     && let (Expr::IVarRead(rn), Expr::IntLit(1)) = (&r.node, &args[0].node)
                         && rn == name {
                             let id = interner.intern(name);
-                            b.emit(Op::IncIvar(id));
+                            b.emit(Op::IncIvar(id, alloc_cid(&mut cc.ivar)));
                             return;
                         }
             compile_expr(b, val, protos, interner, cc);
             let id = interner.intern(name);
             b.emit(Op::Dup);
-            b.emit(Op::StoreIvar(id));
+            b.emit(Op::StoreIvar(id, alloc_cid(&mut cc.ivar)));
         }
         Expr::SourceFile => {
             // Materialise the current proto's filename as a
@@ -2014,7 +2028,7 @@ pub(crate) fn compile_expr(
             let name_id = interner.intern(name);
             compile_expr(b, receiver, protos, interner, cc);
             for a in args { compile_expr(b, a, protos, interner, cc); }
-            let cid = alloc_cid(cc);
+            let cid = alloc_cid(&mut cc.call);
             b.emit(Op::CallAset(name_id, args.len() as u8, cid));
         }
         Expr::Def { name, params, defaults, rest, n_required_post, kw_params, kw_rest, block_param, receiver, body } => {
@@ -2566,7 +2580,7 @@ pub(crate) fn compile_expr(
                 compile_expr(b, kw, protos, interner, cc);
             }
             let name_id = interner.intern(name);
-            let cid = alloc_cid(cc);
+            let cid = alloc_cid(&mut cc.call);
             match (has_recv, block_arg.is_some(), kwsplat.is_some()) {
                 (true,  false, true)  => b.emit(Op::ApplyCallKw(name_id, cid)),
                 (false, false, true)  => b.emit(Op::ApplyCallKwNoRecv(name_id, cid)),
@@ -2610,7 +2624,7 @@ pub(crate) fn compile_expr(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn compile_proto(
     name: String, params: Vec<String>, body: &[SExpr],
-    filename: Rc<str>, protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut u32,
+    filename: Rc<str>, protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut CidGen,
 ) -> usize {
     compile_proto_at(name, params, body, filename, protos, interner, cc, vec![])
 }
@@ -2720,7 +2734,7 @@ fn emit_super_forward_array(b: &mut ProtoBuilder, interner: &mut Interner, rs: u
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn compile_proto_at(
     name: String, params: Vec<String>, body: &[SExpr],
-    filename: Rc<str>, protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut u32,
+    filename: Rc<str>, protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut CidGen,
     class_path: Vec<String>,
 ) -> usize {
     let n_req = params.len() as u16;
@@ -2742,7 +2756,7 @@ pub(crate) fn compile_proto_at(
 pub(crate) fn compile_proto_kind(
     name: String, params: Vec<String>, n_required_positional: u16,
     default_exprs: Vec<Option<SExpr>>, body: &[SExpr],
-    filename: Rc<str>, protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut u32,
+    filename: Rc<str>, protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut CidGen,
     is_method: bool, class_path: Vec<String>,
     rest_slot_for_super: Option<u16>,
     // Bare-`super` forwarding layout: count of post-rest required
@@ -2872,7 +2886,7 @@ fn literal_to_value(e: &Expr, interner: &mut Interner) -> Value {
 /// is `u16::MAX` when the block has no `*rest` parameter.
 pub(crate) fn compile_block(
     parent: &mut ProtoBuilder, block_params: &[BlockParam], body: &[SExpr],
-    protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut u32,
+    protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut CidGen,
 ) -> (usize, u16, u16, u16, u16) {
     let mut b = ProtoBuilder {
         code: vec![],
@@ -3128,14 +3142,14 @@ pub(crate) fn compile_block(
         for (anon_slot, inner_slots) in &destructure_jobs {
             // Coerce: locals[anon] = Array(locals[anon])
             b.emit(Op::LoadLocal(*anon_slot));
-            let cid = alloc_cid(cc);
+            let cid = alloc_cid(&mut cc.call);
             b.emit(Op::CallNoRecv(interner.intern("Array"), 1, cid));
             b.emit(Op::StoreLocal(*anon_slot));
             // Unpack: locals[inner_i] = locals[anon][i]
             for (i, slot) in inner_slots.iter().enumerate() {
                 b.emit(Op::LoadLocal(*anon_slot));
                 b.emit(Op::LoadConstInt(i as i64));
-                let cid = alloc_cid(cc);
+                let cid = alloc_cid(&mut cc.call);
                 b.emit(Op::Call(bracket_id, 1, cid));
                 b.emit(Op::StoreLocal(*slot));
             }

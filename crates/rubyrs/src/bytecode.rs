@@ -134,8 +134,14 @@ pub(crate) enum Op {
     /// subsequent `[]` / `__mw_splat` / `__mw_post` calls always see
     /// an Array.
     MassignSplat,
-    LoadIvar(SymId),
-    StoreIvar(SymId),
+    /// `@name` read on `self`. The `u32` is a per-site inline-cache
+    /// slot id into `Vm::ivar_caches` (ADR 0035 Ph4/5) — its OWN cid
+    /// space (`CidGen::ivar`), separate from the call-site space, so
+    /// neither side inflates the other's dense cache vector.
+    /// `u32::MAX` = uncached (exhausted / synthesized without a vm).
+    LoadIvar(SymId, u32),
+    /// `@name = pop` on `self`; cid as in `LoadIvar`.
+    StoreIvar(SymId, u32),
     /// `@@name` read. Resolves the surrounding class at runtime
     /// (frame.self_val is either a Value::Class or
     /// Value::Object; toplevel falls through to `Vm.toplevel_cvars`
@@ -148,10 +154,11 @@ pub(crate) enum Op {
     /// when no class is on the stack.
     StoreCvar(SymId),
     /// Fast path for `@name = @name + 1`. Same shape as IncLocal but on
-    /// self's ivar table.
-    IncIvar(SymId),
+    /// self's ivar table; cid as in `LoadIvar` (one cache serves the
+    /// read and the write — same slot).
+    IncIvar(SymId, u32),
     /// Same as `IncIvar` but does *not* push the resulting value.
-    IncIvarNoPush(SymId),
+    IncIvarNoPush(SymId, u32),
     LoadConst(SymId),
     /// Same lookup as `LoadConst` but missing → `Value::Nil`
     /// instead of raising `NameError`. Emitted by the AST

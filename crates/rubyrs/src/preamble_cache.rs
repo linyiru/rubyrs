@@ -49,7 +49,7 @@ use crate::vm::Vm;
 pub(crate) const STEP_INSTALL_BUILTINS: u32 = u32::MAX;
 
 const MAGIC: &[u8; 4] = b"RBPC";
-const FORMAT_VERSION: u32 = 2; // bumped: cache_id widened u16->u32 (Op format change)
+const FORMAT_VERSION: u32 = 3; // bumped: ivar-site cids on LoadIvar/StoreIvar/IncIvar* + ivar_counter (ADR 0035 Ph4/5)
 
 /// Owned (deserialize) shape. `SnapshotRef` below is the borrow
 /// twin used at encode time so `store` doesn't clone the proto
@@ -68,9 +68,12 @@ struct Snapshot {
     interner: Vec<String>,
     /// Full proto table at preamble completion.
     protos: Vec<Proto>,
-    /// `vm.cache_counter` at preamble completion (sizes the
-    /// inline-cache vector).
+    /// `vm.cache_counter.call` at preamble completion (sizes the
+    /// call inline-cache vector).
     cache_counter: u32,
+    /// `vm.cache_counter.ivar` at preamble completion (sizes the
+    /// ivar-site cache vector, ADR 0035 Ph4/5).
+    ivar_counter: u32,
     /// Replay program: entry proto index per preamble chunk, in
     /// chunk order, with `STEP_INSTALL_BUILTINS` marking the
     /// host-side builtin-install step.
@@ -87,6 +90,7 @@ struct SnapshotRef<'a> {
     interner: Vec<&'a str>,
     protos: &'a [Proto],
     cache_counter: u32,
+    ivar_counter: u32,
     steps: &'a [u32],
     sources: Vec<(&'a str, &'a str)>,
 }
@@ -190,8 +194,9 @@ pub(crate) fn try_load(vm: &mut Vm, dir: &Path, key: u64) -> Option<ReplayPlan> 
     }
     debug_assert_eq!(vm.interner.len(), snap.interner.len());
     vm.protos = snap.protos;
-    vm.cache_counter = snap.cache_counter;
+    vm.cache_counter = crate::compiler::CidGen { call: snap.cache_counter, ivar: snap.ivar_counter };
     vm.ensure_call_caches(snap.cache_counter as usize);
+    vm.ensure_ivar_caches(snap.ivar_counter as usize);
     for (f, src) in snap.sources {
         vm.sources.insert(Rc::from(f.as_str()), Rc::from(src.as_str()));
     }
@@ -221,7 +226,8 @@ pub(crate) fn store(
             .map(|i| &**vm.interner.resolve(SymId(i as u32)))
             .collect(),
         protos: &vm.protos,
-        cache_counter: vm.cache_counter,
+        cache_counter: vm.cache_counter.call,
+        ivar_counter: vm.cache_counter.ivar,
         steps,
         sources: vm
             .sources

@@ -456,37 +456,39 @@ unsafe extern "C" fn t2_poll(vm: *mut crate::vm::Vm, ip: i64) -> i64 {
 
 /// Lean `Op::LoadIvar` for a guard-checked `Value::Object` self (wave 3):
 /// the codegen already extracted the oid, so this skips the frame fetch +
-/// self clone + receiver match. Returns 1 with the value's raw words in
-/// `out` when the value is trivially-tagged (the caller keeps it virtual);
-/// 0 when the value was pushed onto the real operand stack (non-trivial
-/// tags need a real clone). Missing ivar reads as Nil (CRuby).
-unsafe extern "C" fn t2_ivar_get(vm: *mut crate::vm::Vm, oid: i64, sym: i64, out: *mut i64) -> i64 {
+/// self clone + receiver match. Rides the interpreter's per-site ivar
+/// cache (`cid`, ADR 0035 Ph4/5) — class-ptr guard → direct slot read;
+/// holes/undefined read as Nil (CRuby). Returns 1 with the value's raw
+/// words in `out` when the value is trivially-tagged (the caller keeps
+/// it virtual); 0 when the value was pushed onto the real operand stack
+/// (non-trivial tags need a real clone).
+unsafe extern "C" fn t2_ivar_get(
+    vm: *mut crate::vm::Vm,
+    oid: i64,
+    sym: i64,
+    cid: i64,
+    out: *mut i64,
+) -> i64 {
     let vm = unsafe { &mut *vm };
     let name_id = SymId(sym as u32);
     let id = crate::value::ObjId(oid as u32);
-    match vm.heap.instance(id).ivar_get(name_id) {
-        Some(v) => {
-            if t2_tags().trivial_mask & (1u64 << tag_of(v)) != 0 {
-                let w = value_words(v);
-                unsafe {
-                    out.write(w[0]);
-                    out.add(1).write(w[1]);
-                }
-                1
-            } else {
-                let c = v.clone();
-                vm.stack.push(c);
-                0
-            }
+    let inst = vm.heap.instance(id);
+    let slot =
+        crate::vm::lookup::ivar_slot_cached(&mut vm.ivar_caches, inst, name_id, cid as u32);
+    let v = inst.ivars.read_slot_raw(slot);
+    if t2_tags().trivial_mask & (1u64 << tag_of(&v)) != 0 {
+        let w = value_words(&v);
+        // `v` is a clone; trivially-tagged values have no Drop side
+        // effects, so handing the words over is ownership-clean.
+        std::mem::forget(v);
+        unsafe {
+            out.write(w[0]);
+            out.add(1).write(w[1]);
         }
-        None => {
-            let w = value_words(&Value::Nil);
-            unsafe {
-                out.write(w[0]);
-                out.add(1).write(w[1]);
-            }
-            1
-        }
+        1
+    } else {
+        vm.stack.push(v);
+        0
     }
 }
 
@@ -495,10 +497,12 @@ unsafe extern "C" fn t2_ivar_get(vm: *mut crate::vm::Vm, oid: i64, sym: i64, out
 /// arm byte for byte, including the frozen guard (which can raise —
 /// `ip` is stamped first so the FrozenError's backtrace line is the store
 /// op's, exactly as `step()` would report it; found by the wave-4 acid
-/// battery, latent since wave 3).
+/// battery, latent since wave 3) and the per-site ivar slot cache
+/// (`cid`, ADR 0035 Ph4/5).
 unsafe extern "C" fn t2_ivar_set_v(
     vm: *mut crate::vm::Vm,
     sym: i64,
+    cid: i64,
     w0: i64,
     w1: i64,
     ip: i64,
@@ -522,7 +526,14 @@ unsafe extern "C" fn t2_ivar_set_v(
     }
     match &self_val {
         Value::Object(id) => {
-            vm.heap.instance_mut(*id).ivar_set(name_id, v);
+            let inst = vm.heap.instance_mut(*id);
+            let slot = crate::vm::lookup::ivar_slot_cached(
+                &mut vm.ivar_caches,
+                inst,
+                name_id,
+                cid as u32,
+            );
+            inst.ivars.write_slot(slot, v);
         }
         Value::Class(c) => {
             c.ivars.borrow_mut().insert(name_id, v);
@@ -766,7 +777,8 @@ unsafe extern "C" fn t2_lite_ivar_get(
     let vm = unsafe { &mut *vm };
     let name_id = SymId(sym as u32);
     let id = crate::value::ObjId(oid as u32);
-    match vm.heap.instance(id).ivars.get(&name_id) {
+    let inst = vm.heap.instance(id);
+    match inst.ivars.get(&inst.class, name_id) {
         Some(v) => {
             if t2_tags().trivial_mask & (1u64 << tag_of(v)) != 0 {
                 let w = value_words(v);
@@ -821,7 +833,9 @@ unsafe extern "C" fn t2_lite_ivar_set(
     }
     match &*sv {
         Value::Object(id) => {
-            vm.heap.instance_mut(*id).ivars.insert(name_id, v);
+            let inst = vm.heap.instance_mut(*id);
+            let class = inst.class.clone();
+            inst.ivars.insert(&class, name_id, v);
         }
         Value::Class(c) => {
             c.ivars.borrow_mut().insert(name_id, v);
@@ -1363,17 +1377,21 @@ unsafe extern "C" fn t2_store_local(vm: *mut crate::vm::Vm, slot: i64) {
     }
 }
 
-unsafe extern "C" fn t2_load_ivar(vm: *mut crate::vm::Vm, name_id: i64) {
+unsafe extern "C" fn t2_load_ivar(vm: *mut crate::vm::Vm, name_id: i64, cid: i64) {
     let vm = unsafe { &mut *vm };
     let name_id = SymId(name_id as u32);
     let self_val = vm.frames.last().expect("ICE: LoadIvar no frame").self_val.clone();
     let v = match &self_val {
-        Value::Object(id) => vm
-            .heap
-            .instance(*id)
-            .ivar_get(name_id)
-            .cloned()
-            .unwrap_or(Value::Nil),
+        Value::Object(id) => {
+            let inst = vm.heap.instance(*id);
+            let slot = crate::vm::lookup::ivar_slot_cached(
+                &mut vm.ivar_caches,
+                inst,
+                name_id,
+                cid as u32,
+            );
+            inst.ivars.read_slot_raw(slot)
+        }
         Value::Class(c) => c.ivars.borrow().get(&name_id).cloned().unwrap_or(Value::Nil),
         Value::Hash(id) => vm.heap.hash_ivar_get(*id, name_id).unwrap_or(Value::Nil),
         Value::Array(id) => vm.heap.array_ivar_get(*id, name_id).unwrap_or(Value::Nil),
@@ -1519,8 +1537,8 @@ pub(crate) fn t2_admit_lite(proto: &Proto, ctx: &T2Ctx) -> Result<u16, String> {
             | Op::LoadFalse
             | Op::LoadSymbol(_)
             | Op::LoadSelf
-            | Op::LoadIvar(_)
-            | Op::StoreIvar(_)
+            | Op::LoadIvar(..)
+            | Op::StoreIvar(..)
             | Op::Dup
             | Op::Pop
             | Op::Swap
@@ -2913,7 +2931,7 @@ fn emit_op(cg: &mut Cg, fb: &mut FunctionBuilder, i: usize) -> bool {
         // ------------------------------------------------------------------
         // Ivars.
         // ------------------------------------------------------------------
-        Op::LoadIvar(sym) if cg.inline_on => {
+        Op::LoadIvar(sym, cid) if cg.inline_on => {
             let snap = cg.snapshot();
             let mut fail_b: Option<Block> = None;
             let sw0 = cg.self_w0.expect("self regs");
@@ -2927,6 +2945,7 @@ fn emit_op(cg: &mut Cg, fb: &mut FunctionBuilder, i: usize) -> bool {
             cg.flush(fb);
             let oid = fb.ins().ushr_imm(sw0, 32);
             let symc = fb.ins().iconst(types::I64, sym.0 as i64);
+            let cidc = fb.ins().iconst(types::I64, cid as i64);
             let out = cg.scratch.expect("scratch slot");
             if cg.lite {
                 let call = fb.ins().call(cg.h.lite_ivar_get, &[vm, oid, symc, out]);
@@ -2943,7 +2962,7 @@ fn emit_op(cg: &mut Cg, fb: &mut FunctionBuilder, i: usize) -> bool {
                 cg.vst.push(VVal::raw(w0, w1));
                 return false;
             }
-            let call = fb.ins().call(cg.h.ivar_get, &[vm, oid, symc, out]);
+            let call = fb.ins().call(cg.h.ivar_get, &[vm, oid, symc, cidc, out]);
             let ret = fb.inst_results(call)[0];
             cg.invalidate_mem();
             // ret==1 → value words in scratch (stay virtual); ret==0 → the
@@ -2968,7 +2987,7 @@ fn emit_op(cg: &mut Cg, fb: &mut FunctionBuilder, i: usize) -> bool {
             cg.vst.push(VVal::raw(w0, w1));
             false
         }
-        Op::StoreIvar(sym) if cg.inline_on && !cg.vst.is_empty() => {
+        Op::StoreIvar(sym, cid) if cg.inline_on && !cg.vst.is_empty() => {
             let v = cg.vst.pop().expect("checked nonempty");
             cg.flush(fb);
             let symc = fb.ins().iconst(types::I64, sym.0 as i64);
@@ -2997,8 +3016,11 @@ fn emit_op(cg: &mut Cg, fb: &mut FunctionBuilder, i: usize) -> bool {
                 cg.guard(fb, ok, &mut fail_b, &snap, i);
                 return false;
             }
+            let cidc = fb.ins().iconst(types::I64, cid as i64);
             let ipc = fb.ins().iconst(types::I64, i as i64);
-            let call = fb.ins().call(cg.h.ivar_set_v, &[vm, symc, v.w0, v.w1, ipc]);
+            let call = fb
+                .ins()
+                .call(cg.h.ivar_set_v, &[vm, symc, cidc, v.w0, v.w1, ipc]);
             let st = fb.inst_results(call)[0];
             cg.check_status(fb, st);
             cg.invalidate_mem();
@@ -3108,10 +3130,11 @@ fn emit_op(cg: &mut Cg, fb: &mut FunctionBuilder, i: usize) -> bool {
             cg.invalidate_mem();
             false
         }
-        Op::LoadIvar(sym) => {
+        Op::LoadIvar(sym, cid) => {
             cg.flush(fb);
             let c = fb.ins().iconst(types::I64, sym.0 as i64);
-            fb.ins().call(cg.h.load_ivar, &[vm, c]);
+            let cidc = fb.ins().iconst(types::I64, cid as i64);
+            fb.ins().call(cg.h.load_ivar, &[vm, c, cidc]);
             cg.invalidate_mem();
             false
         }
@@ -3470,8 +3493,8 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize, ctx: &T2Ctx) -> Opt
     let f_entry_info = decl(&mut module, "t2_entry_info", "p", false)?;
     let f_reserve = decl(&mut module, "t2_stack_reserve", "i", false)?;
     let f_poll = decl(&mut module, "t2_poll", "i", true)?;
-    let f_ivar_get = decl(&mut module, "t2_ivar_get", "iip", true)?;
-    let f_ivar_set_v = decl(&mut module, "t2_ivar_set_v", "iiii", true)?;
+    let f_ivar_get = decl(&mut module, "t2_ivar_get", "iiip", true)?;
+    let f_ivar_set_v = decl(&mut module, "t2_ivar_set_v", "iiiii", true)?;
     let f_case_eq_v = decl(&mut module, "t2_case_eq_v", "iiii", true)?;
     let f_case_eq_s = decl(&mut module, "t2_case_eq_s", "ii", true)?;
     let f_return_v = decl(&mut module, "t2_return_v", "iiii", true)?;
@@ -3485,7 +3508,7 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize, ctx: &T2Ctx) -> Opt
     let f_load_self = decl(&mut module, "t2_load_self", "", false)?;
     let f_load_local = decl(&mut module, "t2_load_local", "i", false)?;
     let f_store_local = decl(&mut module, "t2_store_local", "i", false)?;
-    let f_load_ivar = decl(&mut module, "t2_load_ivar", "i", false)?;
+    let f_load_ivar = decl(&mut module, "t2_load_ivar", "ii", false)?;
     let f_dup = decl(&mut module, "t2_dup", "", false)?;
     let f_pop = decl(&mut module, "t2_pop", "", false)?;
     let f_swap = decl(&mut module, "t2_swap", "", false)?;

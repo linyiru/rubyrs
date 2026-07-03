@@ -962,6 +962,14 @@ struct PostPreambleSnapshot {
     /// user code that addressed them. Pairs with the
     /// `cache_counter` restoration below.
     call_caches_len: usize,
+    /// Twin of `call_caches_len` for the ivar-site cache vector
+    /// (ADR 0035 Ph4/5): reset truncates `ivar_caches` back to this
+    /// length so a post-reset compile reusing ivar cids from the
+    /// restored baseline can never read a stale (class_ptr, slot)
+    /// entry left by dropped user code (which could alias a DIFFERENT
+    /// ivar name onto the same cid — wrong-slot serves, not just
+    /// misses).
+    ivar_caches_len: usize,
     /// `vm.cache_counter` at preamble completion. The compiler
     /// casts this counter to `u16` when emitting `Op::Call*`
     /// cache-site ids, so a long-lived Runtime that runs many
@@ -970,7 +978,7 @@ struct PostPreambleSnapshot {
     /// returning the wrong cached `Method`. Restoring to the
     /// post-preamble value caps the counter at a known-safe
     /// baseline.
-    cache_counter: u32,
+    cache_counter: crate::compiler::CidGen,
     /// `vm.method_gen` at preamble completion. `reset()` bumps
     /// this monotonically (wrapping_add(1) per call) so that
     /// CallCache entries' generation check fires fresh — which
@@ -1328,6 +1336,7 @@ impl PostPreambleSnapshot {
             heap_next_gc: rt.vm.heap.next_gc,
             interner_len: rt.vm.interner.len(),
             call_caches_len: rt.vm.call_caches.len(),
+            ivar_caches_len: rt.vm.ivar_caches.len(),
             cache_counter: rt.vm.cache_counter,
             method_gen: rt.vm.method_gen,
             const_gen: rt.vm.const_gen,
@@ -1994,6 +2003,7 @@ impl Runtime {
         // unbounded — `cache_counter as u16` would eventually
         // wrap and start aliasing unrelated call sites.
         self.vm.call_caches.truncate(snapshot.call_caches_len);
+        self.vm.ivar_caches.truncate(snapshot.ivar_caches_len);
         self.vm.cache_counter = snapshot.cache_counter;
         // `vm.fuel` and `deadline_at` are NOT restored here.
         // Both are per-eval: `eval()` re-anchors `vm.fuel` from
@@ -2404,7 +2414,7 @@ impl Runtime {
             let total_ops: usize = self.vm.protos.iter().map(|pr| pr.code.len()).sum();
             eprintln!(
                 "startup-prof: protos={} ops={} interner={} cache_counter={}",
-                self.vm.protos.len(), total_ops, self.vm.interner.len(), self.vm.cache_counter,
+                self.vm.protos.len(), total_ops, self.vm.interner.len(), self.vm.cache_counter.call,
             );
             #[cfg(feature = "preamble-cache")]
             eprintln!(
@@ -3694,8 +3704,10 @@ self.eval_inner(
             compiler::mark_frozen_string_literal(&mut self.vm.protos, fsl_start);
         }
         STARTUP_PROF_COMPILE_NS.fetch_add(_t_compile.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
-        let cache_count = self.vm.cache_counter as usize;
+        let cache_count = self.vm.cache_counter.call as usize;
         self.vm.ensure_call_caches(cache_count);
+        let ivar_count = self.vm.cache_counter.ivar as usize;
+        self.vm.ensure_ivar_caches(ivar_count);
         // Preamble-cache recording: on a cache miss, load_preamble
         // arms this Vec and each preamble chunk's entry proto lands
         // here in execution order — the recording IS the replay

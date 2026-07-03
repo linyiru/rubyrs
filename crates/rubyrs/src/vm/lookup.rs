@@ -163,7 +163,58 @@ impl IcStats {
         0.0
     }
 }
+/// Per-ivar-site inline cache (ADR 0035 Ph4/5): one slot per
+/// `Op::LoadIvar` / `Op::StoreIvar` / `Op::IncIvar*` site, indexed by
+/// the op's cid (`CidGen::ivar` space — separate from call cids so
+/// neither dense vector inflates the other). A hit — the receiver's
+/// REAL class ptr (`Rc::as_ptr(inst.class)`, the ivar-shape owner)
+/// equals `class_ptr` — turns the access into a direct slot load/store.
+///
+/// NO generation / invalidation: class ivar shapes are monotonic
+/// (names only ever ADD, slots never renumber — `Class::ivar_shape`),
+/// so a cached slot can never go stale for its class. `class_ptr == 0`
+/// = unfilled. The class-ptr-reuse hazard (a dead class's allocation
+/// address reused by a new class) is the same one `CallCacheEntry`
+/// accepts.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct IvarSiteCache {
+    pub(crate) class_ptr: usize,
+    pub(crate) slot: u32,
+}
+
 const TOPLEVEL_METHOD_CACHE_KEY: usize = usize::MAX;
+
+/// Resolve the flat-ivar slot for `inst`'s class at ivar-cache site
+/// `cid` (ADR 0035 Ph4/5): class-ptr-guarded cache hit -> cached slot;
+/// miss -> shape intern (a PERMANENT verdict — slots never renumber)
+/// + cache fill. `cid == u32::MAX` = uncached site (id space
+/// exhausted / synthesized op). A free function over the cache vector
+/// so callers can hold a `&Instance` borrowed from `Vm::heap` while
+/// mutating the disjoint `Vm::ivar_caches` field.
+#[inline]
+pub(crate) fn ivar_slot_cached(
+    caches: &mut Vec<IvarSiteCache>,
+    inst: &crate::value::Instance,
+    name_id: SymId,
+    cid: u32,
+) -> u32 {
+    let cls_ptr = Rc::as_ptr(&inst.class) as usize;
+    let idx = cid as usize;
+    if cid != u32::MAX
+        && let Some(e) = caches.get(idx)
+        && e.class_ptr == cls_ptr
+    {
+        return e.slot;
+    }
+    let slot = inst.class.ivar_slot_intern(name_id);
+    if cid != u32::MAX {
+        if idx >= caches.len() {
+            caches.resize(idx + 1, IvarSiteCache::default());
+        }
+        caches[idx] = IvarSiteCache { class_ptr: cls_ptr, slot };
+    }
+    slot
+}
 #[derive(Clone, Default)]
 pub(crate) struct CallCache {
     pub(crate) ways: [CallCacheEntry; IC_WAYS],
@@ -179,6 +230,14 @@ impl Vm {
     pub(crate) fn ensure_call_caches(&mut self, n: usize) {
         if self.call_caches.len() < n {
             self.call_caches.resize(n, CallCache::default());
+        }
+    }
+
+    /// Twin of `ensure_call_caches` for the ivar-site cache vector
+    /// (`CidGen::ivar` id space, ADR 0035 Ph4/5).
+    pub(crate) fn ensure_ivar_caches(&mut self, n: usize) {
+        if self.ivar_caches.len() < n {
+            self.ivar_caches.resize(n, IvarSiteCache::default());
         }
     }
 
