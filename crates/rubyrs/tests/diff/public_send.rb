@@ -1,6 +1,7 @@
-# public_send dispatches a method by name (rubyrs treats it like
-# send — visibility isn't modeled). Discovery: P3 Jekyll spike —
-# jekyll's LogAdapter forwards via writer.public_send(level, …).
+# public_send dispatches a method by name, calling PUBLIC methods
+# only (the visibility matrix lives in send_family_visibility.rb).
+# Discovery: P3 Jekyll spike — jekyll's LogAdapter forwards via
+# writer.public_send(level, …).
 class W
   def greet(n); "hi #{n}"; end
 end

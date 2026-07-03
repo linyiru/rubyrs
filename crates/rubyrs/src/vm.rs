@@ -2414,6 +2414,17 @@ pub(crate) struct Vm {
     /// transitively apply — anything that method itself calls
     /// runs through the normal check.
     pub(crate) bypass_visibility_once: bool,
+    /// Single-shot sibling of `bypass_visibility_once` set by the
+    /// `public_send` recogniser: the re-entered dispatch must
+    /// enforce STRICT public visibility on the resolved method —
+    /// CRuby's `public_send` raises the private/protected
+    /// NoMethodError even for the literal-`self` receiver and the
+    /// protected-kin caller (both exemptions that a normal
+    /// explicit-receiver call honours). Same consume-at-the-
+    /// dispatch-boundary discipline as `bypass_visibility_once`
+    /// (leak-proof when dispatch bottoms out early), and the same
+    /// non-transitivity: only the re-aimed call itself is strict.
+    pub(crate) require_public_once: bool,
     /// True for the duration of a plain `Op::Call` / `Op::CallNoRecv`
     /// dispatch: the call did NOT use keyword syntax (the compiler emits
     /// `Op::Call` only when `kwargs_trailing == false`), so an explicit-
@@ -3083,6 +3094,7 @@ impl Vm {
             pending_method_break: None,
             suppress_call_result_push: false,
             bypass_visibility_once: false,
+            require_public_once: false,
             trailing_hash_positional: false,
             force_primitive_dispatch: false,
             pending_block_arg: None,
@@ -3704,6 +3716,14 @@ impl Vm {
         std::mem::replace(&mut self.bypass_visibility_once, false)
     }
 
+    /// Consume the strict-public flag set by the `public_send`
+    /// recogniser — the `take_bypass_visibility` twin (same
+    /// consume-at-the-dispatch-boundary discipline; see the
+    /// `require_public_once` field doc).
+    pub(crate) fn take_require_public(&mut self) -> bool {
+        std::mem::replace(&mut self.require_public_once, false)
+    }
+
     /// Compute the maximum SymId still referenced by long-lived
     /// VM tables that must stay valid across `Runtime::reset` —
     /// `host_fns` (host-registered Ruby methods), and the two
@@ -3774,6 +3794,7 @@ impl Vm {
         self.pending_method_break = None;
         self.suppress_call_result_push = false;
         self.bypass_visibility_once = false;
+        self.require_public_once = false;
         // Boundary stack for AlreadyCaught propagation through
         // native iter drivers. Cleared here so a panic-aborted
         // dispatch_until (caught by Runtime::eval) doesn't leave

@@ -215,6 +215,10 @@ pub(crate) struct FiberSnapshot {
     pub(crate) pending_loop_transfer: Option<LoopTransfer>,
     pub(crate) suppress_call_result_push: bool,
     pub(crate) bypass_visibility_once: bool,
+    /// `public_send` strict-visibility one-shot — `bypass`'s twin
+    /// (see `Vm::require_public_once`); Fiber-local for the same
+    /// reason.
+    pub(crate) require_public_once: bool,
     #[cfg(feature = "regex")]
     pub(crate) last_match: Option<LastMatch>,
 }
@@ -258,6 +262,10 @@ impl FiberSnapshot {
             &mut vm.bypass_visibility_once,
             &mut self.bypass_visibility_once,
         );
+        std::mem::swap(
+            &mut vm.require_public_once,
+            &mut self.require_public_once,
+        );
         #[cfg(feature = "regex")]
         std::mem::swap(&mut vm.last_match, &mut self.last_match);
         // The folded mask is a cache over swapped fields — refresh it
@@ -285,6 +293,7 @@ impl FiberSnapshot {
             pending_loop_transfer: None,
             suppress_call_result_push: false,
             bypass_visibility_once: false,
+            require_public_once: false,
             #[cfg(feature = "regex")]
             last_match: None,
         }
@@ -869,6 +878,10 @@ mod tests {
             !snap.bypass_visibility_once,
             "bypass_visibility_once must start false",
         );
+        assert!(
+            !snap.require_public_once,
+            "require_public_once must start false",
+        );
         #[cfg(feature = "regex")]
         assert!(snap.last_match.is_none(), "last_match must start None");
     }
@@ -937,6 +950,7 @@ mod tests {
         vm.break_signaled = true;
         vm.suppress_call_result_push = true;
         vm.bypass_visibility_once = true;
+        vm.require_public_once = true;
         vm.method_return = Some(crate::value::Value::Int(77));
 
         let before_stack_len = vm.stack.len();
@@ -944,6 +958,7 @@ mod tests {
         let before_break = vm.break_signaled;
         let before_supp = vm.suppress_call_result_push;
         let before_bypass = vm.bypass_visibility_once;
+        let before_reqpub = vm.require_public_once;
         let before_method_return_is_some = vm.method_return.is_some();
 
         let mut snap = FiberSnapshot::empty();
@@ -955,6 +970,7 @@ mod tests {
         assert_eq!(vm.break_signaled, before_break);
         assert_eq!(vm.suppress_call_result_push, before_supp);
         assert_eq!(vm.bypass_visibility_once, before_bypass);
+        assert_eq!(vm.require_public_once, before_reqpub);
         assert_eq!(vm.method_return.is_some(), before_method_return_is_some);
     }
 

@@ -456,6 +456,11 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn string_search() { run_diff("string_search"); }
 #[test] fn visibility() { run_diff("visibility"); }
 #[test] fn visibility_error_message() { run_diff("visibility_error_message"); }
+// The send-family visibility matrix: public_send strict-public
+// enforcement (incl. literal-self / protected-kin), send/__send__
+// bypass, method_missing routing on visibility failure, respond_to?
+// truthy include_all. CRuby 3.4 probed; see the fixture header.
+#[test] fn send_family_visibility() { run_diff("send_family_visibility"); }
 #[test] fn require_caller_dir_isolation() { run_diff("require_caller_dir_isolation"); }
 #[test] fn string_chomp() { run_diff("string_chomp"); }
 #[test] fn multiwrite_global() { run_diff("multiwrite_global"); }

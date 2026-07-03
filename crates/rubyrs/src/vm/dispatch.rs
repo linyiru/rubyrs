@@ -3396,6 +3396,47 @@ impl Vm {
             Err(e) => return SendBypass::Handled(Err(e)),
         };
         let new_argc = args.len() - 1;
+        // `public_send` — CRuby-exact STRICT visibility: only public
+        // methods are callable; private/protected raise the
+        // kind-appropriate NoMethodError even for the literal-`self`
+        // receiver and the protected-kin caller (probed on CRuby
+        // 3.4.1). Re-aim as an EXPLICIT-recv call with the
+        // `require_public_once` one-shot so the canonical Object /
+        // class-singleton arms' `check_method_visibility` enforces
+        // it; the bare form re-aims on the surrounding `self` when
+        // that self is an Object or Class (`public_send(:m)` ≡
+        // `self.public_send(:m)`). Non-Object/Class bare selves
+        // (toplevel main/nil) keep the legacy bypass shape below —
+        // rubyrs doesn't model toplevel `def`s as private Object
+        // methods, so strict enforcement there would break them
+        // (documented divergence: CRuby raises for
+        // `public_send(:toplevel_meth)`).
+        if name == "public_send" {
+            let recv = match recv_opt {
+                Some(r) => Some(r),
+                None => match self.frames.last().map(|f| &f.self_val) {
+                    Some(Value::Object(_)) | Some(Value::Class(_)) => {
+                        Some(self.frames.last().expect("checked above").self_val.clone())
+                    }
+                    _ => None,
+                },
+            };
+            if let Some(recv) = recv {
+                self.require_public_once = true;
+                self.stack.push(recv);
+                for a in args.into_iter().skip(1) {
+                    self.stack.push(a);
+                }
+                return SendBypass::Handled(self.do_call(target_sym, new_argc, false, u32::MAX));
+            }
+            // Bare public_send on a non-Object self: legacy re-aim
+            // (below) — implicit-self resolution, no strict check.
+            self.bypass_visibility_once = true;
+            for a in args.into_iter().skip(1) {
+                self.stack.push(a);
+            }
+            return SendBypass::Handled(self.do_call(target_sym, new_argc, true, u32::MAX));
+        }
         // Set bypass_visibility BEFORE recursing so the inner
         // do_call's `take_bypass_visibility()` sees it. Note:
         // recursing through the same `do_call` entry preserves
@@ -5097,14 +5138,32 @@ impl Vm {
     ///
     /// `bypass_visibility` is the `send` / `__send__` one-shot
     /// override consumed by `do_call` before this call.
+    ///
+    /// `require_public` is the `public_send` one-shot (also consumed
+    /// at the `do_call` boundary): CRuby's `public_send` calls ONLY
+    /// public methods, raising the private/protected NoMethodError
+    /// even where a normal explicit-receiver call is exempt (the
+    /// literal-`self` private form and the protected-kin caller).
     fn check_method_visibility(
         &self,
         m: &Method,
         recv: &Value,
         name: &str,
         bypass_visibility: bool,
+        require_public: bool,
     ) -> Result<(), Trap> {
         let vis = m.visibility.get();
+        if require_public && vis != Visibility::Public {
+            return Err(self.trap(RubyError::NoMethodError {
+                kind: if vis == Visibility::Private {
+                    crate::error::NoMethodErrorKind::Private
+                } else {
+                    crate::error::NoMethodErrorKind::Protected
+                },
+                method: name.to_string(),
+                recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(recv)),
+            }));
+        }
         // Literal-`self` receiver exemption (private methods are
         // callable as `self.foo`). Object identity for instance
         // receivers; Rc identity for Class receivers (`self.helper`
@@ -7826,6 +7885,9 @@ impl Vm {
         // — the flag would survive and silently bypass the next
         // call's vis check).
         let bypass_visibility = self.take_bypass_visibility();
+        // `public_send` strict-visibility twin — consumed at the same
+        // boundary for the same leak-proofing (see the field doc).
+        let require_public = self.take_require_public();
         // One-shot primitive-dispatch request from a primitive-alias
         // forwarder (`Op::ApplyCallPrimitive`). Taken at the boundary
         // (like `bypass_visibility`) so it applies to THIS dispatch
@@ -9978,7 +10040,10 @@ impl Vm {
                         ),
                     })),
                 };
-                let include_private = matches!(args.get(1), Some(Value::Bool(true)));
+                // CRuby: `include_all` is evaluated for TRUTHINESS (any
+                // truthy second arg counts — `respond_to?(:m, :yes)` is
+                // include-all; probed on CRuby 3.4.1), not `== true`.
+                let include_private = args.get(1).is_some_and(|v| v.is_truthy());
                 if self.responds_to(&self_val, lookup_name, include_private) {
                     self.stack.push(Value::Bool(true));
                     return Ok(());
@@ -10480,7 +10545,22 @@ impl Vm {
                 if self.nfa_stats.is_some() {
                     self.record_nfa_stat(name_id, args.len(), &m, false);
                 }
-                self.check_method_visibility(&m, &recv, &name, bypass_visibility)?;
+                // CRuby routes a visibility-failed call to
+                // `method_missing` (the default
+                // BasicObject#method_missing re-raises the same
+                // private/protected NoMethodError, so behaviour is
+                // unchanged without a user override; with one — e.g.
+                // a proxy whose private helper name leaks through
+                // `public_send` — the override wins, matching CRuby
+                // 3.4.1). Probed only on the cold failure path.
+                if let Err(e) =
+                    self.check_method_visibility(&m, &recv, &name, bypass_visibility, require_public)
+                {
+                    if self.try_method_missing(&recv, name_id, args.into_vec(), None)? {
+                        return Ok(());
+                    }
+                    return Err(e);
+                }
                 self.invoke_method(m, recv.clone(), args.into_vec())?;
                 return Ok(());
             }
@@ -10616,9 +10696,12 @@ impl Vm {
                 // metaclass `is_a?` walk rubyrs doesn't model. The
                 // class-singleton fast path rejects non-Public and
                 // falls through to here, so the error shape stays in
-                // one place.
-                if m.visibility.get() == Visibility::Private {
-                    self.check_method_visibility(&m, &recv, &name, bypass_visibility)?;
+                // one place. Under `require_public` (a re-aimed
+                // `public_send`) the strict check ALSO catches
+                // protected class methods — `X.public_send(:prot)`
+                // must raise like CRuby.
+                if m.visibility.get() == Visibility::Private || require_public {
+                    self.check_method_visibility(&m, &recv, &name, bypass_visibility, require_public)?;
                 }
                 let target_self = recv.clone();
                 return self.invoke_method(m, target_self, args.into_vec());
@@ -15285,7 +15368,10 @@ impl Vm {
                     ),
                 })),
             };
-            let include_private = matches!(args.get(1), Some(Value::Bool(true)));
+            // CRuby: `include_all` is evaluated for TRUTHINESS (any
+            // truthy second arg counts — `respond_to?(:m, :yes)` is
+            // include-all; probed on CRuby 3.4.1), not `== true`.
+            let include_private = args.get(1).is_some_and(|v| v.is_truthy());
             if self.responds_to(&recv, lookup_name, include_private) {
                 self.stack.push(Value::Bool(true));
                 return Ok(());
@@ -22479,6 +22565,14 @@ impl Vm {
         // it before delegating to `do_call`, which DOES enforce
         // visibility — so `send(:priv, &nil)` still bypasses.
         let bypass_visibility = self.take_bypass_visibility();
+        // Consume-and-discard the `public_send` strict-visibility
+        // one-shot at this boundary too (leak-proofing parity with
+        // `bypass_visibility`). The block form doesn't enforce
+        // visibility anywhere today (pre-existing gap: do_call_block
+        // never calls check_method_visibility), so block-form
+        // `public_send(:m) { }` keeps the legacy lenient shape —
+        // documented divergence, narrower than before.
+        let _ = self.take_require_public();
         // Monomorphic inline-cache fast path for the common shape:
         // `obj.method(args) { block }` where `obj` is a user Object,
         // the block is a literal, and `method` is a plain `def`. This
