@@ -142,6 +142,81 @@ heap/GC rewrite (every `ObjId` becomes a pointer; the slab, the free list, marki
 `class_ptrs`/view tables all change) — its own ADR, deferred. The broad inline-object-access win
 (Phases 3+5: obj-calls and ivar reads beat YJIT) is banked independent of it.
 
+### Phases 4/5 FINAL — FLAT ivar layout: per-class union shapes + slot-indexed storage (✅ shipped 2026-07-02)
+
+The scan-based Phase 4/5 above was superseded by the full storage change it deferred: ivar
+access is now a **guarded offset load**, not a scan.
+
+**Shape strategy — per-class UNION table** (`Class::ivar_shape`: `name → slot`, monotonic:
+names only ever ADD and a slot, once handed out, never renumbers). Chosen over CRuby-style
+shape-transition trees because it needs NO escape-hatch second representation (removal,
+out-of-order assignment, and reflection all stay in the one model) and no transition machinery;
+the cost — instances assigning in different orders share slot numbering, and per-object holes
+for slots an object never assigned — is bounded by the class's own name count (rubocop's Node
+family is monomorphic-init, the driving case). Monotonicity is the invalidation story: baked
+`(class, slot)` pairs can go class-stale but never slot-stale, so no generation counter exists
+anywhere in the design.
+
+**Instance storage** (`IvarTable`): `slots: SmallVec<[Value;4]>` indexed by the class shape
+(lazily grown; HOLES hold `Nil`, so the hot read path loads `slots[slot]` raw and undefined
+ivars read as nil for free) + `order: SmallVec<[u32;4]>` (per-object ASSIGNMENT order — CRuby's
+`instance_variables` contract is per-object, not per-class — doubling as the defined-set for
+iteration) + a `bits: u64` O(1) defined-set for the write path (slot ≥ 64 falls back to an
+order scan). Same 104-byte footprint as the scan table; `HeapObj` did not grow. The snapshot
+image stays NAME-keyed (`(SymId, ValueImage)` in assignment order), so restore re-interns into
+the restored class's shape and the image format is numbering-independent.
+
+**The fast paths, one per tier:**
+- **Interpreter**: `LoadIvar`/`StoreIvar`/`IncIvar*` ops carry a per-site cid into
+  `Vm::ivar_caches` (its OWN id space — `CidGen { call, ivar }` — so neither dense cache vec
+  inflates the other; persisted through preamble-cache [RBPC v3] + snapshot [RRS1 v4] +
+  `reset()` truncation). Hit = class ptr compare → direct slot load/store.
+- **Polymorphism-proofing** (the wall the first cut hit): rubocop visits ~40 Node SUBCLASSES
+  through shared methods/getter protos, thrashing any class-keyed cache. Sibling subclasses
+  build shapes through the same `initialize` order ⇒ same numbering, so the caches verify by
+  CONTENT — `names[slot] == sym`, one indexed borrow-flag-free compare
+  (`Class::ivar_shape_name_at`) — and hit across subclasses exactly.
+- **Frame-free getter serves** (dispatch's hottest ivar path): a per-proto content-verified
+  slot cell (`Proto::getter_slot`, runtime-only) — no probe on the serve.
+- **jit-native**: ONE fused entry primitive `jit_self_ivars(vm, self, frame_block)` returns
+  the slot-array base+len AND resolves every baked ivar sym behind a per-frame class memo
+  (same class as the last frame ⇒ zero resolution work). Compiled reads are a branch-free
+  bounds-check + `base + slot*16` load on entry-loaded SSA slots — slot resolution is
+  loop-invariant, so per-READ guards (first cut, measured +39% on `bench_getter`) were hoisted
+  out entirely. The Phase-5 inline scan loop, `jit_ivar_slot`, and the per-site cells are gone.
+- **tier-2 helpers**: borrow-free shape scan (`ivar_slot_lookup_fast` — the class's `names`
+  vec is shared by every instance, i.e. always hot) — measured faster than touching a
+  per-site cache line per op.
+
+**Measured** (Apple Silicon, interleaved A/B vs the unmodified-HEAD baseline binary):
+- Micro, 6-ivar object, tier2: deep ivar read **5.07 → 2.18 ns** (depth-INDEPENDENT; the old
+  scan paid per slot depth); first-ivar read 1.50 → 2.07 ns (the one shape that regresses —
+  the old scan's best case); CRuby 13.4 / YJIT 14.0 on the same loop.
+- 40-subclass polymorphic getter micro: interp −7%/−10%; tier2 par.
+- `bench_getter` (ivar read in a native loop): 0.164ms — still beats YJIT (0.194); `bench_hammer`
+  0.60 vs baseline 0.50 (+20%, the per-frame entry cost on 1-read-per-call bodies — still beats
+  YJIT 0.70). The tradeoff is explicit: ~1ns/frame of entry memo work buys depth-independence
+  and polymorphism-proofness.
+- walkonly big1 (the rubocop cop walk): par within noise both modes (LoadIvar is ~3.7% of walk
+  ops; the interpreter deltas sit inside the ±3% machine noise). rubocop f1/big1/batch20 output
+  byte-identical to baseline, tier on and off; RSS on the big1 run +0.3–0.5%.
+- fib canary unchanged (8.1ms, beats YJIT's 11.0).
+
+**Gates**: diff_cruby 1066/0 in all four configs (default / JIT_NATIVE / TIER2 /
+TIER2+THRESHOLD); STRESS_GC sweep incl. the new `ivar_reflection_battery` fixture (order,
+defined?-vs-nil, remove/re-add, frozen, dup/clone sharing, >8-name shapes, sibling-subclass
+order independence) at CRuby parity; a new snapshot roundtrip test
+(`restore_flat_ivars_order_and_sharing`) proves order + shared refs + holes survive
+image→restore; rubocop image save→load byte-identical to cold.
+
+**Phase 6 (if any)**: the remaining ivar-side costs are (a) the per-frame entry memo on
+1-read-per-call JIT bodies (`bench_hammer`'s ~1ns — fusable further only by shrinking the
+primitive itself) and (b) the `oid → slab` indirection ADR 0036 already rejected re-litigating.
+A future direction with better leverage than either: subtree-SHARED shapes (a subclass adopting
+its superclass's table by reference) would turn the content-verify into a plain pointer compare
+and shrink shape memory, at the cost of union-bloat control (a root-class heuristic). Not
+scheduled — the current design's caches already absorb the polymorphism it would address.
+
 #### Phase 5 original plan (superseded — kept for context)
 Per-node, treesum pays ~6 JIT↔primitive boundaries (`jit_self_inst` + `jit_inst_get_int` for
 `@v` + 2× `jit_inst_obj_call` for `@l`/`@r`, each of which also calls its callee). Plan to
