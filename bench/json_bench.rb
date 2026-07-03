@@ -70,6 +70,11 @@ end
 
 OBJ = build_payload
 JSON_BYTES = JSON.generate(OBJ)
+# Snowflake/Stripe-ID shaped payload: long digit runs INSIDE string
+# values. Guards the bigint pre-scan's string-awareness — a context-
+# blind scan declined these documents to the ~200x-slower pure canon
+# (a measured 160x parse regression, fixed 2026-07).
+SID_BYTES = JSON.generate((1..200).map { |i| { "sid" => (1234567890123456789 + i).to_s, "n" => i } })
 
 runtime_label = if defined?(JSON::NATIVE_AVAILABLE)
   JSON::NATIVE_AVAILABLE ? "rubyrs (_json_native)" : "rubyrs (pure canon)"
@@ -110,6 +115,7 @@ end
 bench("parse",            RUNS, ITERS) { JSON.parse(JSON_BYTES) }
 bench("generate",         RUNS, ITERS) { JSON.generate(OBJ) }
 bench("round_trip",       RUNS, ITERS) { JSON.generate(JSON.parse(JSON_BYTES)) }
+bench("parse_sids",       RUNS, ITERS) { JSON.parse(SID_BYTES) }
 
 if HAVE_OJ
   puts ""

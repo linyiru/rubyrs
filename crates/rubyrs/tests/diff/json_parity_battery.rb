@@ -239,6 +239,11 @@ tryc("hipair-badlo") { JSON.parse('["\ud800\ud800"]') }
 tryc("badesc")   { JSON.parse('["\x41"]') }
 tryc("lonelo-bytes") { JSON.parse('["\udc00"]')[0].bytes }
 
+puts "== sid payloads (verifier item 4: digit runs inside strings) =="
+p JSON.parse('{"sid":"1234567890123456789"}')
+p JSON.parse('{"s":"a\"1234567890123456789012","n":1}')
+p JSON.parse('{"s":"12345678901234567890123","n":12345678901234567890123}')
+
 puts "== error hierarchy (verifier item 7) =="
 puts (JSON::NestingError < JSON::ParserError).inspect
 puts (JSON::NestingError < JSON::JSONError).inspect

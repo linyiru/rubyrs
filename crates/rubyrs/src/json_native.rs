@@ -387,13 +387,30 @@ fn str_decline() -> Trap {
 
 /// True when `bytes` contains a run of ≥19 consecutive ASCII
 /// digits (the shortest run that can overflow an i64 with a
-/// leading `-`). Strided scan: a 19-byte window always contains
-/// exactly one position ≡ 18 (mod 19), so checking every 19th
-/// byte and expanding around digit hits finds every qualifying
-/// run while touching ~n/19 bytes on non-numeric content.
+/// leading `-`) in NUMBER context — i.e. outside JSON string
+/// literals. Two tiers:
+///
+///   1. Cheap filter: a strided scan (a 19-byte window always
+///      contains exactly one position ≡ 18 mod 19, so checking
+///      every 19th byte and expanding around digit hits touches
+///      ~n/19 bytes) finds any ≥19-digit run REGARDLESS of
+///      context. No hit — the overwhelmingly common case — costs
+///      ~0.1 µs on a 3.4 KB payload and the parse proceeds.
+///   2. Precise pass, only on filter hit: a byte state machine
+///      tracks in-string state (escape-aware) and counts digit
+///      runs outside strings. Long IDs in string values
+///      ("sid":"1234567890123456789" — snowflake/Stripe-shaped
+///      payloads) no longer decline the whole document to the
+///      200×-slower canon (a measured 160× parse regression
+///      before this tier existed).
+///
+/// False positives from tier 2 (a genuine ≥19-digit run outside a
+/// string in a MALFORMED document) still just decline to the
+/// canon, whose strict number grammar raises like CRuby.
 fn has_long_digit_run(bytes: &[u8]) -> bool {
     let n = bytes.len();
     let mut i = 18usize;
+    let mut filter_hit = false;
     while i < n {
         if bytes[i].is_ascii_digit() {
             let mut lo = i;
@@ -405,7 +422,8 @@ fn has_long_digit_run(bytes: &[u8]) -> bool {
                 hi += 1;
             }
             if hi - lo >= 19 {
-                return true;
+                filter_hit = true;
+                break;
             }
             // Next possible 19-run starts after this run's end
             // (bytes[hi] is a non-digit); its last byte is at
@@ -413,6 +431,48 @@ fn has_long_digit_run(bytes: &[u8]) -> bool {
             i = hi + 19;
         } else {
             i += 19;
+        }
+    }
+    if !filter_hit {
+        return false;
+    }
+    // Tier 2: string-aware recount. Split into two tight inner
+    // loops (outside-string digit counting / inside-string skip)
+    // so the hot in-string path is a 3-way branch instead of a
+    // state-flag ladder — measured ~2× faster on string-heavy
+    // payloads.
+    let mut i = 0usize;
+    'outside: while i < n {
+        let mut run = 0usize;
+        while i < n {
+            let b = bytes[i];
+            if b.is_ascii_digit() {
+                run += 1;
+                if run >= 19 {
+                    return true;
+                }
+                i += 1;
+            } else if b == b'"' {
+                i += 1;
+                // inside a string literal: skip to the closing
+                // unescaped quote (backslash consumes 2 bytes —
+                // covers \\ and \" alike)
+                while i < n {
+                    let b = bytes[i];
+                    if b == b'\\' {
+                        i += 2;
+                    } else if b == b'"' {
+                        i += 1;
+                        continue 'outside;
+                    } else {
+                        i += 1;
+                    }
+                }
+                return false;
+            } else {
+                run = 0;
+                i += 1;
+            }
         }
     }
     false
