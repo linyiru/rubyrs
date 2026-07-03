@@ -436,8 +436,7 @@ impl<'vm> M<'vm> {
                 } else {
                     h.pairs.push((key, node_val.clone()));
                 }
-                h.index = None;
-                h.user_index = None;
+                h.clear_indexes();
             }
         }
 

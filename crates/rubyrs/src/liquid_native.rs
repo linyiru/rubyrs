@@ -149,7 +149,7 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
         let vm = unsafe { &mut *ptr };
         let mut values = Values::default();
         {
-            let pairs = vm.heap.hash(hash_id).clone();
+            let pairs = vm.heap.hash(hash_id).to_vec();
             for (k, v) in &pairs {
                 let Value::Str(key) = k else {
                     return Ok(Value::Nil);
@@ -197,7 +197,7 @@ fn to_lvalue(vm: &mut crate::vm::Vm, v: &Value, depth: usize) -> Option<LValue> 
             LValue::Array(out)
         }
         Value::Hash(id) => {
-            let pairs = vm.heap.hash(*id).clone();
+            let pairs = vm.heap.hash(*id).to_vec();
             let mut out = Vec::with_capacity(pairs.len());
             for (k, val) in &pairs {
                 let Value::Str(key) = k else { return None };

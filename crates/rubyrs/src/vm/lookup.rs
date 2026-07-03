@@ -1738,7 +1738,7 @@ impl Vm {
         if self.any_hash_singletons
             && let Value::Hash(hid) = recv
             && let crate::heap::HeapObj::Hash(h) = self.heap.get(*hid)
-            && let Some(sc) = &h.singleton_class
+            && let Some(sc) = h.singleton_class()
         {
             if self.lookup_method_uncached(sc, name_id).is_some() {
                 return true;

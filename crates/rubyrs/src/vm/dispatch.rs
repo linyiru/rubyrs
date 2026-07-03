@@ -2100,7 +2100,7 @@ impl Vm {
                     via_tag
                 } else if self.any_hash_singletons {
                     let sc = match self.heap.get(*hid) {
-                        crate::heap::HeapObj::Hash(h) => h.singleton_class.clone(),
+                        crate::heap::HeapObj::Hash(h) => h.singleton_class().cloned(),
                         _ => None,
                     };
                     sc.and_then(|sc| self.lookup_method_uncached(&sc, mm_id))
@@ -6544,7 +6544,7 @@ impl Vm {
                     }
                     out
                 }
-                Value::Hash(hid) => g.vm.heap.hash(*hid).clone(),
+                Value::Hash(hid) => g.vm.heap.hash(*hid).to_vec(),
                 _ => return Err(g.vm.trap(RubyError::ArgumentError {
                     msg: "odd number of arguments for Hash".into(),
                 })),
@@ -6556,18 +6556,9 @@ impl Vm {
                 msg: "odd number of arguments for Hash".into(),
             }));
         };
-        let hid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj {
-            pairs,
-            default_block: None,
-            default_value: None,
-            class_tag,
-            ivars: crate::intern::FxHashMap::default(),
-            index: None,
-            user_index: None,
-                singleton_class: None,
-            frozen: std::cell::Cell::new(false),
-            by_identity: std::cell::Cell::new(false),
-        }));
+        let hid = g.vm.heap.alloc(HeapObj::Hash(
+            crate::heap::HashObj::with_pairs_tagged(pairs, class_tag),
+        ));
         g.vm.stack.push(Value::Hash(hid));
         return Ok(ClassOutcome::Handled);
     }
@@ -6941,18 +6932,9 @@ impl Vm {
         if let Some(v) = &default { g.pin(v.clone()); }
         g.vm.maybe_gc();
         g.vm.check_alloc()?;
-        let hid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj {
-            pairs: Vec::new(),
-            default_block: None,
-            default_value: None,
-            class_tag,
-            ivars: crate::intern::FxHashMap::default(),
-            index: None,
-            user_index: None,
-            singleton_class: None,
-            frozen: std::cell::Cell::new(false),
-            by_identity: std::cell::Cell::new(false),
-        }));
+        let hid = g.vm.heap.alloc(HeapObj::Hash(
+            crate::heap::HashObj::with_pairs_tagged(crate::heap::PairsBuf::new(), class_tag),
+        ));
         if default.is_some() {
             g.vm.heap.hash_set_default_value(hid, default);
         }
@@ -7783,7 +7765,7 @@ impl Vm {
             // keys, `ArgumentError: invalid rounding mode: foo`
             // for unknown values.
             let half_sym = self.interner.intern("half");
-            let pairs: Vec<(Value, Value)> = self.heap.hash(hash_id).clone();
+            let pairs: Vec<(Value, Value)> = self.heap.hash(hash_id).to_vec();
             let mut mode = crate::vm::numeric::HalfMode::Up;
             for (k, v) in &pairs {
                 match k {
@@ -9171,8 +9153,7 @@ impl Vm {
             if let Some(Value::Hash(hid)) = self.stack.get(ridx) {
                 let m = match self.heap.get(*hid) {
                     crate::heap::HeapObj::Hash(h) => h
-                        .singleton_class
-                        .as_ref()
+                        .singleton_class()
                         .and_then(|sc| self.lookup_method_uncached(sc, name_id)),
                     _ => None,
                 };
@@ -15343,7 +15324,7 @@ impl Vm {
         {
             let freeze_sym = self.interner.intern("freeze");
             let mut want: Option<bool> = None;
-            let pairs: Vec<(Value, Value)> = self.heap.hash(*hid).clone();
+            let pairs: Vec<(Value, Value)> = self.heap.hash(*hid).to_vec();
             for (k, v) in &pairs {
                 match k {
                     Value::Sym(s) if *s == freeze_sym => {
@@ -18826,10 +18807,11 @@ impl Vm {
                     s
                 }
             };
-            let seed = self.heap.hash(counts_oid).clone();
+            let seed: crate::heap::PairsBuf =
+                self.heap.hash(counts_oid).iter().cloned().collect();
             let ho = self.heap.hash_obj_mut(s);
             ho.pairs = seed;
-            ho.index = None;
+            ho.clear_indexes();
             Some((counts_oid, s))
         } else {
             None
@@ -18849,7 +18831,7 @@ impl Vm {
             let pairs = std::mem::take(&mut self.heap.hash_obj_mut(s).pairs);
             let ho = self.heap.hash_obj_mut(counts_oid);
             ho.pairs = pairs;
-            ho.index = None;
+            ho.clear_indexes();
         }
         Some(boxed)
     }
@@ -21430,7 +21412,7 @@ impl Vm {
         // no GC between the loop's return and the commit. The memo's scalar default is
         // preserved (only its `pairs` are populated). Keys are unique by construction.
         let scratch_id = crate::value::ObjId(scratch_objid as u32);
-        let pairs: Vec<(Value, Value)> = self.heap.hash(scratch_id).clone();
+        let pairs: Vec<(Value, Value)> = self.heap.hash(scratch_id).to_vec();
         self.heap.hash_mut(memo_id).extend(pairs);
         Some(())
     }
@@ -22234,7 +22216,7 @@ impl Vm {
         let kw_hash: Option<Vec<(Value, Value)>> = if (kw_count > 0 || has_kw_rest) && !trailing_positional {
             if let Some(Value::Hash(hid)) = args.last().cloned() {
                 args.pop();
-                Some(self.heap.hash(hid).clone())
+                Some(self.heap.hash(hid).to_vec())
             } else {
                 None
             }
@@ -23656,7 +23638,7 @@ impl Vm {
             Vec::new()
         } else {
             let pairs: Vec<(Value, Value)> = match &kw_rest_value {
-                Some(Value::Hash(hid)) => self.heap.hash(*hid).clone(),
+                Some(Value::Hash(hid)) => self.heap.hash(*hid).to_vec(),
                 _ => Vec::new(),
             };
             let mut out: Vec<(u16, Value)> = Vec::with_capacity(kw_params.len());
@@ -24996,18 +24978,9 @@ impl Vm {
                 g.pin(Value::Block(block));
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
-                let hid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj {
-                    pairs: Vec::new(),
-                    default_block: None,
-                    default_value: None,
-                    class_tag,
-                    ivars: crate::intern::FxHashMap::default(),
-                    index: None,
-                    user_index: None,
-                    singleton_class: None,
-                    frozen: std::cell::Cell::new(false),
-                    by_identity: std::cell::Cell::new(false),
-                }));
+                let hid = g.vm.heap.alloc(HeapObj::Hash(
+                    crate::heap::HashObj::with_pairs_tagged(crate::heap::PairsBuf::new(), class_tag),
+                ));
                 g.vm.heap.hash_set_default_block(hid, Some(block));
                 g.vm.stack.push(Value::Hash(hid));
                 return Ok(());
@@ -25550,8 +25523,7 @@ impl Vm {
         {
             let m = match self.heap.get(*hid) {
                 crate::heap::HeapObj::Hash(h) => h
-                    .singleton_class
-                    .as_ref()
+                    .singleton_class()
                     .and_then(|sc| self.lookup_method_uncached(sc, name_id)),
                 _ => None,
             };
@@ -27065,18 +27037,10 @@ impl Vm {
         // subclasses still fall through to a plain Instance — separate
         // follow-ups.)
         if class_inherits_named(cls, "Hash") {
-            let id = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj {
-                pairs: Vec::new(),
-                default_block: None,
-                default_value: None,
-                class_tag: Some(cls.clone()),
-                ivars: crate::intern::FxHashMap::default(),
-                index: None,
-                user_index: None,
-                singleton_class: None,
-                frozen: std::cell::Cell::new(false),
-                by_identity: std::cell::Cell::new(false),
-            }));
+            let id = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs_tagged(
+                crate::heap::PairsBuf::new(),
+                Some(cls.clone()),
+            )));
             return Ok(Value::Hash(id));
         }
         // Array twin (rouge's python lexer: `StringRegister < Array`).
@@ -27410,12 +27374,12 @@ impl Vm {
     /// behave. Sets the VM-wide `any_hash_singletons` dispatch gate.
     pub(crate) fn ensure_hash_singleton(&mut self, id: crate::value::ObjId) -> Rc<Class> {
         if let crate::heap::HeapObj::Hash(h) = self.heap.get(id)
-            && let Some(sc) = &h.singleton_class
+            && let Some(sc) = h.singleton_class()
         {
             return sc.clone();
         }
         let base = match self.heap.get(id) {
-            crate::heap::HeapObj::Hash(h) => h.class_tag.clone(),
+            crate::heap::HeapObj::Hash(h) => h.class_tag().cloned(),
             _ => None,
         }
         .or_else(|| self.classes.get(&self.interner.intern("Hash")).cloned());
@@ -27444,7 +27408,7 @@ impl Vm {
             cext_alloc_func: std::cell::Cell::new(None),
         });
         if let crate::heap::HeapObj::Hash(h) = self.heap.get_mut(id) {
-            h.singleton_class = Some(sc.clone());
+            h.extras_mut().singleton_class = Some(sc.clone());
         }
         self.any_hash_singletons = true;
         self.method_gen = self.method_gen.wrapping_add(1);

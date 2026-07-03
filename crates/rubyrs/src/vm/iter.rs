@@ -485,7 +485,7 @@ impl Vm {
         nil_when_unchanged: bool,
         block: ObjId,
     ) -> Result<Value, Trap> {
-        let snapshot: Vec<(Value, Value)> = self.heap.hash(id).clone();
+        let snapshot: Vec<(Value, Value)> = self.heap.hash(id).to_vec();
         let mut g = PinGuard::new(self);
         g.pin(Value::Hash(id));
         g.pin(Value::Block(block));
@@ -509,12 +509,12 @@ impl Vm {
         }
         if let Some(e) = early { return Ok(e); }
         let changed = kept.len() != g.vm.heap.hash(id).len();
-        *g.vm.heap.hash_mut(id) = kept;
+        *g.vm.heap.hash_mut(id) = kept.into();
         Ok(if changed || !nil_when_unchanged { Value::Hash(id) } else { Value::Nil })
     }
 
     pub(crate) fn iter_hash_filter(&mut self, id: ObjId, mode: IterMode, block: ObjId) -> Result<Value, Trap> {
-        let snapshot: Vec<(Value, Value)> = self.heap.hash(id).clone();
+        let snapshot: Vec<(Value, Value)> = self.heap.hash(id).to_vec();
         let mut g = PinGuard::new(self);
         g.pin(Value::Hash(id));
         g.pin(Value::Block(block));
@@ -2040,7 +2040,7 @@ impl Vm {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(id));
                 g.pin(Value::Block(block));
-                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).to_vec();
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for (k, v) in snapshot {
@@ -2102,7 +2102,7 @@ impl Vm {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(id));
                 g.pin(Value::Block(block));
-                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).to_vec();
                 for (k, v) in &snapshot {
                     if k.is_gc_heap_ref() { g.pin(k.clone()); }
                     if v.is_gc_heap_ref() { g.pin(v.clone()); }
@@ -2164,7 +2164,7 @@ impl Vm {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(id));
                 g.pin(Value::Block(block));
-                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).to_vec();
                 for (k, v) in &snapshot {
                     if k.is_gc_heap_ref() { g.pin(k.clone()); }
                     if v.is_gc_heap_ref() { g.pin(v.clone()); }
@@ -2205,7 +2205,7 @@ impl Vm {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(id));
                 g.pin(Value::Block(block));
-                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).to_vec();
                 // Pre-pin every heap-ref k/v from the snapshot —
                 // same discipline as Hash#each: a block that mutates
                 // the receiver can't sweep entries held only via the
@@ -2249,7 +2249,7 @@ impl Vm {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(id));
                 g.pin(Value::Block(block));
-                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).to_vec();
                 for (k, v) in &snapshot {
                     if k.is_gc_heap_ref() { g.pin(k.clone()); }
                     if v.is_gc_heap_ref() { g.pin(v.clone()); }
@@ -2285,13 +2285,13 @@ impl Vm {
             (Value::Hash(id), "transform_keys", [] | [Value::Hash(_)]) => {
                 let id = *id;
                 let mapping: Vec<(Value, Value)> = match args.first() {
-                    Some(Value::Hash(mid)) => self.heap.hash(*mid).clone(),
+                    Some(Value::Hash(mid)) => self.heap.hash(*mid).to_vec(),
                     _ => Vec::new(),
                 };
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(id));
                 g.pin(Value::Block(block));
-                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).to_vec();
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
                 let result_id = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::new())));
@@ -2333,7 +2333,7 @@ impl Vm {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(id));
                 g.pin(Value::Block(block));
-                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).to_vec();
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
                 let result_id = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::with_capacity(snapshot.len()))));
@@ -2363,7 +2363,7 @@ impl Vm {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(id));
                 g.pin(Value::Block(block));
-                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).to_vec();
                 let pre_frames = g.vm.frames.len();
                 let mut new_pairs: Vec<(Value, Value)> = Vec::with_capacity(snapshot.len());
                 let mut early = None;
@@ -2384,7 +2384,7 @@ impl Vm {
                 match early {
                     Some(r) => Some(r),
                     None => {
-                        *g.vm.heap.hash_mut(id) = new_pairs;
+                        *g.vm.heap.hash_mut(id) = new_pairs.into();
                         Some(Value::Hash(id))
                     }
                 }
@@ -2400,7 +2400,7 @@ impl Vm {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(id));
                 g.pin(Value::Block(block));
-                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).to_vec();
                 let pre_frames = g.vm.frames.len();
                 let mut new_vals: Vec<Value> = Vec::with_capacity(snapshot.len());
                 let mut early = None;
@@ -2417,7 +2417,7 @@ impl Vm {
                     None => {
                         let new_pairs: Vec<(Value, Value)> = snapshot.into_iter()
                             .map(|(k, _)| k).zip(new_vals).collect();
-                        *g.vm.heap.hash_mut(id) = new_pairs;
+                        *g.vm.heap.hash_mut(id) = new_pairs.into();
                         Some(Value::Hash(id))
                     }
                 }
@@ -2434,7 +2434,7 @@ impl Vm {
                 g.pin(Value::Hash(id));
                 g.pin(Value::Hash(other));
                 g.pin(Value::Block(block));
-                let extra: Vec<(Value, Value)> = g.vm.heap.hash(other).clone();
+                let extra: Vec<(Value, Value)> = g.vm.heap.hash(other).to_vec();
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for (k, v) in extra {
@@ -2475,8 +2475,8 @@ impl Vm {
                 if let Some(bid) = default_block {
                     g.pin(Value::Block(bid));
                 }
-                let mut out: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
-                let extra: Vec<(Value, Value)> = g.vm.heap.hash(other).clone();
+                let mut out: Vec<(Value, Value)> = g.vm.heap.hash(id).to_vec();
+                let extra: Vec<(Value, Value)> = g.vm.heap.hash(other).to_vec();
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for (k, v) in extra {
@@ -4745,7 +4745,7 @@ impl Vm {
                     }));
                 }
                 let n_take = *n as usize;
-                let entries: Vec<(Value, Value)> = self.heap.hash(*id).clone();
+                let entries: Vec<(Value, Value)> = self.heap.hash(*id).to_vec();
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(*id));
                 g.pin(Value::Block(block));
@@ -4794,7 +4794,7 @@ impl Vm {
             }
             (Value::Hash(id), op @ ("min_by" | "max_by"), []) => {
                 let want_max = op == "max_by";
-                let pairs: Vec<(Value, Value)> = self.heap.hash(*id).clone();
+                let pairs: Vec<(Value, Value)> = self.heap.hash(*id).to_vec();
                 if pairs.is_empty() { return Ok(Some(Value::Nil)); }
                 let mut best: Option<(Value, Value, Value)> = None;
                 let mut early: Option<Value> = None;
@@ -4866,7 +4866,7 @@ impl Vm {
                 // Values with no GC root → STRESS_GC swept them and
                 // the resulting Array<[k,v]> had dangling slots
                 // that exploded inside `to_display`.
-                let pairs_in: Vec<(Value, Value)> = self.heap.hash(*id).clone();
+                let pairs_in: Vec<(Value, Value)> = self.heap.hash(*id).to_vec();
                 let mut keyed: Vec<(Value, Value, Value)> = Vec::with_capacity(pairs_in.len());
                 let mut early: Option<Value> = None;
                 let mut g = PinGuard::new(self);
@@ -4931,7 +4931,7 @@ impl Vm {
                 // alloc work (with `maybe_gc`) over `buckets` and
                 // each freshly-built pair Array. Extend the guard
                 // and pin each new ObjId as it's created.
-                let pairs_in: Vec<(Value, Value)> = self.heap.hash(*id).clone();
+                let pairs_in: Vec<(Value, Value)> = self.heap.hash(*id).to_vec();
                 let mut buckets: Vec<(Value, Vec<Value>)> = Vec::new();
                 let mut early: Option<Value> = None;
                 let mut g = PinGuard::new(self);
@@ -5017,7 +5017,7 @@ impl Vm {
             // `iter_hash_filter`.
             (Value::Hash(id), "one?", []) => {
                 let id = *id;
-                let snapshot: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                let snapshot: Vec<(Value, Value)> = self.heap.hash(id).to_vec();
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(id));
                 g.pin(Value::Block(block));
@@ -5060,7 +5060,7 @@ impl Vm {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(id));
                 g.pin(Value::Block(block));
-                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).to_vec();
                 for (k, v) in &snapshot {
                     if k.is_gc_heap_ref() { g.pin(k.clone()); }
                     if v.is_gc_heap_ref() { g.pin(v.clone()); }
@@ -5112,7 +5112,7 @@ impl Vm {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(id));
                 g.pin(Value::Block(block));
-                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).to_vec();
                 for (k, v) in &snapshot {
                     if k.is_gc_heap_ref() { g.pin(k.clone()); }
                     if v.is_gc_heap_ref() { g.pin(v.clone()); }
@@ -5180,7 +5180,7 @@ impl Vm {
                 }
                 let id = *id;
                 let n_usz = usize::try_from(*n).unwrap_or(usize::MAX);
-                let snapshot: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                let snapshot: Vec<(Value, Value)> = self.heap.hash(id).to_vec();
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(id));
                 g.pin(Value::Block(block));
@@ -5256,7 +5256,7 @@ impl Vm {
                 }
                 let id = *id;
                 let n_usz = usize::try_from(*n).unwrap_or(usize::MAX);
-                let snapshot: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                let snapshot: Vec<(Value, Value)> = self.heap.hash(id).to_vec();
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(id));
                 g.pin(Value::Block(block));
@@ -5323,7 +5323,7 @@ impl Vm {
                 // Array arm for the eager/lazy divergence note.
                 let split_when_true = name == "slice_when";
                 let id = *id;
-                let snapshot: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                let snapshot: Vec<(Value, Value)> = self.heap.hash(id).to_vec();
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(id));
                 g.pin(Value::Block(block));
@@ -5393,7 +5393,7 @@ impl Vm {
             // partition (single pair Array per entry).
             (Value::Hash(id), "find_index", []) => {
                 let id = *id;
-                let snapshot: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                let snapshot: Vec<(Value, Value)> = self.heap.hash(id).to_vec();
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(id));
                 g.pin(Value::Block(block));
@@ -5514,7 +5514,7 @@ impl Vm {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(id));
                 g.pin(Value::Block(block));
-                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).to_vec();
                 for (k, v) in &snapshot {
                     if k.is_gc_heap_ref() { g.pin(k.clone()); }
                     if v.is_gc_heap_ref() { g.pin(v.clone()); }
@@ -5579,7 +5579,7 @@ impl Vm {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(id));
                 g.pin(Value::Block(block));
-                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).to_vec();
                 for (k, v) in &snapshot {
                     if k.is_gc_heap_ref() { g.pin(k.clone()); }
                     if v.is_gc_heap_ref() { g.pin(v.clone()); }
@@ -5616,7 +5616,7 @@ impl Vm {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(id));
                 g.pin(Value::Block(block));
-                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).to_vec();
                 // Defensive pin of every heap-slot k/v before the
                 // block runs — block can mutate the receiver and
                 // sweep elements held only in Rust-local Vecs.
@@ -5660,7 +5660,7 @@ impl Vm {
             // as `|acc, (k, v)|`.
             (Value::Hash(id), "reduce", []) | (Value::Hash(id), "inject", []) => {
                 let id = *id;
-                let snapshot: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                let snapshot: Vec<(Value, Value)> = self.heap.hash(id).to_vec();
                 if snapshot.is_empty() { return Ok(Some(Value::Nil)); }
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(id));
@@ -5707,7 +5707,7 @@ impl Vm {
             (Value::Hash(id), "reduce", [init]) | (Value::Hash(id), "inject", [init]) => {
                 let id = *id;
                 let init = init.clone();
-                let snapshot: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                let snapshot: Vec<(Value, Value)> = self.heap.hash(id).to_vec();
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(id));
                 g.pin(Value::Block(block));
@@ -5752,7 +5752,7 @@ impl Vm {
             (Value::Hash(id), "sum", []) | (Value::Hash(id), "sum", [Value::Int(_)]) => {
                 let id = *id;
                 let init: i64 = match args { [Value::Int(n)] => *n, _ => 0 };
-                let snapshot: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                let snapshot: Vec<(Value, Value)> = self.heap.hash(id).to_vec();
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(id));
                 g.pin(Value::Block(block));
@@ -5817,7 +5817,7 @@ impl Vm {
                 g.pin(Value::Hash(id));
                 g.pin(Value::Block(block));
                 g.pin(seed.clone());
-                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).to_vec();
                 for (k, v) in &snapshot {
                     if k.is_gc_heap_ref() { g.pin(k.clone()); }
                     if v.is_gc_heap_ref() { g.pin(v.clone()); }

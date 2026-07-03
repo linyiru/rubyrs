@@ -1218,7 +1218,7 @@ pub(crate) fn marshal_rack_response(
     // ready-built (status, headers, streaming_body) tuple
     // without duplicating header parsing across the
     // streaming + buffered paths.
-    let header_pairs = vm.heap.hash(headers_id).clone();
+    let header_pairs = vm.heap.hash(headers_id).to_vec();
     let mut headers: Vec<(String, String)> = Vec::with_capacity(header_pairs.len());
     for (k, v) in &header_pairs {
         let key_str = match k {
@@ -2147,8 +2147,7 @@ fn http_parse_query_hash(vm: &mut crate::vm::Vm, qs: &str, ih: &Option<std::rc::
             None => pairs.push((Value::new_str(dec(pair)), Value::Nil)),
         }
     }
-    let mut h = HashObj::with_pairs(pairs);
-    h.class_tag = ih.clone();
+    let h = HashObj::with_pairs_tagged(pairs, ih.clone());
     Value::Hash(vm.heap.alloc(HeapObj::Hash(h)))
 }
 
@@ -2209,8 +2208,7 @@ fn http_match_route(vm: &mut crate::vm::Vm, verb: &str, path: &str, table: &str,
                 block_args.push(val);
             }
         }
-        let mut hobj = HashObj::with_pairs(pairs);
-        hobj.class_tag = ih.clone();
+        let hobj = HashObj::with_pairs_tagged(pairs, ih.clone());
         let cap = Value::Hash(vm.heap.alloc(HeapObj::Hash(hobj)));
         let ba = Value::Array(vm.heap.alloc(HeapObj::Array(block_args.into())));
         return (idx as i64, cap, ba);

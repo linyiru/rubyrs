@@ -349,8 +349,84 @@ impl std::ops::DerefMut for ArrayObj {
 ///     `Hash.new { ... }.merge(x)[:y]` still auto-vivifies.
 ///
 /// Both paths use `Heap::hash_set_default_block` after the alloc.
+///
+/// ## Record-shape layout (2026-07 small-hash campaign)
+///
+/// The overwhelming majority of live Hashes are small "records" —
+/// JSON objects, kwargs, option hashes — that never carry a default,
+/// a subclass tag, ivars, an eigenclass, or (below the
+/// `HASH_INDEX_MIN` threshold) an index. The old flat struct made
+/// every such Hash pay for all of those slots anyway: `HashObj` was
+/// 168 bytes, which (being the largest `HeapObj` variant) also set
+/// the heap-slot size for EVERY object on the heap. Two changes,
+/// profiled on the JSON `parse_sids` workload (200 tiny record
+/// hashes per parse):
+///
+///   1. The cold tail lives behind `extras: Option<Box<HashExtras>>`
+///      — `None` until a default/tag/ivar/index/eigenclass is first
+///      set, so record hashes allocate and sweep 40-ish bytes of
+///      cold-slot bookkeeping instead of 144.
+///   2. `pairs` is a `SmallVec` with `HASH_INLINE_PAIRS` inline
+///      slots (CRuby's `ar_table` analogue: entries embedded in the
+///      RHash slot, no separate table allocation): hashes at or
+///      below the inline cap pay NO pairs allocation at all — and
+///      correspondingly no free at sweep, which the parse_sids
+///      profile showed dominating GC time.
+///
+/// Both changes together keep `size_of::<HashObj>()` at or below
+/// `Instance`'s 128 bytes, so the shared heap-slot size DROPS from
+/// 168 to 136 bytes (pinned by the `heap_layout_sizes` test).
 pub(crate) struct HashObj {
-    pub(crate) pairs: Vec<(Value, Value)>,
+    pub(crate) pairs: PairsBuf,
+    /// Cold tail (defaults / subclass tag / ivars / indexes /
+    /// eigenclass) — `None` for record-shaped hashes. Private so
+    /// every consumer goes through the accessors below, which
+    /// preserve the lazy-allocation invariant.
+    extras: Option<Box<HashExtras>>,
+    /// CRuby's per-object frozen bit (the Hash twin of
+    /// `ArrayObj.frozen`). `freeze` sets it; every mutating method
+    /// then raises FrozenError. `clone` copies it; `dup` resets it.
+    pub(crate) frozen: std::cell::Cell<bool>,
+    /// `Hash#compare_by_identity` flag. When set, CRuby compares keys
+    /// by `equal?` (object identity) instead of `eql?`/`hash`. In
+    /// rubyrs's Tier-1 Hash model, object/class/module/symbol keys
+    /// ALREADY compare by identity (their `ruby_eql`/`ruby_hash` are
+    /// pointer/ id based), so the realistic identity-map use — keys
+    /// that are Module/Class objects, e.g. zeitwerk's
+    /// `Zeitwerk::Cref::Map` — behaves correctly with the flag alone.
+    /// Primitive-value keys (String/Array contents) keep value
+    /// semantics here, a documented divergence (full identity hashing
+    /// would need an object-id-keyed index threaded through the hot
+    /// path). `compare_by_identity?` reflects this bit; `clone`/`dup`
+    /// preserve it (CRuby copies the flag on both).
+    pub(crate) by_identity: std::cell::Cell<bool>,
+}
+
+/// Inline `pairs` capacity — the `ar_table` analogue's embed limit.
+/// 3 keeps `HashObj` (120 B) under `Instance` (128 B) so the shared
+/// heap-slot size is set by Instance, not Hash; 4 would push the
+/// slot from 136 to 160 bytes for every object on the heap. Records
+/// with more pairs spill to the heap exactly like the old `Vec`
+/// (one allocation), so nothing gets slower past the cap.
+pub(crate) const HASH_INLINE_PAIRS: usize = 3;
+
+/// The Hash pairs buffer: insertion-ordered key/value pairs, inline
+/// up to [`HASH_INLINE_PAIRS`]. Grows to a heap buffer past that —
+/// all `Vec` mutators used by the VM (`push` / `insert` / `remove` /
+/// `retain` / `drain` / `truncate` / `sort_by`) exist on `SmallVec`
+/// with identical semantics.
+pub(crate) type PairsBuf = smallvec::SmallVec<[(Value, Value); HASH_INLINE_PAIRS]>;
+
+/// The cold tail of a Hash — every slot that record-shaped hashes
+/// (JSON objects, kwargs, option hashes) never touch. Boxed behind
+/// `HashObj::extras`, allocated lazily by the first setter that
+/// needs it. Field semantics are unchanged from the pre-2026-07
+/// flat layout; see each field's comment.
+#[derive(Default)]
+pub(crate) struct HashExtras {
+    /// `Hash.new { |h, k| ... }` default block (a `Value::Block` id).
+    /// GC walks it; `Hash#[]` invokes it with `(self_hash, key)` on
+    /// a missing key.
     pub(crate) default_block: Option<ObjId>,
     /// Scalar default — set by `Hash.new(default_value)`. Returned
     /// as-is from `Hash#[]` on missing keys; NOT cached into the
@@ -406,23 +482,6 @@ pub(crate) struct HashObj {
     /// behind the VM-level `any_hash_singletons` gate so plain
     /// Hash traffic pays nothing.
     pub(crate) singleton_class: Option<Rc<Class>>,
-    /// CRuby's per-object frozen bit (the Hash twin of
-    /// `ArrayObj.frozen`). `freeze` sets it; every mutating method
-    /// then raises FrozenError. `clone` copies it; `dup` resets it.
-    pub(crate) frozen: std::cell::Cell<bool>,
-    /// `Hash#compare_by_identity` flag. When set, CRuby compares keys
-    /// by `equal?` (object identity) instead of `eql?`/`hash`. In
-    /// rubyrs's Tier-1 Hash model, object/class/module/symbol keys
-    /// ALREADY compare by identity (their `ruby_eql`/`ruby_hash` are
-    /// pointer/ id based), so the realistic identity-map use — keys
-    /// that are Module/Class objects, e.g. zeitwerk's
-    /// `Zeitwerk::Cref::Map` — behaves correctly with the flag alone.
-    /// Primitive-value keys (String/Array contents) keep value
-    /// semantics here, a documented divergence (full identity hashing
-    /// would need an object-id-keyed index threaded through the hot
-    /// path). `compare_by_identity?` reflects this bit; `clone`/`dup`
-    /// preserve it (CRuby copies the flag on both).
-    pub(crate) by_identity: std::cell::Cell<bool>,
 }
 
 /// `ruby_hash(key)` → pair positions, keyed directly on the 64-bit
@@ -451,18 +510,94 @@ impl std::hash::Hasher for U64Hasher {
 }
 
 impl HashObj {
-    pub(crate) fn with_pairs(pairs: Vec<(Value, Value)>) -> Self {
+    /// Plain-Hash constructor. Accepts a `Vec` (every pre-existing
+    /// caller) or a `PairsBuf` built directly (the hot JSON/YAML
+    /// visitors — building inline avoids a Vec alloc + free for
+    /// ≤ `HASH_INLINE_PAIRS` records).
+    pub(crate) fn with_pairs(pairs: impl Into<PairsBuf>) -> Self {
         Self {
-            pairs,
-            default_block: None,
-            default_value: None,
-            class_tag: None,
-            ivars: crate::intern::FxHashMap::default(),
-            index: None,
-            user_index: None,
-            singleton_class: None,
+            pairs: pairs.into(),
+            extras: None,
             frozen: std::cell::Cell::new(false),
             by_identity: std::cell::Cell::new(false),
+        }
+    }
+
+    /// Subclass-instance constructor (`class M < Hash; M.new`):
+    /// `with_pairs` + the class tag in one step.
+    pub(crate) fn with_pairs_tagged(
+        pairs: impl Into<PairsBuf>,
+        class_tag: Option<Rc<Class>>,
+    ) -> Self {
+        let mut h = Self::with_pairs(pairs);
+        if class_tag.is_some() {
+            h.extras_mut().class_tag = class_tag;
+        }
+        h
+    }
+
+    /// Cold-tail view (`None` = pristine record-shaped Hash).
+    #[inline]
+    pub(crate) fn extras(&self) -> Option<&HashExtras> {
+        self.extras.as_deref()
+    }
+
+    /// Mutable cold tail, allocating it on first use. Callers that
+    /// only want to CLEAR state should prefer the `Option`-aware
+    /// helpers (`clear_indexes`, …) so a pristine Hash stays
+    /// extras-free.
+    #[inline]
+    pub(crate) fn extras_mut(&mut self) -> &mut HashExtras {
+        self.extras.get_or_insert_with(Box::default)
+    }
+
+    #[inline]
+    pub(crate) fn default_block(&self) -> Option<ObjId> {
+        self.extras.as_ref().and_then(|e| e.default_block)
+    }
+    #[inline]
+    pub(crate) fn default_value(&self) -> Option<&Value> {
+        self.extras.as_ref().and_then(|e| e.default_value.as_ref())
+    }
+    /// `true` when `Hash#[]` on a missing key would NOT just return
+    /// nil (default value or default proc present).
+    #[inline]
+    pub(crate) fn has_default(&self) -> bool {
+        self.extras
+            .as_ref()
+            .is_some_and(|e| e.default_block.is_some() || e.default_value.is_some())
+    }
+    #[inline]
+    pub(crate) fn class_tag(&self) -> Option<&Rc<Class>> {
+        self.extras.as_ref().and_then(|e| e.class_tag.as_ref())
+    }
+    #[inline]
+    pub(crate) fn singleton_class(&self) -> Option<&Rc<Class>> {
+        self.extras.as_ref().and_then(|e| e.singleton_class.as_ref())
+    }
+    /// Subclass ivar table; `None` when no ivar was ever set (the
+    /// borrow-free read path).
+    #[inline]
+    pub(crate) fn ivars(&self) -> Option<&crate::intern::FxHashMap<crate::intern::SymId, Value>> {
+        self.extras.as_ref().map(|e| &e.ivars)
+    }
+    #[inline]
+    pub(crate) fn index(&self) -> Option<&HashIndex> {
+        self.extras.as_ref().and_then(|e| e.index.as_ref())
+    }
+    #[inline]
+    pub(crate) fn user_index(
+        &self,
+    ) -> Option<&crate::intern::FxHashMap<i64, Vec<u32>>> {
+        self.extras.as_ref().and_then(|e| e.user_index.as_ref())
+    }
+    /// Drop both key indexes (pairs mutated in a way they can't
+    /// track). No-op — and no extras allocation — on a pristine Hash.
+    #[inline]
+    pub(crate) fn clear_indexes(&mut self) {
+        if let Some(e) = self.extras.as_deref_mut() {
+            e.index = None;
+            e.user_index = None;
         }
     }
 }
@@ -882,18 +1017,17 @@ impl Heap {
     pub(crate) fn set_hash_frozen(&self, id: ObjId) {
         if let HeapObj::Hash(h) = self.get(id) { h.frozen.set(true); }
     }
-    pub(crate) fn hash(&self, id: ObjId) -> &Vec<(Value, Value)> {
+    pub(crate) fn hash(&self, id: ObjId) -> &[(Value, Value)] {
         if let HeapObj::Hash(h) = self.get(id) { &h.pairs } else { panic!("ICE: heap slot is not a Hash") }
     }
-    pub(crate) fn hash_mut(&mut self, id: ObjId) -> &mut Vec<(Value, Value)> {
+    pub(crate) fn hash_mut(&mut self, id: ObjId) -> &mut PairsBuf {
         // A caller taking `&mut pairs` may insert / delete / reorder
         // entries the index can't track, so invalidate it — the next
         // indexed lookup rebuilds it lazily. Single-key fast paths use
         // `hash_insert` / `hash_delete` instead, which keep the index
         // live (so building a Hash stays O(1) per key, not O(n²)).
         if let HeapObj::Hash(h) = self.get_mut(id) {
-            h.index = None;
-            h.user_index = None;
+            h.clear_indexes();
             &mut h.pairs
         } else {
             panic!("ICE: heap slot is not a Hash")
@@ -913,7 +1047,7 @@ impl Heap {
     /// linear scan always compares live key content.
     fn ensure_hash_index(&mut self, id: ObjId) {
         if let HeapObj::Hash(h) = self.get(id) {
-            if h.index.is_some() { return; }
+            if h.index().is_some() { return; }
         } else {
             panic!("ICE: heap slot is not a Hash");
         }
@@ -927,7 +1061,7 @@ impl Heap {
             let kh = self.hash(id)[i].0.ruby_hash(self);
             map.entry(kh).or_default().push(i as u32);
         }
-        self.hash_obj_mut(id).index = Some(map);
+        self.hash_obj_mut(id).extras_mut().index = Some(map);
     }
     /// O(1)-amortised position of `key` in the Hash, or `None`. Uses the
     /// key index for large Hashes; small ones (no index) fall back to a
@@ -937,7 +1071,7 @@ impl Heap {
         self.ensure_hash_index(id);
         let kh = key.ruby_hash(self);
         if let HeapObj::Hash(h) = self.get(id) {
-            match h.index.as_ref() {
+            match h.index() {
                 Some(m) => {
                     if let Some(cands) = m.get(&kh) {
                         for &i in cands {
@@ -965,7 +1099,7 @@ impl Heap {
         self.ensure_hash_index(id);
         let kh = key.ruby_hash(self);
         let existing: Option<usize> = if let HeapObj::Hash(h) = self.get(id) {
-            match h.index.as_ref() {
+            match h.index() {
                 Some(m) => m.get(&kh).and_then(|cands| {
                     cands
                         .iter()
@@ -988,7 +1122,7 @@ impl Heap {
                 let h = self.hash_obj_mut(id);
                 let new_i = h.pairs.len() as u32;
                 h.pairs.push((key, val));
-                if let Some(m) = h.index.as_mut() {
+                if let Some(m) = h.extras.as_deref_mut().and_then(|e| e.index.as_mut()) {
                     m.entry(kh).or_default().push(new_i);
                 }
                 None
@@ -1004,21 +1138,25 @@ impl Heap {
         let i = self.hash_index_lookup(id, key)?;
         let h = self.hash_obj_mut(id);
         let (_, v) = h.pairs.remove(i);
-        h.index = None;
-        h.user_index = None; // positions shifted — user-key index invalidated too
+        // positions shifted — both indexes invalidated
+        h.clear_indexes();
         Some(v)
     }
     /// The user Hash-subclass this Hash is an instance of, if any
     /// (`class M < Hash; end; M.new` → `Some(M)`). `None` for plain
     /// `{}` / `Hash.new`.
     pub(crate) fn hash_class_tag(&self, id: ObjId) -> Option<Rc<Class>> {
-        if let HeapObj::Hash(h) = self.get(id) { h.class_tag.clone() } else { None }
+        if let HeapObj::Hash(h) = self.get(id) { h.class_tag().cloned() } else { None }
     }
     /// Stamp a subclass tag onto a Hash — used by non-mutating builders
     /// (`merge`, `select`, …) so the result keeps the receiver's class
     /// (CRuby: `IndifferentHash.new.merge(x).class == IndifferentHash`).
     pub(crate) fn hash_set_class_tag(&mut self, id: ObjId, tag: Option<Rc<Class>>) {
-        if let HeapObj::Hash(h) = self.get_mut(id) { h.class_tag = tag; }
+        if let HeapObj::Hash(h) = self.get_mut(id) {
+            if tag.is_some() || h.extras().is_some() {
+                h.extras_mut().class_tag = tag;
+            }
+        }
     }
     /// Read `@name` ivar off a (subclass) Hash; `None` if unset.
     /// Array twin of `hash_ivar_get` / `hash_ivar_set`.
@@ -1031,11 +1169,13 @@ impl Heap {
         }
     }
     pub(crate) fn hash_ivar_get(&self, id: ObjId, name: crate::intern::SymId) -> Option<Value> {
-        if let HeapObj::Hash(h) = self.get(id) { h.ivars.get(&name).cloned() } else { None }
+        if let HeapObj::Hash(h) = self.get(id) {
+            h.ivars().and_then(|iv| iv.get(&name).cloned())
+        } else { None }
     }
     /// Set `@name` ivar on a (subclass) Hash.
     pub(crate) fn hash_ivar_set(&mut self, id: ObjId, name: crate::intern::SymId, v: Value) {
-        if let HeapObj::Hash(h) = self.get_mut(id) { h.ivars.insert(name, v); }
+        if let HeapObj::Hash(h) = self.get_mut(id) { h.extras_mut().ivars.insert(name, v); }
     }
     /// Clone a (subclass) Hash's full ivar table — used by dup/clone.
     /// Array twin of `hash_ivars_clone`.
@@ -1043,7 +1183,9 @@ impl Heap {
         if let HeapObj::Array(a) = self.get(id) { a.ivars.clone() } else { crate::intern::FxHashMap::default() }
     }
     pub(crate) fn hash_ivars_clone(&self, id: ObjId) -> crate::intern::FxHashMap<crate::intern::SymId, Value> {
-        if let HeapObj::Hash(h) = self.get(id) { h.ivars.clone() } else { crate::intern::FxHashMap::default() }
+        if let HeapObj::Hash(h) = self.get(id) {
+            h.ivars().cloned().unwrap_or_default()
+        } else { crate::intern::FxHashMap::default() }
     }
     /// Delete `@name` off a (subclass or reflection-carrying) Array,
     /// returning the removed value (`None` when unset) — the
@@ -1053,7 +1195,12 @@ impl Heap {
     }
     /// Hash twin of `array_ivar_remove`.
     pub(crate) fn hash_ivar_remove(&mut self, id: ObjId, name: crate::intern::SymId) -> Option<Value> {
-        if let HeapObj::Hash(h) = self.get_mut(id) { h.ivars.remove(&name) } else { None }
+        if let HeapObj::Hash(h) = self.get_mut(id) {
+            match h.extras.as_deref_mut() {
+                Some(e) => e.ivars.remove(&name),
+                None => None,
+            }
+        } else { None }
     }
     /// Default-value block stored alongside the Hash by `Hash.new {
     /// |h, k| ... }`. None for hash literals (`{}`) and the common
@@ -1063,7 +1210,7 @@ impl Heap {
     /// semantics, narrowed to the common shape (no static default
     /// value yet, no `default=` assignment — both are deferred gaps).
     pub(crate) fn hash_default_block(&self, id: ObjId) -> Option<ObjId> {
-        if let HeapObj::Hash(h) = self.get(id) { h.default_block }
+        if let HeapObj::Hash(h) = self.get(id) { h.default_block() }
         else { panic!("ICE: heap slot is not a Hash (hash_default_block)") }
     }
     /// Install the default-value block; one-shot at allocation
@@ -1075,7 +1222,11 @@ impl Heap {
     /// internal ObjId-routing bugs surface loudly rather than
     /// silently no-op.
     pub(crate) fn hash_set_default_block(&mut self, id: ObjId, block: Option<ObjId>) {
-        if let HeapObj::Hash(h) = self.get_mut(id) { h.default_block = block; }
+        if let HeapObj::Hash(h) = self.get_mut(id) {
+            if block.is_some() || h.extras().is_some() {
+                h.extras_mut().default_block = block;
+            }
+        }
         else { panic!("ICE: heap slot is not a Hash (hash_set_default_block)") }
     }
     /// Scalar default — set by `Hash.new(default)`. Returned as-is
@@ -1083,11 +1234,15 @@ impl Heap {
     /// `&Value` into a method that's about to mutate the heap.
     /// Panics on type mismatch, consistent with `hash()`.
     pub(crate) fn hash_default_value(&self, id: ObjId) -> Option<Value> {
-        if let HeapObj::Hash(h) = self.get(id) { h.default_value.clone() }
+        if let HeapObj::Hash(h) = self.get(id) { h.default_value().cloned() }
         else { panic!("ICE: heap slot is not a Hash (hash_default_value)") }
     }
     pub(crate) fn hash_set_default_value(&mut self, id: ObjId, value: Option<Value>) {
-        if let HeapObj::Hash(h) = self.get_mut(id) { h.default_value = value; }
+        if let HeapObj::Hash(h) = self.get_mut(id) {
+            if value.is_some() || h.extras().is_some() {
+                h.extras_mut().default_value = value;
+            }
+        }
         else { panic!("ICE: heap slot is not a Hash (hash_set_default_value)") }
     }
     pub(crate) fn range(&self, id: ObjId) -> &RangeObj {
@@ -1364,10 +1519,13 @@ impl Heap {
                         Heap::visit_value(k, &mut self.marks, &mut worklist);
                         Heap::visit_value(v, &mut self.marks, &mut worklist);
                     }
+                    // Cold tail: absent on record-shaped hashes, so
+                    // the common case skips this whole block.
+                    let Some(ex) = h.extras() else { continue };
                     // Default-block is a heap-managed Block; without
                     // a mark walk it would be swept while the Hash
                     // still references it via `Hash.new { ... }`.
-                    if let Some(blk_id) = h.default_block
+                    if let Some(blk_id) = ex.default_block
                         && !self.marks[blk_id.0 as usize]
                     {
                         self.marks[blk_id.0 as usize] = true;
@@ -1377,18 +1535,18 @@ impl Heap {
                     // May itself reference the heap (e.g. a default
                     // String or Array); walk via the usual Value
                     // visitor.
-                    if let Some(v) = &h.default_value {
+                    if let Some(v) = &ex.default_value {
                         Heap::visit_value(v, &mut self.marks, &mut worklist);
                     }
                     // Hash-subclass instance variables.
-                    for v in h.ivars.values() {
+                    for v in ex.ivars.values() {
                         Heap::visit_value(v, &mut self.marks, &mut worklist);
                     }
                     // Per-instance eigenclass (def h.x): closure
                     // captures + ivars, same walk as the Instance
                     // arm above — this eigenclass is reachable
                     // ONLY through the Hash slot.
-                    if let Some(sc) = &h.singleton_class {
+                    if let Some(sc) = &ex.singleton_class {
                         for m in sc.methods.borrow().values() {
                             if let Some(cl) = &m.closure {
                                 cl.each_capture_cell(|cell| {
@@ -2752,6 +2910,46 @@ pub(crate) fn format_float(f: f64) -> String {
 mod tests {
     use super::*;
 
+    /// Layout guard for the record-shape Hash representation (2026-07
+    /// small-hash campaign). Before the campaign every heap slot was
+    /// 168 bytes because the flat `HashObj` (cold tail inline) was the
+    /// largest `HeapObj` variant. With the cold tail boxed behind
+    /// `extras` and `HASH_INLINE_PAIRS` = 3 inline pairs, `HashObj`
+    /// stays at or under `Instance`'s 128 bytes and the shared slot
+    /// size drops to 136. If a future field pushes either bound, this
+    /// fails loudly — grow deliberately (it costs bytes on EVERY heap
+    /// object), don't let it drift.
+    #[test]
+    fn heap_layout_sizes() {
+        use std::mem::size_of;
+        eprintln!("size Slot           = {}", size_of::<Slot>());
+        eprintln!("size HeapObj        = {}", size_of::<HeapObj>());
+        eprintln!("size HashObj        = {}", size_of::<HashObj>());
+        eprintln!("size ArrayObj       = {}", size_of::<ArrayObj>());
+        eprintln!("size Instance       = {}", size_of::<Instance>());
+        eprintln!("size Value          = {}", size_of::<Value>());
+        assert!(
+            size_of::<HashObj>() <= size_of::<Instance>(),
+            "HashObj ({}) outgrew Instance ({}) — it would set the heap-slot size again",
+            size_of::<HashObj>(),
+            size_of::<Instance>()
+        );
+        assert!(
+            size_of::<Slot>() <= 136,
+            "heap slot grew past 136 bytes ({}) — every live object pays this",
+            size_of::<Slot>()
+        );
+        // An inline-capacity record hash must not carry a pairs heap
+        // buffer (the ar_table-analogue invariant this campaign ships).
+        let h = HashObj::with_pairs(
+            (0..HASH_INLINE_PAIRS as i64)
+                .map(|i| (Value::Int(i), Value::Int(i)))
+                .collect::<PairsBuf>(),
+        );
+        assert!(!h.pairs.spilled(), "inline-cap pairs must stay inline");
+        assert!(h.extras().is_none(), "plain with_pairs must not allocate extras");
+    }
+
     /// ArrayObj plumbing (ADR 0020 / Array-subclass work): plain
     /// construction carries no tag, Deref reaches the elems, the
     /// ivar + tag helpers answer None-shaped defaults on plain
@@ -2813,8 +3011,8 @@ mod tests {
         });
         sc.methods.borrow_mut().insert(crate::intern::SymId(3), m);
         sc.ivars.borrow_mut().insert(crate::intern::SymId(4), Value::Array(ivar_val));
-        let mut hobj = HashObj::with_pairs(vec![]);
-        hobj.singleton_class = Some(sc);
+        let mut hobj = HashObj::with_pairs(Vec::new());
+        hobj.extras_mut().singleton_class = Some(sc);
         let h = heap.alloc(HeapObj::Hash(hobj));
         let roots = vec![Value::Hash(h)];
         let _ = heap.collect(&roots);

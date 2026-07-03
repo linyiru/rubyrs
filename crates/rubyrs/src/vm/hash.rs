@@ -127,7 +127,7 @@ impl Vm {
         hash_sym: crate::intern::SymId,
         eql_sym: crate::intern::SymId,
     ) -> Result<(), Trap> {
-        if matches!(self.heap.get(id), HeapObj::Hash(h) if h.user_index.is_some()) {
+        if matches!(self.heap.get(id), HeapObj::Hash(h) if h.user_index().is_some()) {
             return Ok(());
         }
         let n = self.heap.hash(id).len();
@@ -143,7 +143,7 @@ impl Vm {
                 idx.entry(hv).or_default().push(i as u32);
             }
         }
-        pg.vm.heap.hash_obj_mut(id).user_index = Some(idx);
+        pg.vm.heap.hash_obj_mut(id).extras_mut().user_index = Some(idx);
         Ok(())
     }
 
@@ -159,8 +159,7 @@ impl Vm {
     ) -> Result<Option<usize>, Trap> {
         let bucket: Vec<u32> = match self.heap.get(id) {
             HeapObj::Hash(h) => h
-                .user_index
-                .as_ref()
+                .user_index()
                 .and_then(|ui| ui.get(&hv))
                 .cloned()
                 .unwrap_or_default(),
@@ -245,7 +244,7 @@ impl Vm {
                 h.pairs.push((key, val));
                 // Maintain the bucket incrementally (append never shifts
                 // existing positions, so the index stays valid).
-                if let Some(ui) = h.user_index.as_mut() {
+                if let Some(ui) = h.extras_mut().user_index.as_mut() {
                     ui.entry(hv).or_default().push(pos);
                 }
                 Ok(None)
@@ -278,8 +277,7 @@ impl Vm {
                 let h = self.heap.hash_obj_mut(id);
                 let (_, v) = h.pairs.remove(i);
                 // positions shifted — drop both indexes, rebuilt lazily
-                h.index = None;
-                h.user_index = None;
+                h.clear_indexes();
                 Ok(Some(v))
             }
             None => Ok(None),
@@ -328,7 +326,7 @@ impl Vm {
     /// receiver nor operand is rooted here (both arrived as popped
     /// Rust-local ObjIds from do_call).
     fn vm_hash_pairs_subset(&mut self, sub: ObjId, sup: ObjId) -> Result<bool, Trap> {
-        let pairs: Vec<(Value, Value)> = self.heap.hash(sub).clone();
+        let pairs: Vec<(Value, Value)> = self.heap.hash(sub).to_vec();
         let mut g = PinGuard::new(self);
         g.pin(Value::Hash(sub));
         g.pin(Value::Hash(sup));
@@ -860,7 +858,7 @@ impl Vm {
                         // merge sort over the pair list. We share
                         // the build path because both produce an
                         // Array<[k, v]>.
-                        let mut pairs: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                        let mut pairs: Vec<(Value, Value)> = self.heap.hash(id).to_vec();
                         if name == "sort" {
                             match super::sort::merge_sort_by(&mut pairs, |a, b| {
                                 match self.user_cmp(&a.0, &b.0) {
@@ -1065,8 +1063,8 @@ impl Vm {
                     // preserving iteration order (CRuby).
                     ("transform_keys", [Value::Hash(mid)]) => {
                         let mid = *mid;
-                        let snapshot: Vec<(Value, Value)> = self.heap.hash(id).clone();
-                        let mapping: Vec<(Value, Value)> = self.heap.hash(mid).clone();
+                        let snapshot: Vec<(Value, Value)> = self.heap.hash(id).to_vec();
+                        let mapping: Vec<(Value, Value)> = self.heap.hash(mid).to_vec();
                         let mut g = PinGuard::new(self);
                         g.pin(Value::Hash(id));
                         g.pin(Value::Hash(mid));
@@ -1168,7 +1166,7 @@ impl Vm {
                     // iter.rs.
                     ("find_index", [target]) => {
                         let target = target.clone();
-                        let pairs: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                        let pairs: Vec<(Value, Value)> = self.heap.hash(id).to_vec();
                         for (i, (k, v)) in pairs.iter().enumerate() {
                             // Compare via a fresh [k, v] pair
                             // Array using ruby_eq. Allocating a
@@ -1195,7 +1193,7 @@ impl Vm {
                     // CRuby parity (callers may chain
                     // `tally.values.sum` etc.).
                     ("tally", []) => {
-                        let pairs: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                        let pairs: Vec<(Value, Value)> = self.heap.hash(id).to_vec();
                         let mut g = PinGuard::new(self);
                         g.pin(Value::Hash(id));
                         g.vm.maybe_gc();
@@ -1228,7 +1226,7 @@ impl Vm {
                     // matches CRuby's surface (callers may
                     // chain `.size`, `.first`, etc.).
                     ("uniq", []) => {
-                        let pairs: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                        let pairs: Vec<(Value, Value)> = self.heap.hash(id).to_vec();
                         let mut g = PinGuard::new(self);
                         g.pin(Value::Hash(id));
                         // Pre-alloc the result Array and pin it;
@@ -1259,7 +1257,7 @@ impl Vm {
                     // singletons. Only Array args are supported
                     // (Enumerator / Range args are Tier-2).
                     ("zip", args_slice) if args_slice.iter().all(|a| matches!(a, Value::Array(_))) => {
-                        let receiver_pairs: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                        let receiver_pairs: Vec<(Value, Value)> = self.heap.hash(id).to_vec();
                         // Snapshot every arg Array's contents
                         // BEFORE the result-alloc loop so
                         // intermediate maybe_gc can't sweep
@@ -1382,7 +1380,7 @@ impl Vm {
                     // allocations and the corresponding
                     // max_live pressure.
                     ("min", []) | ("max", []) => {
-                        let pairs = self.heap.hash(id).clone();
+                        let pairs = self.heap.hash(id).to_vec();
                         if pairs.is_empty() { return Ok(Some(Value::Nil)); }
                         let want_max = name == "max";
                         let mut best_idx = 0usize;
@@ -1447,7 +1445,7 @@ impl Vm {
                         // the alloc, so it doesn't need an extra
                         // pin (heap-ObjId children of it are
                         // reachable through the receiver pin).
-                        let pairs: Vec<(Value, Value)> = self.heap.hash(id).clone();
+                        let pairs: Vec<(Value, Value)> = self.heap.hash(id).to_vec();
                         let default_block = self.heap.hash_default_block(id);
                         let default_value = self.heap.hash_default_value(id);
                         // Preserve the Hash-subclass tag + ivars so
@@ -1469,8 +1467,7 @@ impl Vm {
                         // `h.clone.foo` → works. (spec_headers#test_dup_and_clone)
                         let singleton_class = if name == "clone" {
                             if let crate::heap::HeapObj::Hash(h) = self.heap.get(id) {
-                                h.singleton_class
-                                    .as_ref()
+                                h.singleton_class()
                                     .map(|sc| std::rc::Rc::new(sc.shallow_copy()))
                             } else {
                                 None
@@ -1485,18 +1482,18 @@ impl Vm {
                             g.pin(Value::Block(bid));
                         }
                         g.vm.maybe_gc();
-                        let nid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj {
-                            pairs,
-                            default_block: None,
-                            default_value: None,
-                            class_tag,
-                            ivars,
-                            index: None,
-                            user_index: None,
-                            singleton_class,
-                            frozen: std::cell::Cell::new(keep_frozen),
-                            by_identity: std::cell::Cell::new(by_identity),
-                        }));
+                        let nid = {
+                            let mut nh = crate::heap::HashObj::with_pairs_tagged(pairs, class_tag);
+                            if !ivars.is_empty() {
+                                nh.extras_mut().ivars = ivars;
+                            }
+                            if singleton_class.is_some() {
+                                nh.extras_mut().singleton_class = singleton_class;
+                            }
+                            nh.frozen.set(keep_frozen);
+                            nh.by_identity.set(by_identity);
+                            g.vm.heap.alloc(HeapObj::Hash(nh))
+                        };
                         if default_block.is_some() {
                             g.vm.heap.hash_set_default_block(nid, default_block);
                         }
@@ -1574,9 +1571,9 @@ impl Vm {
                                     }
                                 }
                             };
-                            sources.push(g.vm.heap.hash(hid).clone());
+                            sources.push(g.vm.heap.hash(hid).to_vec());
                         }
-                        let mut out: Vec<(Value, Value)> = g.vm.heap.hash(id).clone();
+                        let mut out: Vec<(Value, Value)> = g.vm.heap.hash(id).to_vec();
                         for extra in sources {
                             for (k, v) in extra {
                                 let pos = out.iter().position(|(ek, _)| ek.ruby_eql(&k, &g.vm.heap));
@@ -1611,7 +1608,7 @@ impl Vm {
                     // conflict-resolver lives in `collection_call_block`
                     // (vm/iter.rs); this is the blockless path.
                     ("merge!", [Value::Hash(other)]) | ("update", [Value::Hash(other)]) => {
-                        let extra: Vec<(Value, Value)> = self.heap.hash(*other).clone();
+                        let extra: Vec<(Value, Value)> = self.heap.hash(*other).to_vec();
                         for (k, v) in extra {
                             let pos = self.heap.hash(id).iter()
                                 .position(|(ek, _)| ek.ruby_eql(&k, &self.heap));
@@ -1629,8 +1626,8 @@ impl Vm {
                     // `deep_transform_keys!` (and the deep symbolize/
                     // stringify bang methods built on it) rely on it.
                     ("replace", [Value::Hash(other)]) => {
-                        let pairs: Vec<(Value, Value)> = self.heap.hash(*other).clone();
-                        *self.heap.hash_mut(id) = pairs;
+                        let pairs: Vec<(Value, Value)> = self.heap.hash(*other).to_vec();
+                        *self.heap.hash_mut(id) = pairs.into();
                         Some(Value::Hash(id))
                     }
                     // `Hash#clear` — remove all pairs, return self.

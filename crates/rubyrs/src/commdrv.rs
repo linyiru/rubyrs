@@ -533,7 +533,7 @@ fn build_tables(vm: &Vm, seal: &Seal, comm: ObjId) -> DRes<Tables> {
     let mut lists: Vec<Vec<CbEntry>> = Vec::new();
     let mut per_type = vec![[u32::MAX; 2]; TYPE_TABLE.len()];
 
-    let cb_pairs: Vec<(Value, Value)> = vm.heap.hash(cb_hid).clone();
+    let cb_pairs: Vec<(Value, Value)> = vm.heap.hash(cb_hid).to_vec();
     for (k, v) in &cb_pairs {
         let Value::Sym(ks) = k else { return decline("@callbacks key not a Symbol") };
         // Keys that aren't `on_/after_<known type>` can only belong to
@@ -546,14 +546,14 @@ fn build_tables(vm: &Vm, seal: &Seal, comm: ObjId) -> DRes<Tables> {
     }
 
     let mut restricted: [FxHashMap<SymId, u32>; 4] = Default::default();
-    let rm_pairs: Vec<(Value, Value)> = vm.heap.hash(rm_hid).clone();
+    let rm_pairs: Vec<(Value, Value)> = vm.heap.hash(rm_hid).to_vec();
     for (k, v) in &rm_pairs {
         let Value::Sym(ks) = k else { return decline("@restricted_map key not a Symbol") };
         let Some(kind) = seal.restricted_keys.iter().position(|r| r == ks) else {
             return decline("@restricted_map has an unexpected key");
         };
         let Value::Hash(sub_hid) = v else { return decline("@restricted_map value not a Hash") };
-        let sub_pairs: Vec<(Value, Value)> = vm.heap.hash(*sub_hid).clone();
+        let sub_pairs: Vec<(Value, Value)> = vm.heap.hash(*sub_hid).to_vec();
         for (mk, mv) in &sub_pairs {
             let Value::Sym(ms) = mk else { return decline("restricted method name not a Symbol") };
             let entries = build_list(vm, mv, seal.restricted_keys[kind])?;

@@ -402,14 +402,16 @@ fn capture_heap(vm: &crate::vm::Vm, ids: &mut ClassIds) -> Vec<HeapObjImage> {
                         .iter()
                         .map(|(k, v)| (image_value(k, ids), image_value(v, ids)))
                         .collect(),
-                    class_tag: h.class_tag.as_ref().map(|c| ids.intern(c)),
-                    ivars: image_fx_ivars(&h.ivars, ids),
+                    class_tag: h.class_tag().map(|c| ids.intern(c)),
+                    ivars: h
+                        .ivars()
+                        .map(|iv| image_fx_ivars(iv, ids))
+                        .unwrap_or_default(),
                     frozen: h.frozen.get(),
                     by_identity: h.by_identity.get(),
-                    default_block: h.default_block.map(|b| b.0),
+                    default_block: h.default_block().map(|b| b.0),
                     default_value: h
-                        .default_value
-                        .as_ref()
+                        .default_value()
                         .map(|v| Box::new(image_value(v, ids))),
                 },
                 HeapObj::Range(r) => HeapObjImage::Range {
@@ -1022,16 +1024,27 @@ fn build_heap(
                                 value_from_image(v, classes, kinds),
                             )
                         })
-                        .collect(),
+                        .collect::<crate::heap::PairsBuf>(),
                 );
-                h.class_tag = class_tag.map(|id| classes[id as usize].clone());
-                h.ivars = fx_ivars_from_image(ivars, classes, kinds);
-                h.frozen = std::cell::Cell::new(*frozen);
-                h.by_identity = std::cell::Cell::new(*by_identity);
-                h.default_block = default_block.map(crate::value::ObjId);
-                h.default_value = default_value
+                let class_tag = class_tag.map(|id| classes[id as usize].clone());
+                let re_ivars = fx_ivars_from_image(ivars, classes, kinds);
+                let default_block = default_block.map(crate::value::ObjId);
+                let default_value = default_value
                     .as_ref()
                     .map(|v| value_from_image(v, classes, kinds));
+                if class_tag.is_some()
+                    || !re_ivars.is_empty()
+                    || default_block.is_some()
+                    || default_value.is_some()
+                {
+                    let ex = h.extras_mut();
+                    ex.class_tag = class_tag;
+                    ex.ivars = re_ivars;
+                    ex.default_block = default_block;
+                    ex.default_value = default_value;
+                }
+                h.frozen = std::cell::Cell::new(*frozen);
+                h.by_identity = std::cell::Cell::new(*by_identity);
                 Slot::Live(HeapObj::Hash(h))
             }
             HeapObjImage::Range {

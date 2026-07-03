@@ -5913,7 +5913,7 @@ pub(crate) unsafe extern "C" fn jit_hash_get_symkey(
     }
     // Absent: 0 is sound ONLY when there's no user default (the codegen's `|| 0` then
     // yields 0 too). A defaulted Hash must go to the interpreter.
-    if h.default_value.is_some() || h.default_block.is_some() {
+    if h.has_default() {
         NRet { res: 0, ovf: 1 }
     } else {
         NRet { res: 0, ovf: 0 }
@@ -5959,13 +5959,13 @@ pub(crate) unsafe extern "C" fn jit_hash_incr_symkey(
         }
     }
     // Absent: sound only with no user default (else the interpreter must apply it).
-    if h.default_value.is_some() || h.default_block.is_some() {
+    if h.has_default() {
         return NRet { res: 0, ovf: 1 };
     }
     match default.checked_add(delta) {
         Some(nv) => {
             h.pairs.push((Value::Sym(crate::intern::SymId(sym)), Value::Int(nv)));
-            h.index = None;
+            h.clear_indexes();
             NRet { res: nv, ovf: 0 }
         }
         None => NRet { res: 0, ovf: 1 },
@@ -5993,7 +5993,7 @@ pub(crate) unsafe extern "C" fn jit_hash_set_symkey(
             slot.1 = Value::Int(val);
         } else {
             h.pairs.push((Value::Sym(crate::intern::SymId(sym)), Value::Int(val)));
-            h.index = None;
+            h.clear_indexes();
         }
     }
 }

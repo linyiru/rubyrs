@@ -851,7 +851,7 @@ impl<'a> HostCtx<'a> {
     /// `None` for any other shape.
     pub fn resolve_hash(&self, val: &Value) -> Option<&[(Value, Value)]> {
         if let Value::Hash(id) = val {
-            Some(self.heap.hash(*id).as_slice())
+            Some(self.heap.hash(*id))
         } else {
             None
         }
@@ -4054,7 +4054,7 @@ self.eval_inner(
     /// Returns `None` if the value is not a Hash.
     pub fn resolve_hash(&self, val: &Value) -> Option<Vec<(Value, Value)>> {
         if let Value::Hash(id) = val {
-            Some(self.vm.heap.hash(*id).clone())
+            Some(self.vm.heap.hash(*id).to_vec())
         } else {
             None
         }

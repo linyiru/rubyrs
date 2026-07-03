@@ -4026,7 +4026,7 @@ impl Vm {
                                 re.as_str(),
                             ),
                         }))?;
-                        let pairs = self.heap.hash(*hid).clone();
+                        let pairs = self.heap.hash(*hid).to_vec();
                         let mut table: std::collections::HashMap<String, String> =
                             std::collections::HashMap::new();
                         for (k, v) in &pairs {
@@ -4075,7 +4075,7 @@ impl Vm {
                     // only possible match key, so resolve its replacement
                     // once and do a plain substring replace.
                     ("sub" | "gsub" | "sub!" | "gsub!", [Value::Str(pat), Value::Hash(hid)]) => {
-                        let pairs = self.heap.hash(*hid).clone();
+                        let pairs = self.heap.hash(*hid).to_vec();
                         let pat_s = pat.to_string_lossy();
                         let mut repl = String::new();
                         for (k, v) in &pairs {

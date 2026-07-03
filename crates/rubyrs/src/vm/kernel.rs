@@ -2211,7 +2211,7 @@ impl Vm {
                 let mut uplevel: Option<i64> = None;
                 let mut category: Option<String> = None;
                 if let Some(Value::Hash(hid)) = args.last() {
-                    let pairs = self.heap.hash(*hid).clone();
+                    let pairs = self.heap.hash(*hid).to_vec();
                     let all_kw = !pairs.is_empty()
                         && pairs.iter().all(|(k, _)| matches!(k, Value::Sym(s)
                             if matches!(&**self.interner.resolve(*s), "uplevel" | "category")));
@@ -5945,15 +5945,17 @@ impl Vm {
                     seen.push(id.0);
                     match self.heap.get(*id) {
                         crate::heap::HeapObj::Hash(h) => {
-                            if h.default_block.is_some() {
+                            if h.default_block().is_some() {
                                 return Err("can't dump hash with default proc".into());
                             }
                             for (k, val) in h.pairs.iter() {
                                 stack.push(k.clone());
                                 stack.push(val.clone());
                             }
-                            for iv in h.ivars.values() {
-                                stack.push(iv.clone());
+                            if let Some(iv) = h.ivars() {
+                                for v in iv.values() {
+                                    stack.push(v.clone());
+                                }
                             }
                         }
                         _ => return Err("no _dump_data is defined for this object".into()),
@@ -6669,8 +6671,10 @@ impl MarshalReader<'_> {
                     None
                 };
                 if let crate::heap::HeapObj::Hash(h) = vm.heap.get_mut(id) {
-                    h.pairs = pairs;
-                    h.default_value = default;
+                    h.pairs = pairs.into();
+                    if default.is_some() || h.extras().is_some() {
+                        h.extras_mut().default_value = default;
+                    }
                 }
                 Ok(Value::Hash(id))
             }
@@ -6697,7 +6701,7 @@ impl MarshalReader<'_> {
                     }
                     Value::Hash(hid) => {
                         if let crate::heap::HeapObj::Hash(h) = vm.heap.get_mut(*hid) {
-                            h.class_tag = Some(cls);
+                            h.extras_mut().class_tag = Some(cls);
                         }
                     }
                     _ => return Err("unsupported `C` subclass payload (rubyrs: Array/Hash only)".into()),
@@ -7136,7 +7140,7 @@ impl MarshalWriter {
                 }
                 let (has_block, default, sub) = match vm.heap.get(*id) {
                     crate::heap::HeapObj::Hash(h) => {
-                        (h.default_block.is_some(), h.default_value.clone(), h.class_tag.clone())
+                        (h.default_block().is_some(), h.default_value().cloned(), h.class_tag().cloned())
                     }
                     _ => (false, None, None),
                 };
@@ -7155,7 +7159,7 @@ impl MarshalWriter {
                     self.out.push(b'C');
                     self.write_symbol(vm, csym);
                 }
-                let pairs = vm.heap.hash(*id).clone();
+                let pairs = vm.heap.hash(*id).to_vec();
                 // A scalar default (`Hash.new(0)`) uses the `}` tag, which
                 // trails the pairs with the default value; otherwise `{`.
                 self.out.push(if default.is_some() { b'}' } else { b'{' });

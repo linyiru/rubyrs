@@ -990,9 +990,14 @@ impl<'de> serde::de::Visitor<'de> for VmVisitor<'_, '_> {
     {
         self.ctx.depth += 1;
         let obj_id = self.ctx.keys.next_obj_gen();
-        // Pre-size like visit_seq — 8 covers typical record objects.
-        let mut pairs: Vec<(Value, Value)> =
-            Vec::with_capacity(map.size_hint().unwrap_or(8));
+        // Record-shape fast path: build the SmallVec pairs buffer
+        // directly, so a ≤HASH_INLINE_PAIRS object (the JSON-record
+        // common case) allocates NO pairs buffer at all — the pairs
+        // land inline in the HashObj (and thus inline in the heap
+        // slot), and the sweep side frees nothing. Larger objects
+        // spill to one heap buffer on the 4th push, like the old
+        // pre-sized Vec.
+        let mut pairs: crate::heap::PairsBuf = crate::heap::PairsBuf::new();
         loop {
             let seed = KeySeed {
                 obj_id,

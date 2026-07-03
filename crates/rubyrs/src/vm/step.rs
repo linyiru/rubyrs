@@ -6612,7 +6612,9 @@ impl Vm {
                 }
             }
         }
-        let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(n);
+        // SmallVec pairs: a ≤HASH_INLINE_PAIRS literal (most kwargs /
+        // option hashes) builds fully inline — no pairs allocation.
+        let mut pairs: crate::heap::PairsBuf = crate::heap::PairsBuf::with_capacity(n);
         {
             let mut d = self.stack.drain(split..);
             while let (Some(k), Some(v)) = (d.next(), d.next()) {
