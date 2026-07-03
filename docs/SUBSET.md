@@ -392,6 +392,25 @@ separate args (so a single-arg block binds to just the key,
 matching CRuby's documented divergence for the filter
 shapes).
 
+### `Hash#rehash` — two documented divergences
+
+`Hash#rehash` (re-index after mutating keys in place) follows
+CRuby's collapse rule — when rehashing reveals duplicate keys,
+the FIRST key object keeps its position and the LAST value
+wins — and raises FrozenError on frozen receivers. Two
+divergences, both verified against CRuby 3.4.1:
+
+- **No iteration guard**: `h.each { h.rehash }` silently
+  rehashes; CRuby raises `RuntimeError` ("rehash during
+  iteration"). Same family as the pre-existing missing
+  insert-during-each guard.
+- **`rehash` never calls user `hash`**: duplicate detection
+  runs on `eql?` alone, so a key class whose `hash` raises
+  completes silently where CRuby propagates the error, and
+  the `eql?` receiver/argument direction is reversed vs
+  CRuby. The observable collapse OUTCOME (position, value,
+  survivor identity) matches CRuby on consistent keys.
+
 Divergence — `Hash.new` with a default value / default proc
 isn't supported: `Hash.new(5)` and `Hash.new { ... }` both
 return an `Object`, not a Hash. Calling any Hash method on
