@@ -753,6 +753,86 @@ byte-identical tier-on/off == fresh CRuby oracles; 20-file prism batch ==
 `/tmp/cruby_prism20_fresh.txt` (regenerated and re-verified against CRuby
 first); fib canary above.
 
+### Fallback-census wave results (2026-07-03; census-first — measure the
+residual `do_call` fallback pool, then absorb only what the numbers rank)
+
+Instrumentation (permanent, env-gated `RUBYRS_T2_FALLBACK_STATS=1`, the
+`RUBYRS_CASCADE_STATS` debug-knob shape): (a) every `t2_call`-family
+fallback edge classified post-hoc via the UNCACHED lookup (reason ×
+name × receiver shape × argc — gate/settled/host-fn/lookup-miss/
+non-public/closure/builtin/arity/nfa-kw-rest-blk-opt/eligible/prim-recv/
+class-recv), (b) a one-shot `t2_fb_from` marker giving exact first-level
+"reached the slow cascade" attribution, (c) a `t2_op` census of every
+generic-helper op execution, (d) per-reason lite materialize-bail
+attribution. Dumped as `t2fb-stats` / `t2op-stats` CLI rows.
+
+**The census (walkonly big1 ×10, adaptive tier2), per walk:** 295K
+t2_call fallbacks (32.6% of t2_call attempts) = **63% primitive-receiver
++ 35% universal lookup-miss shapes that `do_call`'s own mid-cascade
+buckets re-serve** — the fallback tax was the `do_call` preamble, not
+the serve; 94K/walk also fell through to the slow cascade (`Array#drop`
+23.7K — the single hottest shape, `Object#class` 6.4K, bare
+`block_given?` 6.4K, `Hash#fetch` 3.7K, `Array#freeze` 3.2K …); 57K/walk
+block-form calls ALL fell past the block IC (`each` on Array 23.8K,
+NFA-shaped `visit_descendants` 16.3K); generic-helper op residue:
+`LoadConst`/`LoadConstChain` 86K, `CreateBlock` 38K, `ApplyCall` family
+38K (`type?` 14.9K), argc-3/4 plain calls 15-20K. The wave-guess ledger:
+kwargs shapes measured TINY at the t2 edge (nfa-kw 383/walk — the NFA
+plan already absorbs rest/opt; kw stays interpreter-bound by design),
+`LoadConstStr` 28.7K but each is one cheap helper round-trip (~0.4ms
+pool), `Super` 2.4K.
+
+Absorbed (three pieces, each gated + battery'd):
+
+- **A. `Vm::try_walk_fast_buckets`** — the mid-cascade bucket zone
+  (`===`, the walk-attributed universal/collection buckets, send-family
+  #1-#3) extracted verbatim from `do_call` and probed by `t2_call_impl`
+  at the cascade's exact position (after the class-singleton sibling),
+  gated per receiver KIND on the str/heap/hash singleton flags.
+- **B. `T2_CALL_MAX_ARGC` 2 → 8** — the framed argc cap was wave-2
+  conservatism, not an ABI limit; argc 3-8 `Call`/`CallNoRecv` now take
+  the IC-fast helpers.
+- **C. Census-ranked new buckets** (serving both `do_call` and the t2
+  probe): `Array#drop`/`freeze`/`dup`, `Hash#fetch` (1-arg hit-only +
+  2-arg, blockless), `String#dup`, `Object#class`, bare `block_given?` —
+  canonical arms mirrored byte-for-byte behind new method_gen-
+  revalidated chain-clean flags / IC-miss gates; everything uncertain
+  declines.
+
+| measurement | baseline (5ec68cd8) | census wave |
+|---|---:|---:|
+| t2_call fallbacks /walk | 295K (ic_fast 611K) | **39.5K (−87%; ic_fast 879K)** |
+| slow-cascade sends from compiled bodies /walk | 94K | **47K** |
+| walkonly big1 ×20 (tier2, interleaved best-of, quiet box) | 252.4ms | **250.6ms** (4/5 pairs −1.5..−2.5ms) |
+| walkonly big1 ×20 (tier OFF — the buckets serve interpreted dispatch too) | 256.7ms | **254.5ms** (3/3 pairs) |
+| f1 e2e | 1.59–1.61s | 1.57–1.59s |
+| fib canary (default / jit-native / tier2) | 0.32/0.008/0.078s | identical |
+
+**Finding (the wave-4 lesson at the dispatch layer).** Absorbing 87% of
+the fallback edge moved the wall only ~2-3ms: the re-served fallbacks
+cost ~10ns of `do_call` preamble each, not the ~40ns projected — the
+cascade's early arms are cheap and branch-predicted; the real per-call
+money was only in the ~47K/walk that reached the slow cascade (halved
+here). The walk's remaining measured pool: the 57K/walk block-form
+calls falling past the block IC (the block-machinery track owns the
+frame-build side; the DISPATCH side — an NFA-shaped block-form serve —
+is open), the `[]=` argc-3 slice-assign (4.8K/walk, ~1.2ms, declined
+here for write-semantics risk), `method_defined?` (2.7K, ~0.7ms —
+below the 1ms bar), and the LoadConst/Chain helper round-trips (~0.9ms
+pool). Stop rule honoured: every remaining single shape projects <1.2ms.
+
+Gates: diff_cruby **1077/0** ×4 configs (default / JIT_NATIVE / tier2 /
+tier2+THRESHOLD=1; includes the new `t2_walk_buckets_battery` —
+redefinition-after-warm across all five bucket names, per-instance-
+singleton flip after warm, frozen/defaulted-hash/KeyError semantics,
+argc-3/4 private + wrong-arity + method_missing + `__send__` shapes);
+battery three-way vs CRuby byte-identical under plain / tier2+T1 /
+STRESS_GC(both) / JIT_NATIVE; rubocop f1 + big1 + 20-file prism batch
+byte-identical vs FRESH CRuby oracles, tier on and off. Surfaced
+pre-existing (not fixed): `instance_variable_set/get` on Array/Hash
+values raises a misleading FrozenError via the reflection catch-all —
+the heap ivar tables exist, only the reflection arms are unwired.
+
 ### Amdahl honesty
 
 At 84–100% frame coverage the measured wave-1 win is 0 — coverage without
