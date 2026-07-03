@@ -2209,6 +2209,14 @@ pub(crate) struct Vm {
     pub(crate) sym_dup: SymId,
     pub(crate) sym_class_name: SymId,
     pub(crate) sym_block_given_q: SymId,
+    /// Pre-interned names for the 2026-07 census-TAIL buckets
+    /// (`Object#equal?` ~15K, `Module#method_defined?` ~27K, bare
+    /// `__method__` ~16K sends per 10-iter RuboCop walk — the
+    /// shapes the census wave declined at <1.2ms each; `[]=`
+    /// argc-3 rides the existing `sym_index_set_op`).
+    pub(crate) sym_equal_q: SymId,
+    pub(crate) sym_method_defined_q: SymId,
+    pub(crate) sym_method_intro: SymId,
     /// Pre-interned send-family names for the send-family fast
     /// buckets (RuboCop cop-walk census 2026-07: `respond_to?` is
     /// the single hottest slow-cascade name at ~24.7K sends per
@@ -2809,6 +2817,9 @@ impl Vm {
         let sym_dup = interner.intern("dup");
         let sym_class_name = interner.intern("class");
         let sym_block_given_q = interner.intern("block_given?");
+        let sym_equal_q = interner.intern("equal?");
+        let sym_method_defined_q = interner.intern("method_defined?");
+        let sym_method_intro = interner.intern("__method__");
         let sym_respond_to = interner.intern("respond_to?");
         let sym_respond_to_missing = interner.intern("respond_to_missing?");
         let sym_send = interner.intern("send");
@@ -3199,6 +3210,9 @@ impl Vm {
             sym_dup,
             sym_class_name,
             sym_block_given_q,
+            sym_equal_q,
+            sym_method_defined_q,
+            sym_method_intro,
             sym_respond_to,
             sym_respond_to_missing,
             rtm_default_stub: None,

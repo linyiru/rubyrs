@@ -1124,6 +1124,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // and the census-ranked buckets (Array#drop/freeze/dup, Hash#fetch,
 // String#dup, Object#class, bare block_given?).
 #[test] fn t2_walk_buckets_battery() { run_diff("t2_walk_buckets_battery"); }
+// Census-TAIL buckets (Array []= argc-3 splice-assign, Object#equal?,
+// Module#method_defined?, bare __method__) — dispatch shapes +
+// redefinition/visibility-flip invalidation edges.
+#[test] fn t2_walk_tail_battery() { run_diff("t2_walk_tail_battery"); }
 // method_defined? CRuby semantics (visibility, inherit scope,
 // universal surface, sentinel classes, error arms).
 #[test] fn method_defined_semantics() { run_diff("method_defined_semantics"); }

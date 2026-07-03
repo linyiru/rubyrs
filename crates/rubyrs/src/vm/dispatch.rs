@@ -7984,9 +7984,11 @@ impl Vm {
         /// (`is_a?`/`kind_of?`, `!`, `nil?`, Array `size`/`length`/
         /// `empty?`/`include?`/`member?`/`push`/`<<`, Int `-@`/`<<`,
         /// Sym `to_s`/`to_sym`, Hash `size`/`length`/`empty?`,
-        /// `nil == x`, bare `Kernel#Array` identity) and the
-        /// SEND-FAMILY buckets #1-#3 (`respond_to?`, explicit
-        /// `send`-family re-aim, bare `send`/`__send__` re-aim).
+        /// `nil == x`, bare `Kernel#Array` identity), the SEND-FAMILY
+        /// buckets #1-#3 (`respond_to?`, explicit `send`-family
+        /// re-aim, bare `send`/`__send__` re-aim), and the census-TAIL
+        /// buckets (Array `[]=` argc-3 splice-assign, `Object#equal?`,
+        /// `Module#method_defined?`, bare `__method__`).
         ///
         /// Runs at `do_call`'s exact cascade position (right after the
         /// class-singleton probe, right before the slow cascade), and
@@ -8407,6 +8409,36 @@ impl Vm {
                             }
                         }
                     }
+                    // `Object#equal?` — identity. Mirrors the
+                    // universal arm ("CRuby never overrides this")
+                    // byte-for-byte for the census's Object-receiver
+                    // shape (~1.5K/walk): (Object, Object) → ObjId
+                    // equality; any other argument kind → the arm's
+                    // `_ => ruby_eq` fallback (no Object-vs-other
+                    // arm there → false). Gated like the `class` /
+                    // `is_a?` buckets on an IC-backed user-method
+                    // MISS (a public fixed-arity `def equal?` was
+                    // already served upstream; any other override
+                    // declines to the canonical order, where the
+                    // universal arm's always-intercept precedence
+                    // applies). Bool result, no alloc → no
+                    // `maybe_gc`.
+                    if name_id == self.sym_equal_q
+                        && let Value::Object(oid) = &self.stack[ridx]
+                    {
+                        let oid = *oid;
+                        if let Some(cls) = self.heap.try_class_of(oid)
+                            && self.lookup_method_cached(&cls, name_id, cache_id).is_none()
+                        {
+                            let same = match (&self.stack[ridx], &self.stack[ridx + 1]) {
+                                (Value::Object(a), Value::Object(b)) => a == b,
+                                (recv, arg) => recv.ruby_eq(arg, &self.heap),
+                            };
+                            self.stack.truncate(ridx);
+                            self.stack.push(Value::Bool(same));
+                            return Ok(true);
+                        }
+                    }
                     // `nil == x` — the universal cross-type `==`
                     // fallback reduces to `ruby_eq(Nil, x)`: true
                     // iff x is nil.
@@ -8563,6 +8595,83 @@ impl Vm {
                             }
                         }
                     }
+                } else if argc == 3 {
+                    // `a[start, len] = value` — Array splice-assign
+                    // (`Op::CallAset` argc-3; 2026-07 census: ~4.8K
+                    // sends/walk from compiled bodies — the hottest
+                    // remaining slow-cascade shape after the census
+                    // wave). Mirrors the canonical array.rs
+                    // `("[]=", [Int, Int, v])` arm byte-for-byte for
+                    // the NON-RAISING shapes; everything that raises
+                    // (or needs cap arithmetic) declines so the
+                    // canonical arm owns those semantics:
+                    //   - Int start / Int length only (the Range form
+                    //     and coercible args keep the canonical arm);
+                    //   - negative start wraps from the end;
+                    //     still-negative declines (canonical raises
+                    //     IndexError "index N too small ...");
+                    //   - negative length declines (IndexError
+                    //     "negative length (N)");
+                    //   - frozen / tagged-subclass receivers decline
+                    //     (central frozen guard / subclass override
+                    //     gate);
+                    //   - capped Vms (`max_value_bytes`) decline (the
+                    //     canonical arm owns the byte-cap check);
+                    //   - an Array value splices its ELEMENTS
+                    //     (aliasing-safe: assigning a slice of the
+                    //     receiver itself snapshots the receiver
+                    //     before the splice — canonical's rule); any
+                    //     other value wraps as a single element;
+                    //   - start past the end pads with Nil; length
+                    //     clamps at the current end;
+                    //   - evaluates to the assigned value as-is
+                    //     (`Op::CallAset` then swaps in the RHS — the
+                    //     same Value either way).
+                    // In-place splice on the existing heap cell — no
+                    // GC-heap alloc, so no `maybe_gc` (same as the
+                    // canonical arm).
+                    if name_id == self.sym_index_set_op
+                        && self.fast_index_array_set_safe
+                        && self.max_value_bytes.is_none()
+                        && let Value::Array(id) = &self.stack[ridx]
+                    {
+                        let id = *id;
+                        if self.heap.array_class_tag(id).is_none()
+                            && !self.heap.array_frozen(id)
+                            && let (Value::Int(start), Value::Int(length)) =
+                                (&self.stack[ridx + 1], &self.stack[ridx + 2])
+                        {
+                            let (start, l) = (*start, *length);
+                            let len = self.heap.array(id).len() as i64;
+                            let s = if start < 0 { len + start } else { start };
+                            if s >= 0 && l >= 0 {
+                                let v = self.stack[ridx + 3].clone();
+                                // Snapshot the replacement values
+                                // BEFORE mutably borrowing the
+                                // receiver (canonical's aliasing
+                                // discipline).
+                                let new_vals: Vec<Value> = match &v {
+                                    Value::Array(vid) if *vid != id => {
+                                        self.heap.array(*vid).clone()
+                                    }
+                                    Value::Array(_) => self.heap.array(id).clone(),
+                                    other => vec![other.clone()],
+                                };
+                                let s_u = s as usize;
+                                let end_idx =
+                                    ((s + l) as usize).min(self.heap.array(id).len());
+                                let a = self.heap.array_mut(id);
+                                while a.len() < s_u {
+                                    a.push(Value::Nil);
+                                }
+                                let splice_end = end_idx.max(s_u).min(a.len());
+                                a.splice(s_u..splice_end, new_vals);
+                                self.stack.truncate(ridx);
+                                self.stack.push(v);
+                                return Ok(true);
+                            }
+                        }
+                    }
                 }
                 // Array#push — variadic append (argc 0 is a no-op
                 // returning self; matches the canonical arm).
@@ -8587,6 +8696,55 @@ impl Vm {
                             }
                         }
                         self.stack.push(Value::Array(id));
+                        return Ok(true);
+                    }
+                }
+                // `Module#method_defined?(:name[, inherit])` —
+                // Class/Module receiver with a Sym name (census:
+                // ~2.7K/walk, all slow-cascade; `NodePattern`
+                // compiled matchers probe cop-class capabilities).
+                // Serves through the SAME `class_method_defined`
+                // helper the canonical introspection arm calls
+                // (`try_dispatch_class_introspection`), which rides
+                // the respond_to? `(class, name, method_gen)` memo —
+                // one chain walk amortized across the walk's probes,
+                // and the fast and canonical answers cannot drift.
+                // Gates:
+                //   - the surrounding `!maybe_refined` /
+                //     `!force_primitive` / `!any_undefs` trio;
+                //   - Sym name only (Str names are cold — canonical);
+                //   - no `class_tag` (a module value that is an
+                //     instance of a Module subclass resolves
+                //     instance methods from its tag class in the
+                //     slow path — same gate as the `===` class
+                //     bucket);
+                //   - a `def self.method_defined?` singleton
+                //     override anywhere on the receiver's singleton
+                //     chain declines via a per-site
+                //     `lookup_class_singleton_cached` MISS (the name
+                //     is in `class_singleton_deny`, so no upstream
+                //     fast path served it; the canonical cascade's
+                //     name-keyed arm actually shadows such overrides
+                //     today, so declining is strictly conservative);
+                //   - the 2-arg inherit flag is truthiness-evaluated
+                //     for BOTH values (the canonical arm now honours
+                //     inherit=false via the own-table variant).
+                // Bool result, no alloc → no `maybe_gc`.
+                if name_id == self.sym_method_defined_q
+                    && (argc == 1 || argc == 2)
+                    && let Value::Class(cls) = &self.stack[ridx]
+                    && cls.class_tag.is_none()
+                    && let Value::Sym(target) = &self.stack[ridx + 1]
+                {
+                    let (cls, target) = (cls.clone(), *target);
+                    if self
+                        .lookup_class_singleton_cached(&cls, name_id, cache_id)
+                        .is_none()
+                    {
+                        let inherit = argc == 1 || self.stack[ridx + 2].is_truthy();
+                        let answer = class_method_defined(self, &cls, target, inherit);
+                        self.stack.truncate(ridx);
+                        self.stack.push(Value::Bool(answer));
                         return Ok(true);
                     }
                 }
@@ -8636,6 +8794,68 @@ impl Vm {
                     && self.lookup_method_cached(&cls, name_id, cache_id).is_none()
                 {
                     self.stack.push(Value::Bool(has_block));
+                    return Ok(true);
+                }
+            } else if no_recv
+                && argc == 0
+                && name_id == self.sym_method_intro
+                && !self.host_fns.contains_key(&name_id)
+            {
+                // Bare `__method__` on an Object self — the kernel
+                // builtin arm's exact frame walk (vm/kernel.rs):
+                // skip block / class-body frames; a define_method
+                // frame's RUNTIME name is stamped in
+                // `aux.invoked_name` (the proto name would be the
+                // block's lexical context); `<main>` → nil. Gated
+                // like the `block_given?` bucket above: IC-backed
+                // user-method MISS on the self chain (a public
+                // fixed-arity override was already served by
+                // `try_invoke_self_recv_cached`; any other override
+                // declines to the canonical order — the builtin arm
+                // runs first there, so declining is conservative);
+                // non-Object selves decline (toplevel/main
+                // resolution and a user toplevel `def __method__`
+                // stay with the cascade). `__callee__` is
+                // deliberately NOT here (cold in the walk — census
+                // 2026-07: 0 sends). Census: ~1.6K `__method__`
+                // sends/walk, all slow-cascade. Sym/Nil result, no
+                // GC-heap alloc → no `maybe_gc`.
+                let self_oid = match self.frames.last().map(|f| &f.self_val) {
+                    Some(Value::Object(oid)) => Some(*oid),
+                    _ => None,
+                };
+                if let Some(oid) = self_oid
+                    && let Some(cls) = self.heap.try_class_of(oid)
+                    && self.lookup_method_cached(&cls, name_id, cache_id).is_none()
+                {
+                    // Ok(sym) = aux-stamped runtime name; Err(idx) =
+                    // proto whose name needs the resolve+intern the
+                    // kernel arm performs (identical SymId — intern
+                    // of an already-interned name).
+                    let mut found: Option<Result<SymId, usize>> = None;
+                    for f in self.frames.iter().rev() {
+                        if f.is_block || f.is_class_body {
+                            continue;
+                        }
+                        if let Some(nm) = f.aux.as_ref().and_then(|a| a.invoked_name) {
+                            found = Some(Ok(nm));
+                            break;
+                        }
+                        if self.protos[f.proto_idx].name == "<main>" {
+                            break;
+                        }
+                        found = Some(Err(f.proto_idx));
+                        break;
+                    }
+                    let v = match found {
+                        Some(Ok(sid)) => Value::Sym(sid),
+                        Some(Err(pi)) => {
+                            let n = self.protos[pi].name.clone();
+                            Value::Sym(self.interner.intern(&n))
+                        }
+                        None => Value::Nil,
+                    };
+                    self.stack.push(v);
                     return Ok(true);
                 }
             }
