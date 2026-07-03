@@ -954,6 +954,96 @@ directly — a deep but well-scoped change (heap rep + GC + every value-op touch
 remains out of scope for this ADR; the PoC just proves the lever is real and de-risks the
 investment.
 
+## Reality check on real rubocop (2026-07-01) — the walk win does NOT transfer; the JIT is net-negative there
+
+A full lever campaign (5-agent decomposition + PoCs, all gated on byte-identical rubocop
+output + diff_cruby green) measured the JIT against the REAL RuboCop 1.88 cop walk
+(`Team#investigate`, 600-line file), not the `bench_walk` skeleton:
+
+- **JIT-on 390ms vs JIT-off 359ms — the JIT is ~8% net-NEGATIVE on the real walk.** Per
+  process: 7,865 compile attempts, 35 ok, and the only native method that ever *executed*
+  (`on_newline`) deopted on 100% of its 631 calls. The 34 compiled `objparam` predicates are
+  structurally unreachable: the slow-cascade serving hook (`invoke_method_with_block_inner`)
+  and the explicit-recv D-Layer-4 block have no `objparam`/loop-driver arms, so their
+  compiled code can never fire. The microbench walk shapes beat YJIT because the WHOLE loop
+  compiles; the real walk never enters native code at all.
+- **The real walk is interpreter-dispatch-bound**: ~2.2M dispatches per file-walk, 45.7%
+  through the full slow cascade, dominated by primitive/reflection sends on builtin
+  receivers (`===`, `is_a?`, `!`, `include?`, `public_send`, `respond_to?`) from NodePattern
+  matchers — receivers a method-body JIT cannot target. Broadening `compile()` op coverage
+  toward the decline histogram is low-value here: the bodies bottleneck on those same
+  primitive sends.
+- **Consequence for the rubocop north-star**: the surpass path on this workload is (a)
+  dispatch-core fast paths (the shipped builtin `===` bucket cut whitequark parse 2.5×
+  because case/when desugars to `===` do_calls — the ragel lexer is one giant
+  `case state when <int>`), (b) the parser_prism engine (native prism backend) for parse,
+  and (c) making the compiled predicates actually servable (plumbing, low expected value)
+  — NOT more compile() coverage. For rubocop-shaped CLI runs, `RUBYRS_JIT_NATIVE` off is
+  currently the faster configuration; the compile-attempt tax should be gated before the
+  JIT is defaulted on for such workloads.
+- Canonical rubocop-workload build: `--features stdlib,jit-native,mimalloc` — mimalloc is a
+  measured win on every leg of this workload (single-file wall −10.6%, `require` −12%,
+  walk −3.5%, 20-file batch −4.7%).
+
+### Serving-plumbing fix (2026-07-02) — compiled code now REACHABLE; tax cut ~9.3% → ~2.5-3%
+
+The two defects above were fixed (all gated on byte-identical rubocop output under both
+modes + diff_cruby green in both modes):
+
+- **Serving arms wired everywhere a resolved method meets a cached proto.** Precedence:
+  (1) the FAST paths serve in place (explicit-recv D-Layer-4: value → int(guarded) →
+  objparam → Float → objparam2 → zeroarg-after-getter; self-recv/toplevel
+  `try_invoke_fixed_method_from_stack`: int → Float → objparam → objparam2 → zeroarg);
+  (2) the slow-cascade hook (`invoke_method_with_block_inner`) gained the missing
+  `objparam`/`objparam2` arms and now fills ALL THREE 1-arg verdicts
+  (int/value/objparam) in ONE routed trip; (3) `jit_should_route` routes only while a
+  verdict is missing or where only the hook can serve (value, int-PIC) — a compiled
+  objparam no longer routes into a hook that couldn't serve it, and 0/2-arg dispatches
+  never route (the hook is 1-arg-only). Loop-driver `NativeLoop`s are NOT servable at
+  method-dispatch sites (they need a block + array driver, served from iter.rs).
+- **The `jit_native_zeroarg` variant turned out to be the REAL serving surface on the
+  walk**: rubocop-ast's eval-generated `def send_type?; @type == :send; end` predicates +
+  `begin_pos`/`end_pos`/`eos?` fire natively **~53k times per walk** (210 methods,
+  ~0 deopt) once served at explicit-recv argc==0 (after the getter fast path) and
+  self-recv. Previously zeroarg was reachable ONLY as a native PIC callee.
+- **Compile tax killed by a pre-gate** (`jit_native::pregate`): one O(ops) scan declines
+  undecidable bodies (CreateBlock/Super/Yield/LoadConstChain/…) BEFORE
+  `compile_native_for_class_rec`'s callee cascade (which compiled fparam+objparam variants
+  of every 1-arg callee even when the top body was hopeless). On the walk: ~74-80% of
+  attempts now decline in the pre-gate.
+- **Deopt circuit-breaker**: serving a proto that deopts on 100% of calls (`line`,
+  `matched`, `extract_rhs` — 166k wasted native-attempt+reinterpret pairs per 10 walks) is
+  pure loss; after 32 dispatch-deopts a proto is marked `dispatch_dead` (NOT dropped — its
+  address may be baked in other code's PIC caches) and serving stops. Walk deopts fell
+  166k → ~1k per 10 iters.
+- **Dense negative cache** (`Vm::jit_flags`, one byte/proto): settled-dead verdicts answer
+  in one Vec read instead of 3-7 FxHashMap probes per call.
+- **Two latent crash classes fixed** (exposed the moment the predicates actually ran):
+  (1) codegen's `reads_self_ivar` missed the bare-getter arm, so a body with a B4 getter
+  call but no own `LoadIvar` scanned a NULL ivar base (the not-found dummy load faulted);
+  (2) serving sites held `&NativeProto` borrows INTO the cache maps across the native
+  call, but the running code can re-enter the VM (cold obj-call PIC → compile) and insert
+  into those same maps — a rehash moves the proto under the borrow. All serving now copies
+  a by-value `NpEntry` snapshot first.
+- **Honest outcome (walkonly, big1.rb, best-of interleaved rounds): JIT-on 349.4ms vs
+  JIT-off 341.7ms — the tax is now +2.3% (was +9.3%)**, with ~53k native serves per walk
+  actually executing (~0 deopt). E2E `run_rubocop` on big1: wall +2.5%, run-leg +4-5%
+  under JIT-on (single-shot, so the one-time cost of the 196 now-successful zeroarg
+  compiles offsets the pre-gate savings; within noise of the pre-fix binary). The serve
+  itself wins (isolated microbench: explicit-recv predicate −34%, self-recv reader
+  −21%), but the walk's ~2.2M dispatches/iter each pay a few extra loads/branches for
+  the JIT-on checks, and those diffuse costs still slightly outweigh the concentrated
+  wins on THIS workload. Remaining known levers: per-class zeroarg PIC (guard-miss
+  methods re-probe forever), Method-embedded flags (drop the `jit_flags` Vec
+  indirection), and body coverage for the top interpreted-frame methods now that serving
+  works — steered by the `RUBYRS_JIT_STATS=1` per-method native-exec/deopt tables. Prior
+  estimate was "<5% win from serving alone" — measured reality: serving alone is roughly
+  tax-neutral (it converts the JIT from clearly net-negative to near-parity on the
+  walk), and the real value is that every future body-coverage win is now actually
+  reachable. Both correctness holes it exposed (NULL ivar-base in bare-getter bodies;
+  PIC fills serving protected/private callees) are fixed and pinned by diff_cruby, now
+  green under BOTH default and `RUBYRS_JIT_NATIVE=1` full runs.
+
 ## Risks
 
 - **YJIT-class scope.** A full method JIT with PIC + deopt + broad coverage is a

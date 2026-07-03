@@ -835,6 +835,7 @@ impl Heap {
             singleton_target: RefCell::new(None),
             undefed: RefCell::new(crate::intern::FxHashSet::default()),
             anon_serial: std::cell::Cell::new(0),
+            ivar_shape: std::cell::RefCell::new(crate::value::IvarShape::default()),
                     class_vars: RefCell::new(crate::intern::FxHashMap::default()),
             consts: RefCell::new(crate::intern::FxHashMap::default()),
             assigned_name: RefCell::new(None),
@@ -1239,6 +1240,15 @@ impl Heap {
         // by the Vm root scan; this set bounds the redundant re-walk).
         let mut seen_inst_classes: crate::intern::FxHashSet<*const Class> =
             crate::intern::FxHashSet::default();
+        // Locals-CELL content scans visited this cycle (Block handle
+        // captures / closure captures / fiber-snapshot frames). Cells
+        // are shared heavily (every handle minted from one loop shares
+        // its scope cells; ~40 rubocop-ast `*_type?` closures share one
+        // class-body cell) -- dedup bounds the scan to once per cell per
+        // cycle. Sound: no Ruby code runs mid-collection, so contents
+        // are stable.
+        let mut seen_cells: crate::intern::FxHashSet<usize> =
+            crate::intern::FxHashSet::default();
         for v in roots { Heap::visit_value(v, &mut self.marks, &mut worklist); }
         // Minor: force-walk the remembered old objects so a young object held
         // ONLY by an old one (via a post-promotion mutation) is still marked.
@@ -1259,7 +1269,7 @@ impl Heap {
         while let Some(id) = worklist.pop() {
             match &self.slots[id.0 as usize] {
                 Slot::Live(HeapObj::Instance(inst)) => {
-                    for v in inst.ivars.values() {
+                    for v in inst.ivars.values_raw() {
                         Heap::visit_value(v, &mut self.marks, &mut worklist);
                     }
                     // Mark the instance's CLASS graph. An ANONYMOUS class
@@ -1294,9 +1304,13 @@ impl Heap {
                     if let Some(sc) = &inst.singleton_class {
                         for m in sc.methods.borrow().values() {
                             if let Some(cl) = &m.closure {
-                                for v in cl.captured.borrow().iter() {
-                                    Heap::visit_value(v, &mut self.marks, &mut worklist);
-                                }
+                                cl.each_capture_cell(|cell| {
+                                    if seen_cells.insert(std::rc::Rc::as_ptr(cell) as usize) {
+                                        for v in cell.borrow().iter() {
+                                            Heap::visit_value(v, &mut self.marks, &mut worklist);
+                                        }
+                                    }
+                                });
                                 // A closure method that captures an enclosing
                                 // `yield` block (`define_singleton_method(:m) {
                                 // yield }` — the on_teardown idiom) holds that
@@ -1367,9 +1381,13 @@ impl Heap {
                     if let Some(sc) = &h.singleton_class {
                         for m in sc.methods.borrow().values() {
                             if let Some(cl) = &m.closure {
-                                for v in cl.captured.borrow().iter() {
-                                    Heap::visit_value(v, &mut self.marks, &mut worklist);
-                                }
+                                cl.each_capture_cell(|cell| {
+                                    if seen_cells.insert(std::rc::Rc::as_ptr(cell) as usize) {
+                                        for v in cell.borrow().iter() {
+                                            Heap::visit_value(v, &mut self.marks, &mut worklist);
+                                        }
+                                    }
+                                });
                             }
                         }
                         for v in sc.ivars.borrow().values() {
@@ -1384,16 +1402,22 @@ impl Heap {
                 Slot::Live(HeapObj::Block(bh)) => {
                     // Walk captured locals (shared Rc<RefCell> with
                     // any frame currently executing this block, but
-                    // immutably borrowed only here) and the block's
-                    // `self_val`. The visit_value calls do not
-                    // recurse — they mark + worklist-push only —
-                    // so the RefCell borrow stays scoped to this
-                    // arm and can't conflict with itself.
-                    let captured = bh.captured.borrow();
-                    for v in captured.iter() {
-                        Heap::visit_value(v, &mut self.marks, &mut worklist);
-                    }
-                    drop(captured);
+                    // immutably borrowed only here) — `captured` PLUS
+                    // every outer-chain cell (an ORIGINAL binding
+                    // cell whose defining frame popped may be
+                    // reachable only through this handle) — and the
+                    // block's `self_val`. The visit_value calls do
+                    // not recurse — they mark + worklist-push only —
+                    // so each RefCell borrow stays scoped to one
+                    // `each_capture_cell` callback and can't conflict
+                    // with itself.
+                    bh.each_capture_cell(|cell| {
+                        if seen_cells.insert(std::rc::Rc::as_ptr(cell) as usize) {
+                            for v in cell.borrow().iter() {
+                                Heap::visit_value(v, &mut self.marks, &mut worklist);
+                            }
+                        }
+                    });
                     Heap::visit_value(&bh.self_val, &mut self.marks, &mut worklist);
                     // The yield-block this block forwards to (escaped
                     // closure case): nothing else roots it once the
@@ -1413,9 +1437,13 @@ impl Heap {
                     // class table after a `remove_method`.
                     if let Some(m) = method
                         && let Some(cl) = &m.closure {
-                        for v in cl.captured.borrow().iter() {
-                            Heap::visit_value(v, &mut self.marks, &mut worklist);
-                        }
+                        cl.each_capture_cell(|cell| {
+                            if seen_cells.insert(std::rc::Rc::as_ptr(cell) as usize) {
+                                for v in cell.borrow().iter() {
+                                    Heap::visit_value(v, &mut self.marks, &mut worklist);
+                                }
+                            }
+                        });
                     }
                 }
                 Slot::Live(HeapObj::UnboundMethod { method, .. }) => {
@@ -1436,9 +1464,13 @@ impl Heap {
                     // SymId.
                     if let Some(m) = method
                         && let Some(cl) = &m.closure {
-                        for v in cl.captured.borrow().iter() {
-                            Heap::visit_value(v, &mut self.marks, &mut worklist);
-                        }
+                        cl.each_capture_cell(|cell| {
+                            if seen_cells.insert(std::rc::Rc::as_ptr(cell) as usize) {
+                                for v in cell.borrow().iter() {
+                                    Heap::visit_value(v, &mut self.marks, &mut worklist);
+                                }
+                            }
+                        });
                     }
                 }
                 Slot::Live(HeapObj::CurriedProc { underlying, gathered, .. }) => {
@@ -1478,10 +1510,32 @@ impl Heap {
                         Heap::visit_value(v, &mut self.marks, &mut worklist);
                     }
                     for frame in &snap.frames {
-                        if let Some(rc) = frame.locals.as_shared() {
+                        if let Some(rc) = frame.locals.as_shared()
+                            && seen_cells.insert(std::rc::Rc::as_ptr(rc) as usize)
+                        {
                             let locals = rc.borrow();
                             for v in locals.iter() {
                                 Heap::visit_value(v, &mut self.marks, &mut worklist);
+                            }
+                        }
+                        // Capture-routing cells — a suspended fiber's
+                        // block frame may hold the only path to an
+                        // ORIGINAL binding cell (mirrors the live-
+                        // frame root walk in vm/gc.rs).
+                        if let Some(cell) = &frame.outer_cell
+                            && seen_cells.insert(std::rc::Rc::as_ptr(cell) as usize)
+                        {
+                            for v in cell.borrow().iter() {
+                                Heap::visit_value(v, &mut self.marks, &mut worklist);
+                            }
+                        }
+                        if let Some(chain) = &frame.outer_rest {
+                            for (cell, _) in chain.iter() {
+                                if seen_cells.insert(std::rc::Rc::as_ptr(cell) as usize) {
+                                    for v in cell.borrow().iter() {
+                                        Heap::visit_value(v, &mut self.marks, &mut worklist);
+                                    }
+                                }
                             }
                         }
                         Heap::visit_value(&frame.self_val, &mut self.marks, &mut worklist);
@@ -1699,16 +1753,20 @@ impl Heap {
                     // spec suite ICE under normal GC pressure).
                     for m in cls.methods.borrow().values() {
                         if let Some(cl) = &m.closure {
-                            for v in cl.captured.borrow().iter() {
-                                touch(v, &mut stack, &mut seen);
-                            }
+                            cl.each_capture_cell(|cell| {
+                                for v in cell.borrow().iter() {
+                                    touch(v, &mut stack, &mut seen);
+                                }
+                            });
                         }
                     }
                     for m in cls.singleton_methods.borrow().values() {
                         if let Some(cl) = &m.closure {
-                            for v in cl.captured.borrow().iter() {
-                                touch(v, &mut stack, &mut seen);
-                            }
+                            cl.each_capture_cell(|cell| {
+                                for v in cell.borrow().iter() {
+                                    touch(v, &mut stack, &mut seen);
+                                }
+                            });
                         }
                     }
                     // Class variables + per-class consts can hold
@@ -2200,19 +2258,19 @@ impl Value {
             Value::Object(id) => {
                 let head = self.to_display(heap, interner);
                 let inst_ivars = match heap.get(*id) {
-                    HeapObj::Instance(inst) => Some(&inst.ivars),
+                    HeapObj::Instance(inst) => Some(inst.ivar_pairs()),
                     _ => None,
                 };
                 match inst_ivars {
                     Some(iv) if !iv.is_empty() => {
                         let mut pairs: Vec<(String, String)> = iv
-                            .iter()
+                            .into_iter()
                             .map(|(k, v)| {
                                 let val = match v {
                                     Value::Object(_) => v.to_display(heap, interner),
                                     _ => v.to_inspect(heap, interner),
                                 };
-                                (interner.resolve(*k).to_string(), val)
+                                (interner.resolve(k).to_string(), val)
                             })
                             .collect();
                         pairs.sort_by(|a, b| a.0.cmp(&b.0));
@@ -2717,6 +2775,7 @@ mod tests {
             singleton_target: RefCell::new(None),
             undefed: RefCell::new(crate::intern::FxHashSet::default()),
             anon_serial: Cell::new(0),
+            ivar_shape: std::cell::RefCell::new(crate::value::IvarShape::default()),
             class_vars: RefCell::new(crate::intern::FxHashMap::default()),
             consts: RefCell::new(crate::intern::FxHashMap::default()),
             assigned_name: RefCell::new(None),
@@ -2736,6 +2795,8 @@ mod tests {
                 param_start: 0,
                 n_params: 0,
                 captured_yield_block: None,
+                outer_chain: None,
+                creator_start: 0,
             }),
             builtin: None,
             original_name: None,

@@ -236,31 +236,93 @@ module Marshal
   # 1024 dumps, after which dump degrades to the tokenless
   # placeholder. minitest's Result over-the-wire tests only need
   # the same-process equality contract.
-  def self.dump(obj, *_rest)
-    # Prefer a REAL CRuby-4.8 byte stream for the common-tag subset
-    # (nil/bool/Integer/Float/String/Symbol/Array/Hash + links). That
-    # makes load(dump(x)) a genuine DEEP COPY and the bytes portable to
-    # CRuby. Anything outside the subset (Bignum, arbitrary objects,
-    # Struct, Procs, Hash-with-default, …) returns nil here and falls
-    # back to the same-process registry token — which still satisfies
-    # load(dump(x)) == x and preserves object identity for the types
-    # that can't be byte-serialized (minitest's Result contract).
+  # Length-framed IO protocol (dump-to-port / load-from-port). CRuby's
+  # stream is self-delimiting; rubyrs's reader wants the whole payload
+  # up front, so an explicit frame is written instead: "RMF1" +
+  # 8-digit decimal byte length + the \x04\x08 payload. Both pipe ends
+  # are rubyrs (the parallel gem forks the SAME binary), so the frame
+  # needs no CRuby wire compatibility — only self-consistency. Caps a
+  # frame at ~95MiB, far beyond the per-file result graphs that cross
+  # rubocop's worker pipes (~66KB).
+  FRAME_MAGIC = "RMF1"
+
+  def self.dump(obj, port = nil, _limit = nil)
+    # CRuby signature: dump(obj [, port] [, limit]) — an Integer in
+    # the port slot is a depth limit (rubyrs ignores depth; the
+    # writer is iterative over links, not recursive-capped).
+    port = nil if port.is_a?(Integer)
+    if port.nil?
+      # Prefer a REAL CRuby-4.8 byte stream for the common-tag subset
+      # (nil/bool/Integer/Float/String/Symbol/Array/Hash/Range/Bignum/
+      # user objects + links). That makes load(dump(x)) a genuine DEEP
+      # COPY and the bytes portable to CRuby. Anything outside the
+      # subset (Procs, Hash-with-default-proc, anonymous classes, …)
+      # returns nil here and falls back to the same-process registry
+      # token — which still satisfies load(dump(x)) == x and preserves
+      # object identity for the types that can't be byte-serialized
+      # (minitest's Result contract).
+      bin = __rubyrs_marshal_dump_binary(obj)
+      return bin unless bin.nil?
+      return __rubyrs_marshal_stash(obj)
+    end
+    unless port.respond_to?(:write)
+      raise TypeError, "instance of IO needed"
+    end
     bin = __rubyrs_marshal_dump_binary(obj)
-    return bin unless bin.nil?
-    __rubyrs_marshal_stash(obj)
+    if bin.nil?
+      # No registry-token fallback on the IO path: a token cannot
+      # cross the process boundary an IO port implies. Raise CRuby's
+      # TypeError for the genuinely-undumpable shapes (Proc, IO,
+      # singleton, anonymous class, …); a graph that passes the probe
+      # but still fell outside the byte subset is a rubyrs limitation
+      # — name it honestly.
+      __rubyrs_marshal_check_dumpable(obj)
+      raise TypeError,
+        "object graph is outside the rubyrs Marshal binary subset (cannot dump to an IO)"
+    end
+    port.write(FRAME_MAGIC)
+    port.write(format("%08d", bin.bytesize))
+    port.write(bin)
+    port
   end
 
   def self.load(src, *_rest)
+    unless src.is_a?(String)
+      if src.respond_to?(:read)
+        # One frame per call, blocking — the parallel worker loop
+        # round-trips multiple frames over one pipe. EOF at a frame
+        # boundary is EOFError (CRuby's Marshal.load-at-EOF), which
+        # the parallel gem's Worker#work rescues as DeadWorker.
+        hdr = src.read(12)
+        if hdr.nil? || hdr.empty?
+          raise EOFError, "end of file reached"
+        end
+        unless hdr.bytesize == 12 && hdr.byteslice(0, 4) == FRAME_MAGIC
+          raise TypeError, "incompatible marshal file format (rubyrs frame header not found)"
+        end
+        len = hdr.byteslice(4, 8).to_i
+        bin = len.zero? ? "" : src.read(len)
+        if bin.nil? || bin.bytesize < len
+          raise EOFError, "end of file reached"
+        end
+        return __rubyrs_marshal_load_binary(bin)
+      end
+    end
     s = src.to_s
     hit = __rubyrs_marshal_fetch(s)
     return hit[0] if hit
-    # Real CRuby marshal bytes (\x04\x08 header): the load-only
-    # binary reader handles the common-tag subset (nil/bool/int/
-    # float/string/symbol/array/hash + links); anything richer
+    # Real CRuby marshal bytes (\x04\x08 header): the binary reader
+    # handles the common-tag subset (nil/bool/int/bignum/float/string/
+    # symbol/array/hash/range/object/struct + links); anything richer
     # raises TypeError naming the tag. Consumer: addressable's
     # pregenerated unicode.data table.
     if s.getbyte(0) == 4 && s.getbyte(1) == 8
       return __rubyrs_marshal_load_binary(s)
+    end
+    # A string that carries a full frame (a dump-to-StringIO read back
+    # as one blob) unwraps to its payload.
+    if s.byteslice(0, 4) == FRAME_MAGIC && s.bytesize >= 12
+      return __rubyrs_marshal_load_binary(s.byteslice(12, s.bytesize - 12))
     end
     raise TypeError,
       "incompatible marshal file format (rubyrs Tier 1: token round-trip or common-tag binary subset)"

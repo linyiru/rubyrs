@@ -45,7 +45,33 @@ pub struct StrCell {
     /// the same in any ASCII-compatible encoding) so a `force_encoding`
     /// never invalidates it — only a content write does.
     ascii_cache: Cell<i8>,
+    /// Cached UTF-8 VALIDITY of the current content: -1 unknown, 0
+    /// invalid, 1 valid. `std::str::from_utf8` is O(n), and the
+    /// char-indexed String ops (`[]`, `match(re, pos)`) ran it (or a
+    /// lossy equivalent) on EVERY call — on rubocop's 21KB source
+    /// buffer that validation alone was ~600ns/call × 8.6k
+    /// `Buffer#slice` calls per walk. Same invalidation contract as
+    /// `ascii_cache` (cleared by `borrow_mut`); ASCII-only content is
+    /// trivially valid, so `is_utf8_cached` consults the ASCII flag
+    /// first and this cell is only computed for non-ASCII content.
+    utf8_cache: Cell<i8>,
+    /// Lazily-built char→byte offset table for content that receives
+    /// CHAR-indexed ops (`String#[]` / `match(re, pos)` / `match?`):
+    /// entry `i` is the byte offset where char `i` starts, plus one
+    /// final entry == `bytes.len()`, so the byte span of chars
+    /// `[a, b)` is `starts[a]..starts[b]` — an O(1) lookup instead of
+    /// the O(n) `chars().collect()` walk the generic paths did per
+    /// call. Only strings of `CHAR_STARTS_CACHE_MIN`+ bytes cache the
+    /// table (below that the direct walk is cheaper than the alloc
+    /// churn); ASCII-only strings never need it (byte == char).
+    /// Cleared by `borrow_mut` (same contract as `hash_cache`).
+    char_starts: RefCell<Option<Rc<Vec<u32>>>>,
 }
+
+/// Content-size threshold for CACHING the char→byte table. Small
+/// strings rebuild it per call (still cheap); large buffers — the
+/// rubocop source-buffer case — keep it until the next mutation.
+const CHAR_STARTS_CACHE_MIN: usize = 256;
 
 impl StrCell {
     #[inline]
@@ -54,6 +80,8 @@ impl StrCell {
             bytes: RefCell::new(bytes),
             hash_cache: Cell::new(0),
             ascii_cache: Cell::new(-1),
+            utf8_cache: Cell::new(-1),
+            char_starts: RefCell::new(None),
         }
     }
 
@@ -63,12 +91,17 @@ impl StrCell {
         self.bytes.borrow()
     }
 
-    /// Write access — clears the cached hash AND ASCII flag BEFORE
-    /// handing out the guard (see the invalidation contract above).
+    /// Write access — clears the cached hash, ASCII/UTF-8 flags AND
+    /// the char→byte table BEFORE handing out the guard (see the
+    /// invalidation contract above).
     #[inline]
     pub fn borrow_mut(&self) -> std::cell::RefMut<'_, Vec<u8>> {
         self.hash_cache.set(0);
         self.ascii_cache.set(-1);
+        self.utf8_cache.set(-1);
+        if self.char_starts.borrow().is_some() {
+            *self.char_starts.borrow_mut() = None;
+        }
         self.bytes.borrow_mut()
     }
 
@@ -85,6 +118,70 @@ impl StrCell {
                 a
             }
         }
+    }
+
+    /// Is the content valid UTF-8? Caches the O(n) validation; the
+    /// cache is reset by `borrow_mut`. ASCII-only content (per the
+    /// ASCII cache) short-circuits to `true` without touching the
+    /// UTF-8 cell.
+    #[inline]
+    pub(crate) fn is_utf8_cached(&self) -> bool {
+        if self.ascii_cache.get() == 1 {
+            return true;
+        }
+        match self.utf8_cache.get() {
+            1 => true,
+            0 => false,
+            _ => {
+                let ok = std::str::from_utf8(&self.bytes.borrow()).is_ok();
+                self.utf8_cache.set(if ok { 1 } else { 0 });
+                ok
+            }
+        }
+    }
+
+    /// The char→byte offset table for the CURRENT content (see the
+    /// field doc): `starts[i]` = byte offset of char `i`, one extra
+    /// final entry == byte length. Chars follow the same walk the
+    /// invalid-UTF-8 `String#[]` arm has always used (well-formed
+    /// sequences advance by their length; a malformed lead /
+    /// continuation byte counts as its own 1-byte char) — for VALID
+    /// UTF-8 that is exactly the `char_indices` boundaries. Cached
+    /// for large buffers, rebuilt per call for small ones.
+    pub(crate) fn char_starts(&self) -> Rc<Vec<u32>> {
+        if let Some(cs) = self.char_starts.borrow().as_ref() {
+            return cs.clone();
+        }
+        let bytes = self.bytes.borrow();
+        let mut starts: Vec<u32> = Vec::with_capacity(bytes.len().min(1 << 20) + 1);
+        let mut i = 0;
+        while i < bytes.len() {
+            starts.push(i as u32);
+            let b = bytes[i];
+            let seq = if b < 0x80 {
+                1
+            } else if b & 0xE0 == 0xC0 {
+                2
+            } else if b & 0xF0 == 0xE0 {
+                3
+            } else if b & 0xF8 == 0xF0 {
+                4
+            } else {
+                1 // continuation byte or invalid lead → its own 1-byte char
+            };
+            let well_formed = seq > 1
+                && i + seq <= bytes.len()
+                && (1..seq).all(|k| bytes[i + k] & 0xC0 == 0x80);
+            i += if well_formed { seq } else { 1 };
+        }
+        starts.push(bytes.len() as u32);
+        let cache_it = bytes.len() >= CHAR_STARTS_CACHE_MIN;
+        drop(bytes);
+        let table = Rc::new(starts);
+        if cache_it {
+            *self.char_starts.borrow_mut() = Some(table.clone());
+        }
+        table
     }
 
     /// Cached `ruby_hash` for the current content, or 0 if not
@@ -462,6 +559,39 @@ const _: () = assert!(
     "Value must stay 8-aligned (ADR 0035)"
 );
 
+/// The canonical-owner chain for a closure's captured (outer) slot
+/// region. Element `i` is `(cell, start)`: `cell` is the locals cell
+/// that OWNS slots `[start_i, start_{i+1})` (the last element owns up
+/// to the closure's own `param_start`), and `chain[0].1 == 0` always
+/// — the root method / class-body / toplevel scope. Built once at
+/// `Op::CreateBlock` (a block created in a non-block scope gets the
+/// one-element chain `[(scope_cell, 0)]`; a block created inside a
+/// block frame extends the creating frame's chain with that frame's
+/// own per-invocation cell). Because each element holds a strong Rc,
+/// the ORIGINAL binding cells stay alive — and reads/writes of a
+/// captured local can be routed to the canonical cell — for the
+/// lifetime of any capturing closure, including after the defining
+/// frames pop (the shared-binding semantics CRuby closures have).
+pub(crate) type OuterChain = Rc<[(Rc<RefCell<Vec<Value>>>, u16)]>;
+
+/// The cell that canonically owns `slot` per `chain` — the LAST
+/// element whose start is `<= slot`. Chains are tiny (nesting depth
+/// of the source), so a reverse linear scan beats anything fancier.
+#[inline]
+pub(crate) fn chain_owner_cell(
+    chain: &[(Rc<RefCell<Vec<Value>>>, u16)],
+    slot: usize,
+) -> &Rc<RefCell<Vec<Value>>> {
+    for (cell, start) in chain.iter().rev() {
+        if (*start as usize) <= slot {
+            return cell;
+        }
+    }
+    // chain[0].1 == 0 by construction, so the loop always returns;
+    // defensive fallback to the root keeps this off the panic budget.
+    &chain[0].0
+}
+
 #[derive(Debug)]
 pub struct BlockHandle {
     pub(crate) proto_idx: usize,
@@ -530,6 +660,41 @@ pub struct BlockHandle {
     /// lambda-vs-proc behavioural differences (strict arity, `return`
     /// scope), a documented subset gap.
     pub(crate) is_lambda: bool,
+    /// ANCESTOR canonical-owner chain for the block's outer slot
+    /// region — the scopes OUTSIDE the creating scope. Together with
+    /// `(captured, creator_start)` this describes every captured
+    /// binding: slot `>= creator_start` (and `< param_start`) lives
+    /// in `captured` (the creating scope's cell); slot `<
+    /// creator_start` routes through this chain (see [`OuterChain`]).
+    /// `None` when the creating scope canonically owns everything —
+    /// a method / class-body / toplevel creator (the overwhelmingly
+    /// common case) and synthetic forwarder handles — which keeps
+    /// `Op::CreateBlock` allocation-free for depth-1 blocks. GC:
+    /// rooted alongside `captured` (see `each_capture_cell`).
+    pub(crate) outer_chain: Option<OuterChain>,
+    /// First slot index the CREATING scope's cell (`captured`)
+    /// canonically owns — `0` for a root-scope creator; the creating
+    /// block frame's `own_start` when this block was created inside
+    /// another block / define_method body. Invariant: `Some` chain ⇔
+    /// `creator_start > 0`.
+    pub(crate) creator_start: u16,
+}
+
+impl BlockHandle {
+    /// Every locals cell this handle can reach: `captured` plus each
+    /// distinct ancestor-chain cell. GC root walks use this so heap
+    /// values reachable only through an ORIGINAL binding cell (whose
+    /// defining frame already popped) survive collection.
+    pub(crate) fn each_capture_cell(&self, mut f: impl FnMut(&Rc<RefCell<Vec<Value>>>)) {
+        f(&self.captured);
+        if let Some(chain) = &self.outer_chain {
+            for (cell, _) in chain.iter() {
+                if !Rc::ptr_eq(cell, &self.captured) {
+                    f(cell);
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -569,6 +734,20 @@ pub struct Class {
     /// class << self; attr_accessor :default; end; end` round-
     /// trips, `Foo.instance_variable_set(...)` semantics later.
     pub(crate) ivars: RefCell<FxHashMap<SymId, Value>>,
+    /// ADR 0035 Phases 4/5 — the per-class UNION ivar-shape table:
+    /// `@name → slot index` shared by every instance of this class.
+    /// Built on first assignment of each name (any instance);
+    /// MONOTONIC — names only ever ADD, and a slot index, once handed
+    /// out, is permanent for the class's lifetime. That monotonicity
+    /// is what lets inline caches and the JIT bake `(class_ptr, slot)`
+    /// pairs with NO invalidation protocol: a cached slot can never go
+    /// stale, only a cached class_ptr can mismatch. Instances store
+    /// their ivars in a slot-indexed array (`IvarTable`) so a shape-
+    /// guarded access is a direct offset load instead of a scan.
+    /// Instances that assign in different orders share the same table
+    /// (union semantics); each instance's own assignment ORDER is kept
+    /// on the instance (`IvarTable::order`) for `instance_variables`.
+    pub(crate) ivar_shape: RefCell<IvarShape>,
     pub(crate) methods: RefCell<FxHashMap<SymId, Rc<Method>>>,
     /// Per-class singleton-method table — `def self.foo; ...; end`
     /// inside a class body installs `foo` here. Dispatched against
@@ -795,6 +974,10 @@ impl Class {
             name: self.name.clone(),
             is_module: self.is_module,
             ivars: RefCell::new(self.ivars.borrow().clone()),
+            // Clone the shape so any instance table that ends up keyed
+            // to the copy keeps a consistent slot numbering (a shape
+            // superset is always safe; sharing a RefCell would not be).
+            ivar_shape: RefCell::new(self.ivar_shape.borrow().clone()),
             methods: RefCell::new(self.methods.borrow().clone()),
             singleton_methods: RefCell::new(self.singleton_methods.borrow().clone()),
             superclass: RefCell::new(self.superclass.borrow().clone()),
@@ -846,6 +1029,7 @@ impl Class {
             undefed: RefCell::new(crate::intern::FxHashSet::default()),
             anon_serial: Cell::new(0),
             ivars: RefCell::new(crate::intern::FxHashMap::default()),
+            ivar_shape: RefCell::new(IvarShape::default()),
             methods: RefCell::new(crate::intern::FxHashMap::default()),
             singleton_methods: RefCell::new(crate::intern::FxHashMap::default()),
             superclass: RefCell::new(shell_superclass),
@@ -894,6 +1078,54 @@ impl Class {
             .and_then(std::rc::Weak::upgrade)
             .unwrap_or_else(|| self.clone())
     }
+
+    /// ADR 0035 Ph4/5 — resolve an ivar name to its slot in this
+    /// class's union shape, WITHOUT adding it (read/reflection paths:
+    /// an unknown name means "no instance of this class ever assigned
+    /// it" → undefined ivar).
+    #[inline]
+    pub(crate) fn ivar_slot_lookup(&self, sym: SymId) -> Option<u32> {
+        self.ivar_shape.borrow().lookup(sym)
+    }
+
+    /// Resolve-or-add an ivar name in this class's union shape (write
+    /// paths). The returned slot is permanent for this class.
+    #[inline]
+    pub(crate) fn ivar_slot_intern(&self, sym: SymId) -> u32 {
+        self.ivar_shape.borrow_mut().intern(sym)
+    }
+
+    /// Borrow-flag-free read of `names[slot]` for the HOT slot-cache
+    /// verify (ADR 0035 Ph4/5): sibling subclasses build their shapes
+    /// through the same `initialize` order, so a cached slot usually
+    /// maps to the same name on a DIFFERENT class of the same family —
+    /// one indexed compare confirms it without a scan, making the
+    /// caches polymorphism-proof (`names[slot] == sym` ⟺ slot is
+    /// right, by table injectivity).
+    ///
+    /// SAFETY: single-threaded VM; the only mutator of `ivar_shape` is
+    /// `ivar_slot_intern` (a `borrow_mut` strictly contained in its own
+    /// call), and no caller of this read holds one open — so the raw
+    /// `as_ptr` read never aliases a live `&mut`. Skipping the RefCell
+    /// flag traffic matters: this sits on every cached ivar access.
+    #[inline]
+    pub(crate) fn ivar_shape_name_at(&self, slot: u32) -> Option<SymId> {
+        let shape = unsafe { &*self.ivar_shape.as_ptr() };
+        shape.names.get(slot as usize).copied()
+    }
+
+    /// Borrow-flag-free full slot lookup for the hottest read helpers
+    /// (tier-2's per-op ivar helpers): the class's `names` vec is
+    /// shared by EVERY instance of the class, so it is essentially
+    /// always in L1 — a 4-byte-stride scan of it beats both the old
+    /// per-object pair scan (24B stride over per-object memory) and a
+    /// per-site cache probe (an extra cacheline of cache-vector
+    /// traffic per op). Same SAFETY argument as `ivar_shape_name_at`.
+    #[inline]
+    pub(crate) fn ivar_slot_lookup_fast(&self, sym: SymId) -> Option<u32> {
+        let shape = unsafe { &*self.ivar_shape.as_ptr() };
+        shape.lookup(sym)
+    }
 }
 
 #[derive(Debug)]
@@ -930,93 +1162,257 @@ pub struct Instance {
     pub(crate) frozen: std::cell::Cell<bool>,
 }
 
-/// Per-instance variable table. The overwhelming majority of objects
-/// carry only a handful of ivars, so the table is an insertion-ordered
-/// small-vector scanned linearly: up to 4 ivars live INLINE in the
-/// instance — no heap allocation at all, not even on the first `@x=`
-/// (the old `FxHashMap` cost +59ns RawTable alloc there) — and reads are
-/// linear compares, no hashing (~5x faster than the HashMap get). The
-/// small-table strategy CRuby uses. Insertion order is preserved,
-/// matching CRuby's `instance_variables` definition-order; a HashMap
-/// spill was rejected because it would scramble that order. A
-/// pathological object with hundreds of ivars spills to the SmallVec
-/// heap and pays O(n) per access; the fix if it ever profiles hot is an
-/// order-preserving index (this Vec + a side HashMap for lookup), not a
-/// plain HashMap.
-///
-/// The 4-inline width is FREE on memory: `size_of::<HeapObj>()` is 136B,
-/// set by `HashObj`; Instance with this table is 128B, so it stays under
-/// that ceiling and the enum (sized to its max variant) does NOT grow —
-/// no other slot pays for it. Speed was confirmed with an INTERLEAVED
-/// A/B vs the plain-`Vec` form (alternating runs to cancel the ~40ns
-/// cross-session thermal drift that made a naive before/after comparison
-/// read it as a regression): C1..C4 construction −56ns, reads −14ns,
-/// consistent across 12 rounds.
-/// One ivar slot: a `(name, value)` pair. ADR 0035 Phase 4 — `#[repr(C)]` (was a bare
-/// tuple, whose field offsets Rust does not pin) so the native JIT can read the contiguous
-/// ivar array (`IvarTable::as_ptr_len`, backed by `SmallVec::as_ptr` — a STABLE public API,
-/// not the SmallVec's internal layout) with inline loads: `sym` at offset 0, `val` at 8,
-/// `stride` 24. Same size as the old tuple, so the Instance/HeapObj size budget is unchanged.
-#[derive(Clone, Debug)]
-#[repr(C)]
-pub(crate) struct IvarPair {
-    pub(crate) sym: crate::intern::SymId,
-    pub(crate) val: Value,
+impl Instance {
+    /// Ivar read by name via the class shape (undefined → None; an
+    /// assigned nil is `Some(&Nil)` — reflection needs the difference).
+    #[inline]
+    pub(crate) fn ivar_get(&self, sym: SymId) -> Option<&Value> {
+        self.ivars.get(&self.class, sym)
+    }
+    /// Ivar write by name; interns the name into the class shape on
+    /// first assignment anywhere in the class.
+    #[inline]
+    pub(crate) fn ivar_set(&mut self, sym: SymId, val: Value) -> Option<Value> {
+        let slot = self.class.ivar_slot_intern(sym);
+        self.ivars.write_slot(slot, val)
+    }
+    #[inline]
+    pub(crate) fn ivar_remove(&mut self, sym: SymId) -> Option<Value> {
+        let class = self.class.clone();
+        self.ivars.remove(&class, sym)
+    }
+    #[inline]
+    pub(crate) fn ivar_defined(&self, sym: SymId) -> bool {
+        self.ivars.contains_key(&self.class, sym)
+    }
+    /// Defined ivar names in THIS object's assignment order (CRuby's
+    /// `instance_variables` contract).
+    pub(crate) fn ivar_names(&self) -> Vec<SymId> {
+        self.ivars.keys(&self.class)
+    }
+    /// `(name, &value)` pairs in assignment order.
+    pub(crate) fn ivar_pairs(&self) -> Vec<(SymId, &Value)> {
+        self.ivars.iter(&self.class)
+    }
 }
-// The codegen bakes these — pin them.
-const _: () = assert!(std::mem::offset_of!(IvarPair, sym) == 0);
-const _: () = assert!(std::mem::offset_of!(IvarPair, val) == 8);
-const _: () = assert!(std::mem::size_of::<IvarPair>() == 24);
 
+/// ADR 0035 Phases 4/5 — a class's union ivar shape: `names[slot]` is
+/// the ivar name owning `slot`; `map` is the reverse probe, consulted
+/// once `names` outgrows the linear-scan threshold (a handful of `u32`
+/// compares beats a hash probe for the typical ≤8-ivar class). Both are
+/// maintained together from the first insert. See `Class::ivar_shape`
+/// for the monotonicity contract that makes baked slots safe.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct IvarTable(smallvec::SmallVec<[IvarPair; 4]>);
+pub(crate) struct IvarShape {
+    names: Vec<SymId>,
+    map: FxHashMap<SymId, u32>,
+}
+
+/// Above this many names, `IvarShape::lookup` switches from the linear
+/// name scan to the hash probe.
+const SHAPE_LINEAR_MAX: usize = 8;
+
+impl IvarShape {
+    #[inline]
+    pub(crate) fn lookup(&self, sym: SymId) -> Option<u32> {
+        if self.names.len() <= SHAPE_LINEAR_MAX {
+            self.names.iter().position(|s| *s == sym).map(|i| i as u32)
+        } else {
+            self.map.get(&sym).copied()
+        }
+    }
+    pub(crate) fn intern(&mut self, sym: SymId) -> u32 {
+        if let Some(s) = self.lookup(sym) {
+            return s;
+        }
+        let slot = u32::try_from(self.names.len()).expect("ICE: > u32::MAX ivar names on one class");
+        self.names.push(sym);
+        self.map.insert(sym, slot);
+        slot
+    }
+    #[inline]
+    pub(crate) fn name_of(&self, slot: u32) -> SymId {
+        self.names[slot as usize]
+    }
+}
+
+/// Per-instance variable storage (ADR 0035 Phases 4/5 — FLAT layout).
+///
+/// `slots` is indexed by the owning class's union shape
+/// (`Class::ivar_shape`): every instance of class C stores `@name` at
+/// the same index, so a shape-guarded access is ONE offset load — no
+/// scan, no hash. The vector grows lazily to the highest slot this
+/// object has assigned; slots below that which the object never
+/// assigned are HOLES holding `Value::Nil` (so the hot read path can
+/// load `slots[slot]` raw — an undefined ivar correctly reads as nil
+/// without consulting the defined-set).
+///
+/// `order` lists this object's DEFINED slots in assignment order —
+/// CRuby's `instance_variables` order (which is per-object, not
+/// per-class: two instances assigning in different orders report
+/// differently) — and doubles as the defined-set for iteration and
+/// `len`. `bits` is the O(1) defined test for slots < 64 (write paths
+/// need "first assignment?" per store; slots ≥ 64 fall back to an
+/// `order` scan — pathological classes only).
+///
+/// Invariants:
+///   - `defined(s)` ⟺ `s ∈ order`  (bits mirrors this for s < 64)
+///   - `!defined(s) && s < slots.len()` ⟹ `slots[s] == Nil`
+///     (`remove` writes Nil back so a hole never leaks a stale value
+///     to the raw read path, and the GC never marks removed values)
+///
+/// Memory: 4 inline value slots + 4 inline order entries + the bitset
+/// = 104 bytes, the same as the previous scan-table (`SmallVec<[(sym,
+/// val); 4]>` at 24B stride) — `Instance` stays under the `HashObj`
+/// ceiling and `HeapObj` does not grow.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct IvarTable {
+    slots: smallvec::SmallVec<[Value; 4]>,
+    order: smallvec::SmallVec<[u32; 4]>,
+    bits: u64,
+}
 
 impl IvarTable {
-    pub(crate) fn get(&self, k: &crate::intern::SymId) -> Option<&Value> {
-        self.0.iter().find(|p| &p.sym == k).map(|p| &p.val)
-    }
-    pub(crate) fn insert(&mut self, k: crate::intern::SymId, val: Value) -> Option<Value> {
-        if let Some(p) = self.0.iter_mut().find(|p| p.sym == k) {
-            return Some(std::mem::replace(&mut p.val, val));
+    /// Build a table for an instance of `class` from `(name, value)`
+    /// pairs in assignment order — the native object builders
+    /// (prism materialize / exception construction) accumulate pairs
+    /// before the class is resolved, then materialize here.
+    pub(crate) fn from_pairs(
+        class: &Class,
+        pairs: impl IntoIterator<Item = (SymId, Value)>,
+    ) -> IvarTable {
+        let mut t = IvarTable::default();
+        for (s, v) in pairs {
+            t.insert(class, s, v);
         }
-        self.0.push(IvarPair { sym: k, val });
-        None
+        t
     }
-    pub(crate) fn remove(&mut self, k: &crate::intern::SymId) -> Option<Value> {
-        self.0
-            .iter()
-            .position(|p| &p.sym == k)
-            .map(|i| self.0.remove(i).val)
+
+    #[inline]
+    fn defined(&self, slot: u32) -> bool {
+        if slot < 64 {
+            self.bits & (1u64 << slot) != 0
+        } else {
+            self.order.contains(&slot)
+        }
     }
-    pub(crate) fn contains_key(&self, k: &crate::intern::SymId) -> bool {
-        self.0.iter().any(|p| &p.sym == k)
+
+    pub(crate) fn get(&self, class: &Class, k: SymId) -> Option<&Value> {
+        let slot = class.ivar_slot_lookup(k)?;
+        self.read_slot(slot)
     }
-    #[allow(dead_code)] // symmetric with is_empty(); kept for API completeness
+    /// Defined-aware slot read (reflection: distinguishes an assigned
+    /// nil from an undefined ivar).
+    #[inline]
+    pub(crate) fn read_slot(&self, slot: u32) -> Option<&Value> {
+        if (slot as usize) < self.slots.len() && self.defined(slot) {
+            Some(&self.slots[slot as usize])
+        } else {
+            None
+        }
+    }
+    /// Hot-path read for `@x` (interpreter IC hit / JIT): holes and
+    /// never-grown slots read as Nil — exactly CRuby's undefined-ivar
+    /// semantics — with no defined-set consulted.
+    #[allow(dead_code)] // wired by the ivar-IC step arms
+    #[inline]
+    pub(crate) fn read_slot_raw(&self, slot: u32) -> Value {
+        self.slots.get(slot as usize).cloned().unwrap_or(Value::Nil)
+    }
+    pub(crate) fn insert(&mut self, class: &Class, k: SymId, val: Value) -> Option<Value> {
+        let slot = class.ivar_slot_intern(k);
+        self.write_slot(slot, val)
+    }
+    /// Slot-level store (IC hit / JIT helpers / `insert`). Grows the
+    /// slot vector (Nil-filling holes) on first touch past the end.
+    pub(crate) fn write_slot(&mut self, slot: u32, val: Value) -> Option<Value> {
+        let i = slot as usize;
+        if i >= self.slots.len() {
+            self.slots.resize(i + 1, Value::Nil);
+        }
+        if self.defined(slot) {
+            Some(std::mem::replace(&mut self.slots[i], val))
+        } else {
+            if slot < 64 {
+                self.bits |= 1u64 << slot;
+            }
+            self.order.push(slot);
+            self.slots[i] = val;
+            None
+        }
+    }
+    pub(crate) fn remove(&mut self, class: &Class, k: SymId) -> Option<Value> {
+        let slot = class.ivar_slot_lookup(k)?;
+        if (slot as usize) >= self.slots.len() || !self.defined(slot) {
+            return None;
+        }
+        if slot < 64 {
+            self.bits &= !(1u64 << slot);
+        }
+        if let Some(p) = self.order.iter().position(|s| *s == slot) {
+            self.order.remove(p);
+        }
+        // Nil-out so the hole invariant holds (raw reads + GC marking).
+        Some(std::mem::replace(&mut self.slots[slot as usize], Value::Nil))
+    }
+    pub(crate) fn contains_key(&self, class: &Class, k: SymId) -> bool {
+        class
+            .ivar_slot_lookup(k)
+            .is_some_and(|s| (s as usize) < self.slots.len() && self.defined(s))
+    }
+    #[allow(dead_code)] // kept for API completeness with is_empty()
     pub(crate) fn len(&self) -> usize {
-        self.0.len()
+        self.order.len()
     }
+    #[allow(dead_code)] // kept for API completeness
     pub(crate) fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.order.is_empty()
     }
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (&crate::intern::SymId, &Value)> {
-        self.0.iter().map(|p| (&p.sym, &p.val))
-    }
+    /// Defined values in assignment order — classless, so semantic
+    /// consumers need no shape access.
     pub(crate) fn values(&self) -> impl Iterator<Item = &Value> {
-        self.0.iter().map(|p| &p.val)
+        self.order.iter().map(|&s| &self.slots[s as usize])
     }
-    pub(crate) fn keys(&self) -> impl Iterator<Item = &crate::intern::SymId> {
-        self.0.iter().map(|p| &p.sym)
+    /// ALL slots including holes, for the GC mark walk: a straight
+    /// slice iteration (no `order` indirection, no bounds re-checks);
+    /// holes are Nil — a no-op to mark — so this visits exactly the
+    /// defined values plus free Nils.
+    pub(crate) fn values_raw(&self) -> impl Iterator<Item = &Value> {
+        self.slots.iter()
     }
-    /// ADR 0035 Phase 4 — the contiguous ivar array for the JIT's inline scan: a base
-    /// pointer (via `SmallVec::as_ptr`, valid whether inline or spilled) + the live length.
-    /// The JIT walks `base[0..len]` comparing `sym`, reading `val` at the matching slot — no
-    /// per-ivar primitive call. The pointer is valid for the GC-free duration of a compiled
+    /// Defined names in assignment order (needs the owning class to
+    /// resolve slot → name).
+    pub(crate) fn keys(&self, class: &Class) -> Vec<SymId> {
+        let shape = class.ivar_shape.borrow();
+        self.order.iter().map(|&s| shape.name_of(s)).collect()
+    }
+    /// `(name, value)` pairs in assignment order. Collected (not lazy)
+    /// because the name resolution holds the class shape borrow.
+    pub(crate) fn iter<'a>(&'a self, class: &Class) -> Vec<(SymId, &'a Value)> {
+        let shape = class.ivar_shape.borrow();
+        self.order
+            .iter()
+            .map(|&s| (shape.name_of(s), &self.slots[s as usize]))
+            .collect()
+    }
+    /// ADR 0035 Phase 4/5 — the contiguous SLOT array for the JIT's
+    /// inline offset load: base pointer (`SmallVec::as_ptr`, valid
+    /// whether inline or spilled) + live length, stride
+    /// `size_of::<Value>()` (16). The compiled code guards
+    /// `slot < len` and loads `base + slot*16`; holes are Nil so an
+    /// undefined ivar reads nil / deopts on a kind check, matching the
+    /// interpreter. Valid for the GC-free duration of a compiled
     /// method (the heap does not move while one runs).
     #[cfg(feature = "jit-native")]
-    pub(crate) fn as_ptr_len(&self) -> (*const IvarPair, usize) {
-        (self.0.as_ptr(), self.0.len())
+    pub(crate) fn as_ptr_len(&self) -> (*const Value, usize) {
+        (self.slots.as_ptr(), self.slots.len())
     }
 }
+
+// The JIT bakes the slot stride — pin Value's size (16B, also pinned
+// by the Phase-1 layout contract) and keep the table at its budget.
+const _: () = assert!(std::mem::size_of::<Value>() == 16);
+const _: () = assert!(std::mem::size_of::<IvarTable>() <= 104);
 
 #[derive(Debug)]
 pub struct Method {
@@ -1125,6 +1521,13 @@ pub struct MethodClosure {
     pub(crate) captured: Rc<RefCell<Vec<Value>>>,
     pub(crate) param_start: u16,
     pub(crate) n_params: u16,
+    /// ANCESTOR canonical-owner chain + creating-scope boundary —
+    /// same split and semantics as `BlockHandle::outer_chain` /
+    /// `creator_start` (copied from the source handle at install
+    /// time). Snapshot-restored / synthetic closures carry `(None,
+    /// 0)`: the captured cell owns everything (pre-chain behaviour).
+    pub(crate) outer_chain: Option<OuterChain>,
+    pub(crate) creator_start: u16,
     /// The yield-block the source block lexically captured (the
     /// `block_arg` of the method that ran `define_method`), copied
     /// from the `BlockHandle` at install time. CRuby treats a
@@ -1137,6 +1540,22 @@ pub struct MethodClosure {
     /// enclosing scope had no block. GC-rooted wherever `captured`
     /// is.
     pub(crate) captured_yield_block: Option<ObjId>,
+}
+
+impl MethodClosure {
+    /// Every locals cell this closure can reach — `captured` plus
+    /// each distinct outer-chain cell. Mirror of
+    /// `BlockHandle::each_capture_cell` for the GC root walks.
+    pub(crate) fn each_capture_cell(&self, mut f: impl FnMut(&Rc<RefCell<Vec<Value>>>)) {
+        f(&self.captured);
+        if let Some(chain) = &self.outer_chain {
+            for (cell, _) in chain.iter() {
+                if !Rc::ptr_eq(cell, &self.captured) {
+                    f(cell);
+                }
+            }
+        }
+    }
 }
 
 /// Serde bridge for the LITERAL subset of `Value` — only the shapes

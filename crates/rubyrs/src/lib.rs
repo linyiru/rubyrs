@@ -37,11 +37,14 @@ mod bcrypt;
 #[cfg(feature = "_oj")]
 mod oj;
 mod bytecode;
+mod commdrv;
 mod compiler;
 mod const_marker;
 mod digest;
 #[cfg(feature = "jit-native")]
 pub(crate) mod jit_native;
+#[cfg(feature = "jit-native")]
+pub(crate) mod jit_tier2;
 mod error;
 mod heap;
 #[cfg(feature = "_http_server")]
@@ -51,7 +54,12 @@ mod intern;
 mod json_native;
 // ADR 0036 Slice 1: Prism serialize-parse host fns (prism C lib is always linked via
 // `ruby-prism`), so RuboCop's `parser_prism` engine runs without the C extension.
+mod prism_materialize;
 mod prism_native;
+mod prism_node_specs;
+// Native whitequark translation: `Prism::Translation::Parser#tokenize` in Rust
+// (compiler + builder + lexer ports), for RuboCop's prism engine.
+mod prism_wq;
 // VM snapshot/image (thin slice) — capture the class graph to serde bytes so a
 // future restore can skip `require`'s parse+compile+execute. Gated on the serde
 // derives from `preamble-cache`.
@@ -134,6 +142,16 @@ pub use json_native::register_host_fns as register_json_native_host_fns;
 /// Register the Prism serialize-parse host fns so RuboCop's `parser_prism` engine can build
 /// its AST natively on rubyrs (ADR 0036 Slice 1). See [`prism_native::register_host_fns`].
 pub use prism_native::register_host_fns as register_prism_native_host_fns;
+/// Register the native whitequark-translation host fn
+/// (`__rubyrs_wqtrans_tokenize`) that runs `Prism::Translation::Parser#tokenize`
+/// in Rust for RuboCop's prism engine. See [`prism_wq::register_host_fns`].
+pub use prism_wq::register_host_fns as register_prism_wq_host_fns;
+/// Register the native Commissioner walk-driver host fns
+/// (`__rubyrs_commdrv_*`) that run RuboCop's cop-walk machinery
+/// (`Commissioner#walk` dispatch + callback triggering) natively.
+/// The hook rubyrs injects after `require "rubocop"` detects the
+/// registration via `defined?(...)`. See [`commdrv::register_host_fns`].
+pub use commdrv::register_host_fns as register_commdrv_host_fns;
 /// Register `_rouge_native` host fns (`__rubyrs_rouge_native_table`,
 /// `__rubyrs_rouge_native_lex_html`) onto a `Runtime`. The shim that
 /// rubyrs injects after `require "rouge"` detects the registration via
@@ -944,6 +962,14 @@ struct PostPreambleSnapshot {
     /// user code that addressed them. Pairs with the
     /// `cache_counter` restoration below.
     call_caches_len: usize,
+    /// Twin of `call_caches_len` for the ivar-site cache vector
+    /// (ADR 0035 Ph4/5): reset truncates `ivar_caches` back to this
+    /// length so a post-reset compile reusing ivar cids from the
+    /// restored baseline can never read a stale (class_ptr, slot)
+    /// entry left by dropped user code (which could alias a DIFFERENT
+    /// ivar name onto the same cid — wrong-slot serves, not just
+    /// misses).
+    ivar_caches_len: usize,
     /// `vm.cache_counter` at preamble completion. The compiler
     /// casts this counter to `u16` when emitting `Op::Call*`
     /// cache-site ids, so a long-lived Runtime that runs many
@@ -952,7 +978,7 @@ struct PostPreambleSnapshot {
     /// returning the wrong cached `Method`. Restoring to the
     /// post-preamble value caps the counter at a known-safe
     /// baseline.
-    cache_counter: u32,
+    cache_counter: crate::compiler::CidGen,
     /// `vm.method_gen` at preamble completion. `reset()` bumps
     /// this monotonically (wrapping_add(1) per call) so that
     /// CallCache entries' generation check fires fresh — which
@@ -1310,6 +1336,7 @@ impl PostPreambleSnapshot {
             heap_next_gc: rt.vm.heap.next_gc,
             interner_len: rt.vm.interner.len(),
             call_caches_len: rt.vm.call_caches.len(),
+            ivar_caches_len: rt.vm.ivar_caches.len(),
             cache_counter: rt.vm.cache_counter,
             method_gen: rt.vm.method_gen,
             const_gen: rt.vm.const_gen,
@@ -1912,6 +1939,7 @@ impl Runtime {
         // --- Volatile per-eval state: reset to empty. ---
         self.vm.stack.clear();
         self.vm.frames.clear();
+        self.vm.dm_share_depth = 0;
         self.vm.pinned.clear();
         self.vm.globals.clear();
         self.vm.toplevel_cvars.clear();
@@ -1975,6 +2003,7 @@ impl Runtime {
         // unbounded — `cache_counter as u16` would eventually
         // wrap and start aliasing unrelated call sites.
         self.vm.call_caches.truncate(snapshot.call_caches_len);
+        self.vm.ivar_caches.truncate(snapshot.ivar_caches_len);
         self.vm.cache_counter = snapshot.cache_counter;
         // `vm.fuel` and `deadline_at` are NOT restored here.
         // Both are per-eval: `eval()` re-anchors `vm.fuel` from
@@ -2207,6 +2236,7 @@ impl Runtime {
         // Per-request transient state — all cleared.
         self.vm.stack.clear();
         self.vm.frames.clear();
+        self.vm.dm_share_depth = 0;
         self.vm.pinned.clear();
         self.vm.class_stack.clear();
         self.vm.class_visibility_stack.clear();
@@ -2384,7 +2414,7 @@ impl Runtime {
             let total_ops: usize = self.vm.protos.iter().map(|pr| pr.code.len()).sum();
             eprintln!(
                 "startup-prof: protos={} ops={} interner={} cache_counter={}",
-                self.vm.protos.len(), total_ops, self.vm.interner.len(), self.vm.cache_counter,
+                self.vm.protos.len(), total_ops, self.vm.interner.len(), self.vm.cache_counter.call,
             );
             #[cfg(feature = "preamble-cache")]
             eprintln!(
@@ -3309,6 +3339,71 @@ self.eval_inner(
         (total, built)
     }
 
+    /// TEMPORARY diagnostics twin of `regex_cache_stats` (env-gated
+    /// by `RUBYRS_CASCADE_STATS=1`): the slow-cascade send counters,
+    /// as (method name, receiver-shape label, count) rows sorted by
+    /// count descending. Empty when the env var was not set.
+    pub fn cascade_stats_rows(&self) -> Vec<(String, &'static str, u64)> {
+        const SHAPES: [&str; 13] = [
+            "Int", "Float", "Str", "Sym", "Bool", "Nil", "Array", "Hash", "Class", "Object",
+            "Block", "Other", "NoRecv",
+        ];
+        let mut rows: Vec<(String, &'static str, u64)> = match &self.vm.cascade_stats {
+            Some(m) => m
+                .iter()
+                .map(|((name_id, shape), n)| {
+                    (
+                        self.vm.interner.resolve(*name_id).to_string(),
+                        SHAPES[*shape as usize],
+                        *n,
+                    )
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        rows.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+        rows
+    }
+
+    /// TEMPORARY diagnostics (same `RUBYRS_CASCADE_STATS=1` gate):
+    /// the non-fixed-arity user-Ruby-method callee census, as
+    /// (method name, argc, decoded shape string, no_recv, count)
+    /// rows sorted by count descending. Shape string spells out the
+    /// param signature: `req:N opt:N rest post:N kw:N kwrest blk
+    /// closure nonpub` (flags omitted when absent). Empty when the
+    /// env var was not set.
+    pub fn nfa_stats_rows(&self) -> Vec<(String, u16, String, bool, u64)> {
+        let mut rows: Vec<(String, u16, String, bool, u64)> = match &self.vm.nfa_stats {
+            Some(m) => m
+                .iter()
+                .map(|((name_id, argc, shape, no_recv), n)| {
+                    let mut s = format!(
+                        "req:{} opt:{}",
+                        shape & 0x3f,
+                        (shape >> 6) & 0x3f
+                    );
+                    if shape & (1 << 12) != 0 { s.push_str(" rest"); }
+                    if (shape >> 13) & 0xf != 0 { s.push_str(&format!(" post:{}", (shape >> 13) & 0xf)); }
+                    if (shape >> 17) & 0x3f != 0 { s.push_str(&format!(" kw:{}", (shape >> 17) & 0x3f)); }
+                    if shape & (1 << 23) != 0 { s.push_str(" kwrest"); }
+                    if shape & (1 << 24) != 0 { s.push_str(" blk"); }
+                    if shape & (1 << 25) != 0 { s.push_str(" closure"); }
+                    if shape & (1 << 26) != 0 { s.push_str(" nonpub"); }
+                    (
+                        self.vm.interner.resolve(*name_id).to_string(),
+                        *argc,
+                        s,
+                        *no_recv,
+                        *n,
+                    )
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        rows.sort_by(|a, b| b.4.cmp(&a.4).then_with(|| a.0.cmp(&b.0)));
+        rows
+    }
+
     /// Register a host function callable from Ruby code with `name(args)`.
     /// The function receives evaluated argument values and returns either
     /// a `Value` or a `Trap`.
@@ -3464,6 +3559,11 @@ self.eval_inner(
             // Truncate frames back to the count before THIS
             // handler ran.
             if self.vm.frames.len() > pre_frames {
+                for f in &self.vm.frames[pre_frames..] {
+                    if f.dm_share {
+                        self.vm.dm_share_depth = self.vm.dm_share_depth.saturating_sub(1);
+                    }
+                }
                 self.vm.frames.truncate(pre_frames);
             }
             // Frames discarded wholesale above never ran their pop
@@ -3544,6 +3644,7 @@ self.eval_inner(
                 self.vm.fuel = None;
                 self.vm.deadline_at = None;
                 self.vm.frames.clear();
+        self.vm.dm_share_depth = 0;
                 self.vm.stack.clear();
                 self.vm.pinned.clear();
                 self.vm.clear_control_flow_signals();
@@ -3603,8 +3704,10 @@ self.eval_inner(
             compiler::mark_frozen_string_literal(&mut self.vm.protos, fsl_start);
         }
         STARTUP_PROF_COMPILE_NS.fetch_add(_t_compile.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
-        let cache_count = self.vm.cache_counter as usize;
+        let cache_count = self.vm.cache_counter.call as usize;
         self.vm.ensure_call_caches(cache_count);
+        let ivar_count = self.vm.cache_counter.ivar as usize;
+        self.vm.ensure_ivar_caches(ivar_count);
         // Preamble-cache recording: on a cache miss, load_preamble
         // arms this Vec and each preamble chunk's entry proto lands
         // here in execution order — the recording IS the replay
@@ -3628,6 +3731,7 @@ self.eval_inner(
         // The dispatch state shouldn't. Clear it now so the new
         // eval starts from a known baseline.
         self.vm.frames.clear();
+        self.vm.dm_share_depth = 0;
         self.vm.stack.clear();
         self.vm.pinned.clear();
         // Shared with `Runtime::reset` — see the helper for why
@@ -3750,7 +3854,7 @@ self.eval_inner(
         ) {
             (Some(crate::value::Value::Object(id)), Some(sym)) => {
                 match self.vm.heap.get(*id) {
-                    crate::heap::HeapObj::Instance(inst) => match inst.ivars.get(&sym) {
+                    crate::heap::HeapObj::Instance(inst) => match inst.ivar_get(sym) {
                         Some(crate::value::Value::Int(n)) => *n as i32,
                         _ => 0,
                     },
@@ -3840,6 +3944,9 @@ impl Drop for Runtime {
     /// cext fns without an active Runtime is a host-side bug
     /// anyway, but this keeps the failure mode predictable).
     fn drop(&mut self) {
+        // Env-gated JIT counters (`RUBYRS_JIT_STATS`) — silent no-op unless set.
+        #[cfg(feature = "jit-native")]
+        self.vm.dump_jit_stats();
         #[cfg(all(feature = "cext", not(target_os = "wasi")))]
         rubyrs_cext::reset_state();
     }

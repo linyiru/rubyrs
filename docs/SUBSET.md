@@ -1313,50 +1313,53 @@ rubyrs (STRESS_GC=1): ICE: heap slot is not an Instance
   block-locals across heap allocs during define_method-
   emitted method invocations.
 
-### Detached inner closures don't write-through to outer-method locals
+### ~~Detached inner closures don't write-through to outer-method locals~~ (FIXED)
 
 ```ruby
 total = 0
 adders = []
 [1, 2, 3].each { |x| adders << -> { total += x } }
 adders.each(&:call)
-puts total      # rubyrs: 0; CRuby: 6
+puts total      # rubyrs: 6; CRuby: 6 (was: rubyrs 0)
 ```
 
-- The `total += x` inside the saved lambda runs AFTER the
-  enclosing `.each` block has popped. With the per-invocation
-  block-locals model the lambda's captured Rc is the dead
-  block frame's fresh Vec — `propagate_outer_write`'s chain
-  walk stops there because the surrounding method frame is
-  no longer reachable from the dead Vec via any block frame
-  still on the stack.
-- Read-side semantics are unaffected: the lambda still sees
-  its own iteration's `x` (`adders.each { |a| p a.call }` gives
-  the correct per-iteration sequence for a non-mutating
-  closure body).
-- The same bytecode AFTER the closure-in-iter capture fix
-  trades this narrow case for the much more common
-  `[:a, :b, :c].map { |s| -> { s } }` shape — see commit
-  `d397eaa2` for the full design + the
-  `tests/diff/closure_in_iter_capture.rb` regression
-  suite. Pre-d397eaa2 the trade went the other way: write-
-  through worked but per-iter capture was broken, surfacing
-  in plugin / mixin / `define_method`-with-block-capture
-  loops (the M27 A4 batch's claim).
-- Workaround when write-through matters: use a method
-  parameter (closures over method-params alias the
-  method's locals_Rc unchanged), an instance variable on
-  `self`, or a Hash / Array (mutate via the heap object,
-  not via the local-slot write).
-- Why not fully fixed: a CRuby-correct fix needs
-  cell-per-variable closure environments — the locals
-  storage migrates from `Rc<RefCell<Vec<Value>>>` to per-
-  variable `Rc<RefCell<Value>>` cells linked into a chain
-  the BlockHandle holds. That touches every `Op::LoadLocal`
-  / `Op::StoreLocal` / `Op::IncLocal*` plus the
-  `define_method`-installed closure dispatch path.
-  Sized for a separate dedicated landing, not a doc-pass.
-  Tracked as a follow-up if a real consumer needs it.
+- FIXED by the outer-chain capture-routing model: every
+  `BlockHandle` records the canonical owner of each captured
+  slot region (`captured` + `creator_start` for the creating
+  scope, `outer_chain` for ancestor scopes), and slot accesses
+  below a frame's `own_start` route STRAIGHT to the original
+  binding cell (`Frame::outer_cell_for`) instead of the
+  frame's per-invocation snapshot. A captured local is now one
+  shared binding across the defining scope and every closure,
+  for the lifetime of any capturing closure — including after
+  intermediate frames pop (stored procs, deferred Thread
+  bodies, suspended Fibers, `define_method` bodies,
+  `instance_eval` blocks). Per-iteration capture isolation
+  (`[:a,:b,:c].map { |s| -> { s } }`) is preserved: a block's
+  OWN params/body-locals stay per-invocation; only the
+  captured outer region is shared.
+- Regression fixtures: `tests/diff/closure_capture_nested.rb`
+  and `tests/diff/closure_define_method_binding.rb` (plus the
+  earlier `tests/diff/closure_in_iter_capture.rb`).
+
+### define_method bodies don't bind named keyword params
+
+```ruby
+class C
+  define_method(:m) { |a, k: 1| [a, k] }
+end
+C.new.m(1, k: 2)   # rubyrs: [1, {k: 2}] via rest / k default; CRuby: [1, 2]
+```
+
+- The `define_method`-installed closure binder handles
+  positional, optional (via the nil-keyed default prologue),
+  `*rest`, `**kwrest` and `&blk` params, but does NOT peel a
+  trailing kwargs Hash into NAMED keyword slots the way
+  `invoke_block` does — the Hash stays positional (flowing
+  into `*rest` when present) and the keyword takes its
+  default. Separate binder gap, unrelated to the capture
+  representation; fix belongs in the `m.closure` arm of the
+  method dispatch (mirror `invoke_block`'s kw peel + bind).
 
 ## Deferred to outer tiers
 

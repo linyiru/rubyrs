@@ -163,7 +163,72 @@ impl IcStats {
         0.0
     }
 }
+/// Per-ivar-site inline cache (ADR 0035 Ph4/5): one slot per
+/// `Op::LoadIvar` / `Op::StoreIvar` / `Op::IncIvar*` site, indexed by
+/// the op's cid (`CidGen::ivar` space — separate from call cids so
+/// neither dense vector inflates the other). A hit — the receiver's
+/// REAL class ptr (`Rc::as_ptr(inst.class)`, the ivar-shape owner)
+/// equals `class_ptr` — turns the access into a direct slot load/store.
+///
+/// NO generation / invalidation: class ivar shapes are monotonic
+/// (names only ever ADD, slots never renumber — `Class::ivar_shape`),
+/// so a cached slot can never go stale for its class. `class_ptr == 0`
+/// = unfilled. The class-ptr-reuse hazard (a dead class's allocation
+/// address reused by a new class) is the same one `CallCacheEntry`
+/// accepts.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct IvarSiteCache {
+    pub(crate) class_ptr: usize,
+    pub(crate) slot: u32,
+}
+
 const TOPLEVEL_METHOD_CACHE_KEY: usize = usize::MAX;
+
+/// Resolve the flat-ivar slot for `inst`'s class at ivar-cache site
+/// `cid` (ADR 0035 Ph4/5): class-ptr-guarded cache hit -> cached slot;
+/// miss -> shape intern (a PERMANENT verdict — slots never renumber)
+/// + cache fill. `cid == u32::MAX` = uncached site (id space
+/// exhausted / synthesized op). A free function over the cache vector
+/// so callers can hold a `&Instance` borrowed from `Vm::heap` while
+/// mutating the disjoint `Vm::ivar_caches` field.
+#[inline]
+pub(crate) fn ivar_slot_cached(
+    caches: &mut Vec<IvarSiteCache>,
+    inst: &crate::value::Instance,
+    name_id: SymId,
+    cid: u32,
+) -> u32 {
+    let cls_ptr = Rc::as_ptr(&inst.class) as usize;
+    let idx = cid as usize;
+    if cid != u32::MAX
+        && let Some(e) = caches.get(idx)
+        && e.class_ptr != 0
+    {
+        // Tier 1: same class → cached slot, one compare.
+        if e.class_ptr == cls_ptr {
+            return e.slot;
+        }
+        // Tier 2 (polymorphism-proof): a DIFFERENT class of the same
+        // family usually maps `name_id` to the SAME slot (sibling
+        // subclasses build their shapes through the same initialize
+        // order — rubocop's ~40 Node subclasses at one site). One
+        // indexed compare verifies exactly; repatch the class so a
+        // run of the same class takes tier 1 again.
+        let slot = e.slot;
+        if inst.class.ivar_shape_name_at(slot) == Some(name_id) {
+            caches[idx].class_ptr = cls_ptr;
+            return slot;
+        }
+    }
+    let slot = inst.class.ivar_slot_intern(name_id);
+    if cid != u32::MAX {
+        if idx >= caches.len() {
+            caches.resize(idx + 1, IvarSiteCache::default());
+        }
+        caches[idx] = IvarSiteCache { class_ptr: cls_ptr, slot };
+    }
+    slot
+}
 #[derive(Clone, Default)]
 pub(crate) struct CallCache {
     pub(crate) ways: [CallCacheEntry; IC_WAYS],
@@ -179,6 +244,37 @@ impl Vm {
         if self.call_caches.len() < n {
             self.call_caches.resize(n, CallCache::default());
         }
+    }
+
+    /// Twin of `ensure_call_caches` for the ivar-site cache vector
+    /// (`CidGen::ivar` id space, ADR 0035 Ph4/5).
+    pub(crate) fn ensure_ivar_caches(&mut self, n: usize) {
+        if self.ivar_caches.len() < n {
+            self.ivar_caches.resize(n, IvarSiteCache::default());
+        }
+    }
+
+    /// Frame-free getter serve read (ADR 0035 Ph4/5): the per-proto
+    /// CONTENT-VERIFIED slot cache (`Proto::getter_slot`) → direct
+    /// slot read; verify miss → shape intern + refill. `&self` only —
+    /// interior mutability (`Cell` + shape `RefCell`) keeps the
+    /// dispatch call sites borrow-free.
+    #[inline]
+    pub(crate) fn getter_ivar_read(
+        &self,
+        id: crate::value::ObjId,
+        proto_idx: usize,
+        gsym: SymId,
+    ) -> crate::value::Value {
+        let inst = self.heap.instance(id);
+        let cell = &self.protos[proto_idx].getter_slot;
+        let slot = cell.get();
+        if slot != u32::MAX && inst.class.ivar_shape_name_at(slot) == Some(gsym) {
+            return inst.ivars.read_slot_raw(slot);
+        }
+        let s = inst.class.ivar_slot_intern(gsym);
+        cell.set(s);
+        inst.ivars.read_slot_raw(s)
     }
 
     /// Per-call-site cached lookup. `cache_id` is the slot from the
@@ -1568,103 +1664,31 @@ impl Vm {
                 // are indistinguishable. (TRY_RUNS layer #26.)
                 "dup" | "clone"
             ),
-            Value::Hash(_) => matches!(
-                name,
-                "freeze"
-                    | "frozen?"
-                    | "length"
-                    | "size"
-                    | "[]"
-                    | "[]="
-                    | "empty?"
-                    | "include?"
-                    | "has_key?"
-                    | "key?"
-                    | "member?"
-                    | "keys"
-                    | "values"
-                    | "values_at"
-                    | "to_h"
-                    | "to_hash"
-                    | "to_a"
-                    | "each_key"
-                    | "each_value"
-                    | "merge"
-                    | "merge!"
-                    | "update"
-                    | "replace"
-                    | "clear"
-                    | "delete"
-                    | "invert"
-                    | "key"
-                    | "store"
-                    | "except"
-                    | "slice"
-                    | "dup"
-                    | "clone"
-                    | "each"
-                    | "each_pair"
-                    | "select"
-                    | "filter"
-                    | "reject"
-                    | "find"
-                    | "detect"
-                    | "select!"
-                    | "filter!"
-                    | "reject!"
-                    | "keep_if"
-                    | "delete_if"
-                    | "any?"
-                    | "all?"
-                    | "none?"
-                    | "each_with_index"
-                    | "map"
-                    | "collect"
-                    | "fetch"
-                    | "fetch_values"
-                    | "dig"
-                    | "assoc"
-                    | "rassoc"
-                    | "sort"
-                    | "sort_by"
-                    | "min_by"
-                    | "max_by"
-                    | "group_by"
-                    | "transform_keys"
-                    | "transform_values"
-                    | "transform_keys!"
-                    | "transform_values!"
-                    | "compact"
-                    | "compact!"
-                    | "filter_map"
-                    | "default"
-                    | "default_proc"
-                    | "default_proc="
-                    | "count"
-                    | "each_with_object"
-                    | "flat_map"
-                    | "collect_concat"
-                    | "reduce"
-                    | "inject"
-                    | "sum"
-                    | "first"
-                    | "min"
-                    | "max"
-                    | "one?"
-                    | "partition"
-                    | "take"
-                    | "drop"
-                    | "take_while"
-                    | "drop_while"
-                    | "find_index"
-                    | "tally"
-                    | "uniq"
-                    | "zip"
-                    | "each_slice"
-                    | "each_cons"
-                    | "chunk_while"
-                    | "slice_when"
-                    | "inspect"
+            Value::Hash(_) => matches!(name,
+                "freeze" | "frozen?" |
+                "<" | "<=" | ">" | ">=" |
+                "length" | "size" | "[]" | "[]=" | "empty?" |
+                "include?" | "has_key?" | "key?" | "member?" |
+                "keys" | "values" | "values_at" | "to_h" | "to_hash" | "to_a" |
+                "each_key" | "each_value" |
+                "merge" | "merge!" | "update" | "replace" | "clear" | "delete" | "invert" | "key" | "store" | "except" | "slice" | "dup" | "clone" |
+                "each" | "each_pair" |
+                "select" | "filter" | "reject" | "find" | "detect" |
+                "select!" | "filter!" | "reject!" | "keep_if" | "delete_if" |
+                "any?" | "all?" | "none?" |
+                "each_with_index" | "map" | "collect" | "fetch" |
+                "fetch_values" | "dig" | "assoc" | "rassoc" |
+                "sort" | "sort_by" | "min_by" | "max_by" | "group_by" |
+                "transform_keys" | "transform_values" |
+                "transform_keys!" | "transform_values!" |
+                "compact" | "compact!" | "filter_map" |
+                "default" | "default_proc" | "default_proc=" | "count" | "each_with_object" |
+                "flat_map" | "collect_concat" | "reduce" | "inject" | "sum" |
+                "first" | "min" | "max" | "one?" | "partition" |
+                "take" | "drop" | "take_while" | "drop_while" | "find_index" |
+                "tally" | "uniq" | "zip" |
+                "each_slice" | "each_cons" | "chunk_while" | "slice_when" |
+                "inspect"
             ),
             Value::Range(_) => matches!(
                 name,
@@ -4071,6 +4095,7 @@ mod tests {
             superclass: RefCell::new(superclass),
             undefed: RefCell::new(crate::intern::FxHashSet::default()),
             anon_serial: std::cell::Cell::new(0),
+            ivar_shape: std::cell::RefCell::new(crate::value::IvarShape::default()),
             class_vars: RefCell::new(crate::intern::FxHashMap::default()),
             consts: RefCell::new(crate::intern::FxHashMap::default()),
             assigned_name: RefCell::new(None),

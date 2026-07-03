@@ -18,6 +18,34 @@ use crate::value::{ObjId, Value};
 
 use super::{value_cmp_v, PinGuard, Vm};
 
+/// Build a `LastMatch` from one engine-agnostic `OwnedCaptures` hit so
+/// a `String#scan` block iteration can publish `$~` (and the English
+/// aliases `$LAST_MATCH_INFO` / `$&` / `` $` `` / `$'` / `$1`..). CRuby
+/// sets `$~` to each successive MatchData while a `scan` block runs;
+/// dotenv's parser reads `$LAST_MATCH_INFO[:key]` inside exactly such
+/// a block, so without this the global stays nil and indexing it
+/// raises NoMethodError. `cap_names` (names for groups 1..N) comes
+/// from `CompiledRegex::capture_group_names()`, computed once per
+/// scan by the caller.
+#[cfg(feature = "regex")]
+fn scan_last_match_owned(
+    oc: crate::regex_engine::OwnedCaptures,
+    input: &str,
+    cap_names: &[Option<String>],
+) -> crate::vm::LastMatch {
+    crate::vm::LastMatch {
+        whole: oc.whole,
+        caps: oc.groups,
+        input: input.to_string(),
+        m_start: oc.m_start,
+        m_end: oc.m_end,
+        named: oc.named,
+        group_spans: oc.group_spans,
+        cap_names: cap_names.to_vec(),
+        binary: None,
+    }
+}
+
 /// Outcome of a single `block.call(args)` step inside an
 /// iterator driver. Returned by `Vm::step_block`.
 ///
@@ -127,6 +155,15 @@ impl Vm {
             return Ok(BlockStep::Value(Value::Nil));
         }
         self.invoke_block(block, args)?;
+        // TIER-2 wave 5 (ADR 0037): run the just-pushed block frame
+        // natively when compiled. DONE → the dispatch_until below no-ops;
+        // BAIL → it continues the frame at `ip` (mode switch, never a
+        // re-execution); a trap propagates exactly like a dispatch_until
+        // trap. The signal classification below is unchanged: a native
+        // run exits on any pending control signal, which dispatch_until
+        // then routes identically to the interpreted path.
+        #[cfg(feature = "jit-native")]
+        self.t2_enter_block(false)?;
         self.dispatch_until(pre_frames)?;
         if self.method_return.is_some() {
             // `method_return` itself stays set — the caller's
@@ -156,6 +193,9 @@ impl Vm {
             return Ok(BlockStep::Value(Value::Nil));
         }
         self.invoke_block2(block, a, b)?;
+        // TIER-2 wave 5: see `step_block`.
+        #[cfg(feature = "jit-native")]
+        self.t2_enter_block(false)?;
         self.dispatch_until(pre_frames)?;
         if self.method_return.is_some() {
             return Ok(BlockStep::MethodReturn);
@@ -191,6 +231,9 @@ impl Vm {
             return Ok(BlockStep::Value(Value::Int(r)));
         }
         self.invoke_block1(block, arg)?;
+        // TIER-2 wave 5: see `step_block`.
+        #[cfg(feature = "jit-native")]
+        self.t2_enter_block(false)?;
         self.dispatch_until(pre_frames)?;
         if self.method_return.is_some() {
             return Ok(BlockStep::MethodReturn);
@@ -634,9 +677,9 @@ impl Vm {
         let meth_iv = g.vm.interner.intern("@meth");
         let args_iv = g.vm.interner.intern("@args");
         let inst = g.vm.heap.instance_mut(inst_id);
-        inst.ivars.insert(obj_iv, recv);
-        inst.ivars.insert(meth_iv, Value::Sym(meth_sym));
-        inst.ivars.insert(args_iv, Value::Array(args_id));
+        inst.ivar_set(obj_iv, recv);
+        inst.ivar_set(meth_iv, Value::Sym(meth_sym));
+        inst.ivar_set(args_iv, Value::Array(args_id));
         drop(g);
         Ok(Value::Object(inst_id))
     }
@@ -1202,16 +1245,31 @@ impl Vm {
             match &args[0] {
                 #[cfg(feature = "regex")]
                 Value::Regex(re) => {
-                    // Engine-agnostic scan: the no-block arm and gsub/sub
-                    // already use OwnedCaptures so fancy-regex-backed
-                    // patterns can carry captures, names, and spans without
-                    // exposing backend-specific Captures lifetimes here.
+                    // Dual-engine (layer #17 follow-up): matches come
+                    // from `captures_iter_owned`, which walks EITHER
+                    // the linear `regex` backend OR the fancy-regex
+                    // fallback, so lookahead/lookbehind patterns work
+                    // in block-form scan too. Motivating consumer:
+                    // rubocop 1.88 drives fancy patterns through
+                    // block-form scan on EVERY file (Style/
+                    // MagicCommentFormat's `values`, MatchRange#
+                    // each_match_range under the percent-literal
+                    // Layout cops); the old `as_native()` gate made
+                    // those cops error out, which kept the runner's
+                    // `errors.any?` true and silently blocked every
+                    // result-cache save. A fancy match-time error
+                    // (recursion-limit blow-up) traps like block-gsub's.
                     let owned_matches = re.captures_iter_owned(&source_str).map_err(|e| {
                         g.vm.trap(crate::error::RubyError::RuntimeError {
                             msg: format!("regex match failed: {} (pattern: /{}/)", e, re.as_str()),
                         })
                     })?;
                     let has_groups = re.captures_len() > 1;
+                    let cap_names = re.capture_group_names();
+                    // CRuby sets `$~` to nil after a NO-match scan (block
+                    // form included); the loops below consume
+                    // `owned_matches` by move, so snapshot emptiness first.
+                    let matched_any = !owned_matches.is_empty();
                     // CRuby publishes `$~` (and its English aliases) for
                     // each successive match while the scan block runs.
                     // Save the caller's match into the enclosing method
@@ -1227,18 +1285,16 @@ impl Vm {
                     // pops exactly once and classifies, fixing the
                     // double-pop bug as a side effect.
                     if has_groups {
-                        for caps in &owned_matches {
-                            g.vm.last_match = Some(
-                                g.vm.last_match_from_owned_captures(re, &source_str, caps)
-                            );
-                            let mut group_vec: Vec<Value> = Vec::with_capacity(caps.groups.len());
-                            for grp in &caps.groups {
+                        for oc in owned_matches {
+                            let mut group_vec: Vec<Value> = Vec::with_capacity(oc.groups.len());
+                            for grp in &oc.groups {
                                 group_vec.push(
                                     grp.as_ref()
-                                        .map(|m| Value::new_str(m.clone()))
+                                        .map(|t| Value::new_str(t.clone()))
                                         .unwrap_or(Value::Nil),
                                 );
                             }
+                            g.vm.last_match = Some(scan_last_match_owned(oc, &source_str, &cap_names));
                             g.vm.maybe_gc();
                             g.vm.check_alloc()?;
                             let gid = g.vm.heap.alloc(HeapObj::Array(group_vec.into()));
@@ -1281,11 +1337,9 @@ impl Vm {
                             }
                         }
                     } else {
-                        for caps in &owned_matches {
-                            let whole = caps.whole.clone();
-                            g.vm.last_match = Some(
-                                g.vm.last_match_from_owned_captures(re, &source_str, caps)
-                            );
+                        for oc in owned_matches {
+                            let whole = oc.whole.clone();
+                            g.vm.last_match = Some(scan_last_match_owned(oc, &source_str, &cap_names));
                             match g.vm.step_block1(block, Value::new_str(&whole), pre_frames)? {
                                 BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
                                 BlockStep::Break(r) => { early = Some(r); break; }
@@ -1293,7 +1347,7 @@ impl Vm {
                             }
                         }
                     }
-                    if owned_matches.is_empty() {
+                    if !matched_any {
                         g.vm.last_match = None;
                     }
                 }
@@ -6069,8 +6123,8 @@ mod tests {
     // regression in any of:
     //
     //   * invoke_block fresh-clone path (per-iter isolation)
-    //   * `propagate_outer_write` chain walk (counter / nested
-    //     write-through to outer-method locals)
+    //   * capture routing (`Frame::outer_cell_for` — counter /
+    //     nested write-through to outer-method locals)
     //   * Op::Yield's `find_lexical_owner_frame` seed (yield from
     //     nested block must find the enclosing method even though
     //     the block frame's `locals` is no longer Rc-shared with
@@ -6097,7 +6151,7 @@ mod tests {
 
     #[test]
     fn counter_aggregation_through_each_writes_back_to_outer() {
-        // The `propagate_outer_write` contract — block-frame
+        // The capture-routing contract — block-frame
         // StoreLocal/IncLocal/IncLocalNoPush on a slot in the
         // surrounding method's scope must reach the method's
         // locals so the post-loop read sees the accumulated
@@ -6112,7 +6166,7 @@ mod tests {
 
     #[test]
     fn nested_block_writes_propagate_to_method_locals() {
-        // `propagate_outer_write`'s chain walk past intermediate
+        // Capture routing past intermediate
         // block frames. Inner block writes `result = :found`;
         // the value must reach the surrounding method's `result`
         // slot through the outer block frame's writeback Rc, not

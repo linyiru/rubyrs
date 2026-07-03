@@ -93,9 +93,22 @@ class IO
   end
 
   def self.pipe
-    state = { buf: +"".b, pos: 0, wclosed: false }
-    r = RubyrsPipeReader.new(state)
-    w = RubyrsPipeWriter.new(state)
+    # Two backings, one API:
+    #   - REAL fd pipe(2) (RubyrsFdReader/Writer) when the host can
+    #     fork — pipe endpoints must survive fork(2) and carry real
+    #     blocking/EOF/EPIPE semantics for the cross-process protocol
+    #     the parallel gem runs (rubocop --parallel's Marshal frames).
+    #   - the in-memory shim otherwise (embedded/wasi hosts keep the
+    #     documented single-threaded write-then-read divergences).
+    if __rubyrs_fork_supported?
+      fds = __rubyrs_pipe
+      r = RubyrsFdReader.new(fds[0])
+      w = RubyrsFdWriter.new(fds[1])
+    else
+      state = { buf: +"".b, pos: 0, wclosed: false }
+      r = RubyrsPipeReader.new(state)
+      w = RubyrsPipeWriter.new(state)
+    end
     if block_given?
       begin
         return yield(r, w)
@@ -291,18 +304,49 @@ if __rubyrs_fork_supported?
   module Kernel
     def fork(&blk)
       raise NotImplementedError, "rubyrs fork requires a block (Tier-1 subset)" unless blk
-      __rubyrs_fork_block(blk)
+      # POSIX: only the forking thread survives in the child — the
+      # cooperative scheduler's world (parent green threads, parked
+      # fds, run queue) must reset before the child's block runs, or
+      # the child could resume parent supervisors / double-poll the
+      # parent's pipe fds. (The Rust fork arm clears the VM-side fiber
+      # state; this clears the Ruby-side tables.)
+      __rubyrs_fork_block(proc {
+        ::Thread.__coop_after_fork!
+        blk.call
+      })
     end
   end
 
   module Process
+    # waitpid(2) flags (CRuby values).
+    WNOHANG = 1
+    WUNTRACED = 2
+
     def self.fork(&blk)
       raise NotImplementedError, "rubyrs fork requires a block (Tier-1 subset)" unless blk
-      __rubyrs_fork_block(blk)
+      __rubyrs_fork_block(proc {
+        ::Thread.__coop_after_fork!
+        blk.call
+      })
     end
 
     def self.waitpid(pid, flags = 0)
+      # Cooperative scheduling: a blocking wait from a green thread
+      # (the parallel gem's Worker#stop in each supervisor's ensure)
+      # must not stall the whole VM — poll with WNOHANG and park
+      # between attempts so the other supervisors keep running.
+      if flags == 0 && ::Thread.__coop_active?
+        loop do
+          r = __rubyrs_waitpid(pid, WNOHANG)
+          if r
+            $? = Process::Status.new(r[0], r[1])
+            return r[0]
+          end
+          ::Thread.__coop_sleep(0.002)
+        end
+      end
       r = __rubyrs_waitpid(pid, flags)
+      return nil if r.nil? # WNOHANG, child still running
       $? = Process::Status.new(r[0], r[1])
       r[0]
     end
@@ -437,6 +481,280 @@ class RubyrsPipeReader
     # "rejects insanely long boundaries" test relies on this to unblock
     # the producer thread after Rack shuts the reader down).
     @state[:rclosed] = true
+    nil
+  end
+
+  def closed?
+    @closed
+  end
+end
+
+# Real-fd IO.pipe endpoints (see IO.pipe above) — thin veneers over
+# the `__rubyrs_fd_*` host primitives (raw pipe(2) fds). Unlike the
+# in-memory shim these carry REAL pipe semantics: reads BLOCK until
+# data or writer-close (EOF), writes to a reader-less pipe raise
+# Errno::EPIPE, and the fds survive fork(2) — which is the point:
+# the parallel gem's work_in_processes protocol (rubocop --parallel)
+# Marshal-frames jobs/results across a fork boundary. Duck-typed like
+# StringIO rather than IO subclasses, same as the in-memory pair.
+class RubyrsFdReader
+  def initialize(fd)
+    @fd = fd
+    @closed = false
+    # Pushback buffer: `eof?` on a pipe must BLOCK until it can give a
+    # definitive answer, which costs one speculative byte — stash it
+    # here for the next read. (CRuby's own IO#eof? does exactly this.)
+    @pb = +"".b
+  end
+
+  def fileno
+    @fd
+  end
+
+  def read(length = nil, outbuf = nil)
+    raise IOError, "closed stream" if @closed
+    result =
+      if length.nil?
+        rest = ::Thread.__coop_active? ? __coop_read_all : __rubyrs_fd_read(@fd, nil)
+        out = @pb + (rest || "".b)
+        @pb = +"".b
+        out
+      elsif length == 0
+        "".b
+      else
+        have = @pb.bytesize
+        if have >= length
+          out = @pb.byteslice(0, length)
+          @pb = @pb.byteslice(length, have - length) || +"".b
+          out
+        else
+          rest =
+            if ::Thread.__coop_active?
+              __coop_read_exact(length - have)
+            else
+              __rubyrs_fd_read(@fd, length - have)
+            end
+          if rest.nil?
+            # EOF before any fresh byte: drain the pushback if there
+            # is one, else the nil-at-EOF contract.
+            if have == 0
+              nil
+            else
+              out = @pb
+              @pb = +"".b
+              out
+            end
+          else
+            out = @pb + rest
+            @pb = +"".b
+            out
+          end
+        end
+      end
+    if outbuf
+      outbuf.replace(result || "")
+      result.nil? ? nil : outbuf
+    else
+      result
+    end
+  end
+
+  # Cooperative twins of the blocking `__rubyrs_fd_read` shapes: same
+  # exactly-n / to-EOF contracts, but a would-block read PARKS the
+  # calling green thread on the fd (or drives the scheduler when main
+  # is the caller) instead of blocking the whole VM in read(2). The
+  # single-threaded path above never comes through here — zero cost.
+  def __coop_read_exact(n)
+    buf = +"".b
+    while buf.bytesize < n
+      chunk = __rubyrs_fd_read_step(@fd, n - buf.bytesize)
+      if chunk == false
+        ::Thread.__coop_wait_fd(@fd, :r)
+      elsif chunk.nil?
+        break # EOF
+      else
+        buf << chunk
+      end
+    end
+    buf.empty? && n > 0 ? nil : buf
+  end
+
+  def __coop_read_all
+    buf = +"".b
+    loop do
+      chunk = __rubyrs_fd_read_step(@fd, 65536)
+      if chunk == false
+        ::Thread.__coop_wait_fd(@fd, :r)
+      elsif chunk.nil?
+        break
+      else
+        buf << chunk
+      end
+    end
+    buf
+  end
+
+  def getbyte
+    b = read(1)
+    b && b.getbyte(0)
+  end
+
+  # Byte-at-a-time line read — correctness over throughput (a pipe
+  # can't over-read without a pushback discipline; consumers here
+  # read short protocol lines).
+  def gets(sep = "\n")
+    raise IOError, "closed stream" if @closed
+    line = +"".b
+    loop do
+      c = read(1)
+      if c.nil?
+        return line.empty? ? nil : line
+      end
+      line << c
+      return line if line.end_with?(sep)
+    end
+  end
+
+  def each(sep = "\n")
+    while (l = gets(sep))
+      yield l
+    end
+    self
+  end
+  alias_method :each_line, :each
+
+  # BLOCKING eof? — real-pipe semantics: waits until a byte arrives
+  # (false; byte pushed back) or every write end closes (true). The
+  # parallel gem's forked worker loops `until read.eof?` between
+  # Marshal frames.
+  def eof?
+    raise IOError, "closed stream" if @closed
+    return false unless @pb.empty?
+    b =
+      if ::Thread.__coop_active?
+        __coop_read_exact(1)
+      else
+        __rubyrs_fd_read(@fd, 1)
+      end
+    return true if b.nil?
+    @pb << b
+    false
+  end
+  alias_method :eof, :eof?
+
+  def rewind
+    raise Errno::ESPIPE, "Illegal seek"
+  end
+
+  def binmode; self; end
+  def set_encoding(*_a); self; end
+
+  def close
+    return nil if @closed
+    @closed = true
+    __rubyrs_fd_close(@fd)
+    nil
+  end
+
+  def closed?
+    @closed
+  end
+end
+
+class RubyrsFdWriter
+  def initialize(fd)
+    @fd = fd
+    @closed = false
+  end
+
+  def fileno
+    @fd
+  end
+
+  def write(*args)
+    raise IOError, "closed stream" if @closed
+    total = 0
+    if ::Thread.__coop_active?
+      # A write against a FULL pipe buffer parks the calling green
+      # thread on (fd, :w) instead of blocking the VM in write(2);
+      # EPIPE surfaces from the step exactly like the blocking path.
+      # `while` (not `args.each`): a fiber cannot suspend across a
+      # NATIVE iterator frame (vm/iter.rs truncation) — every loop
+      # around a park point must be pure Ruby.
+      ai = 0
+      while ai < args.length
+        s = args[ai].to_s
+        off = 0
+        size = s.bytesize
+        while off < size
+          r = __rubyrs_fd_write_step(@fd, s, off)
+          if r == false
+            ::Thread.__coop_wait_fd(@fd, :w)
+          else
+            off += r
+          end
+        end
+        total += size
+        ai += 1
+      end
+    else
+      args.each do |a|
+        total += __rubyrs_fd_write(@fd, a.to_s)
+      end
+    end
+    total
+  end
+
+  # A pipe write only blocks against a FULL pipe buffer; this "non-
+  # blocking" veneer performs the plain write (single-threaded rubyrs
+  # can't be mid-drain elsewhere) and keeps CRuby's EPIPE contract:
+  # `exception: false` suppresses EAGAIN/EWOULDBLOCK, never EPIPE.
+  def write_nonblock(s, exception: true)
+    raise IOError, "closed stream" if @closed
+    __rubyrs_fd_write(@fd, s.to_s)
+  end
+
+  def <<(s)
+    write(s)
+    self
+  end
+
+  # `while` loops (not `each`): `write` can park a green thread, and
+  # a fiber cannot suspend across a native iterator frame.
+  def puts(*args)
+    if args.empty?
+      write("\n")
+    else
+      i = 0
+      while i < args.length
+        s = args[i].to_s
+        write(s)
+        write("\n") unless s.end_with?("\n")
+        i += 1
+      end
+    end
+    nil
+  end
+
+  def print(*args)
+    i = 0
+    while i < args.length
+      write(args[i].to_s)
+      i += 1
+    end
+    nil
+  end
+
+  def flush; self; end
+  def sync; true; end
+  def sync=(_v); _v; end
+  def binmode; self; end
+  def set_encoding(*_a); self; end
+
+  def close
+    return nil if @closed
+    @closed = true
+    __rubyrs_fd_close(@fd)
     nil
   end
 

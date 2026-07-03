@@ -23,7 +23,7 @@ mod gc;
 mod hash;
 mod iter;
 mod kernel;
-mod lookup;
+pub(crate) mod lookup;
 #[cfg(feature = "regex")]
 mod match_data;
 mod numeric;
@@ -32,7 +32,7 @@ mod raise;
 mod range;
 mod sort;
 mod sprintf;
-mod step;
+pub(crate) mod step;
 mod string;
 mod util;
 #[cfg(feature = "bignum")]
@@ -233,20 +233,56 @@ pub(crate) struct Frame {
     #[allow(dead_code)] // wired in Phase A.1
     pub(crate) pending_yield: bool,
     /// Set on block frames whose `locals` is a FRESH per-invocation
-    /// Vec cloned from the BlockHandle's `captured` at
-    /// `invoke_block`. Holds the original `captured` Rc + the
-    /// block's `param_start` so that, at Op::Return, the lower
-    /// `[0..param_start]` portion of `locals` (the outer-scope
-    /// slots — method-locals plus any enclosing block's slots) is
-    /// COPIED BACK into the original Rc. This preserves
-    /// closure-write-through to outer scope for the active
-    /// invocation while keeping per-iteration isolation for slots
-    /// that the block itself owns (params + body-locals).
-    /// `None` for method / class-body / toplevel frames, and for
-    /// block frames that don't need writeback (e.g. trivial
-    /// invokes from non-iterating callers — currently unused, but
-    /// the field allows future opt-in).
+    /// Vec (the copy path of `block_frame_locals`). Holds the
+    /// original `captured` Rc + the block's `param_start`. Since the
+    /// outer-chain routing model landed, NO value copy-back happens
+    /// through this — outer-slot reads/writes route directly to the
+    /// canonical binding cell (`outer_cell_for`). The field's
+    /// remaining role is Rc-IDENTITY for the lexical walks
+    /// (`find_lexical_owner_frame` / `find_return_target` /
+    /// `Op::ReturnMethod`'s owner stash): each block frame's
+    /// writeback points one scope outward so `yield` / non-local
+    /// `return` / `super` locate the lexical owner method.
+    /// `None` for method / class-body / toplevel frames and
+    /// share-direct block frames (their `locals` IS the outer cell,
+    /// so the identity walk already matches).
     pub(crate) block_writeback: Option<(Rc<RefCell<Vec<Value>>>, u16)>,
+    /// First slot this frame's own locals cell canonically OWNS.
+    /// `0` for method / class-body / toplevel frames and for
+    /// share-direct block frames (the cell IS the outer scope);
+    /// the block's `param_start` for copy-path block frames and
+    /// `define_method`-closure frames. Slot accesses BELOW this
+    /// boundary are captured outer locals — they route via
+    /// `outer_cell_for` to the canonical binding cell, so every
+    /// closure capturing a variable (and its defining scope)
+    /// reads/writes the SAME slot, even after intermediate
+    /// frames pop (CRuby shared-binding semantics).
+    pub(crate) own_start: u16,
+    /// `true` on a define_method SHARE-DIRECT frame (`Locals` is the
+    /// closure's captured cell itself — see the dm arm of the method
+    /// dispatch). Every frame-pop site decrements
+    /// `Vm::dm_share_depth` when set, so the dm dispatch can gate
+    /// its share fast path on `dm_share_depth == 0` (an O(1) check)
+    /// instead of scanning the frame stack for re-entrancy.
+    pub(crate) dm_share: bool,
+    /// Boundary of the `outer_cell` region: routed slots `>=
+    /// outer_cell_start` live in `outer_cell` (the running handle's
+    /// `captured` — the CREATING scope's cell); routed slots below it
+    /// live in `outer_rest`. Copied from `BlockHandle::creator_start`
+    /// / `MethodClosure::creator_start`; 0 for non-routing frames.
+    pub(crate) outer_cell_start: u16,
+    /// The creating scope's canonical cell for routed slots
+    /// `[outer_cell_start, own_start)` — the running handle's
+    /// `captured` Rc. `None` whenever `own_start == 0` (nothing to
+    /// route). Read by `Op::CreateBlock` to derive deeper closures'
+    /// chains and by the GC root walk (the ORIGINAL binding cell may
+    /// be reachable only through here while this frame runs).
+    pub(crate) outer_cell: Option<Rc<RefCell<Vec<Value>>>>,
+    /// Ancestor canonical-owner chain for routed slots
+    /// `< outer_cell_start` — cloned from the running handle's
+    /// `outer_chain`. `None` for depth-1 closures (creator owns all
+    /// captured slots). GC-walked like `outer_cell`.
+    pub(crate) outer_rest: Option<crate::value::OuterChain>,
     /// Set on block frames from the running `BlockHandle`'s
     /// `captured_yield_block` (the block belonging to the method that
     /// lexically encloses this block). `Op::Yield` reads it as the
@@ -298,7 +334,51 @@ pub(crate) struct FrameAux {
     pub(crate) begin_rescue_depths: Vec<BeginBaseline>,
 }
 
+/// Write `slot` into a routed canonical binding cell — the store half
+/// of the capture-routing pair (see `Frame::outer_cell_for`). Replaces
+/// the old `propagate_outer_write` frame-stack walk: routing hits the
+/// ORIGINAL binding cell directly, so it works even when the defining
+/// frames are no longer on the stack (escaped procs, deferred Thread
+/// bodies, suspended Fibers).
+#[inline]
+pub(crate) fn cell_store(cell: &Rc<RefCell<Vec<Value>>>, slot: usize, v: Value) {
+    let mut t = cell.borrow_mut();
+    if t.len() <= slot {
+        // Defensive: scope cells are sized to their proto's n_locals,
+        // which covers every capturable slot — but a grow beats
+        // silently dropping a user's write.
+        t.resize(slot + 1, Value::Nil);
+    }
+    t[slot] = v;
+}
+
 impl Frame {
+    /// Capture routing: the CANONICAL binding cell for `slot`, or
+    /// `None` when the slot belongs to this frame's own cell. All
+    /// slot reads/writes on `Shared` frames consult this first —
+    /// `own_start == 0` (method / class-body / toplevel /
+    /// share-direct frames) short-circuits on the first compare.
+    /// Routing to the original binding (instead of the frame's
+    /// per-invocation snapshot) is what makes a captured local ONE
+    /// shared binding across the defining scope and every closure,
+    /// even after intermediate frames pop.
+    #[inline]
+    pub(crate) fn outer_cell_for(&self, slot: usize) -> Option<&Rc<RefCell<Vec<Value>>>> {
+        if slot >= self.own_start as usize {
+            return None;
+        }
+        if slot >= self.outer_cell_start as usize {
+            // Creating scope's region — `outer_cell` is Some whenever
+            // own_start > 0; fall through defensively if not.
+            if let Some(cell) = &self.outer_cell {
+                return Some(cell);
+            }
+        }
+        self.outer_rest
+            .as_ref()
+            .map(|chain| crate::value::chain_owner_cell(chain, slot))
+    }
+
     /// Get-or-create the aux box. Call sites that only READ should
     /// prefer `aux.as_ref()` / the `..._len` style probes so an
     /// aux-less frame stays allocation-free.
@@ -391,6 +471,120 @@ pub(crate) struct MethodBreak {
     pub(crate) suspended: bool,
 }
 
+/// ADR 0031 increment 2 — precomputed argument-binding plan for a
+/// NON-fixed-arity method proto (optional positionals / `*rest` /
+/// post-required / `&blk`; kwargs and kw-rest are INELIGIBLE — see
+/// `Vm::nfa_plan_for`). The variadic sibling of `FixedArity`: every
+/// field the general binder re-derives from the Proto per call
+/// (`invoke_method_with_block_inner`'s tail-layout arithmetic) is
+/// captured once here, so the dispatch fast paths can bind a
+/// resolved call stack-direct without touching the ~320-byte-stride
+/// `protos[idx]` row. Optional-param DEFAULTS need no plan entry:
+/// they are compiled as a body-entry prologue (`JumpIfArgGiven` +
+/// default expr + `StoreLocal`, keyed on the frame's
+/// `n_given_positional`), so the binder's only default job is
+/// leaving unfilled slots Nil and stamping the given-count —
+/// evaluation order/scope/once-per-call semantics ride on the same
+/// bytecode the general binder relies on.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct NfaPlan {
+    /// `proto.params.len()` — cross-checked against `m.params.len()`
+    /// at the invoke site so an exotic Method whose params diverge
+    /// from its proto (none exist today outside closures/builtins,
+    /// which the callers already decline) falls back to the cascade.
+    pub(crate) params_len: u16,
+    /// Leading required positionals (`proto.n_required_positional`).
+    pub(crate) required_pre: u16,
+    /// Trailing required positionals (`proto.n_required_post`) —
+    /// bound from the arg tail BEFORE optionals/rest gather.
+    pub(crate) required_post: u16,
+    /// pre + optionals + post — the positional slot region
+    /// `[0, positional_max)`; the rest slot (when `has_rest`) is AT
+    /// `positional_max`, mirroring the general binder's layout.
+    pub(crate) positional_max: u16,
+    pub(crate) has_rest: bool,
+    /// `&blk` param present: its slot is `positional_max + has_rest`
+    /// (kw slots can't intervene — kwargs are ineligible).
+    pub(crate) has_block_param: bool,
+    pub(crate) n_locals: u16,
+    /// Cached `!proto.creates_block` — same contract as
+    /// `FixedArity::stack_eligible`.
+    pub(crate) stack_eligible: bool,
+}
+
+/// Lazy tri-state slot for `Vm::nfa_plans` (index = `proto_idx`).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum NfaPlanSlot {
+    Unknown,
+    Ineligible,
+    Plan(NfaPlan),
+}
+
+/// Body-shape plan for the "rest-predicate" frame-free fast path
+/// (the rubocop-ast `Node#type?(*types)` family — the hottest
+/// polymorphic call in a RuboCop cop walk). A pure-rest method whose
+/// compiled body is EXACTLY one of two op templates:
+///
+///   simple:  `def m?(*rest); rest.include?(g); end`
+///   grouped: `def m?(*rest)
+///               return true if rest.include?(g)
+///               tmp = CONST[g]
+///               !tmp.nil? && rest.include?(tmp)
+///             end`
+///
+/// where `g` is a bare (implicit-self) zero-arg call, is served
+/// WITHOUT a frame, rest-Array materialization, or any body dispatch:
+/// the serve resolves `g` through the body's own inline-cache slot
+/// (so per-receiver-class overrides and `method_gen` invalidation ride
+/// the existing IC), requires the resolution to be a trivial
+/// attr_reader (`getter_ivar`), and unrolls the `include?` scans into
+/// Symbol identity compares over the caller's still-on-stack args.
+/// Exactness is guaranteed by runtime deopts (any non-Symbol arg /
+/// ivar / group value falls through to the general path before any
+/// observable effect) plus the `method_gen`-revalidated
+/// `rest_pred_deps_ok` flag (no user overrides on the builtin methods
+/// the body would dispatch: `Array#include?`, `Hash#[]`,
+/// `Symbol#==`/`nil?`, `NilClass#nil?`, `TrueClass`/`FalseClass#!`).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RestPredPlan {
+    /// The bare zero-arg call name (`type` in rubocop-ast).
+    pub(crate) getter_name: crate::intern::SymId,
+    /// The body's OWN call-site cache id for that call — reusing it
+    /// gives per-receiver-class polymorphic resolution + method_gen
+    /// invalidation identical to actually running the body op.
+    pub(crate) getter_cache: u32,
+    /// How the grouped variant's body loads the fallback-group Hash
+    /// constant. `None` = simple variant (no group phase).
+    pub(crate) group: RestPredGroup,
+}
+
+/// Const-load shape for `RestPredPlan::group`. Serve-time resolution
+/// goes through the interpreter's OWN const caches (`const_cache_chain`
+/// keyed by (callee proto, chain idx) / `const_cache_flat`), so a
+/// cold cache simply declines to the general path — whose body op
+/// then resolves + fills the cache for every later serve. `const_gen`
+/// invalidation is therefore inherited, never reimplemented.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum RestPredGroup {
+    /// Simple variant — no group fallback phase.
+    None,
+    /// Body op 10 is `LoadConstChain(idx)` (bare const read inside a
+    /// class/module scope — the rubocop-ast shape).
+    Chain(u32),
+    /// Body op 10 is `LoadConst(sym)` (toplevel-compiled sibling).
+    Flat(crate::intern::SymId),
+}
+
+/// Lazy tri-state slot for `Vm::rest_preds` (index = `proto_idx`).
+/// A Proto's code is immutable after compile, so `No` / `Pred` are
+/// final (redefinition installs a different proto_idx).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum RestPredSlot {
+    Unknown,
+    No,
+    Pred(RestPredPlan),
+}
+
 /// RAII guard for `Vm.pinned`. Native-side code that needs heap
 /// values to survive an intervening `maybe_gc` / `?` early-return
 /// constructs one of these, calls `.pin(v)` for every value it
@@ -480,21 +674,33 @@ pub(crate) struct RescueHandler {
     /// `rescues` to the wrong depth, leaving outer rescue
     /// handlers stranded. (Code-review #306 round 2.)
     pub(crate) begin_depth_at_push: usize,
-    /// Class filter for `rescue`. `None` means catch-all (used for
-    /// `ensure` and as a future hook for internal/host-only handlers).
-    /// `Some(Class(cls))` means the handler only fires when the raised
-    /// exception's class is `cls` or a descendant. Bare `rescue` (no
-    /// class listed) populates this with `StandardError`, so any
-    /// exception that intentionally lives outside the StandardError
-    /// subtree (e.g. `ResourceExhausted`) cannot be silently swallowed
-    /// by `rescue => e`. Explicit `rescue ClassName => e` carries the
-    /// resolved Class here. Multi-class clauses (`rescue A, B => e`)
-    /// emit one handler per class — same handler_ip, same bind_slot —
-    /// so each entry holds exactly one filter. `Some(Any(list))` is
-    /// the splat form `rescue *CONST`: the constant's Array value is
-    /// snapshotted into a class list at push time and the handler
-    /// fires when ANY entry matches.
-    pub(crate) filter_class: Option<RescueFilter>,
+    /// UNRESOLVED class filter for `rescue` — resolved lazily by the
+    /// unwinder at MATCH time (see `Vm::resolve_rescue_filter`).
+    /// CRuby evaluates a `rescue <expr>` class expression when an
+    /// exception is actually in flight, not at begin entry — and
+    /// eager push-time resolution made every begin/rescue prologue
+    /// pay a lexical-scope walk (Vec clone + `format!` + intern +
+    /// class-table probes per enclosing scope, per call): rubocop's
+    /// `Commissioner#with_cop_error_handling` spent ~0.5µs/call on it,
+    /// 25.6k calls per file walk. Now the non-raising path stores two
+    /// plain words and the resolution cost rides on the raise.
+    pub(crate) filter: RescueFilterSpec,
+}
+
+/// The unresolved filter carried by a `RescueHandler` (resolution
+/// happens at match time — see `filter`'s doc).
+#[derive(Clone, Copy)]
+pub(crate) enum RescueFilterSpec {
+    /// `ensure` entries — no class filter (they match unconditionally
+    /// via `is_ensure`).
+    None,
+    /// `rescue <Name>` — the compiler-stamped SymId (possibly carrying
+    /// the splat / absolute-path markers). Bare `rescue` stamps
+    /// `StandardError`. Multi-class clauses (`rescue A, B => e`) emit
+    /// one handler per class, so each entry holds exactly one sym.
+    Sym(crate::intern::SymId),
+    /// `rescue *local` — the local slot, read at match time.
+    SplatLocal(u16),
 }
 
 /// The two resolved shapes a `rescue` class filter can take. The
@@ -503,12 +709,9 @@ pub(crate) struct RescueHandler {
 pub(crate) enum RescueFilter {
     /// `rescue Foo` / bare `rescue` (= StandardError) — one class.
     Class(Rc<Class>),
-    /// `rescue *CONST` — match if any listed class matches. The
-    /// list is the constant's Array value AS OF push time; CRuby
-    /// re-evaluates the expression at match time, a divergence
-    /// only observable if the array is mutated while the body
-    /// runs (no real gem does this — minitest's
-    /// PASSTHROUGH_EXCEPTIONS pattern is a frozen-ish constant).
+    /// `rescue *CONST` / `rescue *local` — match if any listed class
+    /// matches. The list is the expression's Array value as of MATCH
+    /// time (CRuby semantics).
     Any(Vec<Rc<Class>>),
 }
 
@@ -751,8 +954,128 @@ pub(crate) struct BinaryCaps {
 /// recorded by `refine`; see `Vm::module_refinements`.
 pub(crate) type RefinementList = Vec<(std::rc::Rc<Class>, std::rc::Rc<Class>)>;
 
+/// Env-gated (`RUBYRS_JIT_STATS`) counters for the native-JIT method paths:
+/// compile attempts / successes / pre-gate declines per variant family, and
+/// per-(proto, family) native EXECUTION counts + deopts. Zero-cost when off
+/// (every update is behind the `jit_stats_on` bool). Dumped to stderr on
+/// `Runtime` drop by `Vm::dump_jit_stats`.
+#[cfg(feature = "jit-native")]
+#[derive(Default)]
+pub(crate) struct JitStats {
+    /// Indexed by family: 0=int 1=poly 2=fparam 3=objparam 4=objparam2
+    /// 5=value 6=zeroarg 7=tier2 8=t2lite. `[attempts, ok, pregate_declines]`.
+    pub(crate) compile: [[u64; 3]; 9],
+    /// (proto_idx, family) → (native calls, deopts).
+    pub(crate) exec: crate::intern::FxHashMap<(usize, u8), (u64, u64)>,
+}
+
+#[cfg(feature = "jit-native")]
+pub(crate) const JIT_FAM_NAMES: [&str; 9] =
+    ["int", "poly", "fparam", "objparam", "objparam2", "value", "zeroarg", "tier2", "t2lite"];
+
+/// Second-arg descriptor for the 2-arg (`objparam2`) native dispatch helper
+/// (`Vm::jit_run_objparam2`): the compiled param1 is either an Int value or a
+/// Hash `ObjId` (`walk(node, counts)`), per `NativeProto::param2_hash`.
+#[cfg(feature = "jit-native")]
+#[derive(Clone, Copy)]
+pub(crate) enum ObjP2Arg {
+    Int(i64),
+    Hash(crate::value::ObjId),
+}
+
+/// `Vm::jit_flags` bit: the proto's ZERO-arg verdict is settled and dead
+/// (declined, or breaker-killed) — the explicit-recv argc==0 serving block
+/// skips its map probe entirely on one dense `Vec<u8>` read.
+#[cfg(feature = "jit-native")]
+pub(crate) const JFLAG_NO_ZEROARG: u8 = 1;
+/// `Vm::jit_flags` bit: ALL THREE 1-arg verdicts (int / value / objparam) are
+/// settled and dead — serving probes AND hook routing are skipped on one read.
+/// (The lazy Float specialization is intentionally NOT part of this bit: the
+/// Float sub-arm stays reachable behind a stack-value `matches!`, no map probe.)
+#[cfg(feature = "jit-native")]
+pub(crate) const JFLAG_NO_ONEARG: u8 = 2;
+/// `Vm::jit_flags` bit: the 2-arg (`objparam2`) verdict is settled and dead.
+#[cfg(feature = "jit-native")]
+pub(crate) const JFLAG_NO_OBJP2: u8 = 4;
+/// `Vm::jit_flags` bit: the TIER-2 (frame-keeping direct-threaded, ADR 0037)
+/// verdict is settled and dead — declined at admission or filtered by the
+/// `RUBYRS_JIT_TIER2_ONLY` allowlist.
+#[cfg(feature = "jit-native")]
+pub(crate) const JFLAG_NO_TIER2: u8 = 8;
+/// `Vm::jit_flags` bit: a TIER-2 body is compiled and present in
+/// `Vm::t2_protos` — serve without probing the hotness map.
+#[cfg(feature = "jit-native")]
+pub(crate) const JFLAG_TIER2_HAS: u8 = 16;
+/// Wave-4: a frame-lite entry EXISTS (and has not been breaker-killed) in
+/// `t2_lite_ptrs`. The serve sites gate on this dense byte (usually already
+/// in cache from the tier-2 flow) before touching the 24-byte-entry lite
+/// table, so the non-serving fixed-arity fast path pays one AND, not a
+/// second table probe. Cleared by the bail-streak breaker.
+#[cfg(feature = "jit-native")]
+pub(crate) const JFLAG_TIER2_LITE: u8 = 32;
+
+/// Tier-2 hotness threshold (ADR 0037 wave 2, compile-cost control): a
+/// proto's frame must be entered `BASE + PER_OP × body_ops` times before it
+/// is compiled. Wave 1's flat threshold of 8 made a single `f1.rb` RuboCop
+/// run pay ~270ms compiling 848 protos (a +16% e2e regression) and a big1
+/// run ~640ms/2446 protos — compile cost is ~linear in body size (~8µs/op)
+/// while per-entry native savings are tens-to-hundreds of ns, so payback
+/// needs O(1000) entries. Scaling the threshold with body size makes short
+/// CLI runs compile almost nothing while daemon/batch/hot-loop workloads
+/// still compile everything that matters (a proto hot enough to pay back
+/// reaches the threshold quickly). Env overrides for experiments and for
+/// exercising the tier in tests: `RUBYRS_JIT_TIER2_THRESHOLD` (absolute:
+/// sets BASE and zeroes PER_OP), `RUBYRS_JIT_TIER2_BASE`,
+/// `RUBYRS_JIT_TIER2_PEROP`.
+#[cfg(feature = "jit-native")]
+const T2_THRESHOLD_BASE_DEFAULT: u32 = 2048;
+#[cfg(feature = "jit-native")]
+// Wave 3: the inline lowering grew per-op compile cost ~2.4x (guards +
+// slow-edge blocks), so the threshold scales to match — payback needs
+// entries proportional to compile cost (measured ~19us/op vs wave-2's
+// ~8us/op). Re-measured on f1 e2e: 1024+16/op left a +2.6% one-shot
+// regression (65.7ms bill); 2048+64/op is e2e-NEUTRAL (30.5ms bill, 50
+// protos, 629k IC-fast serves) while hot workloads (fib, the walk's
+// 100k+-call bodies) still compile within their first few thousand
+// entries.
+const T2_THRESHOLD_PER_OP_DEFAULT: u32 = 64;
+/// Tier-2 native-nesting cap: each nested native body adds a Rust stack
+/// segment (native fn + helper + dispatch_until + step); deeper Ruby
+/// recursion falls back to the flat interpreter loop, which has no Rust-stack
+/// cost per Ruby frame.
+#[cfg(feature = "jit-native")]
+const T2_MAX_NATIVE_DEPTH: u32 = 96;
+/// Wave-4 frame-lite bail-streak breaker: this many CONSECUTIVE
+/// materialize-bails (no completed frameless serve in between) disable the
+/// proto's lite entry — a chronic shape mismatch (e.g. a Float-operand
+/// predicate whose Int guards never hold) pays entry + materialize per call
+/// for nothing. A completed serve resets the streak, so mixed workloads
+/// with occasional bails keep serving.
+#[cfg(feature = "jit-native")]
+const T2_LITE_KILL_STREAK: u8 = 32;
+
 pub(crate) struct Vm {
     pub(crate) protos: Vec<Proto>,
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_stats_on: bool,
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_stats: JitStats,
+    /// Per-(proto, family) DISPATCH-deopt counts, feeding the circuit-breaker
+    /// (`jit_note_deopt`): only bumped on the deopt path (the expensive path —
+    /// the interpreter re-runs the body right after), so native successes pay
+    /// nothing for it.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_deopt_count: crate::intern::FxHashMap<(usize, u8), u32>,
+    /// Dense per-proto NEGATIVE cache for JIT dispatch serving (`JFLAG_*`):
+    /// the walk-shaped workload dispatches thousands of methods whose every
+    /// variant declined, and the serving blocks were paying several
+    /// FxHashMap probes per CALL to re-discover that. One `Vec<u8>` read
+    /// answers the settled-dead common case. Bits only ever turn ON (a dead
+    /// verdict never revives; a method redefinition allocates a NEW proto,
+    /// which starts with a zeroed flag byte). Indexed by `proto_idx`, grown on
+    /// demand (`jit_flags_set`).
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_flags: Vec<u8>,
     #[cfg(feature = "jit-native")]
     pub(crate) jit_native: crate::intern::FxHashMap<usize, Option<crate::jit_native::NativeProto>>,
     /// ZERO-arg method NativeProtos compiled for the `jit_obj_call` PIC path (ADR 0034
@@ -782,6 +1105,104 @@ pub(crate) struct Vm {
     /// re-seeded per call) so the common path adds no heap allocation. GC-rooted below.
     #[cfg(feature = "jit-native")]
     pub(crate) jit_hash_scratch: Option<crate::value::ObjId>,
+    /// TIER-2 (ADR 0037): env-gated (`RUBYRS_JIT_TIER2`) frame-keeping
+    /// direct-threaded baseline tier. `t2_protos` holds compiled bodies keyed
+    /// by proto_idx (never removed — machine code addresses stay valid);
+    /// `t2_hot` counts frame entries until `T2_COMPILE_THRESHOLD`;
+    /// `t2_trap` carries a Trap across the C ABI (status 3); `t2_depth` is
+    /// the live native-nesting count (capped at `T2_MAX_NATIVE_DEPTH`).
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_tier2_on: bool,
+    /// Optional method-name allowlist (`RUBYRS_JIT_TIER2_ONLY=a,b,c`) for
+    /// controlled per-method A/B runs; `None` = admit everything eligible.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_tier2_only: Option<std::collections::HashSet<String>>,
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_protos: crate::intern::FxHashMap<usize, crate::jit_tier2::T2Proto>,
+    /// Dense proto_idx → compiled-entry table (parallel to `t2_protos`, which
+    /// OWNS the modules): the per-serve lookup is one bounds-checked Vec read
+    /// instead of an FxHashMap probe (~1M serves per rubocop walk).
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_ptrs: Vec<Option<extern "C" fn(*mut Vm) -> i64>>,
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_hot: crate::intern::FxHashMap<usize, u32>,
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_trap: Option<crate::error::Trap>,
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_depth: u32,
+    /// Total tier-2 Cranelift compile time (stats-gated; ns).
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_compile_ns: u64,
+    /// Wave-2 (`RUBYRS_JIT_TIER2_NOCALL`): compile call ops + `Return`
+    /// through the generic helper (the wave-1 tier) for controlled A/B.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_tier2_nocall: bool,
+    /// Adaptive compile-threshold knobs (see `T2_THRESHOLD_BASE_DEFAULT`).
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_threshold_base: u32,
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_threshold_per_op: u32,
+    /// Wave-2 `t2_call` counters (stats-gated): `[0]` IC-fast serves (the
+    /// dedicated helper served without the do_call cascade), `[1]` fallbacks
+    /// to the full cascade, `[2]` native→native entries (a tier-2 body run
+    /// while already inside tier-2 native code, i.e. `t2_depth > 0`).
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_call_stats: [u64; 3],
+    /// Wave-5 (`RUBYRS_JIT_TIER2_NOBLOCK`): disable BLOCK-proto serving
+    /// (`t2_enter_block` becomes a no-op) for controlled blocks-off A/B runs;
+    /// method-frame serving is unaffected.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_tier2_noblock: bool,
+    /// Wave-5 block-serving counters (stats-gated): `[0]` block invocations
+    /// that reached a serving hook (the invoke_block-family sites), `[1]`
+    /// invocations served natively (compiled block body ran), `[2]` native
+    /// serves that came from the `Op::Yield` arm (native-yield count).
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_block_stats: [u64; 3],
+    /// Wave-3 (`RUBYRS_JIT_TIER2_NOINLINE`): disable the inline op lowering
+    /// (reproduces the wave-2 tier — per-op helpers + IC-fast calls) for
+    /// controlled A/B.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_tier2_noinline: bool,
+    /// Wave-3 item 3: per-call-site settled-verdict bytes for the `t2_call`
+    /// fast probes, dense by `cache_id`. Counts consecutive fast-probe
+    /// declines; ≥ `T2_SITE_SETTLE` short-circuits the probe (with a
+    /// ~1/1024 periodic retry keyed off `op_counter`). Reset to 0 on any
+    /// fast serve. Grows on demand at the decline path only.
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_site_verdict: Vec<u8>,
+    /// Wave-3 backward-branch poll gate: nonzero when fuel or a wall-clock
+    /// deadline is active, so compiled loop back-edges call the poll helper
+    /// (which charges `check_fuel`). Recomputed at every tier-2 serve entry
+    /// (fuel/deadline activation only changes between evals). Read INLINE
+    /// by generated code via its baked field offset, alongside
+    /// `control_signals` and the interrupt flag.
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_poll_flags: u8,
+    /// Wave-4 FRAME-LITE entries, dense by proto_idx: `(fn, argc)` when the
+    /// body compiled a frameless variant (see `jit_tier2::T2LiteFn`). Served
+    /// at the fixed-arity dispatch fast paths BEFORE any arg bind / frame
+    /// push; `None` = not compiled (yet) or killed by the bail-streak
+    /// breaker. The machine code is owned by `t2_protos`' module.
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_lite_ptrs: Vec<Option<(crate::jit_tier2::T2LiteFn, u16)>>,
+    /// Consecutive materialize-bail counter per proto (dense): a lite serve
+    /// that completes resets it; `T2_LITE_KILL_STREAK` consecutive bails
+    /// disable the lite entry (each bail costs a wasted native entry plus
+    /// the materialize on top of the interpreted run — chronic mismatches,
+    /// e.g. an always-non-Int operand shape, must settle to the framed
+    /// path). Mixed workloads with occasional bails never accumulate.
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_lite_streak: Vec<u8>,
+    /// Frame-lite counters: `[0]` native serves that completed frameless
+    /// (stats-gated), `[1]` materialize-bails (counted in the helper),
+    /// `[2]` breaker kills.
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_lite_stats: [u64; 3],
+    /// `RUBYRS_JIT_TIER2_NOLITE`: disable wave-4 frame-lite compilation and
+    /// serving (reproduces the wave-3/5 tier) for controlled A/B.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_tier2_nolite: bool,
     /// FLOAT-param specialization of a 1-arg method (`def scale(n); n*1.5; end`
     /// called with a Float arg): the param binds as Float, the i64 arg carries f64
     /// bits. Leaf methods only (no cross-calls — those decline). Keyed by proto,
@@ -1096,9 +1517,11 @@ pub(crate) struct Vm {
     /// gets a unique u16 slot id; the Vm side allocates
     /// `call_caches[id]` lazily. Lives on the Vm so kernel
     /// builtins (e.g. `require_relative`) that compile new Ruby
-    /// source at runtime can advance the counter without
-    /// round-tripping through Runtime.
-    pub(crate) cache_counter: u32,
+    /// source at runtime can advance the counters without
+    /// round-tripping through Runtime. `.call` = method-call sites
+    /// (`call_caches`), `.ivar` = ivar-access sites (`ivar_caches`,
+    /// ADR 0035 Ph4/5) — separate id spaces, see `CidGen`.
+    pub(crate) cache_counter: crate::compiler::CidGen,
     /// User-defined global variables (`$foo = 1; puts $foo`).
     /// Keyed by SymId of the name including the leading `$`.
     /// Reads of unknown globals return Nil (matches CRuby's
@@ -1441,6 +1864,14 @@ pub(crate) struct Vm {
     pub(crate) refined_method_names: crate::intern::FxHashSet<SymId>,
     pub(crate) stack: Vec<Value>,
     pub(crate) frames: Vec<Frame>,
+    /// Recycled `FrameAux` boxes (cleared, capacities kept warm) so a
+    /// begin/rescue-bearing method doesn't malloc a fresh box + Vec
+    /// backings on EVERY call (rubocop's `with_cop_error_handling`
+    /// enters a begin 25.6k times per file walk). `top_aux_mut` pops
+    /// from here; the frame-pop sites push back via
+    /// `recycle_frame_aux`. Pooled boxes hold NO `Value`s (cleared at
+    /// recycle time), so the GC never needs to walk this.
+    pub(crate) frame_aux_pool: Vec<Box<FrameAux>>,
     pub(crate) heap: Heap,
     /// Native-code holding pen for heap values across GC points; see ADR 0005.
     pub(crate) pinned: Vec<Value>,
@@ -1544,6 +1975,10 @@ pub(crate) struct Vm {
     /// which effectively invalidates every cache entry — re-fill is
     /// lazy on the next call at each site.
     pub(crate) call_caches: Vec<CallCache>,
+    /// Per-ivar-site inline caches (ADR 0035 Ph4/5), dense by the
+    /// `Op::LoadIvar`/`StoreIvar`/`IncIvar*` cid (`CidGen::ivar`
+    /// space). See `IvarSiteCache` for the no-invalidation contract.
+    pub(crate) ivar_caches: Vec<crate::vm::lookup::IvarSiteCache>,
     pub(crate) method_gen: u32,
     /// Inline constant caches. `Op::LoadConst` resolution depends only
     /// on the GLOBAL classes/constants tables, so one entry per SymId
@@ -1622,6 +2057,24 @@ pub(crate) struct Vm {
     /// path (PathManager.join-style guards probe both per call).
     pub(crate) sym_nil_q: SymId,
     pub(crate) sym_empty_q: SymId,
+    /// Pre-interned `===` for the case-equality fast path (RuboCop's
+    /// NodePattern matchers fire `SYM === node` / `Mod === node`
+    /// millions of times per cop walk — 20% of the slow cascade).
+    pub(crate) sym_case_eq: SymId,
+    /// Pre-interned names for the walk-attributed fast buckets
+    /// (RuboCop `Team#investigate` per-phase profile, 2026-07:
+    /// `is_a?` 10.4%, `!` 6.4%, Array `include?`/`size`/`empty?`
+    /// ~15%, `Kernel#Array` 4.6% of the walk's slow-cascade sends;
+    /// `push`/`-@`/`<<` are the parse phase's top three).
+    pub(crate) sym_not: SymId,
+    pub(crate) sym_is_a: SymId,
+    pub(crate) sym_kind_of: SymId,
+    pub(crate) sym_push: SymId,
+    pub(crate) sym_shovel: SymId,
+    pub(crate) sym_neg_at: SymId,
+    pub(crate) sym_kernel_array: SymId,
+    pub(crate) sym_eq_op: SymId,
+    pub(crate) sym_to_sym: SymId,
     /// Collection-index fast-path override guard. The fast path may
     /// serve `h[k]` / `a[i]` directly ONLY while no user `[]` exists
     /// anywhere on the Hash / Array ancestor chain (a reopen, an
@@ -1653,6 +2106,92 @@ pub(crate) struct Vm {
     /// perf in that exotic program, never correctness).
     pub(crate) fast_prim_str_safe: bool,
     pub(crate) fast_prim_int_safe: bool,
+    /// `===` case-equality fast-path twins (same revalidation pass):
+    /// no user `===` anywhere on the Symbol / String chain (sym /
+    /// str flags), and no user `===` INSTANCE method on the Module /
+    /// Class chain (class flag — a `class Module; def ===` reopen
+    /// must fall to the slow path). A `def self.===` on a specific
+    /// class is per-receiver and is checked at the call site via the
+    /// IC-backed `lookup_class_singleton_cached` miss instead.
+    pub(crate) fast_case_eq_sym_safe: bool,
+    pub(crate) fast_case_eq_str_safe: bool,
+    pub(crate) fast_case_eq_class_safe: bool,
+    /// Lumped Int/Float/Bool/Nil twin: no user `===` anywhere on the
+    /// Integer / Float / NilClass / TrueClass / FalseClass chains.
+    /// (RuboCop's cop walk fires `Int === Int` millions of times per
+    /// file via the preamble's `Enumerable#any?/none?(pattern)` /
+    /// `grep` — measured the DOMINANT `===` receiver shape.)
+    pub(crate) fast_case_eq_prim_safe: bool,
+    /// Walk-attributed fast-bucket twins (same `method_gen`-
+    /// revalidated pass as the flags above). Chain-wide
+    /// `lookup_method_uncached` verdicts, mirroring the
+    /// "primitive-receiver fallback to the user-Class method
+    /// table" gate the slow cascade applies to Array / Symbol
+    /// receivers — any user method anywhere on the chain flips
+    /// the flag off and the canonical path resolves it.
+    ///   - `fast_arr_read_safe`: no user `size` / `length` /
+    ///     `empty?` / `include?` / `member?` on the Array chain.
+    ///   - `fast_arr_push_safe` / `fast_arr_shovel_safe`: no user
+    ///     `push` / `<<` on the Array chain (per-name so a
+    ///     `<<`-only reopen keeps `push` fast).
+    ///   - `fast_is_a_sym_safe`: no user `is_a?` / `kind_of?` on
+    ///     the Symbol chain.
+    /// (Int `-@`/`<<` and Bool/Nil `!` need no new flags — their
+    /// guard is the existing own-table `prim_reopen_mask` bit,
+    /// which is exactly the gate the cascade consults before
+    /// `primitive_call` answers those names today.)
+    pub(crate) fast_arr_read_safe: bool,
+    pub(crate) fast_arr_push_safe: bool,
+    pub(crate) fast_arr_shovel_safe: bool,
+    pub(crate) fast_is_a_sym_safe: bool,
+    /// Hash twin of `fast_arr_read_safe`: no user `size` / `length`
+    /// / `empty?` on the Hash chain.
+    pub(crate) fast_hash_read_safe: bool,
+    /// NilClass twins: no user `is_a?`/`kind_of?` (resp. `==`) on
+    /// the NilClass chain.
+    pub(crate) fast_is_a_nil_safe: bool,
+    pub(crate) fast_eq_nil_safe: bool,
+    /// TEMPORARY diagnostics (env-gated, `RUBYRS_CASCADE_STATS=1`):
+    /// per-(name, receiver-shape) counters of do_call sends that
+    /// reach the slow cascade (i.e. fell through every fast bucket
+    /// up to the `interner.resolve` point). `None` (the default)
+    /// costs one branch per slow-cascade send. Dumped to stderr by
+    /// the CLI at exit; used for per-phase attribution of the
+    /// RuboCop workload (parse vs cop-walk).
+    pub(crate) cascade_stats: Option<Box<FxHashMap<(SymId, u8), u64>>>,
+    /// TEMPORARY diagnostics (same `RUBYRS_CASCADE_STATS=1` gate):
+    /// non-fixed-arity user-Ruby-method callee census, recorded at
+    /// the canonical Object-recv invoke arms in the slow cascade.
+    /// Key = (method name, argc passed, packed param shape,
+    /// no_recv). Shape bits (LSB→): req_pre:6 | n_opt:6 | rest:1 |
+    /// req_post:4 | kw_count:6 | kw_rest:1 | block_param:1 |
+    /// closure:1 | non_public:1. Dumped as `nfa-stats` rows by the
+    /// CLI at exit alongside `cascade-stats`.
+    pub(crate) nfa_stats: Option<Box<FxHashMap<(SymId, u16, u32, bool), u64>>>,
+    /// ADR 0031 increment 2 (plan-based): per-proto precomputed
+    /// binding plans for NON-fixed-arity methods (optionals / splat
+    /// / post-required / `&blk` — NOT kwargs), lazily populated by
+    /// `nfa_plan_for` on the first fast-path attempt and immutable
+    /// thereafter (a Proto's param shape never changes after
+    /// compile). Indexed by `proto_idx`; grown on demand — protos
+    /// added later (eval / require) start `Unknown`.
+    pub(crate) nfa_plans: Vec<NfaPlanSlot>,
+    /// Rest-predicate body-shape plans (see `RestPredPlan`), lazily
+    /// verified per proto on the first NFA fast-path attempt. Same
+    /// lifecycle as `nfa_plans` (a Proto's code is immutable).
+    pub(crate) rest_preds: Vec<RestPredSlot>,
+    /// `method_gen`-revalidated safety flag for the rest-predicate
+    /// serve (recomputed in `fast_index_revalidate`, same walk):
+    /// true when none of the builtin methods the verified body
+    /// shapes would dispatch is user-overridden anywhere on the
+    /// respective chains — `Array#include?`, `Hash#[]`,
+    /// `Symbol#==`, `Symbol#nil?`, `NilClass#nil?`,
+    /// `TrueClass#!`, `FalseClass#!`.
+    pub(crate) rest_pred_deps_ok: bool,
+    /// Env-gated (`RUBYRS_JIT_STATS`) counters for the rest-predicate
+    /// serve: (served frame-free, declined-after-plan-match). Dumped
+    /// with the JIT stats at exit.
+    pub(crate) rest_pred_stats: (u64, u64),
     /// Reopen-precedence early gate (same `method_gen`-revalidated
     /// pass): bit per primitive class whose OWN method table holds
     /// at least one name a `primitive_call`-family arm claims
@@ -1731,6 +2270,32 @@ pub(crate) struct Vm {
     /// allocation instead of minting a fresh one. Bounded so a deep
     /// recursion that unwinds doesn't park an unbounded pool.
     pub(crate) locals_pool: Vec<Rc<RefCell<Vec<Value>>>>,
+    /// Single-entry memo for `Op::CreateBlock`'s ancestor-chain
+    /// flatten (only needed for depth ≥ 2 creations — a block created
+    /// inside a chain-carrying frame), keyed by the creating frame's
+    /// `(outer_rest_ptr, outer_cell_ptr, outer_cell_start)`. The
+    /// flatten input is the creating frame's ROUTING structure, whose
+    /// dominant shape references only stable root-scope cells (the
+    /// per-invocation cell churn lives in `BlockHandle::captured`,
+    /// which is NOT part of the flattened chain), so a loop that
+    /// creates depth-2 closures hits this every iteration. Sound
+    /// because the memoized chain holds strong Rcs to the keyed cells:
+    /// the keyed addresses cannot be freed/reused while the entry
+    /// lives, so a pointer match always refers to the SAME inputs —
+    /// for which fresh construction would be identical. Holding dead
+    /// cells until the next miss is a bounded (one entry) retention;
+    /// nothing reads the memoized cells' contents through the memo.
+    pub(crate) chain_memo: Option<(usize, usize, u16, crate::value::OuterChain)>,
+    /// Count of LIVE `Frame::dm_share` frames (across fibers — the
+    /// counter is deliberately NOT swapped by FiberStashGuard, so a
+    /// dm body suspended in another fiber keeps new calls off the
+    /// share path). `0` ⇒ no dm-share invocation can be clobbered ⇒
+    /// the dm dispatch may share the closure cell without scanning
+    /// the frame stack. Non-zero (nested / cross-fiber dm calls,
+    /// rare) falls back to the per-invocation copy path — always
+    /// CORRECT, just not shared-cell fast. Wholesale frame discards
+    /// (`frames.clear()` / error-path truncates) recount or zero it.
+    pub(crate) dm_share_depth: u32,
     /// Contiguous slot storage for `Locals::Stack` frames (the
     /// escape-analysed method-call fast path). Grows like a stack in
     /// lock-step with `frames`: a Stack frame's push appends its
@@ -2025,6 +2590,16 @@ impl Vm {
         let sym_frozen_q = interner.intern("frozen?");
         let sym_nil_q = interner.intern("nil?");
         let sym_empty_q = interner.intern("empty?");
+        let sym_case_eq = interner.intern("===");
+        let sym_not = interner.intern("!");
+        let sym_is_a = interner.intern("is_a?");
+        let sym_kind_of = interner.intern("kind_of?");
+        let sym_push = interner.intern("push");
+        let sym_shovel = interner.intern("<<");
+        let sym_neg_at = interner.intern("-@");
+        let sym_kernel_array = interner.intern("Array");
+        let sym_eq_op = interner.intern("==");
+        let sym_to_sym = interner.intern("to_sym");
         // See the `class_singleton_deny` field doc. Union of every
         // name-keyed `do_call` arm that can fire for a Value::Class
         // receiver before the canonical user-singleton lookup, plus
@@ -2070,6 +2645,66 @@ impl Vm {
             jit_native_objparam2: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_hash_scratch: None,
+            #[cfg(feature = "jit-native")]
+            jit_tier2_on: std::env::var_os("RUBYRS_JIT_TIER2").is_some(),
+            #[cfg(feature = "jit-native")]
+            jit_tier2_only: std::env::var("RUBYRS_JIT_TIER2_ONLY").ok().map(|s| {
+                s.split(',')
+                    .map(|n| n.trim().to_string())
+                    .filter(|n| !n.is_empty())
+                    .collect()
+            }),
+            #[cfg(feature = "jit-native")]
+            t2_protos: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            t2_ptrs: Vec::new(),
+            #[cfg(feature = "jit-native")]
+            t2_hot: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            t2_trap: None,
+            #[cfg(feature = "jit-native")]
+            t2_depth: 0,
+            #[cfg(feature = "jit-native")]
+            t2_compile_ns: 0,
+            #[cfg(feature = "jit-native")]
+            jit_tier2_nocall: std::env::var_os("RUBYRS_JIT_TIER2_NOCALL").is_some(),
+            #[cfg(feature = "jit-native")]
+            t2_threshold_base: {
+                let env_u32 = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<u32>().ok());
+                env_u32("RUBYRS_JIT_TIER2_THRESHOLD")
+                    .or_else(|| env_u32("RUBYRS_JIT_TIER2_BASE"))
+                    .unwrap_or(T2_THRESHOLD_BASE_DEFAULT)
+            },
+            #[cfg(feature = "jit-native")]
+            t2_threshold_per_op: {
+                let env_u32 = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<u32>().ok());
+                if env_u32("RUBYRS_JIT_TIER2_THRESHOLD").is_some() {
+                    // Absolute override: the threshold IS the base.
+                    0
+                } else {
+                    env_u32("RUBYRS_JIT_TIER2_PEROP").unwrap_or(T2_THRESHOLD_PER_OP_DEFAULT)
+                }
+            },
+            #[cfg(feature = "jit-native")]
+            t2_call_stats: [0; 3],
+            #[cfg(feature = "jit-native")]
+            jit_tier2_noblock: std::env::var_os("RUBYRS_JIT_TIER2_NOBLOCK").is_some(),
+            #[cfg(feature = "jit-native")]
+            t2_block_stats: [0; 3],
+            #[cfg(feature = "jit-native")]
+            jit_tier2_noinline: std::env::var_os("RUBYRS_JIT_TIER2_NOINLINE").is_some(),
+            #[cfg(feature = "jit-native")]
+            t2_site_verdict: Vec::new(),
+            #[cfg(feature = "jit-native")]
+            t2_poll_flags: 0,
+            #[cfg(feature = "jit-native")]
+            t2_lite_ptrs: Vec::new(),
+            #[cfg(feature = "jit-native")]
+            t2_lite_streak: Vec::new(),
+            #[cfg(feature = "jit-native")]
+            t2_lite_stats: [0; 3],
+            #[cfg(feature = "jit-native")]
+            jit_tier2_nolite: std::env::var_os("RUBYRS_JIT_TIER2_NOLITE").is_some(),
             #[cfg(feature = "jit-native")]
             jit_native_fparam: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
@@ -2168,6 +2803,14 @@ impl Vm {
             jit_native_floatfind_loop: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_on: std::env::var_os("RUBYRS_JIT_NATIVE").is_some(),
+            #[cfg(feature = "jit-native")]
+            jit_stats_on: std::env::var_os("RUBYRS_JIT_STATS").is_some(),
+            #[cfg(feature = "jit-native")]
+            jit_stats: JitStats::default(),
+            #[cfg(feature = "jit-native")]
+            jit_deopt_count: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
+            jit_flags: Vec::new(),
             protos,
             interner,
             classes: FxHashMap::default(),
@@ -2186,7 +2829,7 @@ impl Vm {
             consumed_autoloads: std::collections::HashSet::new(),
             private_consts: std::collections::HashSet::new(),
             autoload_paths: std::collections::HashMap::new(),
-            cache_counter: 0,
+            cache_counter: crate::compiler::CidGen::default(),
             globals: FxHashMap::default(),
             toplevel_methods: FxHashMap::default(),
             main_obj: None,
@@ -2244,6 +2887,7 @@ impl Vm {
             refined_method_names: crate::intern::FxHashSet::default(),
             stack: Vec::with_capacity(1024),
             frames: vec![],
+            frame_aux_pool: Vec::new(),
             heap: Heap::new(),
             pinned: Vec::new(),
             // ADR 0017 Rule 2 closure: default sink is silent
@@ -2291,6 +2935,7 @@ impl Vm {
             max_symbols: None,
             max_value_bytes: None,
             call_caches: Vec::new(),
+            ivar_caches: Vec::new(),
             method_gen: 0,
             const_cache_flat: FxHashMap::default(),
             const_cache_chain: FxHashMap::default(),
@@ -2312,6 +2957,16 @@ impl Vm {
             sym_frozen_q,
             sym_nil_q,
             sym_empty_q,
+            sym_case_eq,
+            sym_not,
+            sym_is_a,
+            sym_kind_of,
+            sym_push,
+            sym_shovel,
+            sym_neg_at,
+            sym_kernel_array,
+            sym_eq_op,
+            sym_to_sym,
             fast_index_checked_gen: 0,
             fast_index_hash_safe: false,
             fast_index_array_safe: false,
@@ -2320,6 +2975,31 @@ impl Vm {
             fast_index_hash_key_safe: false,
             fast_prim_str_safe: false,
             fast_prim_int_safe: false,
+            fast_case_eq_sym_safe: false,
+            fast_case_eq_str_safe: false,
+            fast_case_eq_class_safe: false,
+            fast_case_eq_prim_safe: false,
+            fast_arr_read_safe: false,
+            fast_arr_push_safe: false,
+            fast_arr_shovel_safe: false,
+            fast_is_a_sym_safe: false,
+            fast_hash_read_safe: false,
+            fast_is_a_nil_safe: false,
+            fast_eq_nil_safe: false,
+            cascade_stats: if std::env::var_os("RUBYRS_CASCADE_STATS").is_some() {
+                Some(Box::default())
+            } else {
+                None
+            },
+            nfa_stats: if std::env::var_os("RUBYRS_CASCADE_STATS").is_some() {
+                Some(Box::default())
+            } else {
+                None
+            },
+            nfa_plans: Vec::new(),
+            rest_preds: Vec::new(),
+            rest_pred_deps_ok: false,
+            rest_pred_stats: (0, 0),
             any_undefs: false,
             prim_reopen_mask: 0,
             inspect_stack: Vec::new(),
@@ -2335,6 +3015,8 @@ impl Vm {
             dispatch_until_depths: Vec::new(),
             method_return_locals: None,
             locals_pool: Vec::new(),
+            chain_memo: None,
+            dm_share_depth: 0,
             locals_arena: Vec::new(),
             control_signals: 0,
             pending_loop_transfer: None,
@@ -2373,8 +3055,468 @@ impl Vm {
 
 impl Vm {
 
+    /// Get-or-create the TOP frame's aux box, reusing a pooled box
+    /// when one is available (see `frame_aux_pool`). The hot aux
+    /// creators (`Op::EnterBegin` / `Op::PushRescue` / `Op::PushEnsure`
+    /// / `Op::EnterLoop`) route through here so a begin/rescue-bearing
+    /// method stays malloc-free per call once the pool is warm.
+    #[inline]
+    pub(crate) fn top_aux_mut(&mut self) -> &mut FrameAux {
+        let f = self.frames.last_mut().expect("ICE: aux access with no frame");
+        if f.aux.is_none() {
+            f.aux = Some(self.frame_aux_pool.pop().unwrap_or_default());
+        }
+        f.aux.as_mut().unwrap()
+    }
 
+    /// Return a popped frame's aux box to the pool: clear every field
+    /// (keeping the Vec capacities — that's the point) so the pool
+    /// holds no `Value`s / stale state, and cap the pool size so a
+    /// deep-recursion spike doesn't pin memory forever. Frame-pop
+    /// sites call this best-effort; a frame dropped elsewhere (e.g.
+    /// `frames.truncate` on an error path) simply frees its box.
+    #[inline]
+    pub(crate) fn recycle_frame_aux(&mut self, aux: Option<Box<FrameAux>>) {
+        const FRAME_AUX_POOL_MAX: usize = 32;
+        if let Some(mut a) = aux
+            && self.frame_aux_pool.len() < FRAME_AUX_POOL_MAX
+        {
+            a.invoked_name = None;
+            a.instance_eval_definee = None;
+            a.rescues.clear();
+            a.loop_rescue_depths.clear();
+            a.loop_stack_depths.clear();
+            a.begin_rescue_depths.clear();
+            self.frame_aux_pool.push(a);
+        }
+    }
 
+    /// Record a native-JIT method EXECUTION attempt (family per
+    /// `JIT_FAM_NAMES`); `deopt` = the native code bailed and the interpreter
+    /// re-ran the body. No-op unless `RUBYRS_JIT_STATS` is set.
+    #[cfg(feature = "jit-native")]
+    #[inline]
+    pub(crate) fn jstat_exec(&mut self, proto_idx: usize, fam: u8, deopt: bool) {
+        if !self.jit_stats_on {
+            return;
+        }
+        let e = self.jit_stats.exec.entry((proto_idx, fam)).or_insert((0, 0));
+        e.0 += 1;
+        if deopt {
+            e.1 += 1;
+        }
+    }
+
+    /// Read the proto's JIT dispatch flags (`JFLAG_*`); 0 = nothing settled.
+    #[cfg(feature = "jit-native")]
+    #[inline]
+    pub(crate) fn jit_flags_get(&self, proto_idx: usize) -> u8 {
+        self.jit_flags.get(proto_idx).copied().unwrap_or(0)
+    }
+
+    /// OR a `JFLAG_*` bit into the proto's flag byte (grows the table).
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn jit_flags_set(&mut self, proto_idx: usize, bit: u8) {
+        if self.jit_flags.len() <= proto_idx {
+            self.jit_flags.resize(proto_idx + 1, 0);
+        }
+        self.jit_flags[proto_idx] |= bit;
+    }
+
+    /// TIER-2 serving hook (ADR 0037), called RIGHT AFTER a method frame is
+    /// pushed at the dispatch fast paths: run the just-pushed top frame's
+    /// body natively when a tier-2 compile exists (compiling it on the
+    /// `T2_COMPILE_THRESHOLD`-th entry). On return the VM state is exactly
+    /// what the interpreter would produce: either the frame completed (popped,
+    /// result on the operand stack), or it bailed with `frame.ip` at the
+    /// resume point (the master loop continues interpreting — a mode switch,
+    /// never a re-execution), or a Trap propagates. Precedence: the frameless
+    /// specialized tiers (int/value/objparam/zeroarg/getter) serve BEFORE any
+    /// frame is pushed, so tier-2 only ever sees what they declined.
+    #[cfg(feature = "jit-native")]
+    #[inline]
+    pub(crate) fn t2_enter(&mut self) -> Result<(), crate::error::Trap> {
+        if !self.jit_tier2_on {
+            return Ok(());
+        }
+        self.t2_enter_slow().map(|_served| ())
+    }
+
+    /// TIER-2 BLOCK serving hook (ADR 0037 wave 5), called RIGHT AFTER the
+    /// interpreter's block binders (`invoke_block`/`invoke_block1`/
+    /// `invoke_block2`) pushed a block frame at the hot invocation sites
+    /// (the `Op::Yield` arm, the `step_block` family, the `proc.call`
+    /// arms): run the just-pushed block frame's body natively when a
+    /// tier-2 compile exists. Identical serving discipline to `t2_enter`
+    /// — param binding (autosplat, rest, kw, block-param, lambda arity)
+    /// already happened in the interpreter's own binder, so the compiled
+    /// body starts at op 0 with the frame exactly as interpretation would
+    /// see it; a bail is a mode switch (the caller's `dispatch_until`
+    /// continues the frame at `ip`), never a re-execution. `from_yield`
+    /// only labels the stats counter (native-yield count).
+    #[cfg(feature = "jit-native")]
+    #[inline]
+    pub(crate) fn t2_enter_block(&mut self, from_yield: bool) -> Result<(), crate::error::Trap> {
+        if !self.jit_tier2_on || self.jit_tier2_noblock {
+            return Ok(());
+        }
+        if self.jit_stats_on {
+            self.t2_block_stats[0] += 1;
+        }
+        let served = self.t2_enter_slow()?;
+        if served && self.jit_stats_on {
+            self.t2_block_stats[1] += 1;
+            if from_yield {
+                self.t2_block_stats[2] += 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns whether the top frame was actually run natively (`Ok(true)`)
+    /// or left for the interpreter (`Ok(false)`); `t2_enter` ignores the
+    /// flag, `t2_enter_block` feeds its stats counters from it.
+    #[cfg(feature = "jit-native")]
+    fn t2_enter_slow(&mut self) -> Result<bool, crate::error::Trap> {
+        let pidx = match self.frames.last() {
+            Some(f) => f.proto_idx,
+            None => return Ok(false),
+        };
+        let flags = self.jit_flags_get(pidx);
+        if flags & JFLAG_NO_TIER2 != 0 {
+            return Ok(false);
+        }
+        if self.t2_depth >= T2_MAX_NATIVE_DEPTH {
+            return Ok(false); // deep recursion: interpret (flat loop, no Rust stack)
+        }
+        if flags & JFLAG_TIER2_HAS == 0 {
+            let c = self.t2_hot.entry(pidx).or_insert(0);
+            *c += 1;
+            // Adaptive threshold (wave 2, compile-cost control): scale the
+            // required entries with body size — compile cost is ~linear in
+            // ops while per-entry savings are ~flat, so bigger bodies must
+            // prove more heat before paying the Cranelift bill.
+            let threshold = self
+                .t2_threshold_base
+                .saturating_add(
+                    self.t2_threshold_per_op
+                        .saturating_mul(self.protos[pidx].code.len() as u32),
+                );
+            if *c < threshold {
+                return Ok(false);
+            }
+            if let Some(only) = &self.jit_tier2_only
+                && !only.contains(&self.protos[pidx].name)
+            {
+                self.jit_flags_set(pidx, JFLAG_NO_TIER2);
+                return Ok(false);
+            }
+            if self.jit_stats_on {
+                self.jit_stats.compile[7][0] += 1;
+            }
+            let compile_t0 = self
+                .jit_stats_on
+                .then(std::time::Instant::now);
+            let t2ctx = crate::jit_tier2::T2Ctx {
+                nocall: self.jit_tier2_nocall,
+                noinline: self.jit_tier2_noinline,
+                nolite: self.jit_tier2_nolite,
+                interrupt_addr: std::sync::Arc::as_ptr(&self.interrupt_pending) as usize,
+                sym_nil_q: self.sym_nil_q.0,
+            };
+            match crate::jit_tier2::compile_tier2(&self.protos[pidx], pidx, &t2ctx)
+            {
+                Some(p) => {
+                    let entry = p.ptr;
+                    let lite = p.lite_ptr;
+                    self.t2_protos.insert(pidx, p);
+                    if self.t2_ptrs.len() <= pidx {
+                        self.t2_ptrs.resize(pidx + 1, None);
+                    }
+                    self.t2_ptrs[pidx] = Some(entry);
+                    // Wave-4 frame-lite entry: served at the fixed-arity
+                    // dispatch fast paths BEFORE any frame is pushed.
+                    if let Some(lp) = lite {
+                        if self.t2_lite_ptrs.len() <= pidx {
+                            self.t2_lite_ptrs.resize(pidx + 1, None);
+                        }
+                        self.t2_lite_ptrs[pidx] = Some(lp);
+                        self.jit_flags_set(pidx, JFLAG_TIER2_LITE);
+                    }
+                    self.jit_flags_set(pidx, JFLAG_TIER2_HAS);
+                    if self.jit_stats_on {
+                        self.jit_stats.compile[7][1] += 1;
+                    }
+                }
+                None => {
+                    self.jit_flags_set(pidx, JFLAG_NO_TIER2);
+                    return Ok(false);
+                }
+            }
+            if let Some(t0) = compile_t0 {
+                self.t2_compile_ns += t0.elapsed().as_nanos() as u64;
+            }
+        }
+        // The fn pointer is copied out BEFORE running (the machine code lives
+        // in the module's mmap and never moves; the dense table entry is a
+        // copy, so a nested compile growing `t2_ptrs` can't invalidate it —
+        // same discipline as `NpEntry`).
+        let f = match self.t2_ptrs.get(pidx).copied().flatten() {
+            Some(f) => f,
+            None => return Ok(false),
+        };
+        // native→native accounting: entering a tier-2 body while already
+        // inside tier-2 native code (`t2_depth > 0`) is the wave-2 direct
+        // native call chain (t2_call → frame push → this entry).
+        if self.jit_stats_on && self.t2_depth > 0 {
+            self.t2_call_stats[2] += 1;
+        }
+        // Wave-3 backward-branch poll gate: fuel/deadline activation only
+        // changes between evals, so a per-serve recompute can never be
+        // stale while native code runs.
+        self.t2_poll_flags = (self.fuel.is_some() || self.deadline_at.is_some()) as u8;
+        self.t2_depth += 1;
+        let status = f(self as *mut Vm);
+        self.t2_depth -= 1;
+        if self.jit_stats_on {
+            self.jstat_exec(pidx, 7, status == crate::jit_tier2::T2_BAIL);
+        }
+        if status == crate::jit_tier2::T2_TRAP {
+            return Err(self
+                .t2_trap
+                .take()
+                .expect("ICE: tier-2 trap status without a stored trap"));
+        }
+        Ok(true)
+    }
+
+    /// Wave-4 FRAME-LITE serve (ADR 0037): run `pidx`'s frameless variant
+    /// against the current operand stack — recv (when `has_recv`) and the
+    /// `argc` args stay ON the stack (rooted) for the whole run; NO frame is
+    /// pushed, no args are bound. Call sites are the fixed-arity dispatch
+    /// fast paths, AFTER their `check_frames` and arity checks and INSTEAD
+    /// of the bind+push+`t2_enter` sequence. Contract on return:
+    ///
+    /// - `T2_DONE`: recv+args were replaced by the return value — the call
+    ///   is complete (the site returns `Ok(true)`).
+    /// - `T2_BAIL`: the native code MATERIALIZED the real frame (the
+    ///   deferred push: current locals bound, recv+args consumed, `ip` at
+    ///   the resume op) — the site returns `Ok(true)` and its caller
+    ///   continues the frame exactly like any interpreter push (the master
+    ///   loop, or a tier-2 caller's `dispatch_until`). A mode switch, never
+    ///   a re-execution.
+    ///
+    /// `self_words` is a borrowing view of the receiver (the stack slot /
+    /// the caller frame's `self_val` / the site's owned local keeps it
+    /// rooted — no GC can run inside a lite body anyway: no admitted helper
+    /// allocates).
+    #[cfg(feature = "jit-native")]
+    #[inline]
+    pub(crate) fn t2_lite_run(
+        &mut self,
+        f: crate::jit_tier2::T2LiteFn,
+        pidx: usize,
+        self_words: [i64; 2],
+        n_pop: usize,
+    ) -> Result<(), crate::error::Trap> {
+        // Backward-branch poll gate mirror — same per-serve recompute as
+        // `t2_enter_slow` (a fired gate materializes + bails; delivery
+        // stays owned by the dispatch loop heads).
+        self.t2_poll_flags = (self.fuel.is_some() || self.deadline_at.is_some()) as u8;
+        let status = f(self as *mut Vm, self_words[0], self_words[1], n_pop as i64);
+        if status == crate::jit_tier2::T2_DONE {
+            if self.jit_stats_on {
+                self.t2_lite_stats[0] += 1;
+                self.jstat_exec(pidx, 8, false);
+            }
+            if let Some(s) = self.t2_lite_streak.get_mut(pidx) {
+                *s = 0;
+            }
+            return Ok(());
+        }
+        debug_assert_eq!(status, crate::jit_tier2::T2_BAIL, "ICE: lite status");
+        // Materialize-bail: the frame exists now; count toward the breaker.
+        if self.t2_lite_streak.len() <= pidx {
+            self.t2_lite_streak.resize(pidx + 1, 0);
+        }
+        if self.jit_stats_on {
+            self.jstat_exec(pidx, 8, true);
+        }
+        let s = &mut self.t2_lite_streak[pidx];
+        *s = s.saturating_add(1);
+        if *s >= T2_LITE_KILL_STREAK {
+            if let Some(slot) = self.t2_lite_ptrs.get_mut(pidx) {
+                *slot = None; // module stays alive in t2_protos
+            }
+            if let Some(f) = self.jit_flags.get_mut(pidx) {
+                *f &= !JFLAG_TIER2_LITE;
+            }
+            self.t2_lite_stats[2] += 1;
+        }
+        Ok(())
+    }
+
+    /// Settle-check for `JFLAG_NO_ONEARG`: set the bit iff all three 1-arg
+    /// verdicts exist and none is alive. Called from the hook once per routed
+    /// visit (after it filled all three) and from the deopt breaker after a
+    /// kill. Any verdict still missing, or any variant alive → no bit (the
+    /// serving/routing logic keeps consulting the maps).
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn jit_maybe_mark_no_onearg(&mut self, proto_idx: usize) {
+        let int_dead = match self.jit_native.get(&proto_idx) {
+            Some(None) => true,
+            Some(Some(np)) => np.dispatch_dead.get(),
+            None => return,
+        };
+        let val_dead = match self.jit_value.get(&proto_idx) {
+            Some(None) => true,
+            Some(Some(_)) => false, // the value JIT has no deopt channel — never dies
+            None => return,
+        };
+        let objp_dead = match self.jit_native_objparam.get(&proto_idx) {
+            Some(None) => true,
+            Some(Some(np)) => np.dispatch_dead.get(),
+            None => return,
+        };
+        if int_dead && val_dead && objp_dead {
+            self.jit_flags_set(proto_idx, JFLAG_NO_ONEARG);
+        }
+    }
+
+    /// Deopt circuit-breaker: called by a dispatch serving site when a native
+    /// run bailed (the interpreter re-runs the body right after, so this map
+    /// bump is noise there). Once a (proto, family) has deopted
+    /// `JIT_DEOPT_KILL` times, mark the proto dispatch-dead — serving it was
+    /// pure per-call waste (a native attempt + a full interpreted re-run; the
+    /// RuboCop walk's `line`/`matched` shapes deopt on 100% of calls). Deopt
+    /// causes are overwhelmingly systematic (an unmodelled input type/shape),
+    /// so a proto over the threshold essentially never wins later. The proto
+    /// stays ALIVE in its map (its machine address may be baked into other
+    /// compiled code's PIC caches — dropping it would free running code);
+    /// `contains_key` stays true, so `jit_should_route`'s verdict logic is
+    /// unchanged.
+    #[cfg(feature = "jit-native")]
+    fn jit_note_deopt(&mut self, proto_idx: usize, fam: u8) {
+        const JIT_DEOPT_KILL: u32 = 32;
+        let c = self.jit_deopt_count.entry((proto_idx, fam)).or_insert(0);
+        *c += 1;
+        if *c < JIT_DEOPT_KILL {
+            return;
+        }
+        let np = match fam {
+            0 => self.jit_native.get(&proto_idx),
+            2 => self.jit_native_fparam.get(&proto_idx),
+            3 => self.jit_native_objparam.get(&proto_idx),
+            4 => self.jit_native_objparam2.get(&proto_idx),
+            6 => self.jit_native_zeroarg.get(&proto_idx),
+            _ => None,
+        };
+        if let Some(Some(np)) = np {
+            np.dispatch_dead.set(true);
+        }
+        // A kill may settle the negative-cache bits.
+        match fam {
+            0 | 3 => self.jit_maybe_mark_no_onearg(proto_idx),
+            4 => self.jit_flags_set(proto_idx, JFLAG_NO_OBJP2),
+            6 => self.jit_flags_set(proto_idx, JFLAG_NO_ZEROARG),
+            _ => {}
+        }
+    }
+
+    /// Combined per-serve bookkeeping: stats (env-gated) + the deopt breaker
+    /// (always on, deopt-path only).
+    #[cfg(feature = "jit-native")]
+    #[inline]
+    pub(crate) fn jstat_serve(&mut self, proto_idx: usize, fam: u8, deopt: bool) {
+        self.jstat_exec(proto_idx, fam, deopt);
+        if deopt {
+            self.jit_note_deopt(proto_idx, fam);
+        }
+    }
+
+    /// Record a compile attempt outcome for a variant family. `pregated` =
+    /// declined by the cheap pre-gate without running the full compiler.
+    #[cfg(feature = "jit-native")]
+    #[inline]
+    pub(crate) fn jstat_compile(&mut self, fam: u8, ok: bool, pregated: bool) {
+        if !self.jit_stats_on {
+            return;
+        }
+        let c = &mut self.jit_stats.compile[fam as usize];
+        c[0] += 1;
+        if ok {
+            c[1] += 1;
+        }
+        if pregated {
+            c[2] += 1;
+        }
+    }
+
+    /// Dump the `RUBYRS_JIT_STATS` counters to stderr (called from
+    /// `Runtime::drop`). Silent unless the env var is set.
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn dump_jit_stats(&self) {
+        if !self.jit_stats_on {
+            return;
+        }
+        eprintln!("== RUBYRS_JIT_STATS ==");
+        if self.rest_pred_stats != (0, 0) {
+            eprintln!(
+                "rest-pred serves={} declines={}",
+                self.rest_pred_stats.0, self.rest_pred_stats.1
+            );
+        }
+        if self.t2_compile_ns > 0 {
+            eprintln!("tier2 compile time total={:.1}ms", self.t2_compile_ns as f64 / 1e6);
+        }
+        if self.t2_call_stats != [0; 3] {
+            eprintln!(
+                "tier2 t2_call ic_fast={} fallback={} native_native={}",
+                self.t2_call_stats[0], self.t2_call_stats[1], self.t2_call_stats[2]
+            );
+        }
+        if self.t2_block_stats != [0; 3] {
+            eprintln!(
+                "tier2 blocks invocations={} native_serves={} native_yield_serves={}",
+                self.t2_block_stats[0], self.t2_block_stats[1], self.t2_block_stats[2]
+            );
+        }
+        if self.t2_lite_stats != [0; 3] {
+            eprintln!(
+                "tier2 lite serves={} materialize_bails={} kills={}",
+                self.t2_lite_stats[0], self.t2_lite_stats[1], self.t2_lite_stats[2]
+            );
+        }
+        for (i, name) in JIT_FAM_NAMES.iter().enumerate() {
+            let [att, ok, pre] = self.jit_stats.compile[i];
+            if att > 0 {
+                eprintln!(
+                    "compile {name:<9} attempts={att} ok={ok} pregate_declines={pre}"
+                );
+            }
+        }
+        let mut rows: Vec<(&(usize, u8), &(u64, u64))> = self.jit_stats.exec.iter().collect();
+        rows.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+        let total_calls: u64 = rows.iter().map(|r| r.1 .0).sum();
+        let total_deopts: u64 = rows.iter().map(|r| r.1 .1).sum();
+        eprintln!(
+            "native-exec methods={} calls={} deopts={}",
+            rows.len(),
+            total_calls,
+            total_deopts
+        );
+        for ((pidx, fam), (calls, deopts)) in rows.into_iter().take(60) {
+            let name = self
+                .protos
+                .get(*pidx)
+                .map(|p| p.name.as_str())
+                .unwrap_or("?");
+            eprintln!(
+                "  exec {:<28} proto={:<6} fam={:<9} calls={} deopts={}",
+                name, pidx, JIT_FAM_NAMES[*fam as usize], calls, deopts
+            );
+        }
+    }
 
 
 
@@ -2558,6 +3700,7 @@ impl Vm {
     pub(crate) fn reset_between_requests_inner(&mut self) {
         self.stack.clear();
         self.frames.clear();
+        self.dm_share_depth = 0;
         self.locals_arena.clear();
         self.pinned.clear();
         self.class_stack.clear();

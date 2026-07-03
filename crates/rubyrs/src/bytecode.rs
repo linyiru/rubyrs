@@ -134,8 +134,14 @@ pub(crate) enum Op {
     /// subsequent `[]` / `__mw_splat` / `__mw_post` calls always see
     /// an Array.
     MassignSplat,
-    LoadIvar(SymId),
-    StoreIvar(SymId),
+    /// `@name` read on `self`. The `u32` is a per-site inline-cache
+    /// slot id into `Vm::ivar_caches` (ADR 0035 Ph4/5) — its OWN cid
+    /// space (`CidGen::ivar`), separate from the call-site space, so
+    /// neither side inflates the other's dense cache vector.
+    /// `u32::MAX` = uncached (exhausted / synthesized without a vm).
+    LoadIvar(SymId, u32),
+    /// `@name = pop` on `self`; cid as in `LoadIvar`.
+    StoreIvar(SymId, u32),
     /// `@@name` read. Resolves the surrounding class at runtime
     /// (frame.self_val is either a Value::Class or
     /// Value::Object; toplevel falls through to `Vm.toplevel_cvars`
@@ -148,10 +154,11 @@ pub(crate) enum Op {
     /// when no class is on the stack.
     StoreCvar(SymId),
     /// Fast path for `@name = @name + 1`. Same shape as IncLocal but on
-    /// self's ivar table.
-    IncIvar(SymId),
+    /// self's ivar table; cid as in `LoadIvar` (one cache serves the
+    /// read and the write — same slot).
+    IncIvar(SymId, u32),
     /// Same as `IncIvar` but does *not* push the resulting value.
-    IncIvarNoPush(SymId),
+    IncIvarNoPush(SymId, u32),
     LoadConst(SymId),
     /// Same lookup as `LoadConst` but missing → `Value::Nil`
     /// instead of raising `NameError`. Emitted by the AST
@@ -538,6 +545,28 @@ pub(crate) enum Op {
     /// `do_call` cold path for user-defined operators. Targets the
     /// `i < n` loop-condition shape and two-local arithmetic.
     BinOpLocalLocal(BinOpKind, u16, u16),
+    /// `<literal> === <expr>` — the case/when desugar's per-arm test
+    /// with a LITERAL Integer/Float/Symbol/String/nil/true/false
+    /// receiver (`case x; when 5; when :sym; when "s"; ...`), lowered
+    /// at compile time so each arm skips the whole `do_call` cascade
+    /// (whitequark's ragel lexer runs giant `case state when <int>`
+    /// chains per token; RuboCop cop bodies use symbol/string arms).
+    /// Stack: pops the predicate value, pushes Bool.
+    ///
+    /// Semantics guard: bare-literal `===` on these receivers is
+    /// `==` (`ruby_eq` — the exact call the universal `===` arm and
+    /// the do_call `===` fast bucket make) ONLY while no user `===`
+    /// exists on the receiver's chain. The handler re-checks the
+    /// same `method_gen`-revalidated `fast_case_eq_{prim,sym,str}_safe`
+    /// flags the `===` fast bucket uses, plus the `===`-refinement
+    /// probe, EVERY execution; when unsafe it materializes the
+    /// literal receiver (exactly as the unlowered `LoadConst*` op
+    /// would have) and re-enters `do_call("===")` with the carried
+    /// inline-cache slot — byte-identical to the unlowered sequence.
+    /// String literals materialize through the same
+    /// source-encoding / frozen_string_literal stamping as
+    /// `Op::LoadConstStr`.
+    CaseEqLit(CaseLit, u32),
     /// Args: handler-offset, bind-slot, bind-flag, filter-class
     /// SymId. The filter SymId is resolved to a class at push-time
     /// by looking it up in `Vm.classes`. Bare `rescue` (no class
@@ -673,6 +702,21 @@ pub(crate) enum Op {
 #[cfg_attr(feature = "preamble-cache", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) enum BinOpKind { Add, Sub, Mul, Div, Mod, Lt, Le, Gt, Ge, Eq, Ne }
 
+/// Inline literal operand for `Op::CaseEqLit` — the receiver of a
+/// lowered `<literal> === <expr>` case/when arm. `Str`/`Sym` carry
+/// the interned SymId (same pipeline as `LoadConstStr`/`LoadSymbol`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "preamble-cache", derive(serde::Serialize, serde::Deserialize))]
+pub(crate) enum CaseLit {
+    Int(i64),
+    Float(f64),
+    Sym(SymId),
+    Str(SymId),
+    Nil,
+    True,
+    False,
+}
+
 impl BinOpKind {
     pub(crate) fn name(self) -> &'static str {
         match self {
@@ -756,6 +800,13 @@ impl BinOpKind {
             BinOpKind::Ne => Value::Bool(a != b),
         })
     }
+}
+
+/// Deserialize default for `Proto::getter_slot` — the cache starts
+/// unfilled (`u32::MAX`; `Cell::default()` would be 0, a VALID slot).
+#[cfg(feature = "preamble-cache")]
+fn getter_slot_unfilled() -> std::cell::Cell<u32> {
+    std::cell::Cell::new(u32::MAX)
 }
 
 #[derive(Debug)]
@@ -907,6 +958,17 @@ pub(crate) struct Proto {
     /// receiver's `@sym` ivar directly, skipping the frame push +
     /// 2-op run + frame pop. `None` for everything else.
     pub(crate) getter_ivar: Option<crate::intern::SymId>,
+    /// ADR 0035 Ph4/5 — CONTENT-VERIFIED flat-ivar slot cache for the
+    /// frame-free getter serves (dispatch reads `getter_ivar` directly
+    /// with no frame): the last slot this getter resolved to.
+    /// Verified per-serve against the receiver class's shape
+    /// (`ivar_shape_name_at(slot) == getter_ivar`), so it hits across
+    /// SIBLING SUBCLASSES too (same initialize order ⇒ same slot
+    /// numbering) — rubocop's ~40 Node subclasses share one attr_reader
+    /// proto. `u32::MAX` = unfilled. Runtime-only: not serialized (the
+    /// verify makes a stale value merely a one-time refill).
+    #[cfg_attr(feature = "preamble-cache", serde(skip, default = "getter_slot_unfilled"))]
+    pub(crate) getter_slot: std::cell::Cell<u32>,
     pub(crate) code: Vec<Op>,
     /// Parallel to `code`: op_spans[i] is the source span where code[i] was emitted.
     pub(crate) op_spans: Vec<Span>,

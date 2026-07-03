@@ -18,7 +18,7 @@ use crate::error::{RubyError, Trap};
 use crate::heap::HeapObj;
 use crate::value::{BlockHandle, Class, Method, ObjId, Value, Visibility};
 
-use super::{Frame, LoopTransferKind, RescueFilter, RescueHandler, Vm, primitive_call, vec_nil};
+use super::{primitive_call, vec_nil, Frame, LoopTransferKind, RescueHandler, Vm};
 
 /// Translate Onigmo-specific regex constructs into something the
 /// Rust `regex` crate accepts. The crate is by design less
@@ -1272,6 +1272,27 @@ impl Vm {
         }))
     }
 
+    /// Materialize a `CaseLit::Str` literal receiver — byte-for-byte
+    /// what `Op::LoadConstStr` pushes for the same SymId in the same
+    /// proto (fresh Value::Str, source-encoding retag,
+    /// frozen_string_literal stamp). Used by `Op::CaseEqLit` for both
+    /// the ruby_eq compare and the do_call fallback.
+    fn case_lit_str(&mut self, id: crate::intern::SymId, proto_idx: usize) -> Value {
+        let s = self.interner.resolve(id).clone();
+        let v = Value::new_str(s.to_string());
+        if let Some(enc) = self.protos[proto_idx].source_encoding
+            && let Value::Str(rs) = &v
+        {
+            self.retag_literal_to_source_encoding(rs, enc);
+        }
+        if self.protos[proto_idx].frozen_string_literal
+            && let Value::Str(rs) = &v
+        {
+            rs.frozen.set(true);
+        }
+        v
+    }
+
     /// Execute one op; returns Ok(false) if we just popped the last frame.
     /// `_proto_idx` is reserved for future per-op span lookup; with the
     /// global interner, ops no longer need it for string resolution.
@@ -1523,7 +1544,21 @@ impl Vm {
                     crate::vm::Locals::Stack(base) => {
                         self.locals_arena[*base as usize + s as usize].clone()
                     }
-                    crate::vm::Locals::Shared(rc) => rc.borrow()[s as usize].clone(),
+                    crate::vm::Locals::Shared(rc) => {
+                        // Captured outer local (`slot < own_start`):
+                        // read the CANONICAL binding cell, not this
+                        // invocation's snapshot — a sibling closure /
+                        // suspended fiber / the defining scope itself
+                        // may have rebound it since this frame was
+                        // pushed. `own_start == 0` (method / class-body
+                        // / toplevel / share-direct frames) keeps the
+                        // one-compare fast path.
+                        if let Some(cell) = f.outer_cell_for(s as usize) {
+                            cell.borrow().get(s as usize).cloned().unwrap_or(Value::Nil)
+                        } else {
+                            rc.borrow()[s as usize].clone()
+                        }
+                    }
                 };
                 self.stack.push(v);
             }
@@ -1533,31 +1568,25 @@ impl Vm {
                 let frame = self.frames.last().expect("ICE: StoreLocal no frame");
                 match &frame.locals {
                     // Stack frames are method frames by construction —
-                    // never a block, so no writeback propagation.
+                    // never a block, so no capture routing.
                     crate::vm::Locals::Stack(base) => {
                         let idx = *base as usize + slot;
                         self.locals_arena[idx] = v;
                     }
                     crate::vm::Locals::Shared(rc) => {
-                        rc.borrow_mut()[slot] = v.clone();
-                        // Per-invocation block-locals model: outer-scope
-                        // writes (slot < block.param_start) propagate
-                        // through every enclosing fresh-Vec back to the
-                        // lexical method's locals. `propagate_outer_write`
-                        // walks the writeback chain. Without this,
-                        // `counter = 0; arr.each { counter += 1 }`
-                        // would update only the block frame's fresh Vec
-                        // and the method would still see 0 after the
-                        // loop. The propagation is a no-op when frame
-                        // has no `block_writeback` (method / class-body
-                        // / toplevel frames), or when the slot sits in
-                        // the current block's own param/body range.
-                        let in_outer_scope = frame
-                            .block_writeback
-                            .as_ref()
-                            .is_some_and(|(_, ps)| slot < *ps as usize);
-                        if in_outer_scope {
-                            self.propagate_outer_write(slot, &v);
+                        // Captured outer local: write the CANONICAL
+                        // binding cell (`cell_store`), so the
+                        // defining scope and every capturing closure
+                        // observe the update — including after this
+                        // frame's creator popped (escaped proc,
+                        // deferred Thread body, suspended Fiber).
+                        // Replaces the old write-to-own-copy +
+                        // live-frame writeback walk, which lost
+                        // updates once an intermediate frame died.
+                        if let Some(cell) = frame.outer_cell_for(slot) {
+                            crate::vm::cell_store(cell, slot, v);
+                        } else {
+                            rc.borrow_mut()[slot] = v;
                         }
                     }
                 }
@@ -1577,37 +1606,31 @@ impl Vm {
                         }
                     }
                     crate::vm::Locals::Shared(rc) => {
-                        let mut locals = rc.borrow_mut();
-                        match &mut locals[slot] {
-                            Value::Int(n) => {
+                        // Captured outer local: increment the CANONICAL
+                        // binding cell in place — see Op::StoreLocal.
+                        let cell = frame.outer_cell_for(slot).unwrap_or(rc);
+                        let mut locals = cell.borrow_mut();
+                        match locals.get_mut(slot) {
+                            Some(Value::Int(n)) => {
                                 *n = (*n).wrapping_add(1);
                                 None
                             }
-                            cur => Some(cur.clone()),
+                            Some(cur) => Some(cur.clone()),
+                            // Owner cell shorter than the slot — the
+                            // routed store below grows it.
+                            None => Some(Value::Nil),
                         }
                     }
                 };
                 if let Some(cur) = slow_cur {
                     // Slow path: rebind via `+`. push, dispatch, store, drop result.
+                    // (`set_local_top` routes captured outer slots.)
                     self.stack.push(cur);
                     self.stack.push(Value::Int(1));
                     let plus_id = self.interner.intern("+");
                     self.do_call(plus_id, 1, false, u32::MAX)?;
                     let v = self.stack.pop().unwrap_or(Value::Nil);
                     self.set_local_top(slot, v);
-                }
-                // Per-invocation block-locals propagation — see
-                // Op::StoreLocal. (Stack frames are never blocks —
-                // block_writeback is None by construction, so the
-                // get_local_top read only ever fires on Shared.)
-                let frame = self.frames.last().expect("ICE: IncLocalNoPush no frame");
-                let in_outer = frame
-                    .block_writeback
-                    .as_ref()
-                    .is_some_and(|(_, ps)| slot < *ps as usize);
-                if in_outer {
-                    let v = self.get_local_top(slot);
-                    self.propagate_outer_write(slot, &v);
                 }
             }
             Op::IncLocal(s) => {
@@ -1626,9 +1649,12 @@ impl Vm {
                         }
                     }
                     crate::vm::Locals::Shared(rc) => {
-                        let mut locals = rc.borrow_mut();
-                        match &mut locals[slot] {
-                            Value::Int(n) => {
+                        // Captured outer local: increment the CANONICAL
+                        // binding cell in place — see Op::StoreLocal.
+                        let cell = frame.outer_cell_for(slot).unwrap_or(rc);
+                        let mut locals = cell.borrow_mut();
+                        match locals.get_mut(slot) {
+                            Some(Value::Int(n)) => {
                                 let new_n = (*n).wrapping_add(1);
                                 *n = new_n;
                                 Some(new_n)
@@ -1640,6 +1666,8 @@ impl Vm {
                 if let Some(new_n) = fast_new_n {
                     self.stack.push(Value::Int(new_n));
                 } else {
+                    // (`get_local_top` / `set_local_top` route captured
+                    // outer slots to the canonical binding cell.)
                     let cur = self.get_local_top(slot);
                     // Slow path: replicate `slot = slot + 1` via BinOp semantics,
                     // including user-defined `+` on the receiver type.
@@ -1653,17 +1681,6 @@ impl Vm {
                         .expect("ICE: IncLocal slow path no result")
                         .clone();
                     self.set_local_top(slot, new_val);
-                }
-                // Per-invocation block-locals propagation — see
-                // Op::StoreLocal.
-                let frame = self.frames.last().expect("ICE: IncLocal no frame");
-                let in_outer = frame
-                    .block_writeback
-                    .as_ref()
-                    .is_some_and(|(_, ps)| slot < *ps as usize);
-                if in_outer {
-                    let v = self.get_local_top(slot);
-                    self.propagate_outer_write(slot, &v);
                 }
             }
             Op::Dup => {
@@ -1682,7 +1699,7 @@ impl Vm {
                 let coerced = self.massign_coerce_to_array(v)?;
                 self.stack.push(coerced);
             }
-            Op::LoadIvar(name_id) => {
+            Op::LoadIvar(name_id, cid) => {
                 // `@foo` reads route to whichever table `self`
                 // carries: instance ivars for `Value::Object`,
                 // class-level ivars for `Value::Class` (the
@@ -1697,19 +1714,17 @@ impl Vm {
                     .self_val
                     .clone();
                 let v = match &self_val {
-                    Value::Object(id) => self
-                        .heap
-                        .instance(*id)
-                        .ivars
-                        .get(&name_id)
-                        .cloned()
-                        .unwrap_or(Value::Nil),
-                    Value::Class(c) => c
-                        .ivars
-                        .borrow()
-                        .get(&name_id)
-                        .cloned()
-                        .unwrap_or(Value::Nil),
+                    // ADR 0035 Ph4/5 — class-ptr-guarded slot cache →
+                    // direct slot load (holes read Nil = CRuby's
+                    // undefined-ivar rule, no defined-set consulted).
+                    Value::Object(id) => {
+                        let inst = self.heap.instance(*id);
+                        let slot = crate::vm::lookup::ivar_slot_cached(
+                            &mut self.ivar_caches, inst, name_id, cid,
+                        );
+                        inst.ivars.read_slot_raw(slot)
+                    }
+                    Value::Class(c) => c.ivars.borrow().get(&name_id).cloned().unwrap_or(Value::Nil),
                     // Hash-subclass instances carry their own ivar table.
                     Value::Hash(id) => self.heap.hash_ivar_get(*id, name_id).unwrap_or(Value::Nil),
                     // Array-subclass instances likewise.
@@ -1730,7 +1745,7 @@ impl Vm {
                 };
                 self.stack.push(v);
             }
-            Op::StoreIvar(name_id) => {
+            Op::StoreIvar(name_id, cid) => {
                 let v = self.stack.pop().expect("ICE: StoreIvar stack underflow");
                 let self_val = self
                     .frames
@@ -1740,12 +1755,17 @@ impl Vm {
                     .clone();
                 self.frozen_ivar_guard(&self_val)?;
                 match &self_val {
+                    // ADR 0035 Ph4/5 — guarded slot cache → direct
+                    // slot store (write_slot handles lazy growth +
+                    // first-assignment order tracking).
                     Value::Object(id) => {
-                        self.heap.instance_mut(*id).ivars.insert(name_id, v);
+                        let inst = self.heap.instance_mut(*id);
+                        let slot = crate::vm::lookup::ivar_slot_cached(
+                            &mut self.ivar_caches, inst, name_id, cid,
+                        );
+                        inst.ivars.write_slot(slot, v);
                     }
-                    Value::Class(c) => {
-                        c.ivars.borrow_mut().insert(name_id, v);
-                    }
+                    Value::Class(c) => { c.ivars.borrow_mut().insert(name_id, v); }
                     // Hash-subclass instances carry their own ivar table.
                     Value::Hash(id) => {
                         self.heap.hash_ivar_set(*id, name_id, v);
@@ -1818,21 +1838,29 @@ impl Vm {
                     }
                 }
             }
-            Op::IncIvarNoPush(name_id) => {
+            Op::IncIvarNoPush(name_id, cid) => {
                 // `@x = @x + 1` fast path, statement form. Mirrors
                 // Op::IncIvar but discards the result. Class-level
                 // ivars routed via `Value::Class` so the same
                 // pattern in a class method bumps the right table.
-                let self_val = self
-                    .frames
-                    .last()
-                    .expect("ICE: IncIvarNoPush no frame")
-                    .self_val
-                    .clone();
+                // One slot cache serves the read AND the write
+                // (same site, same slot — ADR 0035 Ph4/5).
+                let self_val = self.frames.last().expect("ICE: IncIvarNoPush no frame").self_val.clone();
                 self.frozen_ivar_guard(&self_val)?;
-                let cur = match &self_val {
-                    Value::Object(id) => self.heap.instance(*id).ivars.get(&name_id).cloned(),
-                    Value::Class(c) => c.ivars.borrow().get(&name_id).cloned(),
+                let obj_slot = match &self_val {
+                    Value::Object(id) => {
+                        let inst = self.heap.instance(*id);
+                        Some(crate::vm::lookup::ivar_slot_cached(
+                            &mut self.ivar_caches, inst, name_id, cid,
+                        ))
+                    }
+                    _ => None,
+                };
+                let cur = match (&self_val, obj_slot) {
+                    (Value::Object(id), Some(slot)) => {
+                        self.heap.instance(*id).ivars.read_slot(slot).cloned()
+                    }
+                    (Value::Class(c), _) => c.ivars.borrow().get(&name_id).cloned(),
                     _ => None,
                 };
                 let new_v = match cur {
@@ -1848,18 +1876,16 @@ impl Vm {
                     }
                 };
                 if let Some(v) = new_v {
-                    match &self_val {
-                        Value::Object(id) => {
-                            self.heap.instance_mut(*id).ivars.insert(name_id, v);
+                    match (&self_val, obj_slot) {
+                        (Value::Object(id), Some(slot)) => {
+                            self.heap.instance_mut(*id).ivars.write_slot(slot, v);
                         }
-                        Value::Class(c) => {
-                            c.ivars.borrow_mut().insert(name_id, v);
-                        }
+                        (Value::Class(c), _) => { c.ivars.borrow_mut().insert(name_id, v); }
                         _ => { /* drop */ }
                     }
                 }
             }
-            Op::IncIvar(name_id) => {
+            Op::IncIvar(name_id, cid) => {
                 // `@x = @x + 1` fast path, expression form. Same as
                 // IncIvarNoPush but leaves the new value on stack.
                 let self_val = self
@@ -1869,24 +1895,30 @@ impl Vm {
                     .self_val
                     .clone();
                 self.frozen_ivar_guard(&self_val)?;
-                let cur = match &self_val {
-                    Value::Object(id) => self.heap.instance(*id).ivars.get(&name_id).cloned(),
-                    Value::Class(c) => c.ivars.borrow().get(&name_id).cloned(),
+                let obj_slot = match &self_val {
+                    Value::Object(id) => {
+                        let inst = self.heap.instance(*id);
+                        Some(crate::vm::lookup::ivar_slot_cached(
+                            &mut self.ivar_caches, inst, name_id, cid,
+                        ))
+                    }
+                    _ => None,
+                };
+                let cur = match (&self_val, obj_slot) {
+                    (Value::Object(id), Some(slot)) => {
+                        self.heap.instance(*id).ivars.read_slot(slot).cloned()
+                    }
+                    (Value::Class(c), _) => c.ivars.borrow().get(&name_id).cloned(),
                     _ => None,
                 };
                 let new_v: Value = match cur {
                     Some(Value::Int(n)) => {
                         let nv = Value::Int(n.wrapping_add(1));
-                        match &self_val {
-                            Value::Object(id) => {
-                                self.heap
-                                    .instance_mut(*id)
-                                    .ivars
-                                    .insert(name_id, nv.clone());
+                        match (&self_val, obj_slot) {
+                            (Value::Object(id), Some(slot)) => {
+                                self.heap.instance_mut(*id).ivars.write_slot(slot, nv.clone());
                             }
-                            Value::Class(c) => {
-                                c.ivars.borrow_mut().insert(name_id, nv.clone());
-                            }
+                            (Value::Class(c), _) => { c.ivars.borrow_mut().insert(name_id, nv.clone()); }
                             _ => {}
                         }
                         nv
@@ -1898,18 +1930,12 @@ impl Vm {
                         self.stack.push(Value::Int(1));
                         let plus_id = self.interner.intern("+");
                         self.do_call(plus_id, 1, false, u32::MAX)?;
-                        let v = self
-                            .stack
-                            .last()
-                            .expect("ICE: IncIvar slow path no result")
-                            .clone();
-                        match &self_val {
-                            Value::Object(id) => {
-                                self.heap.instance_mut(*id).ivars.insert(name_id, v.clone());
+                        let v = self.stack.last().expect("ICE: IncIvar slow path no result").clone();
+                        match (&self_val, obj_slot) {
+                            (Value::Object(id), Some(slot)) => {
+                                self.heap.instance_mut(*id).ivars.write_slot(slot, v.clone());
                             }
-                            Value::Class(c) => {
-                                c.ivars.borrow_mut().insert(name_id, v.clone());
-                            }
+                            (Value::Class(c), _) => { c.ivars.borrow_mut().insert(name_id, v.clone()); }
                             _ => {}
                         }
                         // Slow path already left value on stack via do_call result.
@@ -2931,7 +2957,15 @@ impl Vm {
                     crate::vm::Locals::Stack(base) => {
                         self.locals_arena[*base as usize + slot as usize].clone()
                     }
-                    crate::vm::Locals::Shared(rc) => rc.borrow()[slot as usize].clone(),
+                    crate::vm::Locals::Shared(rc) => {
+                        // Captured outer local → canonical binding cell
+                        // (see Op::LoadLocal).
+                        if let Some(cell) = f.outer_cell_for(slot as usize) {
+                            cell.borrow().get(slot as usize).cloned().unwrap_or(Value::Nil)
+                        } else {
+                            rc.borrow()[slot as usize].clone()
+                        }
+                    }
                 };
                 self.stack.push(v);
                 self.trailing_hash_positional = true;
@@ -2946,6 +2980,74 @@ impl Vm {
                 if !matches!(self.stack.last(), Some(Value::Str(_))) {
                     let to_s = self.sym_to_s;
                     self.do_call(to_s, 0, false, cache_id)?;
+                }
+            }
+            Op::CaseEqLit(lit, cache_id) => {
+                // `<literal> === <predicate>` (lowered case/when arm).
+                // Safety: the same method_gen-revalidated flags the
+                // do_call `===` fast bucket gates on, re-checked per
+                // execution, plus the `===`-refinement probe. On the
+                // safe path the answer is `lit.ruby_eq(predicate)` —
+                // exactly the universal `===` arm / fast bucket call.
+                // Otherwise materialize the receiver and re-enter
+                // `do_call("===")`: byte-identical to the unlowered
+                // `LoadConst*; Call("===", 1)` sequence (including
+                // `trailing_hash_positional`, which Op::Call sets).
+                if self.fast_index_checked_gen != self.method_gen {
+                    self.fast_index_revalidate();
+                }
+                use crate::bytecode::CaseLit;
+                let refined = !self.refined_method_names.is_empty()
+                    && self.refined_method_names.contains(&self.sym_case_eq);
+                let safe = !refined
+                    && match lit {
+                        CaseLit::Sym(_) => self.fast_case_eq_sym_safe,
+                        CaseLit::Str(_) => self.fast_case_eq_str_safe,
+                        CaseLit::Int(_)
+                        | CaseLit::Float(_)
+                        | CaseLit::Nil
+                        | CaseLit::True
+                        | CaseLit::False => self.fast_case_eq_prim_safe,
+                    };
+                if safe {
+                    let arg = self
+                        .stack
+                        .pop()
+                        .expect("ICE: CaseEqLit predicate underflow");
+                    // Non-Str literals are alloc-free; Str builds the
+                    // same fresh literal Value LoadConstStr would.
+                    let recv = match lit {
+                        CaseLit::Int(n) => Value::Int(n),
+                        CaseLit::Float(f) => Value::Float(f),
+                        CaseLit::Sym(s) => Value::Sym(s),
+                        CaseLit::Nil => Value::Nil,
+                        CaseLit::True => Value::Bool(true),
+                        CaseLit::False => Value::Bool(false),
+                        CaseLit::Str(s) => self.case_lit_str(s, proto_idx),
+                    };
+                    let result = recv.ruby_eq(&arg, &self.heap);
+                    self.stack.push(Value::Bool(result));
+                } else {
+                    let recv = match lit {
+                        CaseLit::Int(n) => Value::Int(n),
+                        CaseLit::Float(f) => Value::Float(f),
+                        CaseLit::Sym(s) => Value::Sym(s),
+                        CaseLit::Nil => Value::Nil,
+                        CaseLit::True => Value::Bool(true),
+                        CaseLit::False => Value::Bool(false),
+                        CaseLit::Str(s) => self.case_lit_str(s, proto_idx),
+                    };
+                    let insertion = self
+                        .stack
+                        .len()
+                        .checked_sub(1)
+                        .expect("ICE: CaseEqLit fallback predicate underflow");
+                    self.stack.insert(insertion, recv);
+                    let case_eq = self.sym_case_eq;
+                    self.trailing_hash_positional = true;
+                    let r = self.do_call(case_eq, 1, false, cache_id);
+                    self.trailing_hash_positional = false;
+                    r?;
                 }
             }
             Op::CallAset(name_id, argc, cache_id) => {
@@ -3640,7 +3742,7 @@ impl Vm {
                 // closures captured during that invocation thus
                 // hold a Rc to the per-invocation Vec, isolated
                 // from subsequent iterations.
-                let (captured, self_val, captured_is_method_scope, captured_yield_block) = {
+                let (captured, self_val, captured_is_method_scope, captured_yield_block, outer_chain, creator_start) = {
                     let f = self.frames.last().expect("ICE: CreateBlock no frame");
                     let captured = match &f.locals {
                         crate::vm::Locals::Shared(rc) => rc.clone(),
@@ -3652,6 +3754,62 @@ impl Vm {
                             unreachable!("ICE: CreateBlock in a Locals::Stack frame")
                         }
                     };
+                    // Ancestor chain + creating-scope boundary for the
+                    // new handle. A non-routing creating frame (method
+                    // / class-body / toplevel / eval / share-direct
+                    // block) canonically owns every slot it exposes →
+                    // `(None, 0)`, ALLOCATION-FREE (the dominant
+                    // depth-1 case). A routing frame (copy-path block
+                    // / define_method body) owns only `[own_start, …)`
+                    // → the new handle's ancestors are THIS frame's
+                    // routing structure flattened (outer_rest ⊕
+                    // outer_cell), so the closure keeps routing
+                    // straight to each ORIGINAL binding, immune to
+                    // this frame popping. The flatten is served from
+                    // the single-entry `chain_memo`: its inputs
+                    // reference stable outer-scope cells (per-
+                    // invocation churn lives in `captured`, which is
+                    // NOT flattened), so loops hit the memo.
+                    let (outer_chain, creator_start): (Option<crate::value::OuterChain>, u16) =
+                        if f.own_start == 0 {
+                            (None, 0)
+                        } else {
+                            let rest_key = f
+                                .outer_rest
+                                .as_ref()
+                                .map(|p| std::rc::Rc::as_ptr(p) as *const u8 as usize)
+                                .unwrap_or(0);
+                            let cell_key = f
+                                .outer_cell
+                                .as_ref()
+                                .map(|c| std::rc::Rc::as_ptr(c) as usize)
+                                .unwrap_or(0);
+                            let start_key = f.outer_cell_start;
+                            let chain: crate::value::OuterChain = match &self.chain_memo {
+                                Some((rk, ck, sk, chain))
+                                    if *rk == rest_key && *ck == cell_key && *sk == start_key =>
+                                {
+                                    chain.clone()
+                                }
+                                _ => {
+                                    let rest_len =
+                                        f.outer_rest.as_ref().map(|r| r.len()).unwrap_or(0);
+                                    let mut v: Vec<(std::rc::Rc<std::cell::RefCell<Vec<Value>>>, u16)> =
+                                        Vec::with_capacity(rest_len + 1);
+                                    if let Some(rest) = &f.outer_rest {
+                                        v.extend(rest.iter().cloned());
+                                    }
+                                    if let Some(cell) = &f.outer_cell {
+                                        v.push((cell.clone(), f.outer_cell_start));
+                                    }
+                                    let chain: crate::value::OuterChain = std::rc::Rc::from(v);
+                                    self.chain_memo =
+                                        Some((rest_key, cell_key, start_key, chain.clone()));
+                                    chain
+                                }
+                            };
+                            (Some(chain), f.own_start)
+                        };
                     // `yield` inside this block resolves to the block of
                     // the lexically-enclosing METHOD. Capture it now so an
                     // ESCAPED closure (whose defining method has already
@@ -3674,14 +3832,13 @@ impl Vm {
                         f.block_arg.or(f.captured_yield_block)
                     };
                     // A non-block creating frame (method / class body /
-                    // toplevel) means `captured` is a real outer scope
-                    // → the block's outer-write share path is sound.
-                    (
-                        captured,
-                        f.self_val.clone(),
-                        !f.is_block,
-                        captured_yield_block,
-                    )
+                    // toplevel) whose cell canonically owns EVERY slot
+                    // (own_start == 0 — a define_method body is
+                    // non-block but only owns its own region) means
+                    // `captured` is a real outer scope → the block's
+                    // outer-write share path is sound.
+                    let is_method_scope = !f.is_block && f.own_start == 0;
+                    (captured, f.self_val.clone(), is_method_scope, captured_yield_block, outer_chain, creator_start)
                 };
                 // Capture the lexical class for `@@cvar` resolution. For
                 // a block created inside another block this returns the
@@ -3714,343 +3871,12 @@ impl Vm {
                     captured_is_method_scope,
                     captured_yield_block,
                     is_lambda,
+                    outer_chain,
+                    creator_start,
                 }));
                 self.stack.push(Value::Block(id));
             }
-            Op::Yield(_) | Op::ApplyYield => {
-                // `yield` resolves to the block of the enclosing
-                // METHOD, not the current frame. When yield runs
-                // inside a nested block (e.g.
-                // `def f; xs.each { |x| yield x }; end`), the
-                // current frame is the `each` block; we must walk
-                // through `is_block` frames to find the nearest
-                // method frame and pick up ITS block_arg.
-                //
-                // CRuby implements the same lookup via the cfp
-                // chain (vm_get_yield_method_cfp). Without the
-                // walk, every block-wrapped yield raises
-                // "no block given (yield)" — broke ERB's scanner.
-                //
-                // **ADR 0024 Phase A.1**: Op::Yield now drives
-                // the block SYNCHRONOUSLY (recursive
-                // `dispatch_until`) so the block's `break val`
-                // unwinds back to the yielding method and
-                // returns val from it — matching CRuby
-                // semantics. v6's fire-and-forget pattern set
-                // `break_signaled` but only Rust-level iter
-                // drivers (`step_block`) observed it; a Ruby
-                // `def f; yield; end; f { break }` was
-                // historically broken (infinite loop / silent
-                // continue depending on caller shape).
-                //
-                // The synchronous flow:
-                //   1. Locate yielding method's frame index by
-                //      LEXICAL scope (ADR 0024 Phase A.7). Blocks
-                //      share their captured `locals` Rc with the
-                //      defining scope (transitively through
-                //      nested blocks); the topmost !is_block
-                //      frame whose `locals` Rc-pointer matches
-                //      the current top frame's `locals` IS the
-                //      lexical owner. Pre-A.7 used "nearest non-
-                //      block frame" — incorrect for shapes like
-                //      `def f; g { yield }; end; def g; yield;
-                //      end; f { ... }` where the inner yield
-                //      bound to g (dynamic neighbour) instead of
-                //      f (lexical owner) and recursively
-                //      re-invoked g's block_arg.
-                //   2. Mark the yielding-method frame's
-                //      `pending_yield = true` (so a Fiber yield
-                //      mid-block can resume correctly).
-                //   3. Enter `YieldDepthGuard` (bounded recursion
-                //      via `Config::max_yield_recursion`; Drop
-                //      decrements panic-safely).
-                //   4. `invoke_block` pushes block frame.
-                //   5. Inner `dispatch_until(pre_frames)` drives
-                //      the block to completion.
-                //   6. On normal return: block value is on
-                //      stack, IP past Op::Yield; clear
-                //      pending_yield; continue.
-                //   7. On `break_signaled`: pop value, walk
-                //      frames down to + including yielding
-                //      method, push value as method's return,
-                //      clear break_signaled.
-                //   8. On `method_return` / `fiber_yield_pending`:
-                //      leave the signal set, let the outer
-                //      dispatch loop / Fiber driver handle.
-                // Phase A.7: lexical lookup via locals Rc-pointer
-                // identity. With the per-invocation block-locals
-                // fix (each `invoke_block` installs a fresh
-                // locals Vec, retaining the original `captured`
-                // Rc on `block_writeback`), the top frame's
-                // `locals` is no longer the same Rc the lexical
-                // owner uses. `find_lexical_owner_frame` walks
-                // the writeback chain to bridge that — each
-                // block frame's writeback points one scope
-                // outward until a method frame is found.
-                // (`lexical_owner_of_top` shortcuts a non-block top
-                // frame to itself — required for Locals::Stack method
-                // frames, identical behaviour for Shared ones.)
-                // Primary: the lexical owner method is still on the
-                // stack — read its `block_arg` directly (the common
-                // `def f; xs.each { yield }; end` synchronous case),
-                // and use its frame index for the pending_yield /
-                // break bookkeeping below.
-                //
-                // Fallback (ESCAPED CLOSURE): the block executing the
-                // yield outlived its defining method (`def m(&blk);
-                // ->(){ yield }; end` returned, the lambda is called
-                // later). The live-frame walk then finds no method
-                // frame, so use the yield-block captured at the
-                // block's creation and threaded onto its frame
-                // (`captured_yield_block`, propagated through nested
-                // blocks); CRuby keeps the same binding alive via the
-                // closure's captured cref. With no live yielding
-                // method, the yield site for break / Fiber-resume
-                // bookkeeping is the top (block) frame itself.
-                let owner = self.lexical_owner_of_top();
-                let (block, yielding_idx) =
-                    match owner.and_then(|idx| self.frames[idx].block_arg.map(|b| (b, idx))) {
-                        Some(pair) => pair,
-                        None => match self.frames.last().and_then(|f| f.captured_yield_block) {
-                            Some(b) => (b, self.frames.len() - 1),
-                            None => {
-                                return Err(self.trap(RubyError::RuntimeError {
-                                    msg: "no block given (yield)".to_string(),
-                                }));
-                            }
-                        },
-                    };
-                // Static argc for `Op::Yield(n)`; for `Op::ApplyYield`
-                // (`yield(*x)`), pop the combined args Array and expand
-                // its elements onto the stack (mirrors `Op::ApplyCall`),
-                // yielding the dynamic count.
-                let argc = match op {
-                    Op::Yield(n) => n as usize,
-                    Op::ApplyYield => {
-                        let arr_val = match self.stack.pop() {
-                            Some(v) => v,
-                            None => unreachable!("ICE: ApplyYield without args array"),
-                        };
-                        let arr_id = match arr_val {
-                            Value::Array(id) => id,
-                            other => {
-                                return Err(self.trap(RubyError::TypeError {
-                                    msg: format!(
-                                        "no implicit conversion of {} into Array",
-                                        other.type_name()
-                                    ),
-                                }));
-                            }
-                        };
-                        let mut g = crate::vm::PinGuard::new(self);
-                        g.pin(Value::Array(arr_id));
-                        let elems: Vec<Value> = g.vm.heap.array(arr_id).clone();
-                        let n = elems.len();
-                        for e in elems {
-                            g.vm.stack.push(e);
-                        }
-                        drop(g);
-                        n
-                    }
-                    _ => unreachable!("yield arm only matches Yield | ApplyYield"),
-                };
-                let split = self.stack.len() - argc;
-                let args: Vec<Value> = self.stack.drain(split..).collect();
-
-                let pre_frames = self.frames.len();
-
-                // Bounded recursion guard FIRST so we never
-                // mark pending_yield without a matching guard
-                // (if enter fails, no cleanup needed).
-                let yguard = crate::vm::YieldDepthGuard::enter(self)?;
-                yguard.vm.frames[yielding_idx].pending_yield = true;
-
-                // Push block frame + drive to completion.
-                if let Err(trap) = yguard.vm.invoke_block(block, args) {
-                    yguard.vm.frames[yielding_idx].pending_yield = false;
-                    return Err(trap);
-                }
-                if let Err(trap) = yguard.vm.dispatch_until(pre_frames) {
-                    // Block raised; clear pending_yield and
-                    // propagate so rescue can catch.
-                    if yielding_idx < yguard.vm.frames.len() {
-                        yguard.vm.frames[yielding_idx].pending_yield = false;
-                    }
-                    return Err(trap);
-                }
-
-                // dispatch_until returned. Determine why:
-                if yguard.vm.method_return.is_some() {
-                    // return-from-block: leave method_return
-                    // set; outer dispatch loop handles unwind.
-                    if yielding_idx < yguard.vm.frames.len() {
-                        yguard.vm.frames[yielding_idx].pending_yield = false;
-                    }
-                    // Guard drops on return → decrements counter.
-                    return Ok(true);
-                }
-                #[cfg(feature = "_fiber")]
-                if yguard.vm.fiber_yield_pending.is_some() {
-                    // Fiber.yield mid-block. DO NOT clear
-                    // pending_yield — it stays set so the
-                    // Fiber's stashed FiberSnapshot captures
-                    // the in-progress state. On resume the
-                    // block continues; eventually it returns
-                    // normally OR breaks. We can't see that
-                    // far ahead here — let the outer Fiber
-                    // driver propagate up; on resume the
-                    // dispatch loop re-enters this same
-                    // dispatch_until at a level that observes
-                    // the post-block state.
-                    //
-                    // Actually subtle: this `dispatch_until`
-                    // call returned. The outer caller is the
-                    // dispatch_until that's driving the Fiber.
-                    // It also sees fiber_yield_pending and
-                    // returns. resume_fiber stashes; later
-                    // re-enters dispatch_until. The dispatch
-                    // loop will pick up at the block's IP
-                    // (top of stack). Block completes,
-                    // Op::Return pops it, control resumes at
-                    // the yielding-method's IP past Op::Yield —
-                    // which is the NEXT op, NOT this same Op::Yield.
-                    //
-                    // The IP for `self.frames[yielding_idx].ip`
-                    // was advanced BEFORE we entered the match
-                    // arm (top of the dispatch loop). So past-yield
-                    // is already the IP. On resume, dispatch fetches
-                    // that next op, not Op::Yield. The synchronous
-                    // wrapper's break-check is therefore SKIPPED on
-                    // the resume path.
-                    //
-                    // ADR 0024 Phase A.8: the resume-side recovery
-                    // lives in `dispatch_until_inner` /
-                    // `dispatch` as a top-of-loop check. When the
-                    // resumed block runs `break`, `break_signaled`
-                    // gets set and the block frame pops naturally;
-                    // the dispatch loop then observes
-                    // `break_signaled && top_frame.pending_yield`
-                    // and routes the value through
-                    // `begin_method_break` — same A.4/A.5
-                    // ensure-aware unwind machinery, just driven
-                    // from a different entry point because the
-                    // original Op::Yield Rust wrapper is gone.
-                    return Ok(true);
-                }
-
-                // Normal block return or block-break.
-                let block_return_value = yguard.vm.stack.pop().unwrap_or(Value::Nil);
-                yguard.vm.frames[yielding_idx].pending_yield = false;
-
-                if yguard.vm.break_signaled {
-                    // Two cases:
-                    //
-                    // (a) Current frame IS the yielding method
-                    //     (yielding_idx == pre_frames - 1).
-                    //     Example: `def f; yield; end; f { break }`.
-                    //     No Rust iter driver sits between us and
-                    //     `f`, so this wrapper is solely responsible
-                    //     for unwinding. Pop the yielding method,
-                    //     push the break value as its return — the
-                    //     new behavior Phase A.1 adds.
-                    //
-                    // (b) Yielding method is deeper
-                    //     (yielding_idx < pre_frames - 1).
-                    //     Example: `def each; 10.times { yield };
-                    //     end; obj.each { break }`. A Rust iter
-                    //     driver (`Int#times`'s `step_block` loop)
-                    //     sits between yield and each. The legacy
-                    //     pre-A.1 path already handles this: leave
-                    //     `break_signaled` set so the enclosing
-                    //     `step_block` returns `BlockStep::Break`
-                    //     and `Int#times` aborts naturally,
-                    //     propagating the break through `each` as
-                    //     its return value. Eating the signal here
-                    //     would strand the Rust driver mid-loop.
-                    if yielding_idx == pre_frames - 1 {
-                        yguard.vm.break_signaled = false;
-                        yguard.vm.sync_control_signals();
-                        // ADR 0024 Phase A.4: walk the yielding
-                        // method's `is_ensure` rescue handlers
-                        // before the frame returns. After
-                        // dispatch_until returned, frames.len() ==
-                        // pre_frames and the topmost frame IS the
-                        // yielding method (case a), so
-                        // begin_method_break drives the ensure
-                        // walk on that frame directly. When no
-                        // ensures remain, it pops the frame and
-                        // pushes the break value as the method's
-                        // return.
-                        //
-                        // Toplevel case: if the yielding method
-                        // is the bottom frame, the walk pops it
-                        // and pushes the value as the script's
-                        // result. dispatch loop terminates on
-                        // empty frames — drop guard FIRST so the
-                        // recursion counter decrements before we
-                        // bail.
-                        let was_toplevel = yielding_idx == 0;
-                        yguard
-                            .vm
-                            .begin_method_break(block_return_value, yielding_idx)?;
-                        drop(yguard);
-                        if was_toplevel && self.frames.is_empty() {
-                            return Ok(false);
-                        }
-                        return Ok(true);
-                    }
-                    // Case (b) — ADR 0024 Phase A.5: yielding
-                    // method is deeper than current frame's
-                    // direct parent. A Rust iter driver (e.g.
-                    // `Int#times`'s `step_block` loop) sits
-                    // between us and the yielding method.
-                    //
-                    // Park the break in `pending_method_break`
-                    // with `target_frame_idx = yielding_idx` so
-                    // the dispatch loop top-of-iteration check
-                    // picks it up after the Rust driver returns
-                    // and control re-enters bytecode in a frame
-                    // above the target. continue_method_break
-                    // then pops intermediate method frames
-                    // (running their ensures on the way) until
-                    // it reaches the yielding method, walks
-                    // its ensures, and lands the break value.
-                    //
-                    // Also push the break value + leave
-                    // break_signaled set so the EXISTING Rust
-                    // iter driver protocol (step_block → BlockStep
-                    // ::Break → driver returns the value) keeps
-                    // working end-to-end. Without this, drivers
-                    // would treat the block return as a normal
-                    // value and keep iterating.
-                    //
-                    // Phase A.9: don't overwrite an
-                    // already-pending break. Multi-method-frame
-                    // shapes like `def f; g { |x| yield x }; end;
-                    // def g; xs.each { |x| yield x }; end;
-                    // f { break }` have several nested Op::Yield
-                    // wrappers each running case (b) on the way
-                    // out. The INNERMOST one (lexically closest to
-                    // the breaking block) has the right target —
-                    // outer wrappers should leave that target
-                    // alone and just propagate.
-                    if yguard.vm.pending_method_break.is_none() {
-                        yguard.vm.pending_method_break = Some(crate::vm::MethodBreak {
-                            value: block_return_value.clone(),
-                            target_frame_idx: yielding_idx,
-                            suspended: false,
-                        });
-                        yguard.vm.sync_control_signals();
-                    }
-                    yguard.vm.stack.push(block_return_value);
-                    drop(yguard);
-                    return Ok(true);
-                }
-                // Normal block return — push the block's value
-                // as the yield expression's value.
-                yguard.vm.stack.push(block_return_value);
-                // Guard drops on fall-through → decrements counter.
-            }
+            Op::Yield(_) | Op::ApplyYield => return self.do_yield(op),
             Op::DefMethod(name_id, p_idx) => {
                 let proto = &self.protos[p_idx as usize];
                 // Capture the defining class (top of class_stack
@@ -4946,15 +4772,9 @@ impl Vm {
                 } else {
                     panic!("ICE: DefMethodBlock without Block on stack");
                 };
-                let (proto_idx, captured, param_start, n_params, captured_yield_block) = {
+                let (proto_idx, captured, param_start, n_params, captured_yield_block, outer_chain, creator_start) = {
                     let bh = self.heap.block(id);
-                    (
-                        bh.proto_idx,
-                        bh.captured.clone(),
-                        bh.param_start,
-                        bh.n_params,
-                        bh.captured_yield_block,
-                    )
+                    (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params, bh.captured_yield_block, bh.outer_chain.clone(), bh.creator_start)
                 };
                 let proto = &self.protos[proto_idx];
                 let params = proto.params.clone();
@@ -4981,14 +4801,9 @@ impl Vm {
                     fixed_arity: None,
                     defining_class,
                     visibility: std::cell::Cell::new(vis),
-                    closure: Some(crate::value::MethodClosure {
-                        captured,
-                        param_start,
-                        n_params,
-                        captured_yield_block,
-                    }),
-                    builtin: None,
-                    original_name: Some(name_id),
+                    closure: Some(crate::value::MethodClosure { captured, param_start, n_params, captured_yield_block, outer_chain: outer_chain.clone(), creator_start }),
+                builtin: None,
+                original_name: Some(name_id),
                 });
                 if let Some(cls) = self.class_stack.last() {
                     cls.install_method(name_id, m);
@@ -5037,15 +4852,9 @@ impl Vm {
                     .stack
                     .pop()
                     .expect("ICE: DefObjectSingletonMethodBlock no receiver on stack");
-                let (proto_idx, captured, param_start, n_params, captured_yield_block) = {
+                let (proto_idx, captured, param_start, n_params, captured_yield_block, outer_chain, creator_start) = {
                     let bh = self.heap.block(block_id);
-                    (
-                        bh.proto_idx,
-                        bh.captured.clone(),
-                        bh.param_start,
-                        bh.n_params,
-                        bh.captured_yield_block,
-                    )
+                    (bh.proto_idx, bh.captured.clone(), bh.param_start, bh.n_params, bh.captured_yield_block, bh.outer_chain.clone(), bh.creator_start)
                 };
                 let proto = &self.protos[proto_idx];
                 let params = proto.params.clone();
@@ -5067,12 +4876,7 @@ impl Vm {
                             fixed_arity: None,
                             defining_class: Some(Rc::downgrade(&sc)),
                             visibility: std::cell::Cell::new(Visibility::Public),
-                            closure: Some(crate::value::MethodClosure {
-                                captured,
-                                param_start,
-                                n_params,
-                                captured_yield_block,
-                            }),
+                            closure: Some(crate::value::MethodClosure { captured, param_start, n_params, captured_yield_block, outer_chain: outer_chain.clone(), creator_start }),
                             builtin: None,
                             original_name: Some(name_id),
                         });
@@ -5086,12 +4890,7 @@ impl Vm {
                             fixed_arity: None,
                             defining_class: Some(Rc::downgrade(cls)),
                             visibility: std::cell::Cell::new(Visibility::Public),
-                            closure: Some(crate::value::MethodClosure {
-                                captured,
-                                param_start,
-                                n_params,
-                                captured_yield_block,
-                            }),
+                            closure: Some(crate::value::MethodClosure { captured, param_start, n_params, captured_yield_block, outer_chain: outer_chain.clone(), creator_start }),
                             builtin: None,
                             original_name: Some(name_id),
                         });
@@ -5111,12 +4910,7 @@ impl Vm {
                             fixed_arity: None,
                             defining_class: Some(Rc::downgrade(&sc)),
                             visibility: std::cell::Cell::new(Visibility::Public),
-                            closure: Some(crate::value::MethodClosure {
-                                captured,
-                                param_start,
-                                n_params,
-                                captured_yield_block,
-                            }),
+                            closure: Some(crate::value::MethodClosure { captured, param_start, n_params, captured_yield_block, outer_chain: outer_chain.clone(), creator_start }),
                             builtin: None,
                             original_name: Some(name_id),
                         });
@@ -5333,35 +5127,30 @@ impl Vm {
                 // can still change what nested bare names resolve to via
                 // its body) invalidates the constant ICs.
                 self.bump_const_gen();
-                let cls = self
-                    .classes
-                    .entry(table_key)
-                    .or_insert_with(|| {
-                        Rc::new(Class {
-                            name: name_str,
-                            is_module,
-                            ivars: RefCell::new(crate::intern::FxHashMap::default()),
-                            methods: RefCell::new(crate::intern::FxHashMap::default()),
-                            singleton_methods: RefCell::new(crate::intern::FxHashMap::default()),
-                            superclass: RefCell::new(parent.clone()),
-                            includes: RefCell::new(Vec::new()),
-                            prepends: RefCell::new(Vec::new()),
-                            singleton_prepends: RefCell::new(Vec::new()),
-                            singleton_includes: RefCell::new(Vec::new()),
-                            singleton_view: RefCell::new(None),
-                            singleton_target: RefCell::new(None),
-                            undefed: RefCell::new(crate::intern::FxHashSet::default()),
-                            anon_serial: std::cell::Cell::new(0),
-                            class_vars: RefCell::new(crate::intern::FxHashMap::default()),
-                            consts: RefCell::new(crate::intern::FxHashMap::default()),
-                            assigned_name: RefCell::new(None),
-                            class_tag: None,
-                            frozen: std::cell::Cell::new(false),
-                            #[cfg(feature = "cext")]
-                            cext_alloc_func: std::cell::Cell::new(None),
-                        })
-                    })
-                    .clone();
+                let cls = self.classes.entry(table_key).or_insert_with(|| Rc::new(Class {
+                    name: name_str,
+                    is_module,
+                    ivars: RefCell::new(crate::intern::FxHashMap::default()),
+                    methods: RefCell::new(crate::intern::FxHashMap::default()),
+                    singleton_methods: RefCell::new(crate::intern::FxHashMap::default()),
+                    superclass: RefCell::new(parent.clone()),
+                    includes: RefCell::new(Vec::new()),
+                    prepends: RefCell::new(Vec::new()),
+                    singleton_prepends: RefCell::new(Vec::new()),
+                    singleton_includes: RefCell::new(Vec::new()),
+                    singleton_view: RefCell::new(None),
+                    singleton_target: RefCell::new(None),
+                    undefed: RefCell::new(crate::intern::FxHashSet::default()),
+                    anon_serial: std::cell::Cell::new(0),
+                    ivar_shape: std::cell::RefCell::new(crate::value::IvarShape::default()),
+                    class_vars: RefCell::new(crate::intern::FxHashMap::default()),
+                    consts: RefCell::new(crate::intern::FxHashMap::default()),
+                    assigned_name: RefCell::new(None),
+                    class_tag: None,
+                    frozen: std::cell::Cell::new(false),
+                    #[cfg(feature = "cext")]
+                    cext_alloc_func: std::cell::Cell::new(None),
+                })).clone();
                 // If the class already existed (reopened) and the user specified a parent
                 // this time, update it (only if it wasn't already set to something else).
                 if let Some(p) = &parent {
@@ -5522,6 +5311,11 @@ impl Vm {
                     aux: None,
                     pending_yield: false,
                     block_writeback: None,
+                    dm_share: false,
+                    own_start: 0,
+                    outer_cell_start: 0,
+                    outer_cell: None,
+                    outer_rest: None,
                     captured_yield_block: None,
                 });
             }
@@ -5577,6 +5371,11 @@ impl Vm {
                     aux: None,
                     pending_yield: false,
                     block_writeback: None,
+                    dm_share: false,
+                    own_start: 0,
+                    outer_cell_start: 0,
+                    outer_cell: None,
+                    outer_rest: None,
                     captured_yield_block: None,
                 });
             }
@@ -5612,6 +5411,16 @@ impl Vm {
                 self.op_new_hash(n as usize)?;
             }
             Op::PushRescue(off, slot, bind, filter_sym) => {
+                // The class filter is NOT resolved here: the handler
+                // stores the compiler-stamped SymId and the unwinder
+                // resolves it at MATCH time (`Vm::resolve_rescue_filter`
+                // in raise.rs — CRuby's own evaluation point for a
+                // `rescue <expr>` class). Push-time resolution made
+                // every begin/rescue prologue pay the lexical-scope
+                // walk (Vec clone + `format!` + intern + class-table
+                // probes per scope, per CALL) — ~0.5µs/call on
+                // rubocop's `with_cop_error_handling`, its #1
+                // self-time method (25.6k calls/walk).
                 let f = self.frames.last().expect("ICE: PushRescue no frame");
                 let ip = f.ip;
                 let loop_depth = f.loop_depth();
@@ -5619,212 +5428,32 @@ impl Vm {
                 let target = (ip as i32 + off) as usize;
                 let depth = self.stack.len();
                 let bind_slot = if bind != 0 { Some(slot) } else { None };
-                // The compiler emits the SymId of the class to filter
-                // by — for bare `rescue` that's `StandardError`, for
-                // `rescue Foo::Bar` the qualified-form SymId stamped
-                // by the lexical dual-write. We resolve through the
-                // same fallback chain as `Op::LoadConst`: `classes`
-                // first (bare names + dual-write copies), then
-                // `constants` (where user `Foo::Bar = …` aliases land).
-                // If neither hits, `filter_class` stays `None` and
-                // the handler fails every match check — closer to
-                // CRuby than silently catching everything.
-                // Resolve the rescue-class name through the lexical
-                // nesting, exactly like `Op::LoadConstChain` resolves a
-                // bare constant read. The compiler stamps only the bare
-                // source sym (e.g. `Sig`), but a class defined as
-                // `module M; class Sig` is keyed in `self.classes` by
-                // its QUALIFIED sym (`M::Sig`) — so a plain
-                // `classes.get("Sig")` missed it and `rescue Sig` inside
-                // `module M` never matched, letting the exception escape
-                // (the `raise` side already resolves via the lexical
-                // chain, so the two sides disagreed). Walk the enclosing
-                // scopes innermost-first, qualifying the bare name, then
-                // fall back to the bare lookup (covers top-level classes
-                // and `rescue Foo::Bar` whose sym is already qualified).
-                let filter = {
-                    // Clone the `Rc<str>` instead of materializing a
-                    // fresh `String` — the interner returns
-                    // `&Rc<str>` so the clone is a refcount bump.
-                    // Defer the lex-walk's `lexical_scope.clone()`
-                    // into the relative branch so absolute rescues
-                    // don't pay for the Vec copy.
-                    let bare_name: std::rc::Rc<str> = self.interner.resolve(filter_sym).clone();
-                    // Splatted filter (`rescue *PASSTHROUGH`) — the
-                    // marked name is a CONSTANT holding an Array of
-                    // classes (minitest's PASSTHROUGH_EXCEPTIONS
-                    // idiom). Resolve the constant's VALUE — absolute
-                    // or via the same lex-walk as the relative branch
-                    // below — and snapshot its class elements.
-                    // Unresolved names and non-Array/non-Class values
-                    // yield `None` (match nothing): fail-closed,
-                    // where the old dropped-splat lowering degraded
-                    // to a bare rescue that matched EVERY
-                    // StandardError (minitest's passthrough arm then
-                    // re-raised every test error and killed the run).
-                    if let Some(splat_inner) = crate::const_marker::strip_splat(&bare_name) {
-                        let val: Option<Value> =
-                            if let Some(abs) = crate::const_marker::strip_absolute(splat_inner) {
-                                let abs_sym = self.interner.intern(abs);
-                                self.constants.get(&abs_sym).cloned()
-                            } else {
-                                let proto_idx = self
-                                    .frames
-                                    .last()
-                                    .expect("ICE: PushRescue no frame")
-                                    .proto_idx;
-                                let lex = self.protos[proto_idx].lexical_scope.clone();
-                                let mut found = None;
-                                for scope_sym in &lex {
-                                    let scope_name = self.interner.resolve(*scope_sym).clone();
-                                    let qualified = format!("{}::{}", scope_name, splat_inner);
-                                    let qsym = self.interner.intern(&qualified);
-                                    if let Some(v) = self.constants.get(&qsym) {
-                                        found = Some(v.clone());
-                                        break;
-                                    }
-                                }
-                                found.or_else(|| {
-                                    let inner_sym = self.interner.intern(splat_inner);
-                                    self.constants.get(&inner_sym).cloned()
-                                })
-                            };
-                        match val {
-                            Some(Value::Array(id)) => {
-                                let list: Vec<std::rc::Rc<Class>> = self
-                                    .heap
-                                    .array(id)
-                                    .iter()
-                                    .filter_map(|v| match v {
-                                        Value::Class(c) => Some(c.clone()),
-                                        _ => None,
-                                    })
-                                    .collect();
-                                Some(RescueFilter::Any(list))
-                            }
-                            // `rescue *X` where X holds a single
-                            // class — CRuby Array()-coerces, so it
-                            // behaves as a one-element list.
-                            Some(Value::Class(c)) => Some(RescueFilter::Class(c)),
-                            _ => None,
-                        }
-                    }
-                    // Absolute paths (`rescue ::Foo::Bar`) carry a
-                    // leading `::` marker from the AST lowering.
-                    // CRuby semantics: skip the lex-walk and look up
-                    // the joined name at top level only.
-                    else if let Some(absolute_bare) =
-                        crate::const_marker::strip_absolute(&bare_name)
-                    {
-                        let abs_sym = self.interner.intern(absolute_bare);
-                        self.classes
-                            .get(&abs_sym)
-                            .cloned()
-                            .or_else(|| match self.constants.get(&abs_sym) {
-                                Some(Value::Class(c)) => Some(c.clone()),
-                                _ => None,
-                            })
-                            .map(RescueFilter::Class)
-                    } else {
-                        let proto_idx = self
-                            .frames
-                            .last()
-                            .expect("ICE: PushRescue no frame")
-                            .proto_idx;
-                        let lex = self.protos[proto_idx].lexical_scope.clone();
-                        let mut found = None;
-                        if !lex.is_empty() {
-                            for scope_sym in &lex {
-                                let scope_name = self.interner.resolve(*scope_sym).clone();
-                                let qualified = format!("{}::{}", scope_name, bare_name);
-                                let qsym = self.interner.intern(&qualified);
-                                if let Some(c) = self.classes.get(&qsym).cloned() {
-                                    found = Some(c);
-                                    break;
-                                }
-                                if let Some(Value::Class(c)) = self.constants.get(&qsym) {
-                                    found = Some(c.clone());
-                                    break;
-                                }
-                            }
-                        }
-                        found
-                            .or_else(|| self.classes.get(&filter_sym).cloned())
-                            .or_else(|| match self.constants.get(&filter_sym) {
-                                Some(Value::Class(c)) => Some(c.clone()),
-                                _ => None,
-                            })
-                            .map(RescueFilter::Class)
-                    }
-                };
-                self.frames
-                    .last_mut()
-                    .expect("ICE: PushRescue no frame")
-                    .aux_mut()
-                    .rescues
-                    .push(RescueHandler {
-                        handler_ip: target,
-                        stack_depth: depth,
-                        bind_slot,
-                        is_ensure: false,
-                        filter_class: filter,
-                        loop_depth_at_push: loop_depth,
-                        begin_depth_at_push: begin_depth,
-                    });
+                self.top_aux_mut().rescues.push(RescueHandler {
+                    handler_ip: target, stack_depth: depth, bind_slot, is_ensure: false,
+                    filter: crate::vm::RescueFilterSpec::Sym(filter_sym),
+                    loop_depth_at_push: loop_depth,
+                    begin_depth_at_push: begin_depth,
+                });
             }
             Op::PushRescueSplatLocal(off, slot, bind, src_slot) => {
-                // `rescue *exp` on a local — read the slot NOW (push
-                // time) and snapshot its Array elements as the filter
-                // list. A single Class coerces to a one-element
-                // filter; Nil/other values match nothing
-                // (fail-closed). See Op::PushRescue for the shared
-                // handler bookkeeping.
-                let f = self
-                    .frames
-                    .last()
-                    .expect("ICE: PushRescueSplatLocal no frame");
+                // `rescue *exp` on a local — the slot is read at MATCH
+                // time (with the same lazy discipline as PushRescue;
+                // CRuby also evaluates the splat expression when an
+                // exception is in flight). See Op::PushRescue for the
+                // shared handler bookkeeping.
+                let f = self.frames.last().expect("ICE: PushRescueSplatLocal no frame");
                 let ip = f.ip;
                 let loop_depth = f.loop_depth();
                 let begin_depth = f.begin_depth();
                 let target = (ip as i32 + off) as usize;
                 let depth = self.stack.len();
                 let bind_slot = if bind != 0 { Some(slot) } else { None };
-                let src = match &f.locals {
-                    crate::vm::Locals::Stack(base) => {
-                        self.locals_arena[*base as usize + src_slot as usize].clone()
-                    }
-                    crate::vm::Locals::Shared(rc) => rc.borrow()[src_slot as usize].clone(),
-                };
-                let filter = match src {
-                    Value::Array(id) => {
-                        let list: Vec<std::rc::Rc<Class>> = self
-                            .heap
-                            .array(id)
-                            .iter()
-                            .filter_map(|v| match v {
-                                Value::Class(c) => Some(c.clone()),
-                                _ => None,
-                            })
-                            .collect();
-                        Some(RescueFilter::Any(list))
-                    }
-                    Value::Class(c) => Some(RescueFilter::Class(c)),
-                    _ => None,
-                };
-                self.frames
-                    .last_mut()
-                    .expect("ICE: PushRescueSplatLocal no frame")
-                    .aux_mut()
-                    .rescues
-                    .push(RescueHandler {
-                        handler_ip: target,
-                        stack_depth: depth,
-                        bind_slot,
-                        is_ensure: false,
-                        filter_class: filter,
-                        loop_depth_at_push: loop_depth,
-                        begin_depth_at_push: begin_depth,
-                    });
+                self.top_aux_mut().rescues.push(RescueHandler {
+                    handler_ip: target, stack_depth: depth, bind_slot, is_ensure: false,
+                    filter: crate::vm::RescueFilterSpec::SplatLocal(src_slot),
+                    loop_depth_at_push: loop_depth,
+                    begin_depth_at_push: begin_depth,
+                });
             }
             Op::PopRescue => {
                 self.frames
@@ -5837,13 +5466,9 @@ impl Vm {
                 // rescue body) can revert it — CRuby's errinfo is
                 // dynamically scoped to the rescue/ensure body, not the
                 // whole program. (See `BeginBaseline::saved_dollar_bang`.)
-                let saved_dollar_bang = self
-                    .globals
-                    .get(&self.sym_bang)
-                    .cloned()
-                    .unwrap_or(Value::Nil);
-                let f = self.frames.last_mut().expect("ICE: EnterBegin no frame");
-                let aux = f.aux_mut();
+                let saved_dollar_bang =
+                    self.globals.get(&self.sym_bang).cloned().unwrap_or(Value::Nil);
+                let aux = self.top_aux_mut();
                 let baseline = crate::vm::BeginBaseline {
                     rescues_len: aux.rescues.len(),
                     loop_rescue_depths_len: aux.loop_rescue_depths.len(),
@@ -5897,20 +5522,12 @@ impl Vm {
                 let begin_depth = f.begin_depth();
                 let target = (ip as i32 + off) as usize;
                 let depth = self.stack.len();
-                self.frames
-                    .last_mut()
-                    .expect("ICE: PushEnsure no frame")
-                    .aux_mut()
-                    .rescues
-                    .push(RescueHandler {
-                        handler_ip: target,
-                        stack_depth: depth,
-                        bind_slot: None,
-                        is_ensure: true,
-                        filter_class: None, // ensure is unconditional
-                        loop_depth_at_push: loop_depth,
-                        begin_depth_at_push: begin_depth,
-                    });
+                self.top_aux_mut().rescues.push(RescueHandler {
+                    handler_ip: target, stack_depth: depth, bind_slot: None, is_ensure: true,
+                    filter: crate::vm::RescueFilterSpec::None, // ensure is unconditional
+                    loop_depth_at_push: loop_depth,
+                    begin_depth_at_push: begin_depth,
+                });
             }
             Op::PopEnsure => {
                 self.frames
@@ -5977,8 +5594,7 @@ impl Vm {
             }
             Op::EnterLoop => {
                 let stack_depth = self.stack.len();
-                let f = self.frames.last_mut().expect("ICE: EnterLoop no frame");
-                let aux = f.aux_mut();
+                let aux = self.top_aux_mut();
                 let depth = aux.rescues.len();
                 aux.loop_rescue_depths.push(depth);
                 aux.loop_stack_depths.push(stack_depth);
@@ -6241,11 +5857,18 @@ impl Vm {
                             )
                         }
                         crate::vm::Locals::Shared(rc) => {
-                            let locals = rc.borrow();
-                            (
-                                locals[a_slot as usize].clone(),
-                                locals[b_slot as usize].clone(),
-                            )
+                            // Either operand can be a captured outer
+                            // local → canonical binding cell (see
+                            // Op::LoadLocal). Per-slot routing because
+                            // the two slots may live in different cells
+                            // (`sum = sum + x`: sum outer, x own).
+                            let read = |slot: u16| -> Value {
+                                if let Some(cell) = frame.outer_cell_for(slot as usize) {
+                                    return cell.borrow().get(slot as usize).cloned().unwrap_or(Value::Nil);
+                                }
+                                rc.borrow()[slot as usize].clone()
+                            };
+                            (read(a_slot), read(b_slot))
                         }
                     },
                     None => unreachable!("BinOpLocalLocal with empty frame stack"),
@@ -6346,6 +5969,9 @@ impl Vm {
                     return Ok(!self.frames.is_empty());
                 }
                 let f = self.frames.pop().expect("ICE: Return no frame");
+                if f.dm_share {
+                    self.dm_share_depth = self.dm_share_depth.saturating_sub(1);
+                }
                 // Frame-local `$~`: a method frame saved its caller's
                 // last-match on entry (block frames carry `None` and
                 // are transparent — they share the enclosing method's
@@ -6374,23 +6000,17 @@ impl Vm {
                 {
                     self.globals.insert(self.sym_bang, saved);
                 }
-                // Per-invocation block-locals model: writes to
-                // outer-scope slots (slot < block.param_start)
-                // are propagated AT-WRITE-TIME via the
-                // `propagate_outer_write` helper at every
-                // `Op::StoreLocal` / `Op::IncLocalNoPush` site,
-                // rather than via a bulk write-back here. A bulk
-                // copy at Op::Return would CLOBBER outer-slot
-                // mutations performed by OTHER code paths
-                // (`define_method`-installed closures dispatch
-                // through `m.closure.captured`, which IS the
-                // outer Rc, so their writes hit the parent
-                // directly; a stomp-copy here would replace those
-                // with this block frame's stale snapshot). The
-                // block_writeback field remains useful for
-                // `find_lexical_owner_frame` (Op::Yield /
-                // Op::ReturnMethod's lexical-method walk) — that's
-                // its remaining role.
+                // Capture-routing model: writes to outer-scope
+                // slots (slot < own_start) are routed AT-WRITE-TIME
+                // to the canonical binding cell (see
+                // `Frame::outer_cell_for`), never via a bulk
+                // write-back here. A bulk copy at Op::Return would
+                // CLOBBER outer-slot mutations performed by OTHER
+                // code paths with this block frame's stale
+                // snapshot. The block_writeback field remains
+                // useful for `find_lexical_owner_frame` (Op::Yield
+                // / Op::ReturnMethod's lexical-method walk) —
+                // that's its remaining role.
                 let ret = self.stack.pop().unwrap_or(Value::Nil);
                 self.stack.truncate(f.base_sp);
                 if f.is_class_body {
@@ -6424,6 +6044,9 @@ impl Vm {
                 // see `recycle_frame_locals`'s strong_count guard), or
                 // truncate its arena segment for a Stack frame.
                 self.release_frame_locals(f.locals);
+                // Recycle the aux box (begin/rescue/loop bookkeeping)
+                // so the next begin-bearing call skips the malloc.
+                self.recycle_frame_aux(f.aux);
                 if done {
                     return Ok(false);
                 }
@@ -6499,6 +6122,392 @@ impl Vm {
                 self.method_return_locals = owner_locals;
             }
         }
+        Ok(true)
+    }
+
+    /// The `Op::Yield` / `Op::ApplyYield` arm body (extracted verbatim so
+    /// the tier-2 `t2_yield` helper can run it without the `step` match
+    /// round-trip — this stays the single source of truth for yield's
+    /// break/fiber/non-local-return postlude). Contract matches `step`:
+    /// `Ok(false)` iff the last frame was popped. The caller charges the
+    /// fuel tick (`step` does it at fn top; `t2_yield` mirrors that).
+    pub(crate) fn do_yield(&mut self, op: Op) -> Result<bool, Trap> {
+        // `yield` resolves to the block of the enclosing
+        // METHOD, not the current frame. When yield runs
+        // inside a nested block (e.g.
+        // `def f; xs.each { |x| yield x }; end`), the
+        // current frame is the `each` block; we must walk
+        // through `is_block` frames to find the nearest
+        // method frame and pick up ITS block_arg.
+        //
+        // CRuby implements the same lookup via the cfp
+        // chain (vm_get_yield_method_cfp). Without the
+        // walk, every block-wrapped yield raises
+        // "no block given (yield)" — broke ERB's scanner.
+        //
+        // **ADR 0024 Phase A.1**: Op::Yield now drives
+        // the block SYNCHRONOUSLY (recursive
+        // `dispatch_until`) so the block's `break val`
+        // unwinds back to the yielding method and
+        // returns val from it — matching CRuby
+        // semantics. v6's fire-and-forget pattern set
+        // `break_signaled` but only Rust-level iter
+        // drivers (`step_block`) observed it; a Ruby
+        // `def f; yield; end; f { break }` was
+        // historically broken (infinite loop / silent
+        // continue depending on caller shape).
+        //
+        // The synchronous flow:
+        //   1. Locate yielding method's frame index by
+        //      LEXICAL scope (ADR 0024 Phase A.7). Blocks
+        //      share their captured `locals` Rc with the
+        //      defining scope (transitively through
+        //      nested blocks); the topmost !is_block
+        //      frame whose `locals` Rc-pointer matches
+        //      the current top frame's `locals` IS the
+        //      lexical owner. Pre-A.7 used "nearest non-
+        //      block frame" — incorrect for shapes like
+        //      `def f; g { yield }; end; def g; yield;
+        //      end; f { ... }` where the inner yield
+        //      bound to g (dynamic neighbour) instead of
+        //      f (lexical owner) and recursively
+        //      re-invoked g's block_arg.
+        //   2. Mark the yielding-method frame's
+        //      `pending_yield = true` (so a Fiber yield
+        //      mid-block can resume correctly).
+        //   3. Enter `YieldDepthGuard` (bounded recursion
+        //      via `Config::max_yield_recursion`; Drop
+        //      decrements panic-safely).
+        //   4. `invoke_block` pushes block frame.
+        //   5. Inner `dispatch_until(pre_frames)` drives
+        //      the block to completion.
+        //   6. On normal return: block value is on
+        //      stack, IP past Op::Yield; clear
+        //      pending_yield; continue.
+        //   7. On `break_signaled`: pop value, walk
+        //      frames down to + including yielding
+        //      method, push value as method's return,
+        //      clear break_signaled.
+        //   8. On `method_return` / `fiber_yield_pending`:
+        //      leave the signal set, let the outer
+        //      dispatch loop / Fiber driver handle.
+        // Phase A.7: lexical lookup via locals Rc-pointer
+        // identity. With the per-invocation block-locals
+        // fix (each `invoke_block` installs a fresh
+        // locals Vec, retaining the original `captured`
+        // Rc on `block_writeback`), the top frame's
+        // `locals` is no longer the same Rc the lexical
+        // owner uses. `find_lexical_owner_frame` walks
+        // the writeback chain to bridge that — each
+        // block frame's writeback points one scope
+        // outward until a method frame is found.
+        // (`lexical_owner_of_top` shortcuts a non-block top
+        // frame to itself — required for Locals::Stack method
+        // frames, identical behaviour for Shared ones.)
+        // Primary: the lexical owner method is still on the
+        // stack — read its `block_arg` directly (the common
+        // `def f; xs.each { yield }; end` synchronous case),
+        // and use its frame index for the pending_yield /
+        // break bookkeeping below.
+        //
+        // Fallback (ESCAPED CLOSURE): the block executing the
+        // yield outlived its defining method (`def m(&blk);
+        // ->(){ yield }; end` returned, the lambda is called
+        // later). The live-frame walk then finds no method
+        // frame, so use the yield-block captured at the
+        // block's creation and threaded onto its frame
+        // (`captured_yield_block`, propagated through nested
+        // blocks); CRuby keeps the same binding alive via the
+        // closure's captured cref. With no live yielding
+        // method, the yield site for break / Fiber-resume
+        // bookkeeping is the top (block) frame itself.
+        let owner = self.lexical_owner_of_top();
+        let (block, yielding_idx) = match owner
+            .and_then(|idx| self.frames[idx].block_arg.map(|b| (b, idx)))
+        {
+            Some(pair) => pair,
+            None => match self.frames.last().and_then(|f| f.captured_yield_block) {
+                Some(b) => (b, self.frames.len() - 1),
+                None => return Err(self.trap(RubyError::RuntimeError {
+                    msg: "no block given (yield)".to_string(),
+                })),
+            },
+        };
+        // Static argc for `Op::Yield(n)`; for `Op::ApplyYield`
+        // (`yield(*x)`), pop the combined args Array and expand
+        // its elements onto the stack (mirrors `Op::ApplyCall`),
+        // yielding the dynamic count.
+        let argc = match op {
+            Op::Yield(n) => n as usize,
+            Op::ApplyYield => {
+                let arr_val = match self.stack.pop() {
+                    Some(v) => v,
+                    None => unreachable!("ICE: ApplyYield without args array"),
+                };
+                let arr_id = match arr_val {
+                    Value::Array(id) => id,
+                    other => {
+                        return Err(self.trap(RubyError::TypeError {
+                            msg: format!(
+                                "no implicit conversion of {} into Array",
+                                other.type_name()
+                            ),
+                        }));
+                    }
+                };
+                let mut g = crate::vm::PinGuard::new(self);
+                g.pin(Value::Array(arr_id));
+                let elems: Vec<Value> = g.vm.heap.array(arr_id).clone();
+                let n = elems.len();
+                for e in elems {
+                    g.vm.stack.push(e);
+                }
+                drop(g);
+                n
+            }
+            _ => unreachable!("yield arm only matches Yield | ApplyYield"),
+        };
+        // Yield-args capture (wave 5): the 1- and 2-arg shapes (the
+        // overwhelming majority of yields) route through
+        // `invoke_block1`/`invoke_block2` below — no per-yield args-Vec
+        // allocation, no general-binder pass. Those helpers push frames
+        // byte-identical to the general path and internally fall back to
+        // `invoke_block` for every shape they can't serve (rest / kw /
+        // block-param / arity-mismatched blocks), so semantics are the
+        // general path's by construction. Values popped here are moved
+        // straight into the block's locals cell (a GC root) by the
+        // binder; nothing allocates in between.
+        enum YArgs {
+            One(Value),
+            Two(Value, Value),
+            Many(Vec<Value>),
+        }
+        let yargs = match argc {
+            1 => YArgs::One(self.stack.pop().expect("ICE: yield stack underflow")),
+            2 => {
+                let b = self.stack.pop().expect("ICE: yield stack underflow");
+                let a = self.stack.pop().expect("ICE: yield stack underflow");
+                YArgs::Two(a, b)
+            }
+            // 0 args: `Vec::new()` is allocation-free.
+            _ => {
+                let split = self.stack.len() - argc;
+                YArgs::Many(self.stack.drain(split..).collect())
+            }
+        };
+
+        let pre_frames = self.frames.len();
+
+        // Bounded recursion guard FIRST so we never
+        // mark pending_yield without a matching guard
+        // (if enter fails, no cleanup needed).
+        let yguard = crate::vm::YieldDepthGuard::enter(self)?;
+        yguard.vm.frames[yielding_idx].pending_yield = true;
+
+        // Push block frame + drive to completion.
+        let invoked = match yargs {
+            YArgs::One(a) => yguard.vm.invoke_block1(block, a),
+            YArgs::Two(a, b) => yguard.vm.invoke_block2(block, a, b),
+            YArgs::Many(args) => yguard.vm.invoke_block(block, args),
+        };
+        if let Err(trap) = invoked {
+            yguard.vm.frames[yielding_idx].pending_yield = false;
+            return Err(trap);
+        }
+        // TIER-2 wave 5 (ADR 0037): run the just-pushed block frame
+        // natively when compiled — the native→native yield when the
+        // caller is a compiled method (its generic Yield helper lands
+        // here), and the block-body fast path for interpreted callers.
+        // DONE → the dispatch_until below no-ops (frames already back at
+        // pre_frames); BAIL → it continues the frame at `ip` — the same
+        // mode-switch contract as every t2_enter site. On a trap, take
+        // the dispatch_until error path's cleanup (the native run may
+        // have consumed frames, so bounds-check the yielding index).
+        #[cfg(feature = "jit-native")]
+        if let Err(trap) = yguard.vm.t2_enter_block(true) {
+            if yielding_idx < yguard.vm.frames.len() {
+                yguard.vm.frames[yielding_idx].pending_yield = false;
+            }
+            return Err(trap);
+        }
+        if let Err(trap) = yguard.vm.dispatch_until(pre_frames) {
+            // Block raised; clear pending_yield and
+            // propagate so rescue can catch.
+            if yielding_idx < yguard.vm.frames.len() {
+                yguard.vm.frames[yielding_idx].pending_yield = false;
+            }
+            return Err(trap);
+        }
+
+        // dispatch_until returned. Determine why:
+        if yguard.vm.method_return.is_some() {
+            // return-from-block: leave method_return
+            // set; outer dispatch loop handles unwind.
+            if yielding_idx < yguard.vm.frames.len() {
+                yguard.vm.frames[yielding_idx].pending_yield = false;
+            }
+            // Guard drops on return → decrements counter.
+            return Ok(true);
+        }
+        #[cfg(feature = "_fiber")]
+        if yguard.vm.fiber_yield_pending.is_some() {
+            // Fiber.yield mid-block. DO NOT clear
+            // pending_yield — it stays set so the
+            // Fiber's stashed FiberSnapshot captures
+            // the in-progress state. On resume the
+            // block continues; eventually it returns
+            // normally OR breaks. We can't see that
+            // far ahead here — let the outer Fiber
+            // driver propagate up; on resume the
+            // dispatch loop re-enters this same
+            // dispatch_until at a level that observes
+            // the post-block state.
+            //
+            // Actually subtle: this `dispatch_until`
+            // call returned. The outer caller is the
+            // dispatch_until that's driving the Fiber.
+            // It also sees fiber_yield_pending and
+            // returns. resume_fiber stashes; later
+            // re-enters dispatch_until. The dispatch
+            // loop will pick up at the block's IP
+            // (top of stack). Block completes,
+            // Op::Return pops it, control resumes at
+            // the yielding-method's IP past Op::Yield —
+            // which is the NEXT op, NOT this same Op::Yield.
+            //
+            // The IP for `self.frames[yielding_idx].ip`
+            // was advanced BEFORE we entered the match
+            // arm (top of the dispatch loop). So past-yield
+            // is already the IP. On resume, dispatch fetches
+            // that next op, not Op::Yield. The synchronous
+            // wrapper's break-check is therefore SKIPPED on
+            // the resume path.
+            //
+            // ADR 0024 Phase A.8: the resume-side recovery
+            // lives in `dispatch_until_inner` /
+            // `dispatch` as a top-of-loop check. When the
+            // resumed block runs `break`, `break_signaled`
+            // gets set and the block frame pops naturally;
+            // the dispatch loop then observes
+            // `break_signaled && top_frame.pending_yield`
+            // and routes the value through
+            // `begin_method_break` — same A.4/A.5
+            // ensure-aware unwind machinery, just driven
+            // from a different entry point because the
+            // original Op::Yield Rust wrapper is gone.
+            return Ok(true);
+        }
+
+        // Normal block return or block-break.
+        let block_return_value = yguard.vm.stack.pop().unwrap_or(Value::Nil);
+        yguard.vm.frames[yielding_idx].pending_yield = false;
+
+        if yguard.vm.break_signaled {
+            // Two cases:
+            //
+            // (a) Current frame IS the yielding method
+            //     (yielding_idx == pre_frames - 1).
+            //     Example: `def f; yield; end; f { break }`.
+            //     No Rust iter driver sits between us and
+            //     `f`, so this wrapper is solely responsible
+            //     for unwinding. Pop the yielding method,
+            //     push the break value as its return — the
+            //     new behavior Phase A.1 adds.
+            //
+            // (b) Yielding method is deeper
+            //     (yielding_idx < pre_frames - 1).
+            //     Example: `def each; 10.times { yield };
+            //     end; obj.each { break }`. A Rust iter
+            //     driver (`Int#times`'s `step_block` loop)
+            //     sits between yield and each. The legacy
+            //     pre-A.1 path already handles this: leave
+            //     `break_signaled` set so the enclosing
+            //     `step_block` returns `BlockStep::Break`
+            //     and `Int#times` aborts naturally,
+            //     propagating the break through `each` as
+            //     its return value. Eating the signal here
+            //     would strand the Rust driver mid-loop.
+            if yielding_idx == pre_frames - 1 {
+                yguard.vm.break_signaled = false;
+                yguard.vm.sync_control_signals();
+                // ADR 0024 Phase A.4: walk the yielding
+                // method's `is_ensure` rescue handlers
+                // before the frame returns. After
+                // dispatch_until returned, frames.len() ==
+                // pre_frames and the topmost frame IS the
+                // yielding method (case a), so
+                // begin_method_break drives the ensure
+                // walk on that frame directly. When no
+                // ensures remain, it pops the frame and
+                // pushes the break value as the method's
+                // return.
+                //
+                // Toplevel case: if the yielding method
+                // is the bottom frame, the walk pops it
+                // and pushes the value as the script's
+                // result. dispatch loop terminates on
+                // empty frames — drop guard FIRST so the
+                // recursion counter decrements before we
+                // bail.
+                let was_toplevel = yielding_idx == 0;
+                yguard.vm.begin_method_break(block_return_value, yielding_idx)?;
+                drop(yguard);
+                if was_toplevel && self.frames.is_empty() {
+                    return Ok(false);
+                }
+                return Ok(true);
+            }
+            // Case (b) — ADR 0024 Phase A.5: yielding
+            // method is deeper than current frame's
+            // direct parent. A Rust iter driver (e.g.
+            // `Int#times`'s `step_block` loop) sits
+            // between us and the yielding method.
+            //
+            // Park the break in `pending_method_break`
+            // with `target_frame_idx = yielding_idx` so
+            // the dispatch loop top-of-iteration check
+            // picks it up after the Rust driver returns
+            // and control re-enters bytecode in a frame
+            // above the target. continue_method_break
+            // then pops intermediate method frames
+            // (running their ensures on the way) until
+            // it reaches the yielding method, walks
+            // its ensures, and lands the break value.
+            //
+            // Also push the break value + leave
+            // break_signaled set so the EXISTING Rust
+            // iter driver protocol (step_block → BlockStep
+            // ::Break → driver returns the value) keeps
+            // working end-to-end. Without this, drivers
+            // would treat the block return as a normal
+            // value and keep iterating.
+            //
+            // Phase A.9: don't overwrite an
+            // already-pending break. Multi-method-frame
+            // shapes like `def f; g { |x| yield x }; end;
+            // def g; xs.each { |x| yield x }; end;
+            // f { break }` have several nested Op::Yield
+            // wrappers each running case (b) on the way
+            // out. The INNERMOST one (lexically closest to
+            // the breaking block) has the right target —
+            // outer wrappers should leave that target
+            // alone and just propagate.
+            if yguard.vm.pending_method_break.is_none() {
+                yguard.vm.pending_method_break = Some(crate::vm::MethodBreak {
+                    value: block_return_value.clone(),
+                    target_frame_idx: yielding_idx,
+                    suspended: false,
+                });
+                yguard.vm.sync_control_signals();
+            }
+            yguard.vm.stack.push(block_return_value);
+            drop(yguard);
+            return Ok(true);
+        }
+        // Normal block return — push the block's value
+        // as the yield expression's value.
+        yguard.vm.stack.push(block_return_value);
+        // Guard drops on fall-through → decrements counter.
         Ok(true)
     }
 

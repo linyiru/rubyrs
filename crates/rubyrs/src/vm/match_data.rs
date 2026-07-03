@@ -94,8 +94,8 @@ impl Vm {
         let whole_ivar = self.interner.intern("@whole");
         let caps_ivar = self.interner.intern("@caps");
         let inst = self.heap.instance_mut(obj_id);
-        inst.ivars.insert(whole_ivar, Value::new_str(whole));
-        inst.ivars.insert(caps_ivar, Value::Array(caps_arr));
+        inst.ivar_set(whole_ivar, Value::new_str(whole));
+        inst.ivar_set(caps_ivar, Value::Array(caps_arr));
         // Optional context ivars — only inserted when the caller
         // supplied the data. Absent ivars resolve to nil via the
         // standard ivar-read fallback, so the MatchData methods
@@ -106,16 +106,16 @@ impl Vm {
         let str_ivar = self.interner.intern("@string");
         let re_ivar = self.interner.intern("@regexp");
         if let Some(s) = ctx.pre_match {
-            self.heap.instance_mut(obj_id).ivars.insert(pre_ivar, Value::new_str(s));
+            self.heap.instance_mut(obj_id).ivar_set(pre_ivar, Value::new_str(s));
         }
         if let Some(s) = ctx.post_match {
-            self.heap.instance_mut(obj_id).ivars.insert(post_ivar, Value::new_str(s));
+            self.heap.instance_mut(obj_id).ivar_set(post_ivar, Value::new_str(s));
         }
         if let Some(s) = ctx.string {
-            self.heap.instance_mut(obj_id).ivars.insert(str_ivar, Value::new_str(s));
+            self.heap.instance_mut(obj_id).ivar_set(str_ivar, Value::new_str(s));
         }
         if let Some(v) = ctx.regexp {
-            self.heap.instance_mut(obj_id).ivars.insert(re_ivar, v);
+            self.heap.instance_mut(obj_id).ivar_set(re_ivar, v);
         }
         // Named captures install as @named_caps: Hash<String,
         // String | nil>. The preamble's `MatchData#[]` consults
@@ -139,7 +139,7 @@ impl Vm {
                 crate::heap::HashObj::with_pairs(pairs)
             ));
             let nc_ivar = self.interner.intern("@named_caps");
-            self.heap.instance_mut(obj_id).ivars.insert(nc_ivar, Value::Hash(h_id));
+            self.heap.instance_mut(obj_id).ivar_set(nc_ivar, Value::Hash(h_id));
         }
         // Group byte spans (@group_byte_offsets) + group names
         // (@cap_names) back MatchData#begin/#end/#offset (+ byte*).
@@ -164,7 +164,7 @@ impl Vm {
             self.check_alloc()?;
             let off_id = self.heap.alloc(HeapObj::Array(span_vals.into()));
             let off_ivar = self.interner.intern("@group_byte_offsets");
-            self.heap.instance_mut(obj_id).ivars.insert(off_ivar, Value::Array(off_id));
+            self.heap.instance_mut(obj_id).ivar_set(off_ivar, Value::Array(off_id));
         }
         if !ctx.cap_names.is_empty() {
             let name_vals: Vec<Value> = ctx.cap_names
@@ -177,7 +177,7 @@ impl Vm {
             self.check_alloc()?;
             let names_id = self.heap.alloc(HeapObj::Array(name_vals.into()));
             let names_ivar = self.interner.intern("@cap_names");
-            self.heap.instance_mut(obj_id).ivars.insert(names_ivar, Value::Array(names_id));
+            self.heap.instance_mut(obj_id).ivar_set(names_ivar, Value::Array(names_id));
         }
         Ok(Value::Object(obj_id))
     }
@@ -294,52 +294,125 @@ impl Vm {
                 self.last_match = None;
                 Ok(Value::Nil)
             }
-            Some(mut oc) => {
-                // Shift the whole-match span from tail-relative to
-                // full-string-relative; group substrings/names are
-                // position-independent and need no adjustment.
-                oc.m_start += byte_start;
-                oc.m_end += byte_start;
-                // Shift group spans from tail-relative to full-string
-                // coordinates too (parallel to the whole-match shift).
-                let group_spans: Vec<Option<(usize, usize)>> = oc.group_spans
-                    .iter()
-                    .map(|sp| sp.map(|(b, e)| (b + byte_start, e + byte_start)))
-                    .collect();
-                let cap_names = re.capture_group_names();
-                let pre = bound[..oc.m_start].to_string();
-                let post = bound[oc.m_end..].to_string();
-                let full_str = bound.clone();
-                let group_vals: Vec<Value> = oc
-                    .groups
-                    .iter()
-                    .map(|g| match g {
-                        Some(s) => Value::new_str(s.clone()),
-                        None => Value::Nil,
-                    })
-                    .collect();
+            Some(oc) => self.finish_regexp_match_hit(re, bound, byte_start, oc),
+        }
+    }
+
+    /// Shared HIT tail for the match-at-pos family: shift the
+    /// tail-relative spans by `byte_start`, set `$~`, and materialize
+    /// the MatchData. `bound` is the FULL subject string (ownership
+    /// moves into `last_match.input`).
+    fn finish_regexp_match_hit(
+        &mut self,
+        re: &std::rc::Rc<crate::regex_engine::CompiledRegex>,
+        bound: String,
+        byte_start: usize,
+        mut oc: crate::regex_engine::OwnedCaptures,
+    ) -> Result<Value, Trap> {
+        // Shift the whole-match span from tail-relative to
+        // full-string-relative; group substrings/names are
+        // position-independent and need no adjustment.
+        oc.m_start += byte_start;
+        oc.m_end += byte_start;
+        // Shift group spans from tail-relative to full-string
+        // coordinates too (parallel to the whole-match shift).
+        let group_spans: Vec<Option<(usize, usize)>> = oc.group_spans
+            .iter()
+            .map(|sp| sp.map(|(b, e)| (b + byte_start, e + byte_start)))
+            .collect();
+        let cap_names = re.capture_group_names();
+        let pre = bound[..oc.m_start].to_string();
+        let post = bound[oc.m_end..].to_string();
+        let full_str = bound.clone();
+        let group_vals: Vec<Value> = oc
+            .groups
+            .iter()
+            .map(|g| match g {
+                Some(s) => Value::new_str(s.clone()),
+                None => Value::Nil,
+            })
+            .collect();
+        self.save_match_scope_on_write();
+        self.last_match = Some(crate::vm::LastMatch {
+            whole: oc.whole.clone(),
+            caps: oc.groups.clone(),
+            input: bound,
+            m_start: oc.m_start,
+            m_end: oc.m_end,
+            named: oc.named.clone(),
+            group_spans: group_spans.clone(),
+            cap_names: cap_names.clone(),
+            binary: None,
+        });
+        let ctx = MatchDataContext {
+            pre_match: Some(pre),
+            post_match: Some(post),
+            string: Some(full_str),
+            regexp: Some(Value::Regex(re.clone())),
+            named_captures: oc.named,
+            group_offsets: group_spans,
+            cap_names,
+        };
+        self.materialize_match_data_with_context(oc.whole, group_vals, ctx)
+    }
+
+    /// Zero-copy sibling of `do_regexp_match_pos` for a receiver whose
+    /// content is KNOWN-valid UTF-8 (`is_utf8_cached`): the engines run
+    /// on a borrowed view of the content bytes, so a MISS allocates
+    /// NOTHING (the old path copied the whole subject + walked its
+    /// chars per call — 13µs on rubocop's 21KB source buffer vs
+    /// CRuby's 80ns for `Token#space_after?`). Only a HIT pays the
+    /// full-string copy that `$~` / MatchData semantics need.
+    ///
+    /// SAFETY contract: the caller must have checked
+    /// `s.content.is_utf8_cached()`; the unchecked view is sound
+    /// because every content mutation goes through `borrow_mut`,
+    /// which resets the validity cache.
+    pub(crate) fn do_regexp_match_at(
+        &mut self,
+        re: &std::rc::Rc<crate::regex_engine::CompiledRegex>,
+        s: &std::rc::Rc<crate::value::RStr>,
+        byte_start: usize,
+    ) -> Result<Value, Trap> {
+        let owned = {
+            let bytes = s.content.borrow();
+            debug_assert!(std::str::from_utf8(&bytes).is_ok());
+            // SAFETY: guarded by `is_utf8_cached` at every call site
+            // (see the method doc); `byte_start` is a char-boundary
+            // offset produced by the ASCII identity or `char_starts`.
+            let view = unsafe { std::str::from_utf8_unchecked(&bytes) };
+            let tail = &view[byte_start..];
+            // Same `\G` discipline as `do_regexp_match_pos`: anchored
+            // engine first, forward search as the fallback.
+            if re.g_anchored() {
+                match re.captures_owned_str_anchored(tail) {
+                    Some(inner) => Ok(inner),
+                    None => re.captures_owned(tail),
+                }
+            } else {
+                re.captures_owned(tail)
+            }
+        };
+        let owned = owned.map_err(|e| {
+            self.trap(crate::error::RubyError::RuntimeError {
+                msg: format!("regex match failed: {} (pattern: /{}/)", e, re.as_str()),
+            })
+        })?;
+        match owned {
+            None => {
                 self.save_match_scope_on_write();
-                self.last_match = Some(crate::vm::LastMatch {
-                    whole: oc.whole.clone(),
-                    caps: oc.groups.clone(),
-                    input: bound,
-                    m_start: oc.m_start,
-                    m_end: oc.m_end,
-                    named: oc.named.clone(),
-                    group_spans: group_spans.clone(),
-                    cap_names: cap_names.clone(),
-                    binary: None,
-                });
-                let ctx = MatchDataContext {
-                    pre_match: Some(pre),
-                    post_match: Some(post),
-                    string: Some(full_str),
-                    regexp: Some(Value::Regex(re.clone())),
-                    named_captures: oc.named,
-                    group_offsets: group_spans,
-                    cap_names,
+                self.last_match = None;
+                Ok(Value::Nil)
+            }
+            Some(oc) => {
+                // HIT: `$~`/MatchData snapshot the subject, so the full
+                // copy is paid here — and only here.
+                let bound = {
+                    let bytes = s.content.borrow();
+                    // SAFETY: same guard as above.
+                    unsafe { std::str::from_utf8_unchecked(&bytes) }.to_string()
                 };
-                self.materialize_match_data_with_context(oc.whole, group_vals, ctx)
+                self.finish_regexp_match_hit(re, bound, byte_start, oc)
             }
         }
     }
@@ -390,6 +463,53 @@ impl Vm {
             }));
         };
         let re = re.clone();
+        let is_binary = matches!(s.encoding.get(), crate::value::EncodingTag::Binary);
+        // Fast path: ASCII / valid-UTF-8 receiver. Resolve `pos` in
+        // O(1) (ASCII: char == byte; else the cached char→byte table)
+        // and run the match on a BORROWED view of the content — the
+        // old path copied the whole subject (`to_string_lossy`) AND
+        // walked every char (`chars().count()` + `char_indices().nth`)
+        // on EVERY call, which made rubocop's `Token#space_after?`
+        // (`source.match(/\G\s/, end_pos)` on a 21KB buffer) 165×
+        // CRuby. Invalid-UTF-8 / BINARY receivers keep the paths below.
+        if !is_binary && s.content.is_utf8_cached() {
+            let byte_start = match args.get(1) {
+                None => Some(0usize),
+                Some(Value::Int(p)) => {
+                    if s.content.is_ascii_cached() {
+                        let char_len = s.content.borrow().len() as i64;
+                        let idx = if *p < 0 { *p + char_len } else { *p };
+                        if idx < 0 || idx > char_len { None } else { Some(idx as usize) }
+                    } else {
+                        let starts = s.content.char_starts();
+                        let char_len = (starts.len() - 1) as i64;
+                        let idx = if *p < 0 { *p + char_len } else { *p };
+                        if idx < 0 || idx > char_len {
+                            None
+                        } else {
+                            Some(starts[idx as usize] as usize)
+                        }
+                    }
+                }
+                Some(other) => {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "no implicit conversion of {} into Integer",
+                            other.type_name(),
+                        ),
+                    }));
+                }
+            };
+            return match byte_start {
+                // Out-of-range pos → no match (nil), matching CRuby.
+                None => {
+                    self.save_match_scope_on_write();
+                    self.last_match = None;
+                    Ok(Value::Nil)
+                }
+                Some(b) => self.do_regexp_match_at(&re, s, b),
+            };
+        }
         let bound = s.to_string_lossy();
         let char_len = bound.chars().count();
         // Resolve the optional char-index `pos`. Negative counts from
@@ -419,7 +539,7 @@ impl Vm {
         // path (binary+pos is vanishingly rare; the existing @whole /
         // pre / post are lossy there anyway).
         if byte_start == 0
-            && matches!(s.encoding.get(), crate::value::EncodingTag::Binary)
+            && is_binary
             && let Some(v) = self.do_regexp_match_binary(&re, s)?
         {
             return Ok(v);

@@ -488,8 +488,8 @@ impl Vm {
                 if let HeapObj::Instance(inst) = self.heap.get(*oid) {
                     let mut sec: Option<i64> = None;
                     let mut nsec: i64 = 0;
-                    for (k, val) in inst.ivars.iter() {
-                        match self.interner.resolve(*k).as_ref() {
+                    for (k, val) in inst.ivar_pairs() {
+                        match self.interner.resolve(k).as_ref() {
                             "@sec" => if let Value::Int(n) = val { sec = Some(*n); },
                             "@nsec" => if let Value::Int(n) = val { nsec = *n; },
                             _ => {}
@@ -1884,6 +1884,10 @@ fn io_errno(e: &std::io::Error) -> (&'static str, &'static str) {
             21 => return ("Errno::EISDIR", "Is a directory"),
             22 => return ("Errno::EINVAL", "Invalid argument"),
             28 => return ("Errno::ENOSPC", "No space left on device"),
+            // Same number on Linux and macOS. Raised by the fd-pipe
+            // write primitive when the read end is gone — the parallel
+            // gem's Worker#work rescues it as DeadWorker.
+            32 => return ("Errno::EPIPE", "Broken pipe"),
             _ => {
                 // ELOOP's number differs by platform (62 macOS / 40
                 // Linux), so compare against libc's constant rather

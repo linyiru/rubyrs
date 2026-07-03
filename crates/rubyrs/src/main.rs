@@ -401,6 +401,13 @@ fn main() {
     // is unconditionally linked. Lets RuboCop's `parser_prism` engine build its AST natively,
     // bypassing the slow interpreted whitequark lexer. Inert unless the prism shim calls them.
     rubyrs::register_prism_native_host_fns(&mut rt);
+    // Native whitequark translation (prism_wq): the Translation::Parser#tokenize
+    // pipeline in Rust. Inert unless the prism translation hook calls it.
+    rubyrs::register_prism_wq_host_fns(&mut rt);
+    // Native Commissioner walk driver (commdrv): RuboCop's cop-walk
+    // machinery (per-node callback triggering + traversal) in Rust.
+    // Inert unless the require("rubocop") hook calls it.
+    rubyrs::register_commdrv_host_fns(&mut rt);
     // `_rouge_native` accelerator: expose the carmine engine host fns;
     // the require("rouge") hook injects the shim that detects + uses
     // them. Without this registration the shim stays inert.
@@ -512,6 +519,28 @@ fn main() {
     if std::env::var_os("RUBYRS_REGEX_STATS").is_some() {
         let (total, built) = rt.regex_cache_stats();
         eprintln!("regex-stats\ttotal={}\tbuilt={}", total, built);
+    }
+    // TEMPORARY diagnostics (`RUBYRS_CASCADE_STATS=1`): dump the
+    // slow-cascade send counters, one row per (name, receiver
+    // shape), count-descending. Same debug-knob shape as
+    // `RUBYRS_REGEX_STATS`.
+    if std::env::var_os("RUBYRS_CASCADE_STATS").is_some() {
+        for (name, shape, n) in rt.cascade_stats_rows() {
+            eprintln!("cascade-stats\t{}\t{}\t{}", name, shape, n);
+        }
+        // The non-fixed-arity user-method callee census (ADR 0031
+        // "explicit-non-fixed-arity" bucket): name, argc passed,
+        // decoded param shape, recv form, count.
+        for (name, argc, shape, no_recv, n) in rt.nfa_stats_rows() {
+            eprintln!(
+                "nfa-stats\t{}\targc={}\t{}\t{}\t{}",
+                name,
+                argc,
+                shape,
+                if no_recv { "norecv" } else { "explicit" },
+                n
+            );
+        }
     }
     #[cfg(feature = "ic-stats")]
     if env_lookup("RUBYRS_IC_STATS").is_some() {

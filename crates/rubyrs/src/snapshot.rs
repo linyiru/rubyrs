@@ -45,6 +45,7 @@ use std::rc::Rc;
 /// `Proto` is neither `Clone` nor `PartialEq`).
 pub(crate) struct CapturedGraph {
     pub(crate) cache_counter: u32,
+    pub(crate) ivar_counter: u32,
     pub(crate) classes: Vec<ClassImage>,
     pub(crate) registry: Vec<(u32, u32)>,
     pub(crate) const_classes: Vec<(u32, u32)>,
@@ -57,6 +58,11 @@ pub(crate) struct CapturedGraph {
     /// See [`VmImage::loaded_features`].
     pub(crate) loaded_features: Vec<String>,
     pub(crate) loaded_stdlib_stubs: Vec<String>,
+    /// See [`VmImage::autoloads_toplevel`].
+    pub(crate) autoloads_toplevel: Vec<(u32, String)>,
+    pub(crate) autoloads_scoped: Vec<(u32, String)>,
+    pub(crate) consumed_autoloads: Vec<u32>,
+    pub(crate) autoload_paths: Vec<(String, Vec<u32>)>,
 }
 
 /// Borrow twin used at encode time so serialize doesn't clone the proto
@@ -66,6 +72,7 @@ struct VmImageRef<'a> {
     interner: Vec<&'a str>,
     protos: &'a [Proto],
     cache_counter: u32,
+    ivar_counter: u32,
     classes: &'a [ClassImage],
     registry: &'a [(u32, u32)],
     const_classes: &'a [(u32, u32)],
@@ -74,6 +81,10 @@ struct VmImageRef<'a> {
     constants: &'a [(u32, ValueImage)],
     loaded_features: &'a [String],
     loaded_stdlib_stubs: &'a [String],
+    autoloads_toplevel: &'a [(u32, String)],
+    autoloads_scoped: &'a [(u32, String)],
+    consumed_autoloads: &'a [u32],
+    autoload_paths: &'a [(String, Vec<u32>)],
 }
 
 /// Owned (decode) shape of the full image.
@@ -83,8 +94,10 @@ pub(crate) struct VmImage {
     pub(crate) interner: Vec<String>,
     /// Full proto (bytecode) table.
     pub(crate) protos: Vec<Proto>,
-    /// `vm.cache_counter` — sizes the inline-cache vector on restore.
+    /// `vm.cache_counter.call` — sizes the call inline-cache vector on restore.
     pub(crate) cache_counter: u32,
+    /// `vm.cache_counter.ivar` — sizes the ivar-site cache vector (ADR 0035 Ph4/5).
+    pub(crate) ivar_counter: u32,
     /// Every reachable class, dense-id order (index = class id).
     pub(crate) classes: Vec<ClassImage>,
     /// The `vm.classes` registry: (name SymId, class id).
@@ -109,6 +122,24 @@ pub(crate) struct VmImage {
     /// "Cop RuboCop::Cop::Cop could not be dismissed".
     pub(crate) loaded_features: Vec<String>,
     pub(crate) loaded_stdlib_stubs: Vec<String>,
+    /// PENDING `autoload` registrations (`vm.autoloads_toplevel` /
+    /// `vm.autoloads_scoped`): const-name SymId (qualified for scoped) →
+    /// require path. An unfired autoload's constant exists ONLY in these
+    /// VM-level tables — no class's `consts` holds it — yet it is listed in
+    /// `Module#constants` and defined on first reference. RuboCop registers
+    /// every formatter + corrector this way (lib/rubocop/formatter.rb,
+    /// lib/rubocop/cop/correctors.rb) and fires almost none during
+    /// `require "rubocop"`; without these the restored image silently
+    /// dropped them all ("uninitialized constant
+    /// RuboCop::Formatter::SimpleTextFormatter").
+    pub(crate) autoloads_toplevel: Vec<(u32, String)>,
+    pub(crate) autoloads_scoped: Vec<(u32, String)>,
+    /// `vm.consumed_autoloads` — fired-but-undefined keys (the removable
+    /// undef-slot zeitwerk's remove_const relies on).
+    pub(crate) consumed_autoloads: Vec<u32>,
+    /// `vm.autoload_paths` — reverse map (canonicalized target path → const
+    /// keys) so a post-restore `require` still SATISFIES pending autoloads.
+    pub(crate) autoload_paths: Vec<(String, Vec<u32>)>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
@@ -324,8 +355,17 @@ fn image_value(v: &crate::value::Value, ids: &mut ClassIds) -> ValueImage {
     }
 }
 
-fn image_ivars(it: &crate::value::IvarTable, ids: &mut ClassIds) -> Vec<(u32, ValueImage)> {
-    it.iter().map(|(s, v)| (s.0, image_value(v, ids))).collect()
+/// Image an Instance's ivars as `(SymId, ValueImage)` pairs in the
+/// object's ASSIGNMENT order — the image format is name-keyed (NOT
+/// slot-keyed), so it is independent of the class's ivar-shape slot
+/// numbering (ADR 0035 Ph4/5): restore re-interns names into the
+/// restored class's shape in encounter order.
+fn image_ivars(
+    it: &crate::value::IvarTable,
+    class: &crate::value::Class,
+    ids: &mut ClassIds,
+) -> Vec<(u32, ValueImage)> {
+    it.iter(class).into_iter().map(|(s, v)| (s.0, image_value(v, ids))).collect()
 }
 
 fn image_fx_ivars(
@@ -347,7 +387,7 @@ fn capture_heap(vm: &crate::vm::Vm, ids: &mut ClassIds) -> Vec<HeapObjImage> {
             Slot::Live(obj) => match obj {
                 HeapObj::Instance(i) => HeapObjImage::Instance {
                     class: ids.intern(&i.class),
-                    ivars: image_ivars(&i.ivars, ids),
+                    ivars: image_ivars(&i.ivars, &i.class, ids),
                     frozen: i.frozen.get(),
                 },
                 HeapObj::Array(a) => HeapObjImage::Array {
@@ -587,8 +627,36 @@ pub(crate) fn capture(vm: &crate::vm::Vm) -> CapturedGraph {
         .map(|p| p.to_string_lossy().into_owned())
         .collect();
     let loaded_stdlib_stubs = vm.loaded_stdlib_stubs.iter().cloned().collect();
+    // Pending autoloads (see VmImage::autoloads_toplevel). The tables are
+    // wasi-gated on the Vm (no `require` there), so image them as empty on
+    // that target.
+    #[cfg(not(target_os = "wasi"))]
+    let (autoloads_toplevel, autoloads_scoped) = (
+        vm.autoloads_toplevel
+            .iter()
+            .map(|(s, p)| (s.0, p.clone()))
+            .collect(),
+        vm.autoloads_scoped
+            .iter()
+            .map(|(s, p)| (s.0, p.clone()))
+            .collect(),
+    );
+    #[cfg(target_os = "wasi")]
+    let (autoloads_toplevel, autoloads_scoped) = (Vec::new(), Vec::new());
+    let consumed_autoloads = vm.consumed_autoloads.iter().map(|s| s.0).collect();
+    let autoload_paths = vm
+        .autoload_paths
+        .iter()
+        .map(|(p, ks)| {
+            (
+                p.to_string_lossy().into_owned(),
+                ks.iter().map(|k| k.0).collect(),
+            )
+        })
+        .collect();
     CapturedGraph {
-        cache_counter: vm.cache_counter,
+        cache_counter: vm.cache_counter.call,
+        ivar_counter: vm.cache_counter.ivar,
         classes,
         registry,
         const_classes,
@@ -597,6 +665,10 @@ pub(crate) fn capture(vm: &crate::vm::Vm) -> CapturedGraph {
         constants,
         loaded_features,
         loaded_stdlib_stubs,
+        autoloads_toplevel,
+        autoloads_scoped,
+        consumed_autoloads,
+        autoload_paths,
     }
 }
 
@@ -613,6 +685,7 @@ pub(crate) fn to_bytes(
         interner,
         protos: &vm.protos,
         cache_counter: graph.cache_counter,
+        ivar_counter: graph.ivar_counter,
         classes: &graph.classes,
         registry: &graph.registry,
         const_classes: &graph.const_classes,
@@ -621,6 +694,10 @@ pub(crate) fn to_bytes(
         constants: &graph.constants,
         loaded_features: &graph.loaded_features,
         loaded_stdlib_stubs: &graph.loaded_stdlib_stubs,
+        autoloads_toplevel: &graph.autoloads_toplevel,
+        autoloads_scoped: &graph.autoloads_scoped,
+        consumed_autoloads: &graph.consumed_autoloads,
+        autoload_paths: &graph.autoload_paths,
     };
     postcard::to_allocvec(&img)
 }
@@ -632,7 +709,11 @@ pub(crate) fn from_bytes(bytes: &[u8]) -> Result<VmImage, postcard::Error> {
 
 const MAGIC: &[u8; 4] = b"RRS1";
 // v2: added loaded_features + loaded_stdlib_stubs (require-guard) to the image.
-const FORMAT_VERSION: u32 = 2;
+// v3: added the pending-autoload tables (autoloads_toplevel/scoped,
+//     consumed_autoloads, autoload_paths) — without them every unfired
+//     `autoload` constant (all of rubocop's formatters + correctors) was
+//     silently dropped across a restore.
+const FORMAT_VERSION: u32 = 4; // bumped: ivar-site cids in Op + ivar_counter (ADR 0035 Ph4/5)
 
 /// Outcome of a validated load: either the image was restored, or it was
 /// rejected (with a reason) and the VM is UNTOUCHED so the caller can fall
@@ -719,6 +800,7 @@ fn new_class_shell(name: String, is_module: bool) -> Rc<Class> {
         is_module,
         undefed: RefCell::new(crate::intern::FxHashSet::default()),
         anon_serial: Cell::new(0),
+        ivar_shape: std::cell::RefCell::new(crate::value::IvarShape::default()),
         ivars: RefCell::new(crate::intern::FxHashMap::default()),
         methods: RefCell::new(crate::intern::FxHashMap::default()),
         singleton_methods: RefCell::new(crate::intern::FxHashMap::default()),
@@ -760,6 +842,13 @@ fn build_method(
         param_start: cl.param_start,
         n_params: cl.n_params,
         captured_yield_block: cl.captured_yield_block.map(crate::value::ObjId),
+        // Snapshot images don't carry the capture chain (cell
+        // identity is already broken by the deep-copy above — each
+        // restored closure gets a private cell). `(None, 0)` → every
+        // captured slot routes to `captured`, preserving the restored
+        // closure's pre-chain semantics.
+        outer_chain: None,
+        creator_start: 0,
     });
     Rc::new(Method {
         params: mi.params.clone(),
@@ -885,15 +974,17 @@ fn build_heap(
                 ivars,
                 frozen,
             } => {
+                let cls = classes[*class as usize].clone();
                 let mut it = IvarTable::default();
                 for (s, vi) in ivars {
                     it.insert(
+                        &cls,
                         crate::intern::SymId(*s),
                         value_from_image(vi, classes, kinds),
                     );
                 }
                 Slot::Live(HeapObj::Instance(Instance {
-                    class: classes[*class as usize].clone(),
+                    class: cls,
                     ivars: it,
                     singleton_class: None,
                     frozen: std::cell::Cell::new(*frozen),
@@ -971,6 +1062,12 @@ fn build_heap(
                     .collect();
                 Slot::Live(HeapObj::Block(crate::value::BlockHandle {
                     proto_idx: *proto_idx as usize,
+                    // Cell identity is broken by the image round-trip
+                    // (deep copy), so the best restorable shape is
+                    // "the captured cell owns everything" — the
+                    // pre-chain semantics for restored blocks.
+                    outer_chain: None,
+                    creator_start: 0,
                     captured: std::rc::Rc::new(std::cell::RefCell::new(env)),
                     self_val: value_from_image(self_val, classes, kinds),
                     lexical_cvar_class: lexical_cvar_class.map(|id| classes[id as usize].clone()),
@@ -1020,8 +1117,9 @@ pub(crate) fn restore(vm: &mut crate::vm::Vm, img: VmImage) {
     }
     // 2. Protos + call-cache sizing (image ⊇ preamble at identical indices).
     vm.protos = img.protos;
-    vm.cache_counter = img.cache_counter;
+    vm.cache_counter = crate::compiler::CidGen { call: img.cache_counter, ivar: img.ivar_counter };
     vm.ensure_call_caches(img.cache_counter as usize);
+    vm.ensure_ivar_caches(img.ivar_counter as usize);
 
     // 2b. Require guard: repopulate `loaded_features` + `loaded_stdlib_stubs` so
     //     a post-restore `require` of anything the image already loaded is a
@@ -1033,6 +1131,35 @@ pub(crate) fn restore(vm: &mut crate::vm::Vm, img: VmImage) {
         .map(|s| std::path::PathBuf::from(s.as_str()))
         .collect();
     vm.loaded_stdlib_stubs = img.loaded_stdlib_stubs.iter().cloned().collect();
+
+    // 2c. Pending autoloads (see VmImage::autoloads_toplevel): an unfired
+    //     `autoload` constant lives ONLY in these tables, so without them the
+    //     restored image loses the constant entirely (rubocop's formatters +
+    //     correctors). SymIds reference the image interner appended above.
+    #[cfg(not(target_os = "wasi"))]
+    {
+        vm.autoloads_toplevel = img
+            .autoloads_toplevel
+            .iter()
+            .map(|(s, p)| (SymId(*s), p.clone()))
+            .collect();
+        vm.autoloads_scoped = img
+            .autoloads_scoped
+            .iter()
+            .map(|(s, p)| (SymId(*s), p.clone()))
+            .collect();
+    }
+    vm.consumed_autoloads = img.consumed_autoloads.iter().map(|s| SymId(*s)).collect();
+    vm.autoload_paths = img
+        .autoload_paths
+        .iter()
+        .map(|(p, ks)| {
+            (
+                std::path::PathBuf::from(p.as_str()),
+                ks.iter().map(|k| SymId(*k)).collect(),
+            )
+        })
+        .collect();
 
     // 3. Resolve every image class-id to an Rc<Class>: reuse an existing
     //    (builtin) class by its registered name, else create a shell. Also
@@ -1514,6 +1641,73 @@ mod tests {
             as_s(&vr),
             "1,two,three|1|30|24|[1, 2, 3]|true",
             "unexpected"
+        );
+    }
+
+    /// ADR 0035 Ph4/5 — flat-ivar snapshot roundtrip: image an object
+    /// graph whose instances carry MANY ivars (past the inline-4 slots),
+    /// assigned in DIFFERENT orders across instances of the same class
+    /// (union-shape stressor), including SHARED references and a
+    /// removed-then-readded name. Restore into a fresh VM and verify
+    /// `instance_variables` ORDER (per-object assignment order — the
+    /// name-keyed image format must reproduce it, independent of the
+    /// restored class's shape slot numbering) + values + ref sharing.
+    #[test]
+    fn restore_flat_ivars_order_and_sharing() {
+        let defs = r#"
+            class Node
+              def fwd
+                @a = 1; @b = 2; @c = 3; @d = 4; @e = 5; @f = 6
+                self
+              end
+              def rev(shared)
+                @f = shared; @e = shared; @d = 40; @c = 30; @b = 20; @a = 10
+                self
+              end
+            end
+            SHARED = [:s]
+            FWD = Node.new.fwd
+            REV = Node.new.rev(SHARED)
+            HOLEY = Node.new
+            HOLEY.instance_variable_set(:@e, :only_e)
+            REM = Node.new.fwd
+            REM.remove_instance_variable(:@a)
+            REM.instance_variable_set(:@a, :readded)
+        "#;
+        let probe = r#"
+            [ FWD.instance_variables.inspect,
+              REV.instance_variables.inspect,
+              HOLEY.instance_variables.inspect,
+              REM.instance_variables.inspect,
+              REV.instance_variable_get(:@e).equal?(SHARED).to_s,
+              REV.instance_variable_get(:@f).equal?(SHARED).to_s,
+              HOLEY.instance_variable_get(:@a).inspect,
+              REM.instance_variable_get(:@a).inspect ].join("|")
+        "#;
+
+        let mut loader = crate::Runtime::new();
+        loader.eval(defs, "defs").expect("defs");
+        let graph = capture(&loader.vm);
+        let bytes = to_bytes(&loader.vm, &graph).expect("serialize");
+        let img = from_bytes(&bytes).expect("deserialize");
+
+        let mut restored = crate::Runtime::new();
+        restore(&mut restored.vm, img);
+        let vr = restored.eval(probe, "probe").expect("restored probe");
+
+        let mut cold = crate::Runtime::new();
+        cold.eval(defs, "defs").expect("cold defs");
+        let vc = cold.eval(probe, "probe").expect("cold probe");
+
+        let as_s = |v: &crate::value::Value| match v {
+            crate::value::Value::Str(s) => s.to_string_lossy(),
+            other => format!("{other:?}"),
+        };
+        assert_eq!(as_s(&vr), as_s(&vc), "restored ivar graph != cold");
+        assert_eq!(
+            as_s(&vr),
+            "[:@a, :@b, :@c, :@d, :@e, :@f]|[:@f, :@e, :@d, :@c, :@b, :@a]|[:@e]|[:@b, :@c, :@d, :@e, :@f, :@a]|true|true|nil|:readded",
+            "unexpected flat-ivar roundtrip shape"
         );
     }
 }
