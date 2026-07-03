@@ -455,6 +455,7 @@ fn write_int(mut n: i64, out: &mut Vec<u8>) {
 ///     (single memcpy per run).
 ///   - Slow path: when a byte needs escaping, emit the escape
 ///     literal then resume scanning.
+///
 /// ~5× faster than the char-by-char `s.chars().for_each` shape
 /// because ASCII runs (the common case in JSON payloads) skip
 /// per-byte branches AND skip UTF-8 decoding entirely.

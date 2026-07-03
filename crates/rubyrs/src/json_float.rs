@@ -485,6 +485,7 @@ mod tests {
     /// Curated corpus — expected bytes captured from CRuby 3.4.1 +
     /// json 2.20.0 (`JSON.generate([v])`), 2026-07-03.
     #[test]
+    #[allow(clippy::approx_constant)] // 3.14159 is corpus data, not a π stand-in
     fn curated_edge_corpus_matches_cruby() {
         let cases: &[(f64, &str)] = &[
             (0.0, "0.0"),
