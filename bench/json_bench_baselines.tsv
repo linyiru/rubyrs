@@ -36,6 +36,11 @@
 #      noise hides real regressions later.
 #
 # Metric         max_us  note
-parse              50    initial — local ~17 µs ARM mac, 3× CI headroom
-generate           50    initial — local ~14 µs ARM mac, 3× CI headroom
-round_trip         150   initial — local ~40 µs ARM mac, ~4× CI headroom (GC variance is higher on round_trip — see fc524f8b)
+# 2026-07 _json_native pass (fpconv floats + wrapper fast paths + key
+# interning): local dropped parse 17→~12.5, generate 11→~5.9,
+# round_trip 37→~18.5 — all three now BEAT CRuby 3.4.1 + json 2.20
+# (15.3 / 6.4 / 22.3 local). Budgets ratcheted DOWN from 50/50/150
+# (prior initial calibration) keeping the same ~3× CI-runner headroom.
+parse              38    2026-07 ratchet — local ~12.5 µs ARM mac (was 50; prior local ~17), 3× CI headroom
+generate           18    2026-07 ratchet — local ~5.9 µs ARM mac (was 50; prior local ~14), 3× CI headroom
+round_trip         60    2026-07 ratchet — local ~18.5 µs ARM mac (was 150; prior local ~40), ~3× CI headroom (round_trip GC variance)

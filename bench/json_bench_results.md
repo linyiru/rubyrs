@@ -1,20 +1,41 @@
 # JSON benchmark — pure canon vs `_json_native` vs CRuby/Oj
 
 Workload: 100-key Object with mixed-type values + 20-element nested
-Array of Hashes (~3.4 KB JSON). 5000 iterations × 3 runs, minimum
-total reported. Driver: `bench/json_bench.rb`.
+Array of Hashes (~3.4 KB JSON). Driver: `bench/json_bench.rb`.
 
-Numbers from 2026-06-01, ARM macOS / Apple Silicon, release builds.
-Rerun with the same driver on your machine for a current snapshot.
+## Current (2026-07-03, ARM macOS / Apple Silicon, ITERS=3000 RUNS=5, best of 3 interleaved rounds)
+
+| Operation   | CRuby 3.4.1 + json 2.20 | Oj :strict | rubyrs `_json_native` | vs CRuby |
+|-------------|-------------------------|------------|------------------------|----------|
+| `parse`     | 14.3 µs/iter            | 24.3 µs/iter | **12.8 µs/iter**     | **0.90×** |
+| `generate`  |  6.2 µs/iter            | 11.6 µs/iter | **5.8 µs/iter**      | **0.94×** |
+| `round_trip`| 21.0 µs/iter            | 35.7 µs/iter | **18.9 µs/iter**     | **0.90×** |
+
+**rubyrs beats CRuby stdlib AND Oj on all three metrics.** Byte
+parity with CRuby is pinned by `tests/diff/json_parity_battery.rb`
+(three-way: CRuby oracle == native accelerator ==
+RUBYRS_JSON_NO_NATIVE pure canon) and an 11.0M-sample fpconv float
+differential (0 mismatches).
+
+Differential micro-fixtures (µs/iter, rubyrs vs CRuby):
+
+| Fixture | rubyrs | CRuby | note |
+|---------|--------|-------|------|
+| `generate {}` | 0.52 | 0.11 | fixed cost, was 3.74 before the no-opts fast path |
+| `parse "{}"`  | 0.73 | 0.12 | was 1.53 |
+| gen 200 integral floats | 5.6 | 5.2 | was 31.2 (5.35×) before the fpconv port |
+| gen 200 fractional floats | 5.6 | 5.2 | was 11.7 |
+| parse keys_repeated (5×200) | 43.0 | 32.0 | was 64.6; residual gap is Hash-alloc/GC-side |
+| parse keys_unique (1000)    | 40.9 | 60.6 | win extended (was 58.7) |
+| gen 3.4 KB / 1 MB | 3.3 / 755 | 3.3 / 834 | large payloads at or ahead of parity |
+
+## Historical (2026-06-01 snapshot, ITERS=5000 RUNS=3 — CRuby was json 2.9-era timings)
 
 | Operation   | CRuby stdlib | Oj :strict | rubyrs pure canon | rubyrs `_json_native` |
 |-------------|--------------|------------|-------------------|------------------------|
-| `parse`     |  ~22 µs/iter | ~28 µs/iter | ~4100 µs/iter (193×) | **~17 µs/iter (0.62× Oj)** |
-| `generate`  |  ~29 µs/iter | ~13 µs/iter | ~4500 µs/iter (163×) | ~14 µs/iter (1.11× Oj)     |
-| `round_trip`|  ~54 µs/iter | ~40 µs/iter | ~8700 µs/iter (175×) | **~40 µs/iter (1.04× Oj)** |
-
-Multiplier vs Oj :strict (the fastest gem-based Ruby JSON impl).
-**Bold** = rubyrs beats both CRuby stdlib AND Oj.
+| `parse`     |  ~22 µs/iter | ~28 µs/iter | ~4100 µs/iter (193×) | ~17 µs/iter |
+| `generate`  |  ~29 µs/iter | ~13 µs/iter | ~4500 µs/iter (163×) | ~14 µs/iter |
+| `round_trip`|  ~54 µs/iter | ~40 µs/iter | ~8700 µs/iter (175×) | ~40 µs/iter |
 
 ## Takeaways
 
@@ -88,6 +109,29 @@ Multiplier vs Oj :strict (the fastest gem-based Ruby JSON impl).
    4096`, ~4× fewer sweep cycles on alloc-and-discard loops.
    Recovers ~70 % of the GC overhead the `RUBYRS_GC_DISABLE=1`
    probe identified.
+6. **2026-07 beat-CRuby pass** — parse 12.8 µs (0.90× CRuby),
+   generate 5.8 µs (0.94×), round_trip 18.9 µs (0.90×); all three
+   now ahead of both CRuby stdlib (json 2.20) and Oj. Four levers,
+   each byte-parity-pinned by `json_parity_battery`:
+   (a) exact fpconv/Grisu2 float port (`json_float.rs`) — CRuby's
+   generator does NOT use Float#to_s; the old `write!("{:.1}")`
+   arm was 5.35× slower AND format-divergent (1e20 emitted as
+   an integer literal). Verified equal to CRuby over 11.0M
+   samples. (b) no-opts wrapper fast paths — `JSON.generate(obj)`
+   built a full State per call (~3.2 µs); `{}` generate dropped
+   3.7 → 0.5 µs. Plus thread-local scratch + exact-size result
+   (the old 4 KB `Vec` move pinned 4 KB behind every small
+   result String). (c) zero-copy `from_slice` parse +
+   `float_roundtrip` (serde's default float parse is 1 ULP off
+   CRuby on tie/boundary decimals). (d) fstring-equivalent key
+   interning (thread-local capped cache — keys parse frozen +
+   shared like CRuby) + visitor Vec pre-sizing; repeated-key
+   parse 64.6 → 43.0 µs, unique-key 58.7 → 40.9 µs.
+   Correctness riders: exact bigints (serde was silently
+   producing Floats; the canon's `to_i` wrapped), 1e999 →
+   Infinity, duplicate-key last-wins, CRuby nesting limits +
+   messages, invalid-UTF-8 generate errors (exact class +
+   message).
 
 ## Reproducing
 
