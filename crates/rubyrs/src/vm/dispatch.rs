@@ -8230,7 +8230,7 @@ impl Vm {
                         if self.fast_str_dup_safe
                             && matches!(&self.stack[ridx], Value::Str(_))
                         {
-                            let v = {
+                            let (v, src) = {
                                 let Value::Str(s) = &self.stack[ridx] else {
                                     unreachable!("just matched")
                                 };
@@ -8239,8 +8239,13 @@ impl Vm {
                                 if let Value::Str(ref ns) = v {
                                     ns.encoding.set(s.encoding.get());
                                 }
-                                v
+                                (v, s.clone())
                             };
+                            // Side-table ivars travel on dup (CRuby
+                            // generic-copy rule) — same helper the
+                            // canonical arm calls; one false branch
+                            // when no string ivars exist.
+                            self.str_ivars_copy_on_dup(&src, &v);
                             self.stack[ridx] = v;
                             return Ok(true);
                         }
@@ -12943,12 +12948,14 @@ impl Vm {
             return Ok(());
         }
         // `obj.instance_variables` — Array of Symbols (with `@`
-        // prefix). Reads ivars from `Value::Object` (Instance) and
-        // `Value::Class` receivers (cls.ivars), staying consistent
-        // with `instance_variable_get` / `_set` which also support
-        // both shapes. Other receivers (primitives, Array/Hash/etc.
-        // that don't carry ivars in rubyrs's heap model) get an
-        // empty Array.
+        // prefix). Reads ivars from `Value::Object` (Instance),
+        // `Value::Class` (cls.ivars), `Value::Array` / `Value::Hash`
+        // (the heap-side subclass ivar tables — plain values carry
+        // them too, matching CRuby where any Array/Hash accepts
+        // ivars), and `Value::Str` (the `str_ivars` side-table),
+        // staying consistent with `instance_variable_get` / `_set`.
+        // Other receivers (immediates — frozen in CRuby, so they
+        // can never have had an ivar set) get an empty Array.
         if &*name == "instance_variables" && args.is_empty() {
             let mut names: Vec<Value> = Vec::new();
             // Instance ivars are stored insertion-ordered (IvarTable's
@@ -13000,6 +13007,12 @@ impl Vm {
                     let key = std::rc::Rc::as_ptr(s) as usize;
                     self.str_ivars.get(&key).map_or_else(Vec::new, |(_, m)| m.keys().copied().collect())
                 }
+                // Array / Hash values: the heap-side ivar tables
+                // (unordered maps, so these keep the alphabetical
+                // sort below — same documented divergence from
+                // CRuby's insertion order as Class / Str).
+                Value::Array(id) => self.heap.array_ivars_clone(*id).into_keys().collect(),
+                Value::Hash(id) => self.heap.hash_ivars_clone(*id).into_keys().collect(),
                 _ => Vec::new(),
             };
             if !ivar_ids.is_empty() {
@@ -13050,13 +13063,30 @@ impl Vm {
         // Instance" assertion this fix avoids; if `Op::StoreIvar`
         // is ever reached for a non-Instance Object slot it will
         // still ICE (a separate hardening concern, not covered
-        // by this PR). The `_ =>` arm below catches every
-        // non-Object/non-Class receiver — Int/Str/Float/Sym/
-        // Nil/Bool/Array/Hash/Range/Proc/etc. — and raises
-        // FrozenError. For mutable shapes like Array/Hash that
-        // CRuby DOES allow ivars on, supporting that surface
-        // would require ivar slots on those HeapObj variants;
-        // explicit out-of-scope until a caller surfaces it.
+        // by this PR).
+        //
+        // Beyond Object/Class: `Value::Str` stores in the
+        // `str_ivars` side-table; `Value::Array` / `Value::Hash`
+        // store in the heap-side ivar tables (`ArrayObj::ivars` /
+        // `HashObj::ivars` — the same slots subclass instances and
+        // the marshal path use; CRuby allows ivars on any Array/
+        // Hash, not just subclass instances). Each of the three is
+        // frozen-guarded: a REAL FrozenError fires only when the
+        // receiver is actually frozen, matching CRuby.
+        //
+        // The `_ =>` arm below catches the remaining receivers.
+        // For the immediates (Int/Float/Sym/Nil/Bool/BigInt/
+        // Rational) and always-frozen kinds (Range, Regexp
+        // literals) the FrozenError it raises IS CRuby's answer
+        // ("can't modify frozen Integer: 5" — every immediate is
+        // frozen in CRuby 3.x, and Range/Regexp-literal values
+        // are frozen too). Known remaining divergence: CRuby
+        // allows ivars on Proc / Method / UnboundMethod /
+        // `Regexp.new` values (all unfrozen there); rubyrs's
+        // BlockHandle / method objects / `CompiledRegex` carry no
+        // ivar table, so those receivers keep the (wrong-class)
+        // FrozenError — genuinely-unsupported, documented decline
+        // until a caller surfaces it.
         // `Object#dup` for plain user-class instances — shallow
         // copy: same (real) class, ivars cloned, NO singleton
         // class, NOT frozen (CRuby dup semantics; clone is the
@@ -13194,6 +13224,15 @@ impl Vm {
                         .cloned()
                         .unwrap_or(Value::Nil)
                 }
+                // Array / Hash values: the heap-side ivar tables
+                // (same slots the subclass StoreIvar / marshal
+                // paths use). Unset → nil, matching CRuby.
+                Value::Array(id) => {
+                    self.heap.array_ivar_get(*id, ivar_id).unwrap_or(Value::Nil)
+                }
+                Value::Hash(id) => {
+                    self.heap.hash_ivar_get(*id, ivar_id).unwrap_or(Value::Nil)
+                }
                 _ => Value::Nil,
             };
             self.stack.push(v);
@@ -13270,6 +13309,37 @@ impl Vm {
                     self.stack.push(value);
                     return Ok(());
                 }
+                // Array / Hash values → the heap-side ivar tables.
+                // Frozen guard first (same message the collection
+                // mutator guards raise), so the FrozenError fires
+                // only when the receiver is ACTUALLY frozen —
+                // pre-fix these fell into the `_` arm below and
+                // raised a misleading FrozenError on unfrozen
+                // receivers.
+                Value::Array(id) => {
+                    let id = *id;
+                    if self.heap.array_frozen(id) {
+                        let shown = self.inspect_value(&Value::Array(id))?;
+                        return Err(self.trap(RubyError::FrozenError {
+                            msg: format!("can't modify frozen Array: {}", shown),
+                        }));
+                    }
+                    self.heap.array_ivar_set(id, ivar_id, value.clone());
+                    self.stack.push(value);
+                    return Ok(());
+                }
+                Value::Hash(id) => {
+                    let id = *id;
+                    if self.heap.hash_frozen(id) {
+                        let shown = self.inspect_value(&Value::Hash(id))?;
+                        return Err(self.trap(RubyError::FrozenError {
+                            msg: format!("can't modify frozen Hash: {}", shown),
+                        }));
+                    }
+                    self.heap.hash_ivar_set(id, ivar_id, value.clone());
+                    self.stack.push(value);
+                    return Ok(());
+                }
                 _ => {
                     let cls = crate::vm::numeric::class_name_for_error(&recv);
                     let inspected = recv.to_inspect(&self.heap, &self.interner);
@@ -13281,8 +13351,9 @@ impl Vm {
         }
         // `obj.instance_variable_defined?(name)` — true iff the
         // named ivar has been set (even to nil). Mirrors the
-        // get/set storage shape: reads the same Instance.ivars
-        // map for Value::Object and Class.ivars for Value::Class.
+        // get/set storage shape: Instance.ivars for Value::Object,
+        // Class.ivars for Value::Class, `str_ivars` for Value::Str,
+        // and the heap-side tables for Value::Array / Value::Hash.
         // Other receivers carry no ivar table, so the answer is
         // always false. The name argument goes through the same
         // `resolve_ivar_name_arg` validator as get/set, so an
@@ -13293,6 +13364,23 @@ impl Vm {
         // minitest's reporting path strips internal state with it.
         if &*name == "remove_instance_variable" && args.len() == 1 {
             let ivar_id = self.resolve_ivar_name_arg(&args[0])?;
+            // Frozen guard BEFORE the removal/NameError decision:
+            // CRuby raises FrozenError on a frozen receiver even
+            // when the named ivar was never set (`[].freeze.
+            // remove_instance_variable(:@nope)` → FrozenError,
+            // not NameError — probed against ruby 3.4).
+            let frozen_cls: Option<&str> = match &recv {
+                Value::Str(s) if s.frozen.get() => Some("String"),
+                Value::Array(id) if self.heap.array_frozen(*id) => Some("Array"),
+                Value::Hash(id) if self.heap.hash_frozen(*id) => Some("Hash"),
+                _ => None,
+            };
+            if let Some(cls_name) = frozen_cls {
+                let shown = self.inspect_value(&recv)?;
+                return Err(self.trap(RubyError::FrozenError {
+                    msg: format!("can't modify frozen {}: {}", cls_name, shown),
+                }));
+            }
             let removed = match &recv {
                 Value::Object(oid) => match self.heap.get_mut(*oid) {
                     crate::heap::HeapObj::Instance(inst) => inst.ivar_remove(ivar_id),
@@ -13303,6 +13391,10 @@ impl Vm {
                     let key = std::rc::Rc::as_ptr(s) as usize;
                     self.str_ivars.get_mut(&key).and_then(|(_, m)| m.remove(&ivar_id))
                 }
+                // Array / Hash values → the heap-side ivar tables
+                // (twin of the get/set arms above).
+                Value::Array(id) => self.heap.array_ivar_remove(*id, ivar_id),
+                Value::Hash(id) => self.heap.hash_ivar_remove(*id, ivar_id),
                 _ => None,
             };
             match removed {
@@ -13332,6 +13424,10 @@ impl Vm {
                     let key = std::rc::Rc::as_ptr(s) as usize;
                     self.str_ivars.get(&key).is_some_and(|(_, m)| m.contains_key(&ivar_id))
                 }
+                // Array / Hash values → the heap-side ivar tables
+                // (twin of the get/set arms above).
+                Value::Array(id) => self.heap.array_ivar_get(*id, ivar_id).is_some(),
+                Value::Hash(id) => self.heap.hash_ivar_get(*id, ivar_id).is_some(),
                 _ => false,
             };
             self.stack.push(Value::Bool(defined));

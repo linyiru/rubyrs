@@ -1045,6 +1045,16 @@ impl Heap {
     pub(crate) fn hash_ivars_clone(&self, id: ObjId) -> crate::intern::FxHashMap<crate::intern::SymId, Value> {
         if let HeapObj::Hash(h) = self.get(id) { h.ivars.clone() } else { crate::intern::FxHashMap::default() }
     }
+    /// Delete `@name` off a (subclass or reflection-carrying) Array,
+    /// returning the removed value (`None` when unset) — the
+    /// `Object#remove_instance_variable` backend for Array values.
+    pub(crate) fn array_ivar_remove(&mut self, id: ObjId, name: crate::intern::SymId) -> Option<Value> {
+        if let HeapObj::Array(a) = self.get_mut(id) { a.ivars.remove(&name) } else { None }
+    }
+    /// Hash twin of `array_ivar_remove`.
+    pub(crate) fn hash_ivar_remove(&mut self, id: ObjId, name: crate::intern::SymId) -> Option<Value> {
+        if let HeapObj::Hash(h) = self.get_mut(id) { h.ivars.remove(&name) } else { None }
+    }
     /// Default-value block stored alongside the Hash by `Hash.new {
     /// |h, k| ... }`. None for hash literals (`{}`) and the common
     /// `Hash.new` no-arg form. `Hash#[]` checks this slot when the

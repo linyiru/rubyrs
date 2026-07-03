@@ -2062,6 +2062,35 @@ pub(crate) fn string_call(
 }
 
 impl Vm {
+    /// Copy the source string's `str_ivars` side-table entry (if
+    /// any) onto a freshly dup/cloned string Value — CRuby copies
+    /// instance variables on BOTH `String#dup` and `String#clone`
+    /// (generic object copy), and rubyrs keeps String ivars in the
+    /// Rc-keyed side-table rather than on RStr. Values are cloned
+    /// shallowly (children shared with the source — CRuby ditto).
+    /// Gated on the set-once `any_str_ivars` flag so the common
+    /// no-string-ivars program pays one false branch. Called by the
+    /// canonical dup/clone arms below AND the walk-bucket
+    /// `String#dup` fast arm (vm/dispatch.rs) so the two paths
+    /// can't drift.
+    pub(crate) fn str_ivars_copy_on_dup(&mut self, src: &Rc<RStr>, dst: &Value) {
+        if !self.any_str_ivars {
+            return;
+        }
+        let src_key = Rc::as_ptr(src) as usize;
+        let Some((_, ivars)) = self.str_ivars.get(&src_key) else {
+            return;
+        };
+        if ivars.is_empty() {
+            return;
+        }
+        let ivars = ivars.clone();
+        if let Value::Str(ns) = dst {
+            let dst_key = Rc::as_ptr(ns) as usize;
+            self.str_ivars.insert(dst_key, (ns.clone(), ivars));
+        }
+    }
+
     /// String methods that need heap access — slice, scan, []=,
     /// %, freeze / frozen? / dup, and all the in-place
     /// mutators. Mirrors the heap-aware half of CRuby's
@@ -2103,6 +2132,7 @@ impl Vm {
                         ns.frozen.set(s.frozen.get());
                         ns.encoding.set(s.encoding.get());
                     }
+                    self.str_ivars_copy_on_dup(&s, &v);
                     return Ok(Some(v));
                 }
                 if name == "dup" && args.is_empty() {
@@ -2115,6 +2145,7 @@ impl Vm {
                     if let Value::Str(ref ns) = v {
                         ns.encoding.set(s.encoding.get());
                     }
+                    self.str_ivars_copy_on_dup(&s, &v);
                     return Ok(Some(v));
                 }
                 // `+@` — unfreeze idiom. CRuby 3.x ALWAYS returns
