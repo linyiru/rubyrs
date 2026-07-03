@@ -102,13 +102,9 @@ pub(crate) struct NativeProto {
     /// `(const_sym, const_ptr, tag_memo, result_memo)` — memoizes the answer for a
     /// non-Object value by its type tag.
     _value_is_a_caches: Vec<Box<std::cell::Cell<(usize, usize, usize, usize)>>>,
-    /// ADR 0035 Ph4/5 — per-LoadIvar-site `(class_ptr, slot)` caches for the guarded
-    /// offset load, filled by `jit_ivar_slot`; addresses baked into the code.
-    _ivar_slot_caches: Vec<Box<std::cell::Cell<(usize, i64)>>>,
-    /// ADR 0035 Ph4/5 — the frame-entry scratch cell `jit_self_ivars` writes self's real
-    /// class ptr into (address baked into the code; the value is read back into SSA
-    /// immediately after the entry call).
-    _self_cls_cell: Option<Box<std::cell::Cell<i64>>>,
+    /// ADR 0035 Ph4/5 — the ivar-frame block for `jit_self_ivars` (`[n, syms.., memo_cls,
+    /// slot per sym]`). Its address is baked into the code, so it must outlive it here.
+    _ivar_frame: Option<Box<[std::cell::Cell<i64>]>>,
     /// Deopt circuit-breaker (set by `Vm::jit_note_deopt`): once a proto has
     /// deopted `JIT_DEOPT_KILL` times at dispatch, serving it is pure waste
     /// (the native attempt runs, bails, and the interpreter re-runs the body
@@ -586,91 +582,48 @@ fn ivar_call_receiver(code: &[Op], ivar_ip: usize, syms: &JitSyms) -> Option<(Sy
     None
 }
 
-/// The pieces a per-site inline ivar-slot access needs (ADR 0035 Ph4/5): the frame-entry
-/// `jit_self_ivars` results (slot-array `base` + `len` + self's real class ptr `self_cls`)
-/// plus the plumbing for the per-site `(class_ptr, slot)` cache's cold fill.
+/// ADR 0035 Ph4/5 — the per-READ address computation over an entry-resolved slot:
+/// `(addr, found)` where `addr = base + slot*16` when `0 <= slot < len`, else `base` — a
+/// safe address to load from (a real slot, or the zeroed dummy buffer when self isn't an
+/// Object), so a caller that loads `addr + offset` before checking `found` never faults.
+/// `slot >= len` (this object never grew to the slot → undefined ivar) and resolve-deopt
+/// (-1) both yield `found == 0`. Branch-free: bounds compare + select.
 #[cfg(feature = "jit-native")]
-struct IvarSlotCtx {
+fn emit_ivar_addr_found(
+    fb: &mut FunctionBuilder,
     base: ClValue,
     len: ClValue,
-    self_cls: ClValue,
-    vm_param: ClValue,
-    self_param: ClValue,
-    slot_resolve_ref: FuncRef,
-    ptr_ty: cranelift_codegen::ir::Type,
-}
-
-/// ADR 0035 Ph4/5 — emit the GUARDED OFFSET LOAD address for a self-ivar: compare `self`'s
-/// class ptr against the per-site cache (offset 0); on a hit use the cached slot (offset 8),
-/// on a miss call [`jit_ivar_slot`] (which interns the name into the class shape and fills
-/// the cache — a permanent verdict, since shape slots never renumber). Returns
-/// `(addr, found)`: `addr = base + slot*16` when `0 <= slot < len`, else `base` — a safe
-/// address to load from (a real slot, or the zeroed dummy buffer when self isn't an Object),
-/// so a caller that loads `addr + offset` before checking `found` never faults. `slot >= len`
-/// (this object never grew to the slot → undefined ivar) and resolve-deopt (-1) both yield
-/// `found == 0`. This replaces the Phase-5 inline sym SCAN LOOP: the flat layout (Ph4) puts
-/// the name→slot mapping on the class, so the per-access cost drops to one compare + one
-/// bounds check + one load.
-#[cfg(feature = "jit-native")]
-fn emit_ivar_slot_addr(
-    fb: &mut FunctionBuilder,
-    cx: &IvarSlotCtx,
-    target_sym: u32,
-    cache_addr: i64,
+    slot: ClValue,
 ) -> (ClValue, ClValue) {
-    let flags = MemFlagsData::new();
-    let cache_const = fb.ins().iconst(cx.ptr_ty, cache_addr);
-    let cached_cls = fb.ins().load(cx.ptr_ty, flags, cache_const, 0);
-    let cached_slot = fb.ins().load(types::I64, flags, cache_const, 8);
-    // hit = self_cls == cached_cls && self_cls != 0 (a non-Object self has cls 0 and must
-    // take the resolve path so it deopts).
-    let eq = fb.ins().icmp(IntCC::Equal, cx.self_cls, cached_cls);
-    let nz = fb.ins().icmp_imm(IntCC::NotEqual, cx.self_cls, 0);
-    let hit = fb.ins().band(eq, nz);
-    let resolve_b = fb.create_block();
-    let merge_b = fb.create_block();
-    fb.append_block_param(merge_b, types::I64); // the slot (or -1)
-    fb.ins().brif(hit, merge_b, &[cached_slot.into()], resolve_b, &[]);
-    // cold: resolve + fill the cache.
-    fb.switch_to_block(resolve_b);
-    fb.seal_block(resolve_b);
-    let symc = fb.ins().iconst(types::I32, target_sym as i64);
-    let call = fb
-        .ins()
-        .call(cx.slot_resolve_ref, &[cx.vm_param, cx.self_param, symc, cache_const]);
-    let resolved = fb.inst_results(call)[0];
-    fb.ins().jump(merge_b, &[resolved.into()]);
-    fb.switch_to_block(merge_b);
-    fb.seal_block(merge_b);
-    let slot = fb.block_params(merge_b)[0];
     // found = 0 <= slot < len (signed: -1 fails the ge; len is a real length ≥ 0).
     let ge = fb.ins().icmp_imm(IntCC::SignedGreaterThanOrEqual, slot, 0);
-    let lt = fb.ins().icmp(IntCC::SignedLessThan, slot, cx.len);
+    let lt = fb.ins().icmp(IntCC::SignedLessThan, slot, len);
     let found = fb.ins().band(ge, lt);
     // addr = found ? base + slot*16 : base (computed unconditionally; only ever LOADED
     // through the select result, so the out-of-range arithmetic is dead on !found).
     let off = fb.ins().imul_imm(slot, 16); // stride = size_of::<Value>()
-    let raw = fb.ins().iadd(cx.base, off);
-    let addr = fb.ins().select(found, raw, cx.base);
+    let raw = fb.ins().iadd(base, off);
+    let addr = fb.ins().select(found, raw, base);
     (addr, found)
 }
 
-/// ADR 0035 Phase 5 (Ph4/5 flat layout) — inline read of an `Int` self-ivar: guarded slot
-/// address, then load the i64 payload, accumulating `ovf` (→ deopt) if the ivar is undefined
-/// (`!found` — hole slots hold Nil, and Nil also fails the tag check) OR not an `Int`. The
-/// `Int` tag is `0` (the first `Value` variant — stable across cfg), so a `tag != 0` check
-/// catches a non-Int ivar, matching `jit_inst_get_int`'s deopt. Returns the i64 value
-/// (garbage on miss/non-Int, but the accumulated `ovf` makes the caller deopt + re-run).
+/// ADR 0035 Phase 5 (Ph4/5 flat layout) — inline read of an `Int` self-ivar from its
+/// entry-resolved slot: bounds-checked address, then load the i64 payload, accumulating
+/// `ovf` (→ deopt) if the ivar is undefined (`!found` — hole slots hold Nil, and Nil also
+/// fails the tag check) OR not an `Int`. The `Int` tag is `0` (the first `Value` variant —
+/// stable across cfg), so a `tag != 0` check catches a non-Int ivar, matching
+/// `jit_inst_get_int`'s deopt. Returns the i64 value (garbage on miss/non-Int, but the
+/// accumulated `ovf` makes the caller deopt + re-run).
 #[cfg(feature = "jit-native")]
 fn emit_ivar_int_read(
     fb: &mut FunctionBuilder,
-    cx: &IvarSlotCtx,
-    sym: u32,
-    cache_addr: i64,
+    base: ClValue,
+    len: ClValue,
+    slot: ClValue,
     ovf_var: Variable,
 ) -> ClValue {
     let flags = MemFlagsData::new();
-    let (addr, found) = emit_ivar_slot_addr(fb, cx, sym, cache_addr);
+    let (addr, found) = emit_ivar_addr_found(fb, base, len, slot);
     let not_found = fb.ins().icmp_imm(IntCC::Equal, found, 0);
     // A flat slot IS the Value: tag (u8) at +0, i64 payload at +8.
     let tag = fb.ins().load(types::I8, flags, addr, 0);
@@ -1124,7 +1077,6 @@ pub(crate) fn compile(
     builder.symbol("jit_ivar_obj_call", jit_ivar_obj_call as *const u8);
     builder.symbol("jit_self_inst", jit_self_inst as *const u8);
     builder.symbol("jit_self_ivars", jit_self_ivars as *const u8);
-    builder.symbol("jit_ivar_slot", jit_ivar_slot as *const u8);
     builder.symbol("jit_inst_get_int", jit_inst_get_int as *const u8);
     builder.symbol("jit_inst_obj_call", jit_inst_obj_call as *const u8);
     builder.symbol("jit_obj_getter_array", jit_obj_getter_array as *const u8);
@@ -1248,27 +1200,18 @@ pub(crate) fn compile(
     let siid = module
         .declare_function("jit_self_inst", Linkage::Import, &siisig)
         .ok()?;
-    // `jit_self_ivars`: (vm, self:ptr, out_cls:ptr) -> (base:i64, len:i64). The ivar SLOT
-    // array + self's real class ptr for the guarded offset loads (ADR 0035 Ph4/5).
+    // `jit_self_ivars`: (vm, self:ptr, frame:ptr) -> (base:i64, len:i64). The ivar SLOT
+    // array + the per-frame memoized slot resolution for the body's baked ivar names
+    // (ADR 0035 Ph4/5) — ONE call per frame, no per-read/per-sym guards. The frame block
+    // packs [n, syms.., memo_cls, slots..] behind a single baked pointer.
     let mut sivsig = module.make_signature();
     sivsig.params.push(AbiParam::new(ptr_ty)); // vm
     sivsig.params.push(AbiParam::new(ptr_ty)); // self ptr
-    sivsig.params.push(AbiParam::new(ptr_ty)); // out: self's real class ptr (0 = not Object)
+    sivsig.params.push(AbiParam::new(ptr_ty)); // frame block
     sivsig.returns.push(AbiParam::new(types::I64)); // base
     sivsig.returns.push(AbiParam::new(types::I64)); // len
     let sivid = module
         .declare_function("jit_self_ivars", Linkage::Import, &sivsig)
-        .ok()?;
-    // `jit_ivar_slot`: (vm, self:ptr, sym:i32, cache:ptr) -> slot:i64 (-1 = deopt). Cold
-    // fill of a per-site (class_ptr, slot) cache (ADR 0035 Ph4/5).
-    let mut ivslotsig = module.make_signature();
-    ivslotsig.params.push(AbiParam::new(ptr_ty)); // vm
-    ivslotsig.params.push(AbiParam::new(ptr_ty)); // self ptr
-    ivslotsig.params.push(AbiParam::new(types::I32)); // ivar sym
-    ivslotsig.params.push(AbiParam::new(ptr_ty)); // cache cell ptr
-    ivslotsig.returns.push(AbiParam::new(types::I64)); // slot or -1
-    let ivslotid = module
-        .declare_function("jit_ivar_slot", Linkage::Import, &ivslotsig)
         .ok()?;
     // `jit_inst_get_int`: (inst_ptr:i64, name:i32) -> (i64, i8). Ivar read from a cached ptr.
     let mut igisig = module.make_signature();
@@ -1525,12 +1468,11 @@ pub(crate) fn compile(
     let mut bool_caches: Vec<Box<std::cell::Cell<(usize, usize, usize)>>> = Vec::new();
     // is_a? caches (4-field; ADR 0034 piece 6).
     let mut value_is_a_caches: Vec<Box<std::cell::Cell<(usize, usize, usize, usize)>>> = Vec::new();
-    // ADR 0035 Ph4/5 — per-LoadIvar-site `(class_ptr, slot)` caches for the guarded offset
-    // load, plus the frame-entry scratch cell `jit_self_ivars` writes self's class ptr into
-    // (read back into SSA immediately after the entry call, so recursion re-writing the cell
-    // later can't corrupt this frame's value).
-    let mut ivar_slot_caches: Vec<Box<std::cell::Cell<(usize, i64)>>> = Vec::new();
-    let mut self_cls_cell: Option<Box<std::cell::Cell<i64>>> = None;
+    // ADR 0035 Ph4/5 — the per-compilation ivar-frame block ([n, syms.., memo_cls,
+    // slots..]) `jit_self_ivars` reads/memoizes; its address is baked into the code, so it
+    // lives on the NativeProto. Slot values are read back into SSA immediately after the
+    // entry call (recursion re-writing the cells later can't corrupt this frame's values).
+    let mut ivar_frame: Option<Box<[std::cell::Cell<i64>]>> = None;
     {
         let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
         // A reference to THIS function, for compiling self-recursive calls
@@ -1557,7 +1499,6 @@ pub(crate) fn compile(
         // Superseded by the inline ivar scan (ADR 0035 Phase 5); kept registered.
         let _self_inst_ref = module.declare_func_in_func(siid, fb.func);
         let self_ivars_ref = module.declare_func_in_func(sivid, fb.func);
-        let ivar_slot_ref = module.declare_func_in_func(ivslotid, fb.func);
         let _inst_get_int_ref = module.declare_func_in_func(igiid, fb.func);
         let _inst_obj_call_ref = module.declare_func_in_func(ioc2id, fb.func);
         let obj_getter_arr_ref = module.declare_func_in_func(ogaid, fb.func);
@@ -1664,31 +1605,70 @@ pub(crate) fn compile(
             matches!(op, Op::LoadIvar(..))
                 || matches!(op, Op::CallNoRecv(name, 0, _) if getters.contains_key(name))
         });
+        // The distinct self-ivar names the body touches — each gets its slot resolved ONCE
+        // at frame entry (below); per-read code then only bounds-checks + loads. (Slot
+        // indices are loop-invariant: shapes never renumber and self's class is fixed for
+        // the frame.)
+        let mut ivar_syms: Vec<u32> = Vec::new();
+        for op in code {
+            let s = match op {
+                Op::LoadIvar(s, _) => Some(s.0),
+                Op::CallNoRecv(name, 0, _) if getters.contains_key(name) => {
+                    Some(getters[name].0)
+                }
+                _ => None,
+            };
+            if let Some(s) = s
+                && !ivar_syms.contains(&s)
+            {
+                ivar_syms.push(s);
+            }
+        }
         let self_ivars_base = fb.declare_var(types::I64);
         let self_ivars_len = fb.declare_var(types::I64);
-        let self_cls_var = fb.declare_var(types::I64);
+        // sym → entry-resolved slot variable (i64; -1 = unresolvable → reads deopt).
+        let mut ivar_slot_vars: FxHashMap<u32, Variable> = FxHashMap::default();
         if reads_self_ivar {
-            // Baked scratch cell for the class-ptr out-param; read back into SSA
-            // immediately (before any body code can recurse and re-write it).
-            let cell = Box::new(std::cell::Cell::new(0i64));
-            let cell_addr = &*cell as *const std::cell::Cell<i64> as i64;
-            self_cls_cell = Some(cell);
-            let cell_const = fb.ins().iconst(ptr_ty, cell_addr);
-            let c = fb.ins().call(self_ivars_ref, &[vm_param, self_param, cell_const]);
+            // Bake the frame block ([n, syms.., memo_cls, slots..]); ONE primitive call
+            // resolves the frame's base/len AND every slot (memoized by class inside the
+            // primitive). Read the slots back into SSA immediately (before any body code
+            // can recurse and re-write the cells).
+            let n = ivar_syms.len();
+            let mut block: Vec<std::cell::Cell<i64>> = Vec::with_capacity(2 + 2 * n);
+            block.push(std::cell::Cell::new(n as i64));
+            for s in &ivar_syms {
+                block.push(std::cell::Cell::new(*s as i64));
+            }
+            block.push(std::cell::Cell::new(0i64)); // memo_cls
+            for _ in 0..n {
+                block.push(std::cell::Cell::new(-1i64)); // slots
+            }
+            let block: Box<[std::cell::Cell<i64>]> = block.into_boxed_slice();
+            let frame_addr = block.as_ptr() as i64;
+            ivar_frame = Some(block);
+            let frame_const = fb.ins().iconst(ptr_ty, frame_addr);
+            let c = fb
+                .ins()
+                .call(self_ivars_ref, &[vm_param, self_param, frame_const]);
             let (b, l) = {
                 let r = fb.inst_results(c);
                 (r[0], r[1])
             };
-            let flags = MemFlagsData::new();
-            let cls = fb.ins().load(types::I64, flags, cell_const, 0);
             fb.def_var(self_ivars_base, b);
             fb.def_var(self_ivars_len, l);
-            fb.def_var(self_cls_var, cls);
+            let flags = MemFlagsData::new();
+            for (k, s) in ivar_syms.iter().enumerate() {
+                let slot = fb
+                    .ins()
+                    .load(types::I64, flags, frame_const, (8 * (2 + n + k)) as i32);
+                let v = fb.declare_var(types::I64);
+                fb.def_var(v, slot);
+                ivar_slot_vars.insert(*s, v);
+            }
         } else {
             let z = fb.ins().iconst(types::I64, 0);
             fb.def_var(self_ivars_base, z);
             fb.def_var(self_ivars_len, z);
-            fb.def_var(self_cls_var, z);
         }
         fb.ins().jump(blocks[0].unwrap(), &[]);
         fb.seal_block(entry);
@@ -1993,20 +1973,11 @@ pub(crate) fn compile(
                             acc_ovf(&mut fb, of);
                             r
                         } else {
-                            let cx = IvarSlotCtx {
-                                base: fb.use_var(self_ivars_base),
-                                len: fb.use_var(self_ivars_len),
-                                self_cls: fb.use_var(self_cls_var),
-                                vm_param,
-                                self_param,
-                                slot_resolve_ref: ivar_slot_ref,
-                                ptr_ty,
-                            };
-                            let cell = Box::new(std::cell::Cell::new((0usize, -1i64)));
-                            let cache_addr =
-                                &*cell as *const std::cell::Cell<(usize, i64)> as i64;
-                            ivar_slot_caches.push(cell);
-                            emit_ivar_int_read(&mut fb, &cx, s.0, cache_addr, ovf_var)
+                            let base = fb.use_var(self_ivars_base);
+                            let len = fb.use_var(self_ivars_len);
+                            let slot_var = *ivar_slot_vars.get(&s.0)?;
+                            let slot = fb.use_var(slot_var);
+                            emit_ivar_int_read(&mut fb, base, len, slot, ovf_var)
                         };
                         stack.push((res, Kind::Int));
                         if fuse_len {
@@ -2469,21 +2440,12 @@ pub(crate) fn compile(
                         // present in jit-native).
                         Kind::ObjectIvar(iv) if view_addr != 0 => {
                             let flags = MemFlagsData::new();
-                            let cx = IvarSlotCtx {
-                                base: fb.use_var(self_ivars_base),
-                                len: fb.use_var(self_ivars_len),
-                                self_cls: fb.use_var(self_cls_var),
-                                vm_param,
-                                self_param,
-                                slot_resolve_ref: ivar_slot_ref,
-                                ptr_ty,
-                            };
-                            let cell = Box::new(std::cell::Cell::new((0usize, -1i64)));
-                            let slot_cache_addr =
-                                &*cell as *const std::cell::Cell<(usize, i64)> as i64;
-                            ivar_slot_caches.push(cell);
+                            let base = fb.use_var(self_ivars_base);
+                            let len = fb.use_var(self_ivars_len);
+                            let slot_var = *ivar_slot_vars.get(&iv)?;
+                            let slot = fb.use_var(slot_var);
                             let (slot_addr, found) =
-                                emit_ivar_slot_addr(&mut fb, &cx, iv, slot_cache_addr);
+                                emit_ivar_addr_found(&mut fb, base, len, slot);
                             // The receiver is the flat slot's Value (tag at +0). It must be
                             // an Object; `object_tag` is its `#[repr(u8)]` discriminant
                             // (cfg-dependent, so computed here at compile time, not baked
@@ -2549,19 +2511,11 @@ pub(crate) fn compile(
                 // `jit_ivar_get_int`, no frame/dispatch. A non-Int ivar deopts.
                 Op::CallNoRecv(name, 0, _) if getters.contains_key(name) => {
                     let ivar = getters[name];
-                    let cx = IvarSlotCtx {
-                        base: fb.use_var(self_ivars_base),
-                        len: fb.use_var(self_ivars_len),
-                        self_cls: fb.use_var(self_cls_var),
-                        vm_param,
-                        self_param,
-                        slot_resolve_ref: ivar_slot_ref,
-                        ptr_ty,
-                    };
-                    let cell = Box::new(std::cell::Cell::new((0usize, -1i64)));
-                    let cache_addr = &*cell as *const std::cell::Cell<(usize, i64)> as i64;
-                    ivar_slot_caches.push(cell);
-                    let res = emit_ivar_int_read(&mut fb, &cx, ivar.0, cache_addr, ovf_var);
+                    let base = fb.use_var(self_ivars_base);
+                    let len = fb.use_var(self_ivars_len);
+                    let slot_var = *ivar_slot_vars.get(&ivar.0)?;
+                    let slot = fb.use_var(slot_var);
+                    let res = emit_ivar_int_read(&mut fb, base, len, slot, ovf_var);
                     stack.push((res, Kind::Int));
                 }
                 // 2-arg self-recursive call (`walk(child, acc)`, ADR 0034 piece 8):
@@ -2952,8 +2906,7 @@ pub(crate) fn compile(
         _obj_call_caches: obj_call_caches,
         _bool_caches: bool_caches,
         _value_is_a_caches: value_is_a_caches,
-        _ivar_slot_caches: ivar_slot_caches,
-        _self_cls_cell: self_cls_cell,
+        _ivar_frame: ivar_frame,
         dispatch_dead: std::cell::Cell::new(false),
     })
 }
@@ -5551,69 +5504,65 @@ pub(crate) struct IvarsRet {
     len: i64,
 }
 
-/// ADR 0035 Phase 5 (Ph4/5 flat layout) — fetch `self`'s ivar slot array (base + length)
-/// ONCE per native frame, and write `self`'s REAL class pointer (`Rc::as_ptr(inst.class)` —
-/// the ivar-shape owner, NOT the singleton-aware `class_ptr_of`) to `out_cls`, so the body's
-/// self-ivar reads become shape-guarded OFFSET LOADS over that array with no per-read
-/// primitive call. `len == 0` / `*out_cls == 0` if `self` is not an Object Instance (→ every
-/// per-site slot guard misses and the resolve primitive deopts). The base points into the
-/// Instance's `SmallVec` (inline buffer or spilled heap) and is valid for the GC-free
-/// duration of the compiled method — the heap does not move while one runs.
+/// ADR 0035 Phase 5 (Ph4/5 flat layout) — ONE call per native frame: fetch `self`'s ivar
+/// slot array (base + length) AND resolve every baked ivar name the body reads into the
+/// per-compilation `cells` block, behind a per-frame class memo: `cells[0]` holds the class
+/// ptr the slots were resolved for (`Rc::as_ptr(inst.class)` — the ivar-shape owner) and
+/// `cells[1..1+n]` the slots for `syms[0..n]`. Same class as last frame → the memo hits and
+/// NOTHING is resolved (slot indices are permanent per class); a different class (sibling
+/// subclasses at a shared method) re-resolves via the borrow-free shape scan — the class's
+/// hot `names` vec, ≤ a handful of compares per name. The compiled code then just LOADS the
+/// slots — no per-read guard, no per-sym call sites. `len == 0` / memo class 0 if `self` is
+/// not an Object Instance (→ every read is out of bounds → deopt). The base points into the
+/// Instance's `SmallVec` and is valid for the GC-free duration of the compiled method.
 pub(crate) unsafe extern "C" fn jit_self_ivars(
     vm: *const crate::vm::Vm,
     self_recv: *const Value,
-    out_cls: *mut i64,
+    frame: *mut i64,
 ) -> IvarsRet {
+    // Frame-block layout (all i64): [0]=n, [1..1+n]=syms, [1+n]=memo_cls, [2+n..2+2n]=slots.
+    let n = unsafe { frame.read() };
+    let syms = unsafe { frame.add(1) };
+    let cells = unsafe { frame.add(1 + n as usize) }; // [memo_cls, slot0, ...]
     // A non-Object self yields `len == 0` and a base that points at a small zeroed buffer
     // rather than null — so a not-found read's dummy load (`base + offset`) touches valid,
     // zeroed memory instead of faulting. (An instance method always has an Object self, so
-    // this is belt-and-suspenders.)
+    // this is belt-and-suspenders.) The memo class is zeroed so the next Object frame
+    // re-resolves.
     static DUMMY: [u8; 64] = [0; 64];
-    unsafe { out_cls.write(0) };
     let dummy = IvarsRet { base: DUMMY.as_ptr() as i64, len: 0 };
     if self_recv.is_null() {
+        unsafe { cells.write(0) };
         return dummy;
     }
     let oid = match unsafe { &*self_recv } {
         Value::Object(o) => *o,
-        _ => return dummy,
+        _ => {
+            unsafe { cells.write(0) };
+            return dummy;
+        }
     };
     match unsafe { &*vm }.heap.get(oid) {
         crate::heap::HeapObj::Instance(inst) => {
-            unsafe { out_cls.write(std::rc::Rc::as_ptr(&inst.class) as i64) };
+            let cls = std::rc::Rc::as_ptr(&inst.class) as i64;
+            if unsafe { cells.read() } != cls {
+                for k in 0..n as usize {
+                    let sym = crate::intern::SymId(unsafe { syms.add(k).read() } as u32);
+                    // INTERN so a body reading a never-assigned name still gets a
+                    // permanent slot (the read sees `slot >= len` → nil/deopt, exactly
+                    // the interpreter's undefined-ivar semantics).
+                    let slot = inst.class.ivar_slot_intern(sym) as i64;
+                    unsafe { cells.add(1 + k).write(slot) };
+                }
+                unsafe { cells.write(cls) };
+            }
             let (ptr, len) = inst.ivars.as_ptr_len();
             IvarsRet { base: ptr as i64, len: len as i64 }
         }
-        _ => dummy,
-    }
-}
-
-/// ADR 0035 Ph4/5 — slow-path slot resolution behind the per-site `(class_ptr, slot)` cache
-/// the compiled code guards against `self`'s class (from [`jit_self_ivars`]'s `out_cls`).
-/// INTERNS the name into the class's union shape (so a hot site that reads a never-assigned
-/// ivar still gets a permanent slot to cache — the read then sees `slot >= len` → nil/deopt,
-/// exactly the interpreter's undefined-ivar semantics) and fills the cache. Returns the slot,
-/// or -1 when `self` isn't an Object Instance (→ deopt; the cache stays unfilled).
-pub(crate) unsafe extern "C" fn jit_ivar_slot(
-    vm: *const crate::vm::Vm,
-    self_recv: *const Value,
-    sym: u32,
-    cache: *const std::cell::Cell<(usize, i64)>,
-) -> i64 {
-    if self_recv.is_null() {
-        return -1;
-    }
-    let oid = match unsafe { &*self_recv } {
-        Value::Object(o) => *o,
-        _ => return -1,
-    };
-    match unsafe { &*vm }.heap.get(oid) {
-        crate::heap::HeapObj::Instance(inst) => {
-            let slot = inst.class.ivar_slot_intern(crate::intern::SymId(sym)) as i64;
-            unsafe { &*cache }.set((std::rc::Rc::as_ptr(&inst.class) as usize, slot));
-            slot
+        _ => {
+            unsafe { cells.write(0) };
+            dummy
         }
-        _ => -1,
     }
 }
 

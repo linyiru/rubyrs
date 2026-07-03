@@ -1642,4 +1642,71 @@ mod tests {
             "unexpected"
         );
     }
+
+    /// ADR 0035 Ph4/5 — flat-ivar snapshot roundtrip: image an object
+    /// graph whose instances carry MANY ivars (past the inline-4 slots),
+    /// assigned in DIFFERENT orders across instances of the same class
+    /// (union-shape stressor), including SHARED references and a
+    /// removed-then-readded name. Restore into a fresh VM and verify
+    /// `instance_variables` ORDER (per-object assignment order — the
+    /// name-keyed image format must reproduce it, independent of the
+    /// restored class's shape slot numbering) + values + ref sharing.
+    #[test]
+    fn restore_flat_ivars_order_and_sharing() {
+        let defs = r#"
+            class Node
+              def fwd
+                @a = 1; @b = 2; @c = 3; @d = 4; @e = 5; @f = 6
+                self
+              end
+              def rev(shared)
+                @f = shared; @e = shared; @d = 40; @c = 30; @b = 20; @a = 10
+                self
+              end
+            end
+            SHARED = [:s]
+            FWD = Node.new.fwd
+            REV = Node.new.rev(SHARED)
+            HOLEY = Node.new
+            HOLEY.instance_variable_set(:@e, :only_e)
+            REM = Node.new.fwd
+            REM.remove_instance_variable(:@a)
+            REM.instance_variable_set(:@a, :readded)
+        "#;
+        let probe = r#"
+            [ FWD.instance_variables.inspect,
+              REV.instance_variables.inspect,
+              HOLEY.instance_variables.inspect,
+              REM.instance_variables.inspect,
+              REV.instance_variable_get(:@e).equal?(SHARED).to_s,
+              REV.instance_variable_get(:@f).equal?(SHARED).to_s,
+              HOLEY.instance_variable_get(:@a).inspect,
+              REM.instance_variable_get(:@a).inspect ].join("|")
+        "#;
+
+        let mut loader = crate::Runtime::new();
+        loader.eval(defs, "defs").expect("defs");
+        let graph = capture(&loader.vm);
+        let bytes = to_bytes(&loader.vm, &graph).expect("serialize");
+        let img = from_bytes(&bytes).expect("deserialize");
+
+        let mut restored = crate::Runtime::new();
+        restore(&mut restored.vm, img);
+        let vr = restored.eval(probe, "probe").expect("restored probe");
+
+        let mut cold = crate::Runtime::new();
+        cold.eval(defs, "defs").expect("cold defs");
+        let vc = cold.eval(probe, "probe").expect("cold probe");
+
+        let as_s = |v: &crate::value::Value| match v {
+            crate::value::Value::Str(s) => s.to_string_lossy(),
+            other => format!("{other:?}"),
+        };
+        assert_eq!(as_s(&vr), as_s(&vc), "restored ivar graph != cold");
+        assert_eq!(
+            as_s(&vr),
+            "[:@a, :@b, :@c, :@d, :@e, :@f]|[:@f, :@e, :@d, :@c, :@b, :@a]|[:@e]|[:@b, :@c, :@d, :@e, :@f, :@a]|true|true|nil|:readded",
+            "unexpected flat-ivar roundtrip shape"
+        );
+    }
 }

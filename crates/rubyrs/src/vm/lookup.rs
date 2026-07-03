@@ -202,9 +202,23 @@ pub(crate) fn ivar_slot_cached(
     let idx = cid as usize;
     if cid != u32::MAX
         && let Some(e) = caches.get(idx)
-        && e.class_ptr == cls_ptr
+        && e.class_ptr != 0
     {
-        return e.slot;
+        // Tier 1: same class → cached slot, one compare.
+        if e.class_ptr == cls_ptr {
+            return e.slot;
+        }
+        // Tier 2 (polymorphism-proof): a DIFFERENT class of the same
+        // family usually maps `name_id` to the SAME slot (sibling
+        // subclasses build their shapes through the same initialize
+        // order — rubocop's ~40 Node subclasses at one site). One
+        // indexed compare verifies exactly; repatch the class so a
+        // run of the same class takes tier 1 again.
+        let slot = e.slot;
+        if inst.class.ivar_shape_name_at(slot) == Some(name_id) {
+            caches[idx].class_ptr = cls_ptr;
+            return slot;
+        }
     }
     let slot = inst.class.ivar_slot_intern(name_id);
     if cid != u32::MAX {
@@ -239,6 +253,29 @@ impl Vm {
         if self.ivar_caches.len() < n {
             self.ivar_caches.resize(n, IvarSiteCache::default());
         }
+    }
+
+    /// Frame-free getter serve read (ADR 0035 Ph4/5): the per-proto
+    /// CONTENT-VERIFIED slot cache (`Proto::getter_slot`) → direct
+    /// slot read; verify miss → shape intern + refill. `&self` only —
+    /// interior mutability (`Cell` + shape `RefCell`) keeps the
+    /// dispatch call sites borrow-free.
+    #[inline]
+    pub(crate) fn getter_ivar_read(
+        &self,
+        id: crate::value::ObjId,
+        proto_idx: usize,
+        gsym: SymId,
+    ) -> crate::value::Value {
+        let inst = self.heap.instance(id);
+        let cell = &self.protos[proto_idx].getter_slot;
+        let slot = cell.get();
+        if slot != u32::MAX && inst.class.ivar_shape_name_at(slot) == Some(gsym) {
+            return inst.ivars.read_slot_raw(slot);
+        }
+        let s = inst.class.ivar_slot_intern(gsym);
+        cell.set(s);
+        inst.ivars.read_slot_raw(s)
     }
 
     /// Per-call-site cached lookup. `cache_id` is the slot from the

@@ -1441,6 +1441,7 @@ impl ProtoBuilder {
         Proto {
             name, params, n_required_positional, local_names,
             getter_ivar,
+            getter_slot: std::cell::Cell::new(u32::MAX),
             // Default false; the parse entries (file load / require /
             // eval) stamp `true` across the whole proto range when the
             // source carried a `# frozen_string_literal: true` comment.

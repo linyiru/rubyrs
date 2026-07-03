@@ -1268,7 +1268,7 @@ impl Heap {
         while let Some(id) = worklist.pop() {
             match &self.slots[id.0 as usize] {
                 Slot::Live(HeapObj::Instance(inst)) => {
-                    for v in inst.ivars.values() {
+                    for v in inst.ivars.values_raw() {
                         Heap::visit_value(v, &mut self.marks, &mut worklist);
                     }
                     // Mark the instance's CLASS graph. An ANONYMOUS class

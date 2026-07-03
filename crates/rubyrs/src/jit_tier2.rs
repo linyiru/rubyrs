@@ -466,16 +466,20 @@ unsafe extern "C" fn t2_ivar_get(
     vm: *mut crate::vm::Vm,
     oid: i64,
     sym: i64,
-    cid: i64,
+    _cid: i64,
     out: *mut i64,
 ) -> i64 {
     let vm = unsafe { &mut *vm };
     let name_id = SymId(sym as u32);
     let id = crate::value::ObjId(oid as u32);
     let inst = vm.heap.instance(id);
-    let slot =
-        crate::vm::lookup::ivar_slot_cached(&mut vm.ivar_caches, inst, name_id, cid as u32);
-    let v = inst.ivars.read_slot_raw(slot);
+    // Borrow-free shape scan (the class's names vec is hot for every
+    // instance) — measured FASTER here than the per-site cid cache,
+    // whose cache-vector line is an extra memory touch per op.
+    let v = match inst.class.ivar_slot_lookup_fast(name_id) {
+        Some(slot) => inst.ivars.read_slot_raw(slot),
+        None => Value::Nil,
+    };
     if t2_tags().trivial_mask & (1u64 << tag_of(&v)) != 0 {
         let w = value_words(&v);
         // `v` is a clone; trivially-tagged values have no Drop side
@@ -502,7 +506,7 @@ unsafe extern "C" fn t2_ivar_get(
 unsafe extern "C" fn t2_ivar_set_v(
     vm: *mut crate::vm::Vm,
     sym: i64,
-    cid: i64,
+    _cid: i64,
     w0: i64,
     w1: i64,
     ip: i64,
@@ -527,12 +531,13 @@ unsafe extern "C" fn t2_ivar_set_v(
     match &self_val {
         Value::Object(id) => {
             let inst = vm.heap.instance_mut(*id);
-            let slot = crate::vm::lookup::ivar_slot_cached(
-                &mut vm.ivar_caches,
-                inst,
-                name_id,
-                cid as u32,
-            );
+            // Writes must INTERN (first assignment defines the name);
+            // the fast lookup covers the overwhelmingly common
+            // already-known case without the site-cache line touch.
+            let slot = match inst.class.ivar_slot_lookup_fast(name_id) {
+                Some(s) => s,
+                None => inst.class.ivar_slot_intern(name_id),
+            };
             inst.ivars.write_slot(slot, v);
         }
         Value::Class(c) => {
@@ -1377,20 +1382,17 @@ unsafe extern "C" fn t2_store_local(vm: *mut crate::vm::Vm, slot: i64) {
     }
 }
 
-unsafe extern "C" fn t2_load_ivar(vm: *mut crate::vm::Vm, name_id: i64, cid: i64) {
+unsafe extern "C" fn t2_load_ivar(vm: *mut crate::vm::Vm, name_id: i64, _cid: i64) {
     let vm = unsafe { &mut *vm };
     let name_id = SymId(name_id as u32);
     let self_val = vm.frames.last().expect("ICE: LoadIvar no frame").self_val.clone();
     let v = match &self_val {
         Value::Object(id) => {
             let inst = vm.heap.instance(*id);
-            let slot = crate::vm::lookup::ivar_slot_cached(
-                &mut vm.ivar_caches,
-                inst,
-                name_id,
-                cid as u32,
-            );
-            inst.ivars.read_slot_raw(slot)
+            match inst.class.ivar_slot_lookup_fast(name_id) {
+                Some(slot) => inst.ivars.read_slot_raw(slot),
+                None => Value::Nil,
+            }
         }
         Value::Class(c) => c.ivars.borrow().get(&name_id).cloned().unwrap_or(Value::Nil),
         Value::Hash(id) => vm.heap.hash_ivar_get(*id, name_id).unwrap_or(Value::Nil),

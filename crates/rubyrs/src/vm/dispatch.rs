@@ -16219,8 +16219,8 @@ impl Vm {
             return None;
         }
         let ivar = self.protos[g.proto_idx].getter_ivar?;
-        let tsym = match self.heap.instance(recv_id).ivar_get(ivar) {
-            Some(Value::Sym(s)) => *s,
+        let tsym = match self.getter_ivar_read(recv_id, g.proto_idx, ivar) {
+            Value::Sym(s) => s,
             _ => return None,
         };
         // Phase 1: `rest.include?(g)` unrolled over the stack args.
@@ -16687,12 +16687,9 @@ impl Vm {
         if argc == 0
             && let Some(gsym) = self.protos[m.proto_idx].getter_ivar
         {
-            let v = self
-                .heap
-                .instance(id)
-                .ivar_get(gsym)
-                .cloned()
-                .unwrap_or(Value::Nil);
+            // ADR 0035 Ph4/5: content-verified per-proto slot cache →
+            // direct slot read (holes read Nil, matching Op::LoadIvar).
+            let v = self.getter_ivar_read(id, m.proto_idx, gsym);
             // argc == 0 → the receiver is the stack top; overwrite it
             // with the result (pop recv + push value in one move).
             self.stack[recv_idx] = v;
@@ -16900,12 +16897,8 @@ impl Vm {
             && m.closure.is_none()
             && let Some(gsym) = self.protos[m.proto_idx].getter_ivar
         {
-            let v = self
-                .heap
-                .instance(id)
-                .ivar_get(gsym)
-                .cloned()
-                .unwrap_or(Value::Nil);
+            // ADR 0035 Ph4/5: content-verified per-proto slot cache.
+            let v = self.getter_ivar_read(id, m.proto_idx, gsym);
             self.stack.push(v);
             return Ok(true);
         }
@@ -21682,6 +21675,7 @@ impl Vm {
                 // for the Locals::Stack representation.
                 creates_block: true,
                 getter_ivar: None,
+                getter_slot: std::cell::Cell::new(u32::MAX),
                 frozen_string_literal: false, line_base: 1, source_encoding: None,
                 code: vec![
                     Op::LoadLocal(0),
@@ -21793,6 +21787,7 @@ impl Vm {
                 // Stack-eligible.
                 creates_block: true,
                 getter_ivar: None,
+                getter_slot: std::cell::Cell::new(u32::MAX),
                 frozen_string_literal: false, line_base: 1, source_encoding: None,
                 code: vec![
                     Op::LoadLocal(0),                   // [outer]
@@ -25527,6 +25522,7 @@ impl Vm {
                 n_locals: 0,
                 creates_block: false,
                 getter_ivar: Some(ivar_id),
+                getter_slot: std::cell::Cell::new(u32::MAX),
                 frozen_string_literal: false, line_base: 1, source_encoding: None,
                 code: vec![Op::LoadIvar(ivar_id, crate::compiler::alloc_cid(&mut self.cache_counter.ivar)), Op::Return],
                 op_spans: vec![Span::ZERO; 2],
@@ -25570,6 +25566,7 @@ impl Vm {
                 n_locals: 1,
                 creates_block: false,
                 getter_ivar: None,
+                getter_slot: std::cell::Cell::new(u32::MAX),
                 frozen_string_literal: false, line_base: 1, source_encoding: None,
                 code: vec![Op::LoadLocal(0), Op::Dup, Op::StoreIvar(ivar_id, crate::compiler::alloc_cid(&mut self.cache_counter.ivar)), Op::Return],
                 op_spans: vec![Span::ZERO; 4],
@@ -25687,6 +25684,7 @@ impl Vm {
             n_locals: 1,
             creates_block: false,
             getter_ivar: None,
+            getter_slot: std::cell::Cell::new(u32::MAX),
             frozen_string_literal: false, line_base: 1, source_encoding: None,
             code: vec![
                 Op::LoadSelf,
@@ -25880,6 +25878,7 @@ impl Vm {
             n_locals: 1,
             creates_block: false,
             getter_ivar: None,
+            getter_slot: std::cell::Cell::new(u32::MAX),
             frozen_string_literal: false, line_base: 1, source_encoding: None,
             code: vec![
                 Op::LoadLocal(0),
@@ -26056,6 +26055,7 @@ impl Vm {
             n_locals: 1,
             creates_block: false,
             getter_ivar: None,
+            getter_slot: std::cell::Cell::new(u32::MAX),
             frozen_string_literal: false, line_base: 1, source_encoding: None,
             code: vec![Op::LoadNil, Op::Return],
             op_spans: vec![Span::ZERO; 2],

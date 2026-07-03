@@ -1077,6 +1077,38 @@ impl Class {
     pub(crate) fn ivar_slot_intern(&self, sym: SymId) -> u32 {
         self.ivar_shape.borrow_mut().intern(sym)
     }
+
+    /// Borrow-flag-free read of `names[slot]` for the HOT slot-cache
+    /// verify (ADR 0035 Ph4/5): sibling subclasses build their shapes
+    /// through the same `initialize` order, so a cached slot usually
+    /// maps to the same name on a DIFFERENT class of the same family —
+    /// one indexed compare confirms it without a scan, making the
+    /// caches polymorphism-proof (`names[slot] == sym` ⟺ slot is
+    /// right, by table injectivity).
+    ///
+    /// SAFETY: single-threaded VM; the only mutator of `ivar_shape` is
+    /// `ivar_slot_intern` (a `borrow_mut` strictly contained in its own
+    /// call), and no caller of this read holds one open — so the raw
+    /// `as_ptr` read never aliases a live `&mut`. Skipping the RefCell
+    /// flag traffic matters: this sits on every cached ivar access.
+    #[inline]
+    pub(crate) fn ivar_shape_name_at(&self, slot: u32) -> Option<SymId> {
+        let shape = unsafe { &*self.ivar_shape.as_ptr() };
+        shape.names.get(slot as usize).copied()
+    }
+
+    /// Borrow-flag-free full slot lookup for the hottest read helpers
+    /// (tier-2's per-op ivar helpers): the class's `names` vec is
+    /// shared by EVERY instance of the class, so it is essentially
+    /// always in L1 — a 4-byte-stride scan of it beats both the old
+    /// per-object pair scan (24B stride over per-object memory) and a
+    /// per-site cache probe (an extra cacheline of cache-vector
+    /// traffic per op). Same SAFETY argument as `ivar_shape_name_at`.
+    #[inline]
+    pub(crate) fn ivar_slot_lookup_fast(&self, sym: SymId) -> Option<u32> {
+        let shape = unsafe { &*self.ivar_shape.as_ptr() };
+        shape.lookup(sym)
+    }
 }
 
 #[derive(Debug)]
@@ -1319,10 +1351,17 @@ impl IvarTable {
     pub(crate) fn is_empty(&self) -> bool {
         self.order.is_empty()
     }
-    /// Defined values in assignment order — classless, so the GC mark
-    /// path stays a plain iteration (holes are Nil and never visited).
+    /// Defined values in assignment order — classless, so semantic
+    /// consumers need no shape access.
     pub(crate) fn values(&self) -> impl Iterator<Item = &Value> {
         self.order.iter().map(|&s| &self.slots[s as usize])
+    }
+    /// ALL slots including holes, for the GC mark walk: a straight
+    /// slice iteration (no `order` indirection, no bounds re-checks);
+    /// holes are Nil — a no-op to mark — so this visits exactly the
+    /// defined values plus free Nils.
+    pub(crate) fn values_raw(&self) -> impl Iterator<Item = &Value> {
+        self.slots.iter()
     }
     /// Defined names in assignment order (needs the owning class to
     /// resolve slot → name).

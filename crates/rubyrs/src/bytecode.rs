@@ -802,6 +802,13 @@ impl BinOpKind {
     }
 }
 
+/// Deserialize default for `Proto::getter_slot` — the cache starts
+/// unfilled (`u32::MAX`; `Cell::default()` would be 0, a VALID slot).
+#[cfg(feature = "preamble-cache")]
+fn getter_slot_unfilled() -> std::cell::Cell<u32> {
+    std::cell::Cell::new(u32::MAX)
+}
+
 #[derive(Debug)]
 #[cfg_attr(feature = "preamble-cache", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct Proto {
@@ -951,6 +958,17 @@ pub(crate) struct Proto {
     /// receiver's `@sym` ivar directly, skipping the frame push +
     /// 2-op run + frame pop. `None` for everything else.
     pub(crate) getter_ivar: Option<crate::intern::SymId>,
+    /// ADR 0035 Ph4/5 — CONTENT-VERIFIED flat-ivar slot cache for the
+    /// frame-free getter serves (dispatch reads `getter_ivar` directly
+    /// with no frame): the last slot this getter resolved to.
+    /// Verified per-serve against the receiver class's shape
+    /// (`ivar_shape_name_at(slot) == getter_ivar`), so it hits across
+    /// SIBLING SUBCLASSES too (same initialize order ⇒ same slot
+    /// numbering) — rubocop's ~40 Node subclasses share one attr_reader
+    /// proto. `u32::MAX` = unfilled. Runtime-only: not serialized (the
+    /// verify makes a stale value merely a one-time refill).
+    #[cfg_attr(feature = "preamble-cache", serde(skip, default = "getter_slot_unfilled"))]
+    pub(crate) getter_slot: std::cell::Cell<u32>,
     pub(crate) code: Vec<Op>,
     /// Parallel to `code`: op_spans[i] is the source span where code[i] was emitted.
     pub(crate) op_spans: Vec<Span>,
