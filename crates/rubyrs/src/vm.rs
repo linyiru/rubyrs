@@ -2685,6 +2685,7 @@ impl Vm {
             jit_tier2_noblock: std::env::var_os("RUBYRS_JIT_TIER2_NOBLOCK").is_some(),
             #[cfg(feature = "jit-native")]
             t2_block_stats: [0; 3],
+            #[cfg(feature = "jit-native")]
             jit_tier2_noinline: std::env::var_os("RUBYRS_JIT_TIER2_NOINLINE").is_some(),
             #[cfg(feature = "jit-native")]
             t2_site_verdict: Vec::new(),
