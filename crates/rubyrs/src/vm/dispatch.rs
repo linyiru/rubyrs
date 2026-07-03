@@ -10107,10 +10107,24 @@ impl Vm {
                             let Some(mid) = key else { continue };
                             // Own-table hit: flip in place (the
                             // Method's visibility Cell), same as
-                            // CRuby's in-place flag change.
+                            // CRuby's in-place flag change. The flip
+                            // MUST bump method_gen: the Rc-holding
+                            // inline caches never needed it (they
+                            // re-read the Cell at call time), but the
+                            // respond_to? verdict memo (`responds_to_
+                            // object_memo` in lookup.rs) caches the
+                            // public/include-all VERDICT and is
+                            // gen-validated — an unbumped in-place
+                            // flip would serve a stale answer. This
+                            // was the ONLY visibility path that
+                            // skipped the bump (the explicit-receiver
+                            // form, apply_class_method_visibility,
+                            // module_function, and the inherited-copy
+                            // branch below all already bump).
                             let own = cls.methods.borrow().get(&mid).cloned();
                             if let Some(m) = own {
                                 m.visibility.set(vis);
+                                self.method_gen = self.method_gen.wrapping_add(1);
                                 continue;
                             }
                             // Inherited / included method (e.g.
