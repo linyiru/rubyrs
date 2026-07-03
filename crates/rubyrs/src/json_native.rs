@@ -85,7 +85,7 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
         SCRATCH.with(|cell| {
             let mut out = cell.borrow_mut();
             out.clear();
-            write_value(vm, v, &mut out)?;
+            write_value(vm, v, &mut out, 0)?;
             if out.len() > 65536 {
                 let big = std::mem::replace(&mut *out, Vec::with_capacity(4096));
                 Ok(Value::new_str_bytes(big))
@@ -148,20 +148,36 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
         // or free the buffer mid-parse.
         let bytes = s.content.borrow();
         let mut de = serde_json::Deserializer::from_slice(&bytes);
-        let visitor = VmVisitor { vm };
-        let result = serde::de::Deserializer::deserialize_any(&mut de, visitor).map_err(|e| Trap {
-            err: RubyError::RuntimeError {
-                msg: format!("native parse: {e}"),
-            },
-            backtrace: vec![],
-        })?;
-        de.end().map_err(|e| Trap {
-            err: RubyError::RuntimeError {
-                msg: format!("native parse: {e}"),
-            },
-            backtrace: vec![],
-        })?;
-        Ok(result)
+        let map_parse_err = |e: serde_json::Error| {
+            // The visitor's own depth guard raises "nesting of N is
+            // too deep"; serde wraps custom messages with a
+            // " at line X column Y" suffix and we'd prefix
+            // "native parse: " — both would leak into the
+            // JSON::NestingError message the wrapper re-raises.
+            // Strip back to the exact CRuby text for that case.
+            let msg = e.to_string();
+            let msg = match (msg.find("nesting of"), msg.find(" is too deep")) {
+                (Some(start), Some(end)) => msg[start..end + " is too deep".len()].to_string(),
+                _ => format!("native parse: {msg}"),
+            };
+            Trap {
+                err: RubyError::RuntimeError { msg },
+                backtrace: vec![],
+            }
+        };
+        KEY_CACHE.with(|kc| {
+            let mut kc = kc.borrow_mut();
+            let mut ctx = ParseCtx {
+                vm,
+                depth: 0,
+                keys: &mut kc,
+            };
+            let visitor = VmVisitor { ctx: &mut ctx };
+            let result = serde::de::Deserializer::deserialize_any(&mut de, visitor)
+                .map_err(map_parse_err)?;
+            de.end().map_err(map_parse_err)?;
+            Ok(result)
+        })
     });
 }
 
@@ -171,7 +187,12 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
 /// push. Mirrors the pure canon's `generate_with` emit shape
 /// byte-for-byte (the parity contract the json_canon fixture
 /// pins).
-fn write_value(vm: &crate::vm::Vm, v: &Value, out: &mut Vec<u8>) -> Result<(), Trap> {
+fn write_value(vm: &crate::vm::Vm, v: &Value, out: &mut Vec<u8>, depth: u32) -> Result<(), Trap> {
+    // CRuby's generator allows container depth ≤ max_nesting (100
+    // by default) and raises JSON::NestingError past it. Decline to
+    // the canon (which raises the exact CRuby class + message) —
+    // this also bounds our own native recursion on hostile inputs.
+    const MAX_GEN_NESTING: u32 = 100;
     match v {
         Value::Nil => out.extend_from_slice(b"null"),
         Value::Bool(b) => out.extend_from_slice(if *b { b"true" } else { b"false" }),
@@ -215,15 +236,31 @@ fn write_value(vm: &crate::vm::Vm, v: &Value, out: &mut Vec<u8>) -> Result<(), T
             // Value-vec allocation per Array node (~100 entries
             // on the bench payload's outer Object value list,
             // 20 on each nested Hash's "tags" array).
+            if depth + 1 > MAX_GEN_NESTING {
+                return Err(Trap {
+                    err: RubyError::RuntimeError {
+                        msg: "json_native: nesting too deep".to_string(),
+                    },
+                    backtrace: vec![],
+                });
+            }
             let items = vm.heap.array(*id);
             out.push(b'[');
             for (i, item) in items.iter().enumerate() {
                 if i > 0 { out.push(b','); }
-                write_value(vm, item, out)?;
+                write_value(vm, item, out, depth + 1)?;
             }
             out.push(b']');
         }
         Value::Hash(id) => {
+            if depth + 1 > MAX_GEN_NESTING {
+                return Err(Trap {
+                    err: RubyError::RuntimeError {
+                        msg: "json_native: nesting too deep".to_string(),
+                    },
+                    backtrace: vec![],
+                });
+            }
             let pairs = vm.heap.hash(*id);
             out.push(b'{');
             for (i, (k, val)) in pairs.iter().enumerate() {
@@ -276,7 +313,7 @@ fn write_value(vm: &crate::vm::Vm, v: &Value, out: &mut Vec<u8>) -> Result<(), T
                     }
                 }
                 out.push(b':');
-                write_value(vm, val, out)?;
+                write_value(vm, val, out, depth + 1)?;
             }
             out.push(b'}');
         }
@@ -380,6 +417,274 @@ fn write_escaped_bytes(s: &[u8], out: &mut Vec<u8>) {
     out.push(b'"');
 }
 
+/// Per-parse state threaded through the visitor recursion.
+///
+/// GC safety: the key cache holds `Value::Str`s (Rc-managed — NOT
+/// GC-heap objects; see `Value::is_gc_heap_ref`) across the
+/// visitor's `vm.heap.alloc` calls, so a collection could never
+/// free them even if one ran; and the `pairs` / `elems` Vecs that
+/// DO hold heap `ObjId`s are safe for the same reason they always
+/// were — `Heap::alloc` never collects (collections only run at
+/// interpreter safepoints, and no Ruby code runs inside the
+/// visitor).
+struct ParseCtx<'a> {
+    vm: &'a mut crate::vm::Vm,
+    /// Container nesting depth. CRuby's parser (json 2.20,
+    /// probed) allows depth ≤ max_nesting + 1 and raises
+    /// `JSON::NestingError` with the PINNED text "nesting of
+    /// {max+1} is too deep" for anything deeper (the number stays
+    /// 101 even for a 150-deep document). serde_json's own
+    /// recursion limit (128) is far enough out that without this
+    /// guard, depths 102..=128 would silently parse (and >128
+    /// would produce the wrong error text).
+    depth: u32,
+    keys: &'a mut KeyCache,
+}
+
+/// fstring-equivalent object-key cache: fxhash(key bytes) → the
+/// FROZEN shared key `Value`. CRuby's parser interns object keys
+/// in the process-global fstring table (frozen; duplicate keys
+/// are `.equal?` even ACROSS separate `JSON.parse` calls), so
+/// sharing one Rc'd frozen Str is not just an allocation win —
+/// it's the observable CRuby shape.
+///
+/// Lifetime: thread-local, persistent across parse calls — a
+/// per-parse table was measured first and REJECTED: building it
+/// cost ~40 ns/key (hash-map insert + growth rehashing), which
+/// regressed unique-key-heavy parses by ~2× (keys_unique fixture
+/// 39 → 85 µs/iter) for wins only on repeat-heavy ones. The
+/// persistent table amortises inserts away entirely: steady-state
+/// parses only pay hash + byte-compare + Rc clone (~10 ns/key)
+/// instead of String + Rc allocation (~40 ns + later free). This
+/// also matches CRuby MORE closely (its fstring table is
+/// process-global). Sharing Rc<RStr> across Vms on one thread is
+/// sound: RStr is Rc-managed (no ObjId, no interner id) and the
+/// entries are frozen.
+///
+/// Memory: capped at `KEY_CACHE_CAP` distinct texts (identifier-
+/// sized keys ≈ ≤0.5 MB worst case). Past the cap, new key texts
+/// stop being cached ([`KeyHit::Uncached`]) — parses stay correct
+/// (content-scan dup detection), just without sharing for the
+/// overflow keys.
+///
+/// fxhash is not collision-free, so hits verify bytes and true
+/// collisions escalate to a `Many` bucket — adversarial inputs
+/// get the right answer, just marginally slower.
+#[derive(Default)]
+struct KeyCache {
+    map: crate::intern::FxHashMap<u64, KeyEntry>,
+    /// Count of distinct key texts stored (cap enforcement —
+    /// `map.len()` undercounts when `Many` buckets hold several).
+    len: usize,
+    /// Monotonically increasing visit_map generation — the
+    /// duplicate-key detector's clock (see [`KeyState`]).
+    obj_gen: u64,
+}
+
+const KEY_CACHE_CAP: usize = 8192;
+
+struct KeyState {
+    val: Value,
+    /// Generation of the object this key text last appeared in +
+    /// the pairs-index it landed at. `visit_map` gets a fresh
+    /// generation on entry, so:
+    ///   - `last_obj == current` → duplicate key within THIS
+    ///     object → last-wins overwrite at `last_idx`, O(1);
+    ///   - `last_obj < current` → last seen before this object
+    ///     opened (a sibling / earlier parse) → plain push, O(1);
+    ///   - `last_obj > current` → seen in a DESCENDANT opened
+    ///     after this object (`{"a":1,"c":{"a":5},"a":9}`) —
+    ///     ambiguous, resolve by pointer-scanning the current
+    ///     object's pairs (rare shape; stays correct).
+    last_obj: u64,
+    last_idx: u32,
+}
+
+enum KeyEntry {
+    One(KeyState),
+    Many(Vec<KeyState>),
+}
+
+/// What the key seed hands `visit_map`.
+enum KeyHit {
+    /// Key is not a duplicate within the current object — push.
+    Push(Value),
+    /// Duplicate within the current object at this pairs-index —
+    /// CRuby is last-wins with the key keeping its position.
+    Dup(u32),
+    /// Cached key last seen in a descendant object — dup-ness
+    /// unknown; resolve by Rc-pointer scan of the current pairs.
+    Ambiguous(Value),
+    /// Cache at capacity, key text not cached — resolve dup-ness
+    /// by content scan of the current pairs.
+    Uncached(Value),
+}
+
+thread_local! {
+    static KEY_CACHE: std::cell::RefCell<KeyCache> = std::cell::RefCell::new(KeyCache::default());
+}
+
+/// CRuby's parse-side nesting default (json 2.x `max_nesting`).
+const MAX_PARSE_NESTING: u32 = 100;
+
+impl KeyCache {
+    fn next_obj_gen(&mut self) -> u64 {
+        self.obj_gen += 1;
+        self.obj_gen
+    }
+
+    /// Look up (or create) the shared frozen key Value for `s`,
+    /// classifying its duplicate-status within the object
+    /// identified by `obj_id` (see [`KeyState`]). `next_idx` is
+    /// where the key would land in the object's pairs Vec.
+    fn intern_key(&mut self, s: &str, obj_id: u64, next_idx: u32) -> KeyHit {
+        use std::collections::hash_map::Entry;
+        use std::hash::Hasher as _;
+        let mut hasher = crate::intern::FxHasher::default();
+        hasher.write(s.as_bytes());
+        let h = hasher.finish();
+        match self.map.entry(h) {
+            Entry::Vacant(e) => {
+                let val = new_frozen_key(s);
+                if self.len < KEY_CACHE_CAP {
+                    self.len += 1;
+                    e.insert(KeyEntry::One(KeyState {
+                        val: val.clone(),
+                        last_obj: obj_id,
+                        last_idx: next_idx,
+                    }));
+                    KeyHit::Push(val)
+                } else {
+                    KeyHit::Uncached(val)
+                }
+            }
+            Entry::Occupied(mut e) => match e.get_mut() {
+                KeyEntry::One(st) => {
+                    if key_matches(&st.val, s) {
+                        hit_state(st, obj_id, next_idx)
+                    } else if self.len < KEY_CACHE_CAP {
+                        // true fxhash collision: two different key
+                        // texts, one hash — keep both.
+                        self.len += 1;
+                        let val = new_frozen_key(s);
+                        let old = std::mem::replace(
+                            st,
+                            KeyState { val: val.clone(), last_obj: obj_id, last_idx: next_idx },
+                        );
+                        *e.get_mut() = KeyEntry::Many(vec![
+                            old,
+                            KeyState { val: val.clone(), last_obj: obj_id, last_idx: next_idx },
+                        ]);
+                        KeyHit::Push(val)
+                    } else {
+                        KeyHit::Uncached(new_frozen_key(s))
+                    }
+                }
+                KeyEntry::Many(vs) => {
+                    if let Some(st) = vs.iter_mut().find(|st| key_matches(&st.val, s)) {
+                        hit_state(st, obj_id, next_idx)
+                    } else if self.len < KEY_CACHE_CAP {
+                        self.len += 1;
+                        let val = new_frozen_key(s);
+                        vs.push(KeyState {
+                            val: val.clone(),
+                            last_obj: obj_id,
+                            last_idx: next_idx,
+                        });
+                        KeyHit::Push(val)
+                    } else {
+                        KeyHit::Uncached(new_frozen_key(s))
+                    }
+                }
+            },
+        }
+    }
+}
+
+/// Classify a cache hit per the [`KeyState`] clock rules. The
+/// ambiguous case leaves the state UNTOUCHED on purpose: a
+/// provisional `last_idx` would be wrong when the scan resolves
+/// to an existing pair, and a later occurrence would then
+/// overwrite the wrong slot.
+fn hit_state(st: &mut KeyState, obj_id: u64, next_idx: u32) -> KeyHit {
+    use std::cmp::Ordering;
+    match st.last_obj.cmp(&obj_id) {
+        Ordering::Equal => KeyHit::Dup(st.last_idx),
+        Ordering::Less => {
+            st.last_obj = obj_id;
+            st.last_idx = next_idx;
+            KeyHit::Push(st.val.clone())
+        }
+        Ordering::Greater => KeyHit::Ambiguous(st.val.clone()),
+    }
+}
+
+/// Build the frozen, UTF-8-tagged key String. Frozen-ness matches
+/// CRuby (`JSON.parse('{"a":1}').keys[0].frozen? == true`), and is
+/// what makes sharing one Rc across duplicate keys sound — nothing
+/// can mutate the text through one key and corrupt the others.
+fn new_frozen_key(s: &str) -> Value {
+    let rstr = crate::value::RStr::new(s.to_string());
+    rstr.frozen.set(true);
+    Value::Str(std::rc::Rc::new(rstr))
+}
+
+fn key_matches(v: &Value, s: &str) -> bool {
+    match v {
+        Value::Str(rs) => *rs.content.borrow() == s.as_bytes(),
+        _ => false,
+    }
+}
+
+fn key_ptr_eq(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Str(x), Value::Str(y)) => std::rc::Rc::ptr_eq(x, y),
+        _ => false,
+    }
+}
+
+fn key_content_eq(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Str(x), Value::Str(y)) => *x.content.borrow() == *y.content.borrow(),
+        _ => false,
+    }
+}
+
+/// Object-key seed: deserializes a key via a TRANSIENT `&str`
+/// (serde_json borrows escape-free keys straight from the input
+/// slice; escaped ones come from its scratch buffer) — so repeat
+/// keys allocate NOTHING, and first-sight keys allocate exactly
+/// one String + Rc. The old `next_key::<String>()` shape paid a
+/// String allocation per key occurrence.
+struct KeySeed<'a, 'c> {
+    ctx: &'a mut ParseCtx<'c>,
+    obj_id: u64,
+    next_idx: u32,
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for KeySeed<'_, '_> {
+    type Value = KeyHit;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<KeyHit, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_str(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for KeySeed<'_, '_> {
+    type Value = KeyHit;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a JSON object key")
+    }
+
+    fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<KeyHit, E> {
+        Ok(self.ctx.keys.intern_key(s, self.obj_id, self.next_idx))
+    }
+}
+
 /// Streaming-visitor parse: skips the `serde_json::Value`
 /// intermediate by allocating Ruby `Value`s directly during
 /// the serde state walk. ~30 % faster on a 3.4 KB payload than
@@ -387,30 +692,30 @@ fn write_escaped_bytes(s: &[u8], out: &mut Vec<u8>) {
 /// materialises — Hash / Array allocations land straight on
 /// `vm.heap`.
 ///
-/// The `&'a mut Vm` borrow threads through nested seeds via
-/// `VmSeed<'a>`: each `next_element_seed` / `next_value_seed`
-/// re-borrows from `self.vm` (an `&'a mut Vm` reborrow), so the
-/// outer visitor's lifetime stays valid across the recursion.
-struct VmVisitor<'a> {
-    vm: &'a mut crate::vm::Vm,
+/// The `&mut ParseCtx` borrow threads through nested seeds via
+/// `VmSeed`: each `next_element_seed` / `next_value_seed`
+/// re-borrows from `self.ctx`, so the outer visitor's lifetime
+/// stays valid across the recursion.
+struct VmVisitor<'a, 'c> {
+    ctx: &'a mut ParseCtx<'c>,
 }
 
-struct VmSeed<'a> {
-    vm: &'a mut crate::vm::Vm,
+struct VmSeed<'a, 'c> {
+    ctx: &'a mut ParseCtx<'c>,
 }
 
-impl<'a, 'de> serde::de::DeserializeSeed<'de> for VmSeed<'a> {
+impl<'de> serde::de::DeserializeSeed<'de> for VmSeed<'_, '_> {
     type Value = Value;
 
     fn deserialize<D>(self, deserializer: D) -> Result<Value, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        deserializer.deserialize_any(VmVisitor { vm: self.vm })
+        deserializer.deserialize_any(VmVisitor { ctx: self.ctx })
     }
 }
 
-impl<'a, 'de> serde::de::Visitor<'de> for VmVisitor<'a> {
+impl<'de> serde::de::Visitor<'de> for VmVisitor<'_, '_> {
     type Value = Value;
 
     fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -427,15 +732,15 @@ impl<'a, 'de> serde::de::Visitor<'de> for VmVisitor<'a> {
         Ok(Value::Int(n))
     }
     fn visit_u64<E: serde::de::Error>(self, n: u64) -> Result<Value, E> {
-        // JSON has no unsigned-only type; serde uses u64 only
-        // when the number is non-negative AND fits a u64 but
-        // not i64. Anything past i64::MAX falls to Float
-        // (matches CRuby's stdlib JSON behaviour — its parser
-        // promotes oversized integers to Float, not Bignum).
+        // The bigint pre-scan declines any document with a ≥19-digit
+        // run to the pure canon, so integer literals reaching serde
+        // always fit i64 (≤18 digits). Defensive: if a >i64::MAX
+        // value somehow arrives, decline rather than silently
+        // truncate or promote to Float (CRuby parses it as Integer).
         if n <= i64::MAX as u64 {
             Ok(Value::Int(n as i64))
         } else {
-            Ok(Value::Float(n as f64))
+            Err(serde::de::Error::custom("bigint-range number"))
         }
     }
     fn visit_f64<E: serde::de::Error>(self, n: f64) -> Result<Value, E> {
@@ -452,16 +757,24 @@ impl<'a, 'de> serde::de::Visitor<'de> for VmVisitor<'a> {
     where
         A: serde::de::SeqAccess<'de>,
     {
-        // Pre-size the Vec when the deserializer provides a
-        // size hint. serde_json doesn't (JSON arrays are length-
-        // unknown until `]`), so this is a no-op for the common
-        // case; kept for forward-compat with deserializers that
-        // do.
-        let mut elems: Vec<Value> = seq.size_hint().map(Vec::with_capacity).unwrap_or_default();
-        while let Some(v) = seq.next_element_seed(VmSeed { vm: &mut *self.vm })? {
+        self.ctx.depth += 1;
+        if self.ctx.depth > MAX_PARSE_NESTING + 1 {
+            return Err(serde::de::Error::custom(format!(
+                "nesting of {} is too deep",
+                MAX_PARSE_NESTING + 1
+            )));
+        }
+        // Pre-size the Vec: serde_json never provides a size hint
+        // (JSON arrays are length-unknown until `]`), so default to
+        // 8 slots — skips the 0→4→8 growth re-allocs every small
+        // array pays (measured ~2-4 µs/iter on 200-object payloads).
+        let mut elems: Vec<Value> =
+            Vec::with_capacity(seq.size_hint().unwrap_or(8));
+        while let Some(v) = seq.next_element_seed(VmSeed { ctx: &mut *self.ctx })? {
             elems.push(v);
         }
-        let id = self.vm.heap.alloc(HeapObj::Array(elems.into()));
+        self.ctx.depth -= 1;
+        let id = self.ctx.vm.heap.alloc(HeapObj::Array(elems.into()));
         Ok(Value::Array(id))
     }
 
@@ -469,17 +782,51 @@ impl<'a, 'de> serde::de::Visitor<'de> for VmVisitor<'a> {
     where
         A: serde::de::MapAccess<'de>,
     {
-        let mut pairs: Vec<(Value, Value)> = map.size_hint().map(Vec::with_capacity).unwrap_or_default();
-        // `next_key::<String>()` allocates one String per key.
-        // Pre-interning common keys (the obvious next opt) would
-        // need a sym-cache; the current shape matches CRuby's
-        // `JSON::Ext::Parser` which also allocates one Ruby
-        // String per key, so we're not losing parity here.
-        while let Some(k) = map.next_key::<String>()? {
-            let v = map.next_value_seed(VmSeed { vm: &mut *self.vm })?;
-            pairs.push((Value::new_str(k), v));
+        self.ctx.depth += 1;
+        if self.ctx.depth > MAX_PARSE_NESTING + 1 {
+            return Err(serde::de::Error::custom(format!(
+                "nesting of {} is too deep",
+                MAX_PARSE_NESTING + 1
+            )));
         }
-        let id = self.vm.heap.alloc(HeapObj::Hash(HashObj::with_pairs(pairs)));
+        let obj_id = self.ctx.keys.next_obj_gen();
+        // Pre-size like visit_seq — 8 covers typical record objects.
+        let mut pairs: Vec<(Value, Value)> =
+            Vec::with_capacity(map.size_hint().unwrap_or(8));
+        loop {
+            let seed = KeySeed {
+                obj_id,
+                next_idx: pairs.len() as u32,
+                ctx: &mut *self.ctx,
+            };
+            let Some(hit) = map.next_key_seed(seed)? else { break };
+            let v = map.next_value_seed(VmSeed { ctx: &mut *self.ctx })?;
+            // Duplicate keys within ONE object: CRuby is last-wins
+            // with the key keeping its original position
+            // ('{"a":1,"b":2,"a":3}' → {"a" => 3, "b" => 2}).
+            // The KeyState generation clock resolves the common
+            // cases O(1); the two scan fallbacks are rare shapes.
+            match hit {
+                KeyHit::Push(k) => pairs.push((k, v)),
+                KeyHit::Dup(idx) => pairs[idx as usize].1 = v,
+                KeyHit::Ambiguous(k) => {
+                    if let Some(slot) = pairs.iter_mut().find(|(pk, _)| key_ptr_eq(pk, &k)) {
+                        slot.1 = v;
+                    } else {
+                        pairs.push((k, v));
+                    }
+                }
+                KeyHit::Uncached(k) => {
+                    if let Some(slot) = pairs.iter_mut().find(|(pk, _)| key_content_eq(pk, &k)) {
+                        slot.1 = v;
+                    } else {
+                        pairs.push((k, v));
+                    }
+                }
+            }
+        }
+        self.ctx.depth -= 1;
+        let id = self.ctx.vm.heap.alloc(HeapObj::Hash(HashObj::with_pairs(pairs)));
         Ok(Value::Hash(id))
     }
 }

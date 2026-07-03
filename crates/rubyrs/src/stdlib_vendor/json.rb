@@ -249,12 +249,22 @@ module JSON
       @max_nesting = max_nesting
       @allow_nan = allow_nan
       @depth = 0
+      # fstring-equivalent key dedup (matches CRuby AND the
+      # `_json_native` visitor): object keys come out FROZEN and
+      # duplicate key texts across one parse share the same String
+      # object (`.equal?` — observable via mutation attempts and
+      # object identity). Lifetime = one Parser instance.
+      @key_cache = {}
     end
 
     def enter_nest
       @depth += 1
-      if @max_nesting > 0 && @depth > @max_nesting
-        raise NestingError, "nesting of #{@depth} is too deep"
+      # CRuby (json 2.20, probed): parse allows depth ≤
+      # max_nesting + 1 and raises with the PINNED text
+      # "nesting of {max+1} is too deep" for anything deeper —
+      # the number stays 101 even for a 150-deep document.
+      if @max_nesting > 0 && @depth > @max_nesting + 1
+        raise NestingError, "nesting of #{@max_nesting + 1} is too deep"
       end
     end
 
@@ -364,7 +374,11 @@ module JSON
         skip_ws
         raise ParserError, "expected string key at position #{@pos}" unless peek == "\""
         key_str = parse_string
-        key = @symbolize_names ? key_str.to_sym : key_str
+        key = if @symbolize_names
+          key_str.to_sym
+        else
+          @key_cache[key_str] ||= key_str.freeze
+        end
         skip_ws
         raise ParserError, "expected ':' at position #{@pos}" unless peek == ":"
         @pos += 1
@@ -650,20 +664,27 @@ module JSON
     when String then escape_string(obj)
     when Symbol then escape_string(obj.to_s)
     when Array
-      return "[]" if obj.empty?
+      # Depth check BEFORE the empty-container early-return —
+      # CRuby raises for an empty array at depth 101 too.
       if max_nest > 0 && depth + 1 > max_nest
-        raise NestingError, "nesting of #{depth + 1} is too deep"
+        # CRuby (json 2.20, probed): generate allows depth ≤
+        # max_nesting, and the raise text pins the NUMBER at
+        # max_nesting (not the actual depth) + carries the
+        # circular-reference hint suffix.
+        raise NestingError, "nesting of #{max_nest} is too deep. Did you try to serialize objects with circular references?"
       end
+      return "[]" if obj.empty?
       inner_indent = indent * (depth + 1)
       outer_indent = indent * depth
       parts = []
       obj.each { |v| parts << inner_indent + generate_with(v, indent, space, obj_nl, arr_nl, allow_nan, max_nest, depth + 1) }
       "[" + arr_nl + parts.join("," + arr_nl) + arr_nl + outer_indent + "]"
     when Hash
-      return "{}" if obj.empty?
       if max_nest > 0 && depth + 1 > max_nest
-        raise NestingError, "nesting of #{depth + 1} is too deep"
+        # See the Array arm — pinned number + hint suffix.
+        raise NestingError, "nesting of #{max_nest} is too deep. Did you try to serialize objects with circular references?"
       end
+      return "{}" if obj.empty?
       inner_indent = indent * (depth + 1)
       outer_indent = indent * depth
       parts = []
