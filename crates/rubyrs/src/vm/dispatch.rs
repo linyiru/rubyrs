@@ -16099,7 +16099,7 @@ impl Vm {
     /// is against the EXACT compiled op template (including jump
     /// offsets), so a compiler-emission change can only DISABLE the
     /// fast path (fall back to the general binder), never mis-serve.
-    fn rest_pred_for(&mut self, proto_idx: usize) -> Option<crate::vm::RestPredPlan> {
+    pub(crate) fn rest_pred_for(&mut self, proto_idx: usize) -> Option<crate::vm::RestPredPlan> {
         use crate::bytecode::Op;
         use crate::vm::{RestPredGroup, RestPredPlan, RestPredSlot};
         if proto_idx >= self.rest_preds.len() {
@@ -16218,7 +16218,7 @@ impl Vm {
     ///     const caches (cold → decline; the body fills them) and
     ///     requires an untagged, default-less, non-identity Hash so
     ///     `hash_index_lookup` equals `Hash#[]`.
-    fn rest_pred_eval(
+    pub(crate) fn rest_pred_eval(
         &mut self,
         rp: crate::vm::RestPredPlan,
         callee_proto: usize,
@@ -16797,7 +16797,10 @@ impl Vm {
             && la as usize == argc
         {
             let w = crate::jit_tier2::lite_self_words(&self.stack[recv_idx]);
-            self.t2_lite_run(lf, m.proto_idx, w, argc + 1)?;
+            // `defining_class` hand-off for the deferred (materialized)
+            // push — the exact value the frame push below would stamp.
+            let dc = m.defining_class.as_ref().and_then(|w| w.upgrade());
+            self.t2_lite_run(lf, m.proto_idx, w, argc + 1, dc)?;
             return Ok(true);
         }
         // Bind the argc args (stack top) into the locals, then drop the recv.
@@ -17410,7 +17413,10 @@ impl Vm {
             && la as usize == argc
         {
             let w = crate::jit_tier2::lite_self_words(&self_val);
-            self.t2_lite_run(lf, m.proto_idx, w, argc)?;
+            // `defining_class` hand-off for the deferred (materialized)
+            // push — the exact value the frame push below would stamp.
+            let dc = m.defining_class.as_ref().and_then(|w| w.upgrade());
+            self.t2_lite_run(lf, m.proto_idx, w, argc, dc)?;
             return Ok(true);
         }
         let n_locals = fixed.n_locals as usize;

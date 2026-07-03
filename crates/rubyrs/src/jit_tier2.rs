@@ -656,13 +656,16 @@ unsafe extern "C" fn t2_case_eq_s(vm: *mut crate::vm::Vm, kind: i64, payload: i6
 /// - implicit-self entries (`n_pop == argc`) CLONE self from the borrowed
 ///   words (the caller's frame / an owned Rust local keeps the original).
 ///
-/// The pushed frame is indistinguishable from the serve site's own push
-/// except `defining_class: None` — sound because lite admission declines
-/// every op whose semantics read it (`Super`, cvar resolution, and every
-/// call form that could reach `do_call`'s Nil-self arm).
+/// The pushed frame is indistinguishable from the serve site's own push:
+/// `defining_class` comes through the `Vm::t2_lite_dc` hand-off (set by the
+/// serve site / the lite chain hand-off from the resolving `Method`, exactly
+/// the value the framed push would stamp — `super`/cvar readers stay
+/// unreachable because those ops decline lite admission, but `do_call`'s
+/// Nil-self bare-call gates DO read it now that call ops are admitted).
 /// Frame-capacity: the serve site ran `check_frames` BEFORE entering lite
-/// and no frames were pushed since (no calls in a lite body), so this
-/// single push is exactly the one the interpreter would have done.
+/// (covering the innermost single push), and every lite→lite chain level
+/// re-checked headroom for its cascade before deferring another frame — so
+/// the pushes here are exactly the ones the interpreter would have done.
 #[allow(clippy::too_many_arguments)]
 unsafe extern "C" fn t2_lite_materialize(
     vm: *mut crate::vm::Vm,
@@ -677,14 +680,102 @@ unsafe extern "C" fn t2_lite_materialize(
     self_w1: i64,
 ) {
     let vm = unsafe { &mut *vm };
-    let (pidx, ip, argc, n_locals, n_pop, trunc) = (
+    lite_materialize_core(
+        vm,
         pidx as usize,
         ip as usize,
         argc as usize,
         n_locals as usize,
         n_pop as usize,
         trunc as usize,
+        slot,
+        self_w0,
+        self_w1,
     );
+}
+
+/// The materialize core (shared by the native bail edges and the lite call
+/// helpers): drain any PENDING outer lite activations first — outermost
+/// first, each frame's `trunc` adjusted for the recv+args slots the frames
+/// below it removed — then push this activation's own deferred frame. The
+/// outward-in cascade keeps `vm.frames` ordered exactly as the interpreter
+/// would have built it.
+#[allow(clippy::too_many_arguments)]
+fn lite_materialize_core(
+    vm: &mut crate::vm::Vm,
+    pidx: usize,
+    ip: usize,
+    argc: usize,
+    n_locals: usize,
+    n_pop: usize,
+    mut trunc: usize,
+    slot: *const i64,
+    self_w0: i64,
+    self_w1: i64,
+) {
+    if !vm.t2_lite_pending.is_empty() {
+        let recs = std::mem::take(&mut vm.t2_lite_pending);
+        let mut removed = 0usize;
+        for r in recs {
+            unsafe {
+                push_lite_frame(
+                    vm,
+                    r.pidx,
+                    r.resume_ip,
+                    r.argc,
+                    r.n_locals,
+                    r.n_pop,
+                    r.trunc - removed,
+                    r.slot,
+                    r.self_w0,
+                    r.self_w1,
+                    r.dc,
+                );
+            }
+            removed += r.n_pop;
+            if vm.jit_stats_on {
+                vm.t2_lite_call_stats[3] += 1;
+            }
+        }
+        trunc -= removed;
+    }
+    let dc = vm.t2_lite_dc.take();
+    unsafe {
+        push_lite_frame(
+            vm, pidx, ip, argc, n_locals, n_pop, trunc, slot, self_w0, self_w1, dc,
+        );
+    }
+    if vm.jit_stats_on {
+        vm.t2_lite_stats[1] += 1;
+    }
+    // Breaker attribution: the proto whose SHAPE failed is the one that
+    // materialized ITSELF — the suspended (cascade-drained) callers were
+    // innocent bystanders and keep their streaks. (The serve-site bail
+    // path and the chain-bail path deliberately do NOT count.)
+    vm.t2_lite_note_bail(pidx);
+}
+
+/// Push ONE deferred lite frame (the wave-4 materialize body, parameterized
+/// over `ip` and `defining_class` for the cascade drain). Ownership
+/// accounting is the wave-4 contract verbatim (see `t2_lite_materialize`'s
+/// doc): native local slots transmute into the arena, recv+args are removed
+/// from the stack without dropping (their ownership transferred), an
+/// explicit recv's words become `frame.self_val`, an implicit self clones
+/// through the borrowed words.
+#[allow(clippy::too_many_arguments)]
+unsafe fn push_lite_frame(
+    vm: &mut crate::vm::Vm,
+    pidx: usize,
+    ip: usize,
+    argc: usize,
+    n_locals: usize,
+    n_pop: usize,
+    trunc: usize,
+    slot: *const i64,
+    self_w0: i64,
+    self_w1: i64,
+    dc: Option<std::rc::Rc<crate::value::Class>>,
+) {
     let arena_base = vm.locals_arena.len();
     vm.locals_arena.reserve(n_locals);
     for i in 0..n_locals {
@@ -720,7 +811,7 @@ unsafe extern "C" fn t2_lite_materialize(
         is_class_body: false,
         swap_return: None,
         block_arg: None,
-        defining_class: None,
+        defining_class: dc,
         lexical_cvar_class: None,
         #[cfg(feature = "regex")]
         saved_last_match: None,
@@ -738,9 +829,6 @@ unsafe extern "C" fn t2_lite_materialize(
         outer_rest: None,
         captured_yield_block: None,
     });
-    if vm.jit_stats_on {
-        vm.t2_lite_stats[1] += 1;
-    }
 }
 
 /// Frame-lite `Op::Return` with the return value in registers (virtual,
@@ -871,6 +959,584 @@ unsafe extern "C" fn t2_lite_ivar_set(
 #[inline]
 pub(crate) fn lite_self_words(v: &Value) -> [i64; 2] {
     value_words(v)
+}
+
+// ---------------------------------------------------------------------------
+// LITE t2_call (ADR 0037 wave-4 follow-on): call ops inside FRAMELESS bodies.
+//
+// A `Call`/`CallNoRecv`/`LoadLocalCall` op in a lite body calls one of the
+// `t2_lite_call_*` helpers below, which resolve through the SAME site IC the
+// framed `t2_call` family uses and then either:
+//
+//   (a) SERVE the callee frameless — only families that are provably
+//       frame-free, raise-free and GC-free while running: the getter fast
+//       path, the jit_native NativeProto families (zeroarg / int / value /
+//       objparam / fparam; compiled code never runs `maybe_gc` and never
+//       touches `vm.frames`), the rest-predicate body-shape serve, the
+//       cascade's own fast-prim/fast-index arms for non-Object receivers,
+//       and — the prize — a lite→lite NATIVE CHAIN into a callee that is
+//       itself lite-admitted; or
+//
+//   (b) MATERIALIZE the caller's frame (the wave-4 deferred push, `ip`
+//       stamped AT the call op) and return 1 — the native body returns
+//       `T2_BAIL` and the interpreter re-runs the call op against the real
+//       frame: interpreted callees, IC misses, non-Public/builtin/closure
+//       resolutions, wrong arity (the canonical ArgumentError comes from the
+//       cascade), fuel/deadline-active runs, and every dispatch-boundary
+//       state (`bypass_visibility_once` / `force_primitive_dispatch` /
+//       refinements / singleton flags) all take this edge. A mode switch at
+//       an exact op boundary, never a replay.
+//
+// CASCADING MATERIALIZATION (the lite→lite soundness core): before invoking
+// a lite callee, the caller registers a `T2LitePending` record (its spill
+// slot, stack shape, self words, `resume_ip = call op + 1`, and its
+// `defining_class`). If the callee — or anything deeper — materializes,
+// `lite_materialize_core` drains the pending records OUTERMOST-FIRST, so
+// caller frames are pushed BELOW callee frames and `vm.frames` matches the
+// interpreter's order exactly; each drained frame resumes interpreted after
+// its call op, receiving the callee's return value at the exact stack
+// position the interpreter would have left it. On a completed (DONE) chain
+// the record is popped unused.
+//
+// The wave-4 invariant survives: while ANY activation is frameless, no
+// foreign code observes the VM — every serve family above is frame-free and
+// raise-free, and none can trigger a GC (`heap.alloc` never collects; only
+// `maybe_gc` does, and no served path calls it), so values in native spill
+// slots stay unreachable-but-immortal for the whole frameless window.
+// ---------------------------------------------------------------------------
+
+/// Caller-context view for the lite call/const helpers. The native entry of
+/// a call-bearing lite body fills a 5-word stack slot
+/// `[locals_slot_addr, trunc, n_pop, self_w0, self_w1]` (the runtime
+/// values); `pidx`/`argc`/`n_locals` are compile-time constants packed into
+/// the helper's `meta` immediate (low 32 = pidx, bits 32..40 = n_locals,
+/// bits 40..44 = argc).
+struct LiteCtx {
+    slot: *const i64,
+    trunc: usize,
+    n_pop: usize,
+    self_w0: i64,
+    self_w1: i64,
+    pidx: usize,
+    argc: usize,
+    n_locals: usize,
+}
+
+#[inline]
+unsafe fn lite_ctx(ctx: *const i64, meta: i64) -> LiteCtx {
+    let m = meta as u64;
+    LiteCtx {
+        slot: unsafe { ctx.read() } as usize as *const i64,
+        trunc: unsafe { ctx.add(1).read() } as usize,
+        n_pop: unsafe { ctx.add(2).read() } as usize,
+        self_w0: unsafe { ctx.add(3).read() },
+        self_w1: unsafe { ctx.add(4).read() },
+        pidx: (m & 0xffff_ffff) as usize,
+        n_locals: ((m >> 32) & 0xff) as usize,
+        argc: ((m >> 40) & 0xf) as usize,
+    }
+}
+
+/// Materialize the CALLER's frame at op `ip` (conservative decline: the
+/// interpreter re-runs the call op against the real frame). Returns the
+/// helper's MATERIALIZED status.
+#[inline]
+fn lite_mat_here(vm: &mut crate::vm::Vm, c: &LiteCtx, ip: usize) -> i64 {
+    lite_materialize_core(
+        vm, c.pidx, ip, c.argc, c.n_locals, c.n_pop, c.trunc, c.slot, c.self_w0, c.self_w1,
+    );
+    if vm.jit_stats_on {
+        vm.t2_lite_call_stats[1] += 1;
+    }
+    1
+}
+
+/// Dispatch-boundary gates shared by every lite call form. Any hit →
+/// materialize (the full cascade owns these states). `t2_poll_flags != 0`
+/// (fuel or wall-clock deadline active) also declines: the per-call
+/// `check_fuel` charge can raise, which must happen interpreted — the
+/// re-run charges exactly what `step()` would.
+#[inline]
+fn lite_call_gates(vm: &crate::vm::Vm, name_id: SymId) -> bool {
+    vm.t2_poll_flags == 0
+        && !vm.bypass_visibility_once
+        && !vm.force_primitive_dispatch
+        && (vm.refined_method_names.is_empty() || !vm.refined_method_names.contains(&name_id))
+}
+
+/// Where the callee's receiver lives (drives both the serve placement and
+/// the lite→lite operand-stack ABI).
+enum LiteRecv {
+    /// Explicit receiver ON the operand stack at this index
+    /// (`[.., recv, a1..aN]`).
+    Stack(usize),
+    /// Implicit self: the caller's borrowed self words (rooted by the
+    /// ultimate outer owner for the whole frameless window).
+    SelfWords,
+    /// `LoadLocalCall` fusion: the receiver lives in the caller's native
+    /// spill slot — NOT on the stack. A lite→lite chain pushes a clone
+    /// (the callee consumes the recv slot); every other serve reads it in
+    /// place and only the RESULT is pushed (net effect = the fused op's).
+    LocalSlot(*const Value),
+}
+
+/// Place a frameless serve's result: consume the callee's recv+args from
+/// the operand stack and leave the result where the interpreter's call op
+/// would have.
+#[inline]
+fn lite_place(vm: &mut crate::vm::Vm, recv: &LiteRecv, cargc: usize, v: Value) {
+    match recv {
+        LiteRecv::Stack(recv_idx) => {
+            vm.stack[*recv_idx] = v;
+            vm.stack.truncate(recv_idx + 1);
+        }
+        LiteRecv::SelfWords => {
+            let keep = vm.stack.len() - cargc;
+            vm.stack.truncate(keep);
+            vm.stack.push(v);
+        }
+        LiteRecv::LocalSlot(_) => {
+            vm.stack.push(v);
+        }
+    }
+}
+
+/// Serve an IC-resolved plain proto method (`m`: non-builtin, non-closure;
+/// explicit forms additionally Public) frameless, or materialize. `oid`/`cls`
+/// are `Some` for an Object receiver (`None` = the toplevel-main form, which
+/// only the guard-free native families and lite→lite chains can serve).
+#[allow(clippy::too_many_arguments)]
+fn lite_serve_m(
+    vm: &mut crate::vm::Vm,
+    c: &LiteCtx,
+    ip: usize,
+    m: &std::rc::Rc<crate::value::Method>,
+    cls: Option<&std::rc::Rc<crate::value::Class>>,
+    oid: Option<crate::value::ObjId>,
+    recv: LiteRecv,
+    cargc: usize,
+) -> i64 {
+    let pidx = m.proto_idx;
+    let fixed = match m.fixed_arity {
+        Some(f) if f.required as usize == cargc => Some(f),
+        // Wrong arity for a fixed method: the cascade raises the canonical
+        // ArgumentError against the materialized frame.
+        Some(_) => return lite_mat_here(vm, c, ip),
+        None => None,
+    };
+    if fixed.is_none() {
+        // Non-fixed arity: the only frameless serve is the rest-predicate
+        // body-shape fast path (frame-free, raise-free, alloc-free — see
+        // `rest_pred_eval`'s exactness gates).
+        if let Some(rid) = oid
+            && let Some(rp) = vm.rest_pred_for(pidx)
+            && let Some(split) = vm.stack.len().checked_sub(cargc)
+            && let Some(result) = vm.rest_pred_eval(rp, pidx, rid, split, cargc)
+        {
+            if vm.jit_stats_on {
+                vm.rest_pred_stats.0 += 1;
+                vm.t2_lite_call_stats[0] += 1;
+            }
+            lite_place(vm, &recv, cargc, Value::Bool(result));
+            return 0;
+        }
+        return lite_mat_here(vm, c, ip);
+    }
+    // Trivial attr_reader: the frame-free getter read (both the explicit
+    // and implicit dispatch paths serve this shape before anything else).
+    if cargc == 0
+        && let Some(rid) = oid
+        && let Some(gsym) = vm.protos[pidx].getter_ivar
+    {
+        let v = vm.getter_ivar_read(rid, pidx, gsym);
+        if vm.jit_stats_on {
+            vm.t2_lite_call_stats[0] += 1;
+        }
+        lite_place(vm, &recv, cargc, v);
+        return 0;
+    }
+    // jit_native NativeProto families (cache-hit-only: compilation and
+    // routing stay on the interpreted paths — a miss materializes and the
+    // cascade compiles as usual, so steady state converges). All families
+    // are GC-free/frame-free by construction; a deopt returns `None` with
+    // no observable effect, and the interpreted re-run is the established
+    // deopt contract at every existing serve site.
+    #[cfg(feature = "jit-native")]
+    if vm.jit_native_on {
+        let vm_ptr = vm as *const crate::vm::Vm;
+        // A borrowed &Value view of the receiver for the native ABI.
+        let sv_view = std::mem::ManuallyDrop::new(unsafe {
+            value_from_words([c.self_w0, c.self_w1])
+        });
+        let recv_ref: &Value = match &recv {
+            LiteRecv::Stack(i) => &vm.stack[*i],
+            LiteRecv::SelfWords => &sv_view,
+            LiteRecv::LocalSlot(p) => unsafe { &**p },
+        };
+        let cls_ptr = cls.map_or(0usize, |c| std::rc::Rc::as_ptr(c) as usize);
+        let jflags = vm.jit_flags_get(pidx);
+        if cargc == 0
+            && jflags & crate::vm::JFLAG_NO_ZEROARG == 0
+            && let Some(Some(np)) = vm.jit_native_zeroarg.get(&pidx)
+        {
+            let e = np.entry();
+            if !e.dead && (e.guard_class == 0 || e.guard_class == cls_ptr) {
+                let res = e.call(vm_ptr, recv_ref, 0);
+                let boxed = res.map(|r| e.box_ret(r));
+                let deopt = boxed.is_none();
+                if let Some(boxed) = boxed {
+                    vm.jstat_serve(pidx, 6, false);
+                    if vm.jit_stats_on {
+                        vm.t2_lite_call_stats[0] += 1;
+                    }
+                    lite_place(vm, &recv, cargc, boxed);
+                    return 0;
+                }
+                debug_assert!(deopt);
+                vm.jstat_serve(pidx, 6, true);
+                return lite_mat_here(vm, c, ip);
+            }
+        }
+        if cargc == 1 && jflags & crate::vm::JFLAG_NO_ONEARG == 0 {
+            // Value method (infallible, heap-read-only).
+            if let Some(Some(vp)) = vm.jit_value.get(&pidx) {
+                let top = vm.stack.len() - 1;
+                let out = vp.call(vm_ptr, recv_ref, &vm.stack[top]);
+                vm.jstat_exec(pidx, 5, false);
+                if vm.jit_stats_on {
+                    vm.t2_lite_call_stats[0] += 1;
+                }
+                lite_place(vm, &recv, cargc, out);
+                return 0;
+            }
+            // Integer method (Int arg).
+            if let Some(Some(np)) = vm.jit_native.get(&pidx) {
+                let e = np.entry();
+                if !e.dead
+                    && (e.guard_class == 0 || e.guard_class == cls_ptr)
+                    && let Some(x) = crate::jit_native::as_int(vm.stack.last().expect("lite call arg"))
+                {
+                    let res = e.call(vm_ptr, recv_ref, x);
+                    let boxed = res.map(|r| e.box_ret(r));
+                    if let Some(boxed) = boxed {
+                        vm.jstat_serve(pidx, 0, false);
+                        if vm.jit_stats_on {
+                            vm.t2_lite_call_stats[0] += 1;
+                        }
+                        lite_place(vm, &recv, cargc, boxed);
+                        return 0;
+                    }
+                    vm.jstat_serve(pidx, 0, true);
+                    return lite_mat_here(vm, c, ip);
+                }
+            }
+            // Object arg → the objparam specialization.
+            if matches!(vm.stack.last(), Some(Value::Object(_)))
+                && let Some(Some(np)) = vm.jit_native_objparam.get(&pidx)
+            {
+                let e = np.entry();
+                if !e.dead {
+                    let top = vm.stack.len() - 1;
+                    let arg_ptr = &vm.stack[top] as *const Value as i64;
+                    let res = e.call(vm_ptr, recv_ref, arg_ptr);
+                    let boxed = res.map(|r| e.box_ret(r));
+                    if let Some(boxed) = boxed {
+                        vm.jstat_serve(pidx, 3, false);
+                        if vm.jit_stats_on {
+                            vm.t2_lite_call_stats[0] += 1;
+                        }
+                        lite_place(vm, &recv, cargc, boxed);
+                        return 0;
+                    }
+                    vm.jstat_serve(pidx, 3, true);
+                    return lite_mat_here(vm, c, ip);
+                }
+            }
+        }
+        // Float arg → the fparam specialization (outside the settle bit,
+        // mirroring the framed sites).
+        if cargc == 1
+            && let Some(&Value::Float(f)) = vm.stack.last()
+            && let Some(Some(np)) = vm.jit_native_fparam.get(&pidx)
+        {
+            let e = np.entry();
+            if !e.dead {
+                let res = e.call(vm_ptr, recv_ref, f.to_bits() as i64);
+                let boxed = res.map(|r| e.box_ret(r));
+                if let Some(boxed) = boxed {
+                    vm.jstat_serve(pidx, 2, false);
+                    if vm.jit_stats_on {
+                        vm.t2_lite_call_stats[0] += 1;
+                    }
+                    lite_place(vm, &recv, cargc, boxed);
+                    return 0;
+                }
+                vm.jstat_serve(pidx, 2, true);
+                return lite_mat_here(vm, c, ip);
+            }
+        }
+    }
+    // The prize: a lite→lite NATIVE CHAIN. The callee runs frameless
+    // against the same operand stack; the caller suspends behind a pending
+    // record so a deeper materialize cascades outward-in.
+    if vm.jit_flags_get(pidx) & crate::vm::JFLAG_TIER2_LITE != 0
+        && let Some(&Some((lf, la))) = vm.t2_lite_ptrs.get(pidx)
+        && la as usize == cargc
+    {
+        // Rust-stack + frame-capacity headroom: a full cascade pushes
+        // `pending + 2` frames (every suspended caller + this caller +
+        // the callee's own materialize), which must stay within the
+        // interpreter's frame cap; embedder caps (`max_frames`) decline
+        // wholesale (rare, and the interpreted path enforces them
+        // canonically).
+        if vm.t2_depth >= crate::vm::T2_MAX_NATIVE_DEPTH
+            || vm.frames.len() + vm.t2_lite_pending.len() + 2 > 10_000
+            || vm.max_frames.is_some()
+        {
+            return lite_mat_here(vm, c, ip);
+        }
+        let (n_pop, w) = match &recv {
+            LiteRecv::Stack(recv_idx) => (cargc + 1, value_words(&vm.stack[*recv_idx])),
+            LiteRecv::SelfWords => (cargc, [c.self_w0, c.self_w1]),
+            LiteRecv::LocalSlot(p) => {
+                // Push a CLONE of the local as the callee's stack recv (the
+                // callee consumes its recv slot on DONE/materialize; the
+                // caller's spill slot keeps its own copy untouched).
+                let v = unsafe { (**p).clone() };
+                vm.stack.push(v);
+                let w = value_words(vm.stack.last().expect("just pushed"));
+                (cargc + 1, w)
+            }
+        };
+        // Suspend the caller: resume AFTER the call op (the call has
+        // happened once the callee is entered), defining_class handed off.
+        let caller_dc = vm.t2_lite_dc.take();
+        vm.t2_lite_pending.push(crate::vm::T2LitePending {
+            slot: c.slot,
+            pidx: c.pidx,
+            argc: c.argc,
+            n_locals: c.n_locals,
+            n_pop: c.n_pop,
+            trunc: c.trunc,
+            self_w0: c.self_w0,
+            self_w1: c.self_w1,
+            resume_ip: ip + 1,
+            dc: caller_dc,
+        });
+        vm.t2_lite_dc = m.defining_class.as_ref().and_then(|w| w.upgrade());
+        let pend_depth = vm.t2_lite_pending.len();
+        vm.t2_depth += 1;
+        let st = lf(vm as *mut crate::vm::Vm, w[0], w[1], n_pop as i64);
+        vm.t2_depth -= 1;
+        if st == T2_DONE {
+            // Chain completed frameless: the record was never consumed —
+            // pop it and restore the caller's defining_class hand-off.
+            debug_assert_eq!(vm.t2_lite_pending.len(), pend_depth, "ICE: lite pending shape");
+            let rec = vm.t2_lite_pending.pop().expect("ICE: lite pending record");
+            vm.t2_lite_dc = rec.dc;
+            if vm.jit_stats_on {
+                vm.t2_lite_call_stats[2] += 1;
+                vm.jstat_exec(pidx, 8, false);
+            }
+            if let Some(s) = vm.t2_lite_streak.get_mut(pidx) {
+                *s = 0;
+            }
+            return 0;
+        }
+        debug_assert_eq!(st, T2_BAIL, "ICE: lite chain status");
+        // The callee (or something deeper) materialized: the cascade
+        // drained our record too — the caller's frame (below the
+        // callee's) exists now. Breaker attribution happened at the
+        // materialize itself (`lite_materialize_core`), so suspended
+        // levels don't multiply one deep event into a kill streak.
+        debug_assert!(vm.t2_lite_pending.len() < pend_depth, "ICE: lite bail without drain");
+        if vm.jit_stats_on {
+            vm.t2_lite_call_stats[1] += 1;
+        }
+        return 1;
+    }
+    lite_mat_here(vm, c, ip)
+}
+
+/// `Op::Call(name, argc, cid)` in a FRAMELESS body — explicit receiver.
+/// Stack (flushed): `[.., recv, a1..aN]`.
+unsafe extern "C" fn t2_lite_call_ex(
+    vm: *mut crate::vm::Vm,
+    ctx: *const i64,
+    meta: i64,
+    name: i64,
+    cargc: i64,
+    cid: i64,
+    ip: i64,
+) -> i64 {
+    let vm = unsafe { &mut *vm };
+    let c = unsafe { lite_ctx(ctx, meta) };
+    let (name_id, cargc, cid, ip) = (SymId(name as u32), cargc as usize, cid as u32, ip as usize);
+    if !lite_call_gates(vm, name_id) {
+        return lite_mat_here(vm, &c, ip);
+    }
+    let Some(recv_idx) = vm.stack.len().checked_sub(cargc + 1) else {
+        return lite_mat_here(vm, &c, ip);
+    };
+    match &vm.stack[recv_idx] {
+        Value::Object(oid) => {
+            let oid = *oid;
+            let Some(cls) = vm.heap.try_class_of(oid) else {
+                return lite_mat_here(vm, &c, ip);
+            };
+            let Some(m) = vm.lookup_method_cached(&cls, name_id, cid) else {
+                return lite_mat_here(vm, &c, ip);
+            };
+            if m.visibility.get() != crate::value::Visibility::Public
+                || m.closure.is_some()
+                || m.builtin.is_some()
+            {
+                return lite_mat_here(vm, &c, ip);
+            }
+            lite_serve_m(vm, &c, ip, &m, Some(&cls), Some(oid), LiteRecv::Stack(recv_idx), cargc)
+        }
+        _ => {
+            // Non-Object receiver: the cascade's own native arms
+            // (fast-prim / fast-index) under `t2_call_impl`'s exact
+            // singleton gates — both are frame-free, raise-free and
+            // GC-heap-allocation-free (documented on their defs), and
+            // both are no-ops on miss.
+            let singleton_free = !vm.any_str_singletons
+                && !vm.any_heap_singletons
+                && !vm.any_hash_singletons
+                && name_id != vm.sym_call;
+            if singleton_free
+                && (vm.try_fast_primitive(name_id, cargc, false)
+                    || vm.try_fast_index(name_id, cargc, false))
+            {
+                if vm.jit_stats_on {
+                    vm.t2_lite_call_stats[0] += 1;
+                }
+                return 0;
+            }
+            lite_mat_here(vm, &c, ip)
+        }
+    }
+}
+
+/// `Op::CallNoRecv(name, argc, cid)` in a FRAMELESS body — implicit self
+/// (from the entry's borrowed words). Mirrors `t2_call_impl`'s no_recv
+/// composition: host-fn precedence, then the toplevel-method IC for a
+/// main/Nil self, else the Object-self cached lookup (no visibility gate).
+unsafe extern "C" fn t2_lite_call_ns(
+    vm: *mut crate::vm::Vm,
+    ctx: *const i64,
+    meta: i64,
+    name: i64,
+    cargc: i64,
+    cid: i64,
+    ip: i64,
+) -> i64 {
+    let vm = unsafe { &mut *vm };
+    let c = unsafe { lite_ctx(ctx, meta) };
+    let (name_id, cargc, cid, ip) = (SymId(name as u32), cargc as usize, cid as u32, ip as usize);
+    if !lite_call_gates(vm, name_id) || vm.host_fns.contains_key(&name_id) {
+        return lite_mat_here(vm, &c, ip);
+    }
+    let sv = std::mem::ManuallyDrop::new(unsafe { value_from_words([c.self_w0, c.self_w1]) });
+    if matches!(&*sv, Value::Nil) || vm.is_main_self(&sv) {
+        // Toplevel bare call (`fib(n-1)` at main): the toplevel-method IC.
+        // Only the guard-free serves apply (no receiver Object).
+        let Some(m) = vm.lookup_toplevel_method_cache_hit(cid) else {
+            return lite_mat_here(vm, &c, ip);
+        };
+        if m.closure.is_some() || m.builtin.is_some() {
+            return lite_mat_here(vm, &c, ip);
+        }
+        return lite_serve_m(vm, &c, ip, &m, None, None, LiteRecv::SelfWords, cargc);
+    }
+    let Value::Object(oid) = &*sv else {
+        return lite_mat_here(vm, &c, ip);
+    };
+    let Some(cls) = vm.heap.try_class_of(*oid) else {
+        return lite_mat_here(vm, &c, ip);
+    };
+    let Some(m) = vm.lookup_method_cached(&cls, name_id, cid) else {
+        return lite_mat_here(vm, &c, ip);
+    };
+    // No visibility gate: implicit-self calls legally reach
+    // private/protected methods.
+    if m.closure.is_some() || m.builtin.is_some() {
+        return lite_mat_here(vm, &c, ip);
+    }
+    lite_serve_m(vm, &c, ip, &m, Some(&cls), Some(*oid), LiteRecv::SelfWords, cargc)
+}
+
+/// `Op::LoadLocalCall(slot, name, cid)` in a FRAMELESS body — the fused
+/// zero-arg explicit-recv superinstruction. The receiver is read from the
+/// caller's native spill slot IN PLACE (no push): a serve pushes only the
+/// result, a lite→lite chain pushes a clone as the callee's stack recv, and
+/// a decline materializes with NOTHING pushed so the interpreter re-runs
+/// the whole fused op from scratch.
+unsafe extern "C" fn t2_lite_call_local(
+    vm: *mut crate::vm::Vm,
+    ctx: *const i64,
+    meta: i64,
+    slot: i64,
+    name: i64,
+    cid: i64,
+    ip: i64,
+) -> i64 {
+    let vm = unsafe { &mut *vm };
+    let c = unsafe { lite_ctx(ctx, meta) };
+    let (name_id, cid, ip) = (SymId(name as u32), cid as u32, ip as usize);
+    if !lite_call_gates(vm, name_id) {
+        return lite_mat_here(vm, &c, ip);
+    }
+    let recv_ptr = unsafe { c.slot.add(slot as usize * 2) } as *const Value;
+    match unsafe { &*recv_ptr } {
+        Value::Object(oid) => {
+            let oid = *oid;
+            let Some(cls) = vm.heap.try_class_of(oid) else {
+                return lite_mat_here(vm, &c, ip);
+            };
+            let Some(m) = vm.lookup_method_cached(&cls, name_id, cid) else {
+                return lite_mat_here(vm, &c, ip);
+            };
+            if m.visibility.get() != crate::value::Visibility::Public
+                || m.closure.is_some()
+                || m.builtin.is_some()
+            {
+                return lite_mat_here(vm, &c, ip);
+            }
+            lite_serve_m(vm, &c, ip, &m, Some(&cls), Some(oid), LiteRecv::LocalSlot(recv_ptr), 0)
+        }
+        _ => lite_mat_here(vm, &c, ip),
+    }
+}
+
+/// `Op::LoadConstChain(chain_idx)` in a FRAMELESS body: serve the
+/// interpreter's own inline constant cache (keyed `(proto, chain slot)`,
+/// generation-tagged) — an IC hit clones the cached value onto the operand
+/// stack (an `Rc`/heap-id copy; no GC allocation); a cold or invalidated
+/// cache materializes and the interpreted arm resolves + refills as usual.
+unsafe extern "C" fn t2_lite_const_chain(
+    vm: *mut crate::vm::Vm,
+    ctx: *const i64,
+    meta: i64,
+    chain_idx: i64,
+    ip: i64,
+) -> i64 {
+    let vm = unsafe { &mut *vm };
+    let c = unsafe { lite_ctx(ctx, meta) };
+    let ip = ip as usize;
+    let cache_key = (c.pidx as u32, chain_idx as u32);
+    if let Some((v, g)) = vm.const_cache_chain.get(&cache_key)
+        && *g == vm.const_gen
+    {
+        let v = v.clone();
+        vm.stack.push(v);
+        if vm.jit_stats_on {
+            vm.t2_lite_call_stats[4] += 1;
+        }
+        return 0;
+    }
+    lite_mat_here(vm, &c, ip)
 }
 
 // ---------------------------------------------------------------------------
@@ -1495,11 +2161,17 @@ const LITE_MAX_ARGC: u16 = 4;
 /// - any non-plain parameter shape (optionals/rest/post/kw/kw-rest/`&blk` —
 ///   their binders and `JumpIfArgGiven`/`JumpIfKwArgGiven` prologues read
 ///   the frame's arity model),
-/// - every call form except the zero-arg `nil?` fusion (calls need the
-///   frame for the callee's caller-link, `caller`, and the dispatch state),
 /// - every op outside the enumerated leaf set (anything that could read
-///   `$~`, cvars, constants, `defining_class`, globals, the block arg, or
-///   run arbitrary interpreter arms).
+///   `$~`, cvars, globals, the block arg, or run arbitrary interpreter
+///   arms).
+///
+/// LITE t2_call (wave-4 follow-on): the plain fixed-argc call ops
+/// (`Call`/`CallNoRecv`/`LoadLocalCall`, argc ≤ `LITE_MAX_ARGC`) and the
+/// IC-cached `LoadConstChain` ARE admitted — served by the `t2_lite_call_*`
+/// helper family, whose every edge either completes frameless or
+/// materializes the frame (with outward-in cascading through nested lite
+/// activations) before the interpreter takes over. Block-passing and
+/// kw-bearing call forms still decline the body.
 ///
 /// Returns the plain fixed argc the entry bakes.
 pub(crate) fn t2_admit_lite(proto: &Proto, ctx: &T2Ctx) -> Result<u16, String> {
@@ -1562,6 +2234,10 @@ pub(crate) fn t2_admit_lite(proto: &Proto, ctx: &T2Ctx) -> Result<u16, String> {
             }
             // The zero-arg `x.nil?` fusion (same gates as the inline arm).
             Op::Call(name, 0, _) if name.0 == ctx.sym_nil_q => {}
+            // LITE t2_call: plain fixed-argc call ops + IC-cached consts.
+            Op::Call(_, a, _) | Op::CallNoRecv(_, a, _) if (*a as u16) <= LITE_MAX_ARGC => {}
+            Op::LoadLocalCall(s, _, _) if *s < nl => {}
+            Op::LoadConstChain(_) => {}
             other => return Err(format!("op {:?} at {}", other, i)),
         }
     }
@@ -1664,6 +2340,11 @@ struct HelperRefs {
     lite_ret_s: cranelift_codegen::ir::FuncRef,
     lite_ivar_get: cranelift_codegen::ir::FuncRef,
     lite_ivar_set: cranelift_codegen::ir::FuncRef,
+    // LITE t2_call family (wave-4 follow-on).
+    lite_call_ex: cranelift_codegen::ir::FuncRef,
+    lite_call_ns: cranelift_codegen::ir::FuncRef,
+    lite_call_local: cranelift_codegen::ir::FuncRef,
+    lite_const: cranelift_codegen::ir::FuncRef,
 }
 
 /// Snapshot of the compile-time machine state; slow-edge blocks materialize
@@ -1724,6 +2405,10 @@ struct Cg<'a> {
     lite: bool,
     /// Base address of the native locals spill slot (lite mode only).
     lite_slot: Option<ClValue>,
+    /// Caller-context slot for the LITE t2_call helpers
+    /// (`[slot_addr, trunc, n_pop, self_w0, self_w1]`), filled once at
+    /// entry when the body contains admitted call/const ops.
+    lite_ctx: Option<ClValue>,
     /// `entry stack len - n_pop` — the stack index of the recv slot
     /// (explicit) / the callee's would-be `base_sp` (lite mode only).
     lite_trunc: Option<ClValue>,
@@ -2094,6 +2779,48 @@ impl<'a> Cg<'a> {
         fb.ins().return_(&[st]);
     }
 
+    /// LITE t2_call emission: flush (recv/args become real, rooted stack
+    /// slots), call the per-form helper, then branch on its status —
+    /// 0 = served frameless (continue the chain; the LOCAL READ CACHE
+    /// SURVIVES: no callee can write this activation's native spill slot —
+    /// lite→lite callees have their own, the native serve families never
+    /// touch it, and the materialized path never returns here), 1 = the
+    /// frame was materialized (with any pending cascade): exit `T2_BAIL`.
+    /// `args` are the helper-specific immediates AFTER (vm, ctx, meta).
+    fn emit_lite_ext(
+        &mut self,
+        fb: &mut FunctionBuilder,
+        i: usize,
+        href: cranelift_codegen::ir::FuncRef,
+        args: &[i64],
+    ) -> bool {
+        let Some(ctx) = self.lite_ctx else {
+            // No ctx slot was laid down (nil?-fusion-only bodies): keep
+            // the wave-4 materialize behaviour.
+            return self.emit_generic(fb, i);
+        };
+        self.flush(fb);
+        let meta = (self.pidx as u64)
+            | ((self.cache.len() as u64) << 32)
+            | ((self.lite_argc as u64) << 40);
+        let metac = fb.ins().iconst(types::I64, meta as i64);
+        let mut call_args = vec![self.vm, ctx, metac];
+        for &a in args {
+            call_args.push(fb.ins().iconst(types::I64, a));
+        }
+        let ipc = fb.ins().iconst(types::I64, i as i64);
+        call_args.push(ipc);
+        let call = fb.ins().call(href, &call_args);
+        let st = fb.inst_results(call)[0];
+        self.invalidate_mem();
+        let ok = fb.ins().icmp_imm(IntCC::Equal, st, 0);
+        let cont = fb.create_block();
+        let bailc = fb.ins().iconst(types::I64, T2_BAIL);
+        fb.ins().brif(ok, cont, &[], self.exit, &[BlockArg::Value(bailc)]);
+        fb.switch_to_block(cont);
+        false
+    }
+
     /// One guard: continue on `ok`, take the shared per-op resume edge
     /// otherwise. `fail_b` is created+filled on first use; `snap` is the
     /// op-entry snapshot.
@@ -2302,6 +3029,7 @@ fn emit_body(
         nocall: t2ctx.nocall,
         lite,
         lite_slot: None,
+        lite_ctx: None,
         lite_trunc: None,
         lite_n_pop: None,
         lite_argc: lite_argc.unwrap_or(0),
@@ -2367,6 +3095,29 @@ fn emit_body(
                 fb.ins().store(fl(), nil0, lsa, s * 16);
                 fb.ins().store(fl(), zero, lsa, s * 16 + 8);
             }
+        }
+        // LITE t2_call caller-context slot: bodies containing admitted
+        // call/const ops (the `nil?`-fusion Call doesn't count — its
+        // empty-vst fallback keeps the wave-4 materialize path) get a
+        // 5-word slot the helpers read: [slot_addr, trunc, n_pop,
+        // self_w0, self_w1]. Filled ONCE here (the values are entry
+        // constants for the whole activation).
+        let has_ext = code.iter().any(|op| match op {
+            Op::Call(name, _, _) => name.0 != t2ctx.sym_nil_q,
+            Op::CallNoRecv(..) | Op::LoadLocalCall(..) | Op::LoadConstChain(_) => true,
+            _ => false,
+        });
+        if has_ext {
+            let cslot =
+                fb.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 40, 3));
+            let ca = fb.ins().stack_addr(ptr_ty, cslot, 0);
+            let trunc = cg.lite_trunc.expect("lite trunc");
+            fb.ins().store(fl(), lsa, ca, 0);
+            fb.ins().store(fl(), trunc, ca, 8);
+            fb.ins().store(fl(), n_pop, ca, 16);
+            fb.ins().store(fl(), sw0, ca, 24);
+            fb.ins().store(fl(), sw1, ca, 32);
+            cg.lite_ctx = Some(ca);
         }
     } else if cg.inline_on {
         // Entry sequence: one info call fills the scratch slot with the
@@ -2610,7 +3361,9 @@ fn emit_op(cg: &mut Cg, fb: &mut FunctionBuilder, i: usize) -> bool {
         // Wave-2 IC-fast call family (chain-inline: the local read cache
         // survives — callees cannot write a Locals::Stack frame's slots).
         // ------------------------------------------------------------------
-        Op::Call(name, argc, cid) if !cg.nocall && argc <= 2 => {
+        Op::Call(name, argc, cid)
+            if !cg.nocall && (argc <= 2 || (cg.lite && (argc as u16) <= LITE_MAX_ARGC)) =>
+        {
             // `x.nil?` on a virtual receiver: the interpreter serves this
             // via try_fast_primitive's universal arm for Int/Float/Sym/
             // Bool/Nil receivers whenever no primitive class was reopened
@@ -2647,11 +3400,15 @@ fn emit_op(cg: &mut Cg, fb: &mut FunctionBuilder, i: usize) -> bool {
                 cg.restore(snap);
             }
             if cg.lite {
-                // Only the `nil?` fusion is admitted in lite mode; a shape
-                // it can't serve (virtual stack empty at this op, or a
-                // statically non-primitive receiver) materializes — the
-                // `t2_call` helper needs the real frame.
-                return cg.emit_generic(fb, i);
+                // LITE t2_call: the frameless call helper — serve or
+                // materialize (a `nil?` shape the fusion above couldn't
+                // take goes through the same helper when a ctx exists).
+                return cg.emit_lite_ext(
+                    fb,
+                    i,
+                    cg.h.lite_call_ex,
+                    &[name.0 as i64, argc as i64, cid as i64],
+                );
             }
             cg.flush(fb);
             let nc = fb.ins().iconst(types::I64, name.0 as i64);
@@ -2664,7 +3421,17 @@ fn emit_op(cg: &mut Cg, fb: &mut FunctionBuilder, i: usize) -> bool {
             cg.invalidate_mem();
             false
         }
-        Op::CallNoRecv(name, argc, cid) if !cg.nocall && argc <= 2 => {
+        Op::CallNoRecv(name, argc, cid)
+            if !cg.nocall && (argc <= 2 || (cg.lite && (argc as u16) <= LITE_MAX_ARGC)) =>
+        {
+            if cg.lite {
+                return cg.emit_lite_ext(
+                    fb,
+                    i,
+                    cg.h.lite_call_ns,
+                    &[name.0 as i64, argc as i64, cid as i64],
+                );
+            }
             cg.flush(fb);
             let nc = fb.ins().iconst(types::I64, name.0 as i64);
             let a = fb.ins().iconst(types::I64, argc as i64);
@@ -2677,6 +3444,14 @@ fn emit_op(cg: &mut Cg, fb: &mut FunctionBuilder, i: usize) -> bool {
             false
         }
         Op::LoadLocalCall(slot, name, cid) if !cg.nocall => {
+            if cg.lite {
+                return cg.emit_lite_ext(
+                    fb,
+                    i,
+                    cg.h.lite_call_local,
+                    &[slot as i64, name.0 as i64, cid as i64],
+                );
+            }
             cg.flush(fb);
             let s = fb.ins().iconst(types::I64, slot as i64);
             let nc = fb.ins().iconst(types::I64, name.0 as i64);
@@ -2687,6 +3462,11 @@ fn emit_op(cg: &mut Cg, fb: &mut FunctionBuilder, i: usize) -> bool {
             cg.check_status(fb, st);
             cg.invalidate_mem();
             false
+        }
+        // LITE t2_call: the IC-cached bare-constant read (frameless on a
+        // cache hit; cold/invalidated → materialize + interpreted refill).
+        Op::LoadConstChain(ci) if cg.lite => {
+            return cg.emit_lite_ext(fb, i, cg.h.lite_const, &[ci as i64]);
         }
         // ------------------------------------------------------------------
         // Wave-5 block family: block-passing calls + yield through their
@@ -3435,6 +4215,10 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize, ctx: &T2Ctx) -> Opt
     builder.symbol("t2_lite_return_s", t2_lite_return_s as *const u8);
     builder.symbol("t2_lite_ivar_get", t2_lite_ivar_get as *const u8);
     builder.symbol("t2_lite_ivar_set", t2_lite_ivar_set as *const u8);
+    builder.symbol("t2_lite_call_ex", t2_lite_call_ex as *const u8);
+    builder.symbol("t2_lite_call_ns", t2_lite_call_ns as *const u8);
+    builder.symbol("t2_lite_call_local", t2_lite_call_local as *const u8);
+    builder.symbol("t2_lite_const_chain", t2_lite_const_chain as *const u8);
     let mut module = JITModule::new(builder);
     let ptr_ty = module.target_config().pointer_type();
 
@@ -3526,6 +4310,10 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize, ctx: &T2Ctx) -> Opt
     let f_lite_ret_s = decl(&mut module, "t2_lite_return_s", "i", true)?;
     let f_lite_ivar_get = decl(&mut module, "t2_lite_ivar_get", "iip", true)?;
     let f_lite_ivar_set = decl(&mut module, "t2_lite_ivar_set", "iiiii", true)?;
+    let f_lite_call_ex = decl(&mut module, "t2_lite_call_ex", "piiiii", true)?;
+    let f_lite_call_ns = decl(&mut module, "t2_lite_call_ns", "piiiii", true)?;
+    let f_lite_call_local = decl(&mut module, "t2_lite_call_local", "piiiii", true)?;
+    let f_lite_const = decl(&mut module, "t2_lite_const_chain", "piii", true)?;
 
     let make_refs = |module: &mut JITModule,
                      func: &mut cranelift_codegen::ir::Function|
@@ -3567,6 +4355,10 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize, ctx: &T2Ctx) -> Opt
             lite_ret_s: module.declare_func_in_func(f_lite_ret_s, func),
             lite_ivar_get: module.declare_func_in_func(f_lite_ivar_get, func),
             lite_ivar_set: module.declare_func_in_func(f_lite_ivar_set, func),
+            lite_call_ex: module.declare_func_in_func(f_lite_call_ex, func),
+            lite_call_ns: module.declare_func_in_func(f_lite_call_ns, func),
+            lite_call_local: module.declare_func_in_func(f_lite_call_local, func),
+            lite_const: module.declare_func_in_func(f_lite_const, func),
         }
     };
 

@@ -1042,9 +1042,10 @@ const T2_THRESHOLD_PER_OP_DEFAULT: u32 = 64;
 /// Tier-2 native-nesting cap: each nested native body adds a Rust stack
 /// segment (native fn + helper + dispatch_until + step); deeper Ruby
 /// recursion falls back to the flat interpreter loop, which has no Rust-stack
-/// cost per Ruby frame.
+/// cost per Ruby frame. Shared with the lite→lite native chains (LITE
+/// t2_call): a chain past the cap materializes and continues interpreted.
 #[cfg(feature = "jit-native")]
-const T2_MAX_NATIVE_DEPTH: u32 = 96;
+pub(crate) const T2_MAX_NATIVE_DEPTH: u32 = 96;
 /// Wave-4 frame-lite bail-streak breaker: this many CONSECUTIVE
 /// materialize-bails (no completed frameless serve in between) disable the
 /// proto's lite entry — a chronic shape mismatch (e.g. a Float-operand
@@ -1053,6 +1054,36 @@ const T2_MAX_NATIVE_DEPTH: u32 = 96;
 /// with occasional bails keep serving.
 #[cfg(feature = "jit-native")]
 const T2_LITE_KILL_STREAK: u8 = 32;
+
+/// A SUSPENDED frameless (frame-lite) activation whose native code is
+/// mid-way through a lite→lite call (ADR 0037 wave-4 follow-on, LITE
+/// t2_call). Pushed by the lite call helper around the nested callee
+/// invocation; consumed either by popping (the callee completed
+/// frameless) or by the materialize cascade: when ANY deeper activation
+/// materializes, every pending record is drained OUTERMOST-FIRST — each
+/// pushing its deferred frame with `resume_ip` stamped AFTER its call op
+/// (the call has happened; the callee's frame sits above) — so the frame
+/// order on `vm.frames` is exactly the interpreter's. `slot` points into
+/// the suspended activation's native spill slot (a Rust/Cranelift stack
+/// address, valid while its native frame is alive — which spans the whole
+/// nested call by construction); the slot values are read only at drain
+/// time, while the activation is suspended, so they cannot change
+/// underneath. `dc` is the activation's `defining_class` (captured from
+/// the resolving `Method` at serve time — the deferred-push twin of the
+/// serve sites' own `m.defining_class` stamp).
+#[cfg(feature = "jit-native")]
+pub(crate) struct T2LitePending {
+    pub(crate) slot: *const i64,
+    pub(crate) pidx: usize,
+    pub(crate) argc: usize,
+    pub(crate) n_locals: usize,
+    pub(crate) n_pop: usize,
+    pub(crate) trunc: usize,
+    pub(crate) self_w0: i64,
+    pub(crate) self_w1: i64,
+    pub(crate) resume_ip: usize,
+    pub(crate) dc: Option<std::rc::Rc<crate::value::Class>>,
+}
 
 pub(crate) struct Vm {
     pub(crate) protos: Vec<Proto>,
@@ -1203,6 +1234,29 @@ pub(crate) struct Vm {
     /// serving (reproduces the wave-3/5 tier) for controlled A/B.
     #[cfg(feature = "jit-native")]
     pub(crate) jit_tier2_nolite: bool,
+    /// LITE t2_call (wave-4 follow-on): suspended frameless activations
+    /// mid-way through a lite→lite native call, outermost first. Non-empty
+    /// ONLY inside a nested lite chain; drained (outward-in) by any
+    /// materialize. See `T2LitePending`.
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_lite_pending: Vec<T2LitePending>,
+    /// The `defining_class` for the INNERMOST live lite activation (its
+    /// pending record holds the outer ones'): set by every lite serve
+    /// entry (`t2_lite_run` / the lite call helper's chain hand-off),
+    /// consumed by the deferred frame push so a materialized lite frame
+    /// carries exactly the `defining_class` the interpreter's push would
+    /// have (read by `do_call`'s Nil-self bare-call gates; `super`/cvar
+    /// readers stay unreachable — those ops decline lite admission).
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_lite_dc: Option<std::rc::Rc<crate::value::Class>>,
+    /// LITE t2_call counters (stats-gated): `[0]` call ops served
+    /// frameless in place (getter/zeroarg/native-family/rest-pred/
+    /// fast-prim), `[1]` call ops that materialized (conservative decline
+    /// or mid-chain cascade), `[2]` lite→lite native chain serves,
+    /// `[3]` frames pushed by cascade drains, `[4]` IC-hit const-chain
+    /// reads served frameless.
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_lite_call_stats: [u64; 5],
     /// FLOAT-param specialization of a 1-arg method (`def scale(n); n*1.5; end`
     /// called with a Float arg): the param binds as Float, the i64 arg carries f64
     /// bits. Leaf methods only (no cross-calls — those decline). Keyed by proto,
@@ -2706,6 +2760,12 @@ impl Vm {
             #[cfg(feature = "jit-native")]
             jit_tier2_nolite: std::env::var_os("RUBYRS_JIT_TIER2_NOLITE").is_some(),
             #[cfg(feature = "jit-native")]
+            t2_lite_pending: Vec::new(),
+            #[cfg(feature = "jit-native")]
+            t2_lite_dc: None,
+            #[cfg(feature = "jit-native")]
+            t2_lite_call_stats: [0; 5],
+            #[cfg(feature = "jit-native")]
             jit_native_fparam: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_poly: crate::intern::FxHashMap::default(),
@@ -3318,13 +3378,25 @@ impl Vm {
         pidx: usize,
         self_words: [i64; 2],
         n_pop: usize,
+        dc: Option<std::rc::Rc<crate::value::Class>>,
     ) -> Result<(), crate::error::Trap> {
         // Backward-branch poll gate mirror — same per-serve recompute as
         // `t2_enter_slow` (a fired gate materializes + bails; delivery
         // stays owned by the dispatch loop heads).
         self.t2_poll_flags = (self.fuel.is_some() || self.deadline_at.is_some()) as u8;
+        // Deferred-push `defining_class` hand-off (see `t2_lite_dc`): a
+        // materialize consumes it; a completed serve clears it below.
+        // Serve sites can only be reached with NO pending lite chain (a
+        // frameless activation never re-enters a dispatch site).
+        debug_assert!(self.t2_lite_pending.is_empty(), "ICE: lite serve inside a lite chain");
+        self.t2_lite_dc = dc;
+        // Native-nesting accounting: lite→lite chains inside this run
+        // deepen the Rust stack; share the tier-2 cap.
+        self.t2_depth += 1;
         let status = f(self as *mut Vm, self_words[0], self_words[1], n_pop as i64);
+        self.t2_depth -= 1;
         if status == crate::jit_tier2::T2_DONE {
+            self.t2_lite_dc = None;
             if self.jit_stats_on {
                 self.t2_lite_stats[0] += 1;
                 self.jstat_exec(pidx, 8, false);
@@ -3335,7 +3407,22 @@ impl Vm {
             return Ok(());
         }
         debug_assert_eq!(status, crate::jit_tier2::T2_BAIL, "ICE: lite status");
-        // Materialize-bail: the frame exists now; count toward the breaker.
+        debug_assert!(self.t2_lite_dc.is_none(), "ICE: lite bail left dc unconsumed");
+        // Materialize-bail: the frame exists now. Breaker attribution
+        // happened at the materialize itself (`lite_materialize_core`),
+        // against the proto whose shape actually failed — which, with
+        // lite→lite chains, may be a CALLEE rather than this entry proto.
+        Ok(())
+    }
+
+    /// Breaker bookkeeping for a lite materialize-bail — called by
+    /// `jit_tier2::lite_materialize_core` for the proto that materialized
+    /// ITSELF (cascade-drained callers are not charged): bump the proto's
+    /// consecutive-bail streak, kill the lite entry at
+    /// `T2_LITE_KILL_STREAK` (chronic shape mismatch = wasted entry +
+    /// materialize per call).
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn t2_lite_note_bail(&mut self, pidx: usize) {
         if self.t2_lite_streak.len() <= pidx {
             self.t2_lite_streak.resize(pidx + 1, 0);
         }
@@ -3345,15 +3432,14 @@ impl Vm {
         let s = &mut self.t2_lite_streak[pidx];
         *s = s.saturating_add(1);
         if *s >= T2_LITE_KILL_STREAK {
-            if let Some(slot) = self.t2_lite_ptrs.get_mut(pidx) {
+            if let Some(slot @ Some(_)) = self.t2_lite_ptrs.get_mut(pidx) {
                 *slot = None; // module stays alive in t2_protos
+                self.t2_lite_stats[2] += 1; // count actual kills once
             }
             if let Some(f) = self.jit_flags.get_mut(pidx) {
                 *f &= !JFLAG_TIER2_LITE;
             }
-            self.t2_lite_stats[2] += 1;
         }
-        Ok(())
     }
 
     /// Settle-check for `JFLAG_NO_ONEARG`: set the bit iff all three 1-arg
@@ -3485,6 +3571,16 @@ impl Vm {
             eprintln!(
                 "tier2 lite serves={} materialize_bails={} kills={}",
                 self.t2_lite_stats[0], self.t2_lite_stats[1], self.t2_lite_stats[2]
+            );
+        }
+        if self.t2_lite_call_stats != [0; 5] {
+            eprintln!(
+                "tier2 lite_call serves={} materializes={} chains={} cascade_frames={} const_serves={}",
+                self.t2_lite_call_stats[0],
+                self.t2_lite_call_stats[1],
+                self.t2_lite_call_stats[2],
+                self.t2_lite_call_stats[3],
+                self.t2_lite_call_stats[4]
             );
         }
         for (i, name) in JIT_FAM_NAMES.iter().enumerate() {
