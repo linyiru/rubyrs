@@ -12,6 +12,22 @@
 #   - kill lands at the target's next park point (CRuby: async).
 #   - a fiber cannot park across a NATIVE-iterator frame (times/each
 #     with a blocking call inside — use while; vm/iter.rs truncation).
+#   - Thread.report_on_exception is NOT implemented: the exception
+#     section below makes CRuby print its "#<Thread:0x… terminated
+#     with exception (report_on_exception is true)" block on STDERR,
+#     while rubyrs prints nothing there — `__coop_run` stores the
+#     body's exception (`@exception = e`) for re-raise at join/value
+#     and never reports. Diagnosed 2026-07: the divergence is
+#     UNCONDITIONAL (verified identical stderr under plain /
+#     STRESS_GC / RUBYRS_JIT_TIER2 / RUBYRS_JIT_NATIVE — an earlier
+#     note that the lines "drop under STRESS_GC" was a
+#     misattribution; there are no such lines to drop). The diff
+#     harness compares stdout only, so this fixture stays green; a
+#     faithful report would embed the thread's nondeterministic
+#     address + host paths and could not be byte-diffed anyway.
+#     Implementing report_on_exception (accessors + report format)
+#     is a feature, not a flush-ordering fix — deferred until a
+#     consumer needs it.
 
 # --- spawn / join / value ------------------------------------------
 t = Thread.new { 21 * 2 }
