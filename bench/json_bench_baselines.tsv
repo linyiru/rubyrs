@@ -51,4 +51,12 @@
 parse              40    2026-07 GC-honest recalibration — local ~13.6 µs ARM mac (mimalloc, bounded RSS), ~3× CI headroom
 generate           18    2026-07 ratchet — local ~5.8 µs ARM mac (was 50; prior local ~14), 3× CI headroom
 round_trip         60    2026-07 ratchet — local ~19.3 µs ARM mac (was 150; prior local ~40), ~3× CI headroom (round_trip GC variance)
-parse_sids         100   2026-07 initial — local ~33 µs ARM mac (CRuby 19.3; structural record-shape gap, see json_bench_results.md), 3× CI headroom
+# 2026-07 small-hash representation (SmallVec inline pairs + boxed cold
+# tail, HashObj 168->120 / heap slot 168->136): parse_sids local
+# 34.9->31.6 µs; ratchet 100->95 keeps the same ~3x CI headroom. The two
+# keys_* rows are new with the campaign: keys_repeated = 200 records x 5
+# keys (spilled-pairs shape, local ~53 µs), keys_unique = one 1000-key
+# hash (lazy-index win, local ~39 µs — rubyrs beats CRuby's ~65 here).
+parse_sids         95    2026-07 small-hash ratchet — local ~31.6 µs ARM mac (CRuby ~19.9), 3× CI headroom
+keys_repeated      160   2026-07 initial — local ~53 µs ARM mac (CRuby ~38), 3× CI headroom
+keys_unique        120   2026-07 initial — local ~39 µs ARM mac (CRuby ~65; the lazy-index WIN this row guards), 3× CI headroom

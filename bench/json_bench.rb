@@ -75,6 +75,15 @@ JSON_BYTES = JSON.generate(OBJ)
 # blind scan declined these documents to the ~200x-slower pure canon
 # (a measured 160x parse regression, fixed 2026-07).
 SID_BYTES = JSON.generate((1..200).map { |i| { "sid" => (1234567890123456789 + i).to_s, "n" => i } })
+# Record-shape Hash-allocation metrics (2026-07 small-hash campaign):
+# keys_repeated = many small records sharing one key set (the shape the
+# SmallVec-inline-pairs representation targets); keys_unique = one big
+# hash (guards the lazy-index win — rubyrs beats CRuby here and must
+# keep doing so after any small-hash change).
+KEYS_REPEATED_BYTES = JSON.generate((1..200).map { |i|
+  { "alpha" => i, "beta" => "v#{i}", "gamma" => i.even?, "delta" => i * 1.5, "epsilon" => nil }
+})
+KEYS_UNIQUE_BYTES = JSON.generate((1..1000).map { |i| ["key_#{i}", i] }.to_h)
 
 runtime_label = if defined?(JSON::NATIVE_AVAILABLE)
   JSON::NATIVE_AVAILABLE ? "rubyrs (_json_native)" : "rubyrs (pure canon)"
@@ -116,6 +125,8 @@ bench("parse",            RUNS, ITERS) { JSON.parse(JSON_BYTES) }
 bench("generate",         RUNS, ITERS) { JSON.generate(OBJ) }
 bench("round_trip",       RUNS, ITERS) { JSON.generate(JSON.parse(JSON_BYTES)) }
 bench("parse_sids",       RUNS, ITERS) { JSON.parse(SID_BYTES) }
+bench("keys_repeated",    RUNS, ITERS) { JSON.parse(KEYS_REPEATED_BYTES) }
+bench("keys_unique",      RUNS, ITERS) { JSON.parse(KEYS_UNIQUE_BYTES) }
 
 if HAVE_OJ
   puts ""

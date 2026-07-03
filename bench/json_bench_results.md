@@ -65,6 +65,33 @@ Differential micro-fixtures (µs/iter, rubyrs vs CRuby):
 | parse keys_unique (1000)    | 40.9 | 60.6 | win extended (was 58.7) |
 | gen 3.4 KB / 1 MB | 3.3 / 755 | 3.3 / 834 | large payloads at or ahead of parity |
 
+## 2026-07 small-hash representation (record-shape campaign)
+
+The parse_sids residual was profiled to decomposition (sample(1),
+7.2k samples): GC+alloc+free complex 23.5% (per-record pairs-Vec
+malloc/free, 168-byte HashObj slot writes, sweep-side frees), serde
+scanning ~29%, the bigint pre-scan ~12%, key-interning ~7%. The
+hash-side slice shipped as `HashObj` = SmallVec inline pairs
+(`HASH_INLINE_PAIRS` = 3, the ar_table-analogue: a ≤3-pair record
+embeds its pairs in the heap slot, zero pairs allocation) + the cold
+tail (defaults/tag/ivars/indexes/eigenclass) boxed behind
+`Option<Box<HashExtras>>`. HashObj 168 → 120 bytes; since HashObj was
+the largest HeapObj variant, the shared heap-slot size dropped
+168 → 136 for EVERY heap object.
+
+| Metric | before | after | CRuby | note |
+|---|---:|---:|---:|---|
+| `parse_sids`    | 34.9 µs | 31.6 µs | ~19.9 µs | −9.5%; residual = pre-scan ~4 µs + serde str scan ~6 µs + value-string allocs ~2 µs (not hash-side) |
+| `parse`         | 14.12 µs | 13.34 µs | ~14.0 µs | win extended |
+| `round_trip`    | 20.04 µs | 19.55 µs | ~20.7 µs | win extended |
+| `keys_unique`   | 41.6 µs | 38.6 µs | ~65.5 µs | lazy-index win extended |
+| `keys_repeated` | 56.1 µs | 55.5 µs | ~38.2 µs | 5-key records spill past the inline cap; residual is scan/intern/GC-side |
+| live-heap RSS, 200k 2-pair hashes | 143.4 MB | 117.3 MB | — | −18.2% (slot shrink + no pairs buffers) |
+| live-heap RSS, 300k 2-ivar instances | 154.8 MB | 128.4 MB | — | −17.0% (global slot shrink) |
+
+(Numbers from the campaign box under moderate load; the ratcheted
+baselines row documents the quiet-machine locals.)
+
 ## Historical (2026-06-01 snapshot, ITERS=5000 RUNS=3 — CRuby was json 2.9-era timings)
 
 | Operation   | CRuby stdlib | Oj :strict | rubyrs pure canon | rubyrs `_json_native` |
