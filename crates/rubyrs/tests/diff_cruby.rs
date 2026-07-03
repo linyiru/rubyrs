@@ -1124,6 +1124,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // and the census-ranked buckets (Array#drop/freeze/dup, Hash#fetch,
 // String#dup, Object#class, bare block_given?).
 #[test] fn t2_walk_buckets_battery() { run_diff("t2_walk_buckets_battery"); }
+// method_defined? CRuby semantics (visibility, inherit scope,
+// universal surface, sentinel classes, error arms).
+#[test] fn method_defined_semantics() { run_diff("method_defined_semantics"); }
 // Ivar reflection on Array/Hash/Str values (heap ivar tables +
 // str_ivars side-table; real frozen guards; dup/clone ivar copy).
 #[test] fn ivar_reflect_collections() { run_diff("ivar_reflect_collections"); }

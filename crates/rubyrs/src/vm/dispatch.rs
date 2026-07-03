@@ -5862,22 +5862,56 @@ impl Vm {
                 self.stack.push(Value::Array(id));
                 Ok(true)
             }
-            ("method_defined?", [Value::Sym(sid)])
-            | ("method_defined?", [Value::Sym(sid), _]) => {
-                let answer = class_method_defined(self, &cls, *sid);
+            // `method_defined?(name, inherit = true)` — the inherit
+            // flag is truthiness-evaluated (CRuby:
+            // `method_defined?(:m, nil)` behaves like `false`).
+            ("method_defined?", [Value::Sym(sid)]) => {
+                let answer = class_method_defined(self, &cls, *sid, true);
                 self.stack.push(Value::Bool(answer));
                 Ok(true)
             }
-            ("method_defined?", [Value::Str(s)])
-            | ("method_defined?", [Value::Str(s), _]) => {
+            ("method_defined?", [Value::Sym(sid), inh]) => {
+                let answer = class_method_defined(self, &cls, *sid, inh.is_truthy());
+                self.stack.push(Value::Bool(answer));
+                Ok(true)
+            }
+            ("method_defined?", [Value::Str(s)]) => {
                 let sid = self.interner.intern(&s.to_string_lossy());
-                let answer = class_method_defined(self, &cls, sid);
+                let answer = class_method_defined(self, &cls, sid, true);
                 self.stack.push(Value::Bool(answer));
                 Ok(true)
             }
+            ("method_defined?", [Value::Str(s), inh]) => {
+                let sid = self.interner.intern(&s.to_string_lossy());
+                let inherit = inh.is_truthy();
+                let answer = class_method_defined(self, &cls, sid, inherit);
+                self.stack.push(Value::Bool(answer));
+                Ok(true)
+            }
+            // Non-Sym/Str name → TypeError; wrong arity →
+            // ArgumentError — both CRuby-parity (probed: `42 is not
+            // a symbol nor a string` uses the INSPECT rendering,
+            // `nil is not …` not `NilClass is not …`). Without
+            // these the calls fell through to NoMethodError.
+            ("method_defined?", args_) => match args_ {
+                [first] | [first, _] => {
+                    let inspected = first.to_inspect(&self.heap, &self.interner);
+                    Err(self.trap(RubyError::TypeError {
+                        msg: format!("{} is not a symbol nor a string", inspected),
+                    }))
+                }
+                _ => Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 1..2)",
+                        args_.len()
+                    ),
+                })),
+            },
             // Visibility-filtered method_defined? triplet. The
-            // optional second arg (inherit flag) is accepted like
-            // method_defined?'s. minitest's Spec DSL `it` walks
+            // optional second arg (inherit flag) narrows to the
+            // OWN method table when falsy, mirroring
+            // method_defined?'s handling. minitest's Spec DSL `it`
+            // walks
             // `children.reject { |c| c.public_method_defined? name }`
             // — its absence aborted every NESTED describe's it
             // registration (leaf describes never call it, which is
@@ -5892,10 +5926,18 @@ impl Vm {
                     Value::Sym(sid) => *sid,
                     Value::Str(s) => self.interner.intern(&s.to_string_lossy()),
                     other => {
+                        // INSPECT rendering, matching CRuby (`nil is
+                        // not a symbol nor a string`, not `NilClass
+                        // is not …`).
+                        let inspected = other.to_inspect(&self.heap, &self.interner);
                         return Err(self.trap(RubyError::TypeError {
-                            msg: format!("{} is not a symbol nor a string", other.type_name()),
+                            msg: format!("{} is not a symbol nor a string", inspected),
                         }));
                     }
+                };
+                let inherit = match args {
+                    [_, inh] => inh.is_truthy(),
+                    _ => true,
                 };
                 let want = match name {
                     "public_method_defined?" => crate::value::Visibility::Public,
@@ -5907,16 +5949,41 @@ impl Vm {
                 // probe inside class_method_defined) are all
                 // public, so a defined-but-not-user-table hit
                 // answers true only for the Public variant.
-                let answer = match self.lookup_method_uncached(&cls, sid) {
-                    Some(m) => m.visibility.get() == want,
-                    None => {
-                        want == crate::value::Visibility::Public
-                            && class_method_defined(self, &cls, sid)
+                let answer = if inherit {
+                    match self.lookup_method_uncached(&cls, sid) {
+                        Some(m) => m.visibility.get() == want,
+                        None => {
+                            want == crate::value::Visibility::Public
+                                && class_method_defined(self, &cls, sid, true)
+                        }
                     }
+                } else {
+                    // Own-table-only: same scope rule as
+                    // `method_defined?(name, false)` (no includes,
+                    // no prepends, no superclasses).
+                    !cls.undefed.borrow().contains(&sid)
+                        && cls
+                            .methods
+                            .borrow()
+                            .get(&sid)
+                            .is_some_and(|m| m.visibility.get() == want)
                 };
                 self.stack.push(Value::Bool(answer));
                 Ok(true)
             }
+            // Triplet wrong-arity catch-all (0 or 3+ args — the 1-
+            // and 2-arg shapes matched above) — CRuby-parity
+            // ArgumentError instead of a NoMethodError fall-through.
+            (
+                "public_method_defined?" | "private_method_defined?"
+                | "protected_method_defined?",
+                args_,
+            ) => Err(self.trap(RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 1..2)",
+                    args_.len()
+                ),
+            })),
             ("undef_method", args) => {
                 // REAL undef since the minitest-substrate work: each
                 // name gets a tombstone on THIS class (see
@@ -25529,14 +25596,32 @@ impl Vm {
 /// to a permissive `true` — matches CRuby for the broadly-shared
 /// Kernel methods and stays out of false-negative territory while
 /// the synthesis cost isn't justified.
-fn class_method_defined(vm: &mut Vm, cls: &Rc<Class>, sid: SymId) -> bool {
+/// `Module#method_defined?(name[, inherit])` backend. CRuby
+/// semantics (probed against ruby 3.4):
+///   - public AND protected records answer true; PRIVATE records
+///     answer FALSE (`Foo.method_defined?(:initialize)` is false) —
+///     pre-2026-07 this answered true for any table hit;
+///   - the universal public-Object surface (`dup` / `class` / `==` /
+///     …, rubyrs's universal dispatch arms) answers true;
+///   - `inherit: false` consults ONLY the module's own method table
+///     — not includes, not PREPENDS, not superclasses (probed:
+///     `Foo.method_defined?(:from_prepended_mod, false)` is false).
+/// The inherit=true chain verdict rides the respond_to?
+/// `(class, name, method_gen)` memo (`RESPOND_PROT_BIT` was added
+/// for exactly this split) — the RuboCop cop walk probes
+/// `method_defined?` ~2.7K times per file, and the walk-bucket arm
+/// in `try_walk_fast_buckets` shares this helper so the fast and
+/// canonical answers cannot drift.
+fn class_method_defined(vm: &mut Vm, cls: &Rc<Class>, sid: SymId, inherit: bool) -> bool {
     // Eigenclass-shell: methods installed via
     // `singleton_class.class_eval { def foo; end }` redirect
     // into `target.singleton_methods` rather than the shell's
     // own `methods` table. CRuby's `shell.method_defined?(:foo)`
     // returns true for redirected installs, so walk the
     // target's singleton-method chain when the shell asks.
-    // (Code-review #253 round 9 #3.)
+    // (Code-review #253 round 9 #3.) Redirected installs are the
+    // shell's OWN methods, so the redirect answers under both
+    // inherit variants.
     if let Some(target) = cls
         .singleton_target
         .borrow()
@@ -25546,7 +25631,44 @@ fn class_method_defined(vm: &mut Vm, cls: &Rc<Class>, sid: SymId) -> bool {
     {
         return true;
     }
-    if vm.lookup_method_uncached(cls, sid).is_some() {
+    if !inherit {
+        // Own-table-only variant. An `undef_method` tombstone on the
+        // class itself reads as "not defined" (matches the
+        // inherit=true walk, which stops at tombstones).
+        if cls.undefed.borrow().contains(&sid) {
+            return false;
+        }
+        return match cls.methods.borrow().get(&sid) {
+            Some(m) => m.visibility.get() != crate::value::Visibility::Private,
+            None => false,
+        };
+        // NOTE: sentinel primitive classes (below) don't get an
+        // own-table approximation — `Integer.method_defined?(:+,
+        // false)` is true in CRuby but Integer's instance surface
+        // lives in dispatch arms, not the table, so the own-only
+        // variant reports false there. Documented subset gap
+        // (exotic; no caller has surfaced it).
+    }
+    // Chain verdict via the respond_to? memo: one walk, memoized per
+    // (class, name, method_gen).
+    let v = vm.responds_to_object_memo(cls, sid);
+    if v & crate::vm::lookup::RESPOND_TABLE_BIT != 0 {
+        // Real record on the chain — visibility decides, and a
+        // PRIVATE record answers false WITHOUT falling to the
+        // sentinel fallbacks (a private reopen shadows any
+        // primitive arm, same as dispatch order).
+        return v & crate::vm::lookup::RESPOND_PUB_BITS == crate::vm::lookup::RESPOND_PUB_BITS
+            || v & crate::vm::lookup::RESPOND_PROT_BIT != 0;
+    }
+    if !cls.is_module
+        && v & crate::vm::lookup::RESPOND_PUB_BITS == crate::vm::lookup::RESPOND_PUB_BITS
+    {
+        // Universal dispatch-arm surface (public Object methods in
+        // CRuby: `dup`, `class`, `==`, `tap`, …). CLASSES only: a
+        // bare module's ancestor chain is just itself (+ its own
+        // includes) and never reaches Object, so CRuby's
+        // `M.method_defined?(:dup)` is false for a plain module —
+        // modules fall through to the name-keyed fallbacks below.
         return true;
     }
     let sentinel: Option<Value> = match cls.name.as_str() {
@@ -25563,7 +25685,11 @@ fn class_method_defined(vm: &mut Vm, cls: &Rc<Class>, sid: SymId) -> bool {
         _ => None,
     };
     match sentinel {
-        Some(s) => vm.responds_to(&s, sid, true),
+        // include_private = false: CRuby's method_defined? does NOT
+        // report the private Kernel surface (`Integer.
+        // method_defined?(:puts)` is false — probed; was `true`
+        // here pre-2026-07 via include_all).
+        Some(s) => vm.responds_to(&s, sid, false),
         // `Kernel` is modeled as a sentinel "primitive" (it hosts the
         // inline-dispatched builtins rather than a real method table),
         // but it must NOT answer `true` for arbitrary names — the
@@ -25572,7 +25698,12 @@ fn class_method_defined(vm: &mut Vm, cls: &Rc<Class>, sid: SymId) -> bool {
         // method_defined?` shim) breaks when a not-yet-defined name
         // reports defined. Consult the registered Kernel builtins
         // instead, so `Kernel.method_defined?(:made_up)` is false while
-        // the genuine reflectable builtins still report true.
+        // the genuine reflectable builtins still report true. (Known
+        // divergence kept: CRuby's module-function Kernel builtins are
+        // private instance methods, so `Kernel.method_defined?(:puts)`
+        // is false there; rubyrs's builtin table carries no
+        // visibility, and flipping this wholesale would break the
+        // capability-detection callers above.)
         None if cls.name == "Kernel" => vm.kernel_builtin_method(sid).is_some(),
         // Other aggregate / opaque primitives (Array/Hash/Proc/…): keep
         // the previously-permissive answer; they have no method table to

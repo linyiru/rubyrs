@@ -56,6 +56,19 @@ pub(crate) const RESPOND_TABLE_BIT: u8 = 4;
 /// `ptr_eq` fails → the bit clears and the hook is invoked, exactly
 /// as pre-memo.
 pub(crate) const RESPOND_RTM_DEFAULT_BIT: u8 = 8;
+/// Set (only alongside [`RESPOND_TABLE_BIT`]) when the resolved
+/// record's visibility is PROTECTED. Distinguishes protected from
+/// private inside the "include-all but not public" verdict so
+/// `Module#method_defined?` — CRuby: public + protected true,
+/// private false — can ride the same memoized walk (the RuboCop cop
+/// walk probes it ~2.7K times per file; see `class_method_defined`
+/// in vm/dispatch.rs — the canonical arm AND the walk-bucket arm
+/// both answer through it). `respond_to?` itself never reads
+/// the bit (its two variants only consult ALL / PUB), so adding it
+/// changes no existing consumer. Same `method_gen` discipline as
+/// the other bits: `private :m` / `protected :m` visibility Cell
+/// flips bump the gen, so a memoized verdict can't go stale.
+pub(crate) const RESPOND_PROT_BIT: u8 = 16;
 
 thread_local! {
     /// respond_to? memo counters: (hits, misses, stale-gen or
@@ -1549,6 +1562,16 @@ impl Vm {
         match self.lookup_method_uncached(cls, name_id) {
             Some(m) if m.visibility.get() == crate::value::Visibility::Public => {
                 RESPOND_PUB_BITS | RESPOND_TABLE_BIT | self.rtm_default_bit(name_id, &m)
+            }
+            // Protected records carry the PROT bit so the
+            // `method_defined?` consumer can tell them from private
+            // (both answer "include-all yes, public no" for
+            // respond_to? — see the RESPOND_PROT_BIT doc).
+            Some(m) if m.visibility.get() == crate::value::Visibility::Protected => {
+                RESPOND_ALL_BIT
+                    | RESPOND_TABLE_BIT
+                    | RESPOND_PROT_BIT
+                    | self.rtm_default_bit(name_id, &m)
             }
             Some(m) => RESPOND_ALL_BIT | RESPOND_TABLE_BIT | self.rtm_default_bit(name_id, &m),
             // Kernel's PRIVATE builtin surface — `respond_to?(name,
