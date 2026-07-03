@@ -1909,7 +1909,7 @@ impl Vm {
                 "include?" | "has_key?" | "key?" | "member?" |
                 "keys" | "values" | "values_at" | "to_h" | "to_hash" | "to_a" |
                 "each_key" | "each_value" |
-                "merge" | "merge!" | "update" | "replace" | "clear" | "delete" | "invert" | "key" | "store" | "except" | "slice" | "dup" | "clone" |
+                "merge" | "merge!" | "update" | "replace" | "clear" | "delete" | "invert" | "key" | "store" | "except" | "slice" | "dup" | "clone" | "rehash" |
                 "each" | "each_pair" |
                 "select" | "filter" | "reject" | "find" | "detect" |
                 "select!" | "filter!" | "reject!" | "keep_if" | "delete_if" |

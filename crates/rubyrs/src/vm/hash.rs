@@ -21,7 +21,7 @@ pub(crate) fn is_hash_mutator(name: &str) -> bool {
         "[]=" | "store" | "delete" | "delete_if" | "reject!" | "select!"
             | "filter!" | "keep_if" | "clear" | "merge!" | "update" | "replace"
             | "shift" | "compact!" | "transform_values!" | "transform_keys!"
-            | "compare_by_identity"
+            | "compare_by_identity" | "rehash"
     )
 }
 
@@ -1636,6 +1636,70 @@ impl Vm {
                     // cache.
                     ("clear", []) => {
                         self.heap.hash_mut(id).clear();
+                        Some(Value::Hash(id))
+                    }
+                    // `Hash#rehash` — CRuby recomputes every key's stored
+                    // hash after in-place key mutation. rubyrs stores no
+                    // per-pair hash (small hashes content-scan; the lazy
+                    // index rebuilds from live content), so the observable
+                    // effect to reproduce (probed on CRuby 3.4, see the
+                    // hash_rehash fixture) is the DEDUP: keys that have
+                    // BECOME eql? collapse — the FIRST key object keeps
+                    // its position, the LAST value wins — and both lookup
+                    // indexes are rebuilt. Frozen guard via
+                    // `is_hash_mutator`. User `hash`/`eql?` keys are
+                    // honored through the same Ruby-dispatch compare the
+                    // literal-dedup path (`op_new_hash`) uses.
+                    ("rehash", []) => {
+                        let snapshot: Vec<(Value, Value)> = self.heap.hash(id).to_vec();
+                        let hash_sym = self.interner.intern("hash");
+                        let eql_sym = self.interner.intern("eql?");
+                        let by_identity = self.hash_is_by_identity(id);
+                        let has_user = !by_identity
+                            && snapshot
+                                .iter()
+                                .any(|(k, _)| self.key_needs_ruby_hash(k, hash_sym, eql_sym));
+                        let mut pairs = snapshot;
+                        if has_user {
+                            // Pin across the eql? dispatches (they can GC and
+                            // the snapshot is off the rooted heap copy).
+                            let mut g = crate::vm::PinGuard::new(self);
+                            for (k, v) in &pairs {
+                                g.pin(k.clone());
+                                g.pin(v.clone());
+                            }
+                            let mut i = 0;
+                            while i < pairs.len() {
+                                let mut j = i + 1;
+                                while j < pairs.len() {
+                                    let (ki, kj) = (pairs[i].0.clone(), pairs[j].0.clone());
+                                    if g.vm.keys_ruby_eql(&ki, &kj, eql_sym)? {
+                                        pairs[i].1 = pairs[j].1.clone();
+                                        pairs.remove(j);
+                                    } else {
+                                        j += 1;
+                                    }
+                                }
+                                i += 1;
+                            }
+                        } else {
+                            let mut i = 0;
+                            while i < pairs.len() {
+                                let mut j = i + 1;
+                                while j < pairs.len() {
+                                    if pairs[j].0.ruby_eql(&pairs[i].0, &self.heap) {
+                                        pairs[i].1 = pairs[j].1.clone();
+                                        pairs.remove(j);
+                                    } else {
+                                        j += 1;
+                                    }
+                                }
+                                i += 1;
+                            }
+                        }
+                        // hash_mut clears both indexes — the rebuild-from-
+                        // live-content that IS rubyrs's rehash.
+                        *self.heap.hash_mut(id) = pairs.into();
                         Some(Value::Hash(id))
                     }
                     ("delete", [k]) => {

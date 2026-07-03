@@ -291,6 +291,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // 2026-07 small-hash representation battery (SmallVec inline pairs +
 // boxed cold tail): order/boundary/frozen/default/subclass semantics,
 // Hash#rehash, and the instrumented-key hash/eql? call patterns.
+#[test] fn hash_small_representation() { run_diff("hash_small_representation"); }
+#[test] fn hash_rehash() { run_diff("hash_rehash"); }
 #[test] fn hash_instrumented_key_calls() { run_diff("hash_instrumented_key_calls"); }
 #[test] fn hash_compare_by_identity() { run_diff("hash_compare_by_identity"); }
 #[test] fn index_fast_path() { run_diff("index_fast_path"); }
