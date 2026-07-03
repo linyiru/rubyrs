@@ -1284,12 +1284,16 @@ pub(crate) struct Vm {
     /// `[2]` breaker kills.
     #[cfg(feature = "jit-native")]
     pub(crate) t2_lite_stats: [u64; 3],
-    /// LITE-BLOCK entries, dense by proto: `(entry, param_start, n_params)`.
-    /// The `param_start`/`n_params` copies double as the serve-site guard —
+    /// LITE-BLOCK entries, dense by proto:
+    /// `(entry, param_start, n_params_bound, is_rest)`. The
+    /// `param_start`/`n_params` copies double as the serve-site guard —
     /// the invoking BlockHandle must match them exactly (paranoia against a
-    /// proto ever being shared across CreateBlock sites).
+    /// proto ever being shared across CreateBlock sites). `is_rest` = the
+    /// rest-only `|*a|` entry: `n_params_bound` is 1 (the pre-allocated
+    /// rest Array) and the handle guard becomes
+    /// `n_params == 0 && rest_slot == Some(param_start)`.
     #[cfg(feature = "jit-native")]
-    pub(crate) t2_lite_blk_ptrs: Vec<Option<(crate::jit_tier2::T2LiteBlkFn, u16, u16)>>,
+    pub(crate) t2_lite_blk_ptrs: Vec<Option<(crate::jit_tier2::T2LiteBlkFn, u16, u16, bool)>>,
     /// `RUBYRS_JIT_TIER2_NOLITEBLK`: disable lite-block SERVING (the
     /// sibling still compiles) for controlled A/B.
     #[cfg(feature = "jit-native")]
@@ -1299,6 +1303,15 @@ pub(crate) struct Vm {
     /// `t2_lite_stats[1]` like every lite materialize.
     #[cfg(feature = "jit-native")]
     pub(crate) t2_lite_blk_stats: [u64; 2],
+    /// TEMPORARY census (stats-gated): rest-only-block (`|*a|`) invocation
+    /// argc distribution — [argc 0..=4, 5+] — across the ib1 fast arm and
+    /// the general binder.
+    pub(crate) restblk_census: [u64; 6],
+    /// TEMPORARY census (stats-gated): rest-only-block invocations by proto.
+    pub(crate) restblk_census_by: crate::intern::FxHashMap<usize, u64>,
+    /// Stats-gated: 1-arg `&:sym` sym-proc block invocations served as a
+    /// direct `arg.sym()` dispatch (no rest Array / block frame).
+    pub(crate) symproc_serves: u64,
     /// `RUBYRS_JIT_TIER2_NOLITE`: disable wave-4 frame-lite compilation and
     /// serving (reproduces the wave-3/5 tier) for controlled A/B.
     #[cfg(feature = "jit-native")]
@@ -2934,6 +2947,9 @@ impl Vm {
             jit_tier2_noliteblk: std::env::var_os("RUBYRS_JIT_TIER2_NOLITEBLK").is_some(),
             #[cfg(feature = "jit-native")]
             t2_lite_blk_stats: [0; 2],
+            restblk_census: [0; 6],
+            restblk_census_by: crate::intern::FxHashMap::default(),
+            symproc_serves: 0,
             #[cfg(feature = "jit-native")]
             jit_tier2_nolite: std::env::var_os("RUBYRS_JIT_TIER2_NOLITE").is_some(),
             #[cfg(feature = "jit-native")]
@@ -3889,6 +3905,25 @@ impl Vm {
                 "tier2 lite_blk entries={} done={}",
                 self.t2_lite_blk_stats[0], self.t2_lite_blk_stats[1]
             );
+        }
+        if self.symproc_serves != 0 {
+            eprintln!("symproc direct serves={}", self.symproc_serves);
+        }
+        if self.restblk_census != [0; 6] {
+            eprintln!(
+                "restblk-census argc0={} argc1={} argc2={} argc3={} argc4={} argc5p={}",
+                self.restblk_census[0], self.restblk_census[1], self.restblk_census[2],
+                self.restblk_census[3], self.restblk_census[4], self.restblk_census[5]
+            );
+            let mut rows: Vec<(&usize, &u64)> = self.restblk_census_by.iter().collect();
+            rows.sort_by(|a, b| b.1.cmp(a.1));
+            for (pidx, n) in rows.into_iter().take(12) {
+                eprintln!(
+                    "  restblk {:<40} proto={} n={}",
+                    self.protos.get(*pidx).map(|p| p.name.as_str()).unwrap_or("?"),
+                    pidx, n
+                );
+            }
         }
         if self.t2_lite_stats != [0; 3] {
             eprintln!(

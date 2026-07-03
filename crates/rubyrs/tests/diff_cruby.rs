@@ -498,6 +498,20 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // land in the original cells, break/next/nlr/$~/redo parity, escaped
 // procs, re-entrant recursion, mixed-tag bails.
 #[test] fn tier2_liteblock_battery() { run_diff("tier2_liteblock_battery"); }
+// LITE REST-BLOCKS (ADR 0037 tail): frameless `|*a|` entries — splat
+// identity/freshness, no auto-splat, next/break, capture-writes, lambda
+// arity, 0/2-arg yields through the general binder, STRESS_GC rooting of
+// the serve-site-allocated rest Array, re-entrant recursion.
+#[test] fn tier2_restblock_lite() { run_diff("tier2_restblock_lite"); }
+// Tier-2 const serves (ADR 0037 tail): framed IC-hit LoadConst/Chain +
+// lite flat/chain reads + the shared LoadConstStr push — redefinition /
+// removal / private_constant / autoload-pending invalidation exactness,
+// fresh-string literal semantics from compiled bodies.
+#[test] fn tier2_const_battery() { run_diff("tier2_const_battery"); }
+// `&:sym` sym-proc direct serve (ADR 0037 tail): visibility,
+// method_missing, raises, redefinition-after-warm, multi-arg forwarding,
+// user-written look-alike blocks keeping full body semantics.
+#[test] fn symbol_to_proc_serve() { run_diff("symbol_to_proc_serve"); }
 // define_method bodies: per-call params/body-locals over a shared outer
 // binding (the optional-default staleness fix).
 #[test] fn closure_define_method_binding() { run_diff("closure_define_method_binding"); }

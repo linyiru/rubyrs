@@ -107,8 +107,8 @@ pub(crate) struct T2Proto {
     /// entry + `t2_lite_materialize`.
     pub(crate) lite_ptr: Option<(T2LiteFn, u16)>,
     /// LITE-BLOCK entry (`(vm, self_w0, self_w1, block_id) -> status`) plus
-    /// the baked `(param_start, n_params)`, when the body passed the
-    /// lite-block admission (`t2_admit_lite_block`). Runs a BLOCK body
+    /// the baked `(param_start, n_params, is_rest)`, when the body passed
+    /// the lite-block admission (`t2_admit_lite_block`). Runs a BLOCK body
     /// without pushing a block frame: the site pushes the bound arg(s) onto
     /// the operand stack (rooted), the own region (params + body locals)
     /// lives in a native spill slot, and captured-outer slot accesses
@@ -117,7 +117,15 @@ pub(crate) struct T2Proto {
     /// `outer_cell_for` routing would land them. Any unservable edge
     /// materializes the real BLOCK frame (share/copy decision + routing by
     /// the interpreter's own `block_frame_locals`) and BAILs.
-    pub(crate) lite_blk_ptr: Option<(T2LiteBlkFn, u16, u16)>,
+    ///
+    /// `is_rest` = the rest-only `|*a|` shape: the entry is compiled as a
+    /// 1-param binder whose single "param" (slot `ps` == the handle's
+    /// `rest_slot`) is the rest Array the serve site ALLOCATED BEFORE
+    /// entering native state (the wave-4 no-GC-under-native invariant:
+    /// the array is built while the interpreter still owns the world,
+    /// pinned across a due collection, then rooted by its operand-stack
+    /// slot for the whole frameless window).
+    pub(crate) lite_blk_ptr: Option<(T2LiteBlkFn, u16, u16, bool)>,
 }
 
 /// Frame-lite entry ABI (wave 4): `(vm, self_w0, self_w1, n_pop) -> status`.
@@ -149,8 +157,11 @@ enum LiteMode {
     Off,
     /// Wave-4 method frame-lite: baked plain-fixed argc.
     Method(u16),
-    /// Lite-block: baked `(param_start, n_params)`.
-    Block(u16, u16),
+    /// Lite-block: baked `(param_start, n_params_bound, is_rest)`. The
+    /// rest-only `|*a|` shape binds exactly like a 1-param block — its one
+    /// "param" is the rest Array the serve site pre-allocates — so the
+    /// flag only rides through to the serve-site guard tuple.
+    Block(u16, u16, bool),
 }
 
 /// Compile-environment snapshot the serving site passes to `compile_tier2`
@@ -1886,6 +1897,63 @@ unsafe extern "C" fn t2_lite_const_chain(
     lite_mat_here(vm, &c, ip, 41, census_name, 0)
 }
 
+/// `Op::LoadConst(sym)` in a FRAMELESS body: the flat per-SymId inline
+/// constant cache (generation-tagged). The interpreter arm's
+/// `private_constant` pre-check runs BEFORE its cache read, so a name in
+/// `private_consts` declines here (the arm re-raises against the
+/// materialized frame); a cold/invalidated slot materializes and the
+/// interpreted arm resolves + refills (autoload, qualified-path walk,
+/// const_missing, NameError — all against a real frame).
+unsafe extern "C" fn t2_lite_const_flat(
+    vm: *mut crate::vm::Vm,
+    ctx: *const i64,
+    meta: i64,
+    sym: i64,
+    ip: i64,
+) -> i64 {
+    let vm = unsafe { &mut *vm };
+    let c = unsafe { lite_ctx(ctx, meta) };
+    let (name_id, ip) = (SymId(sym as u32), ip as usize);
+    if (vm.private_consts.is_empty() || !vm.private_consts.contains(&name_id))
+        && let Some((v, g)) = vm.const_cache_flat.get(&name_id)
+        && *g == vm.const_gen
+    {
+        let v = v.clone();
+        vm.stack.push(v);
+        if vm.jit_stats_on {
+            vm.t2_lite_call_stats[4] += 1;
+        }
+        return 0;
+    }
+    lite_mat_here(vm, &c, ip, 41, name_id, 0)
+}
+
+/// `Op::LoadConstStr(sym)` — the fresh-string-literal push, shared by BOTH
+/// tiers (frameless and framed): byte-for-byte the interpreter arm (fresh
+/// `Value::Str` per execution — mutations must not alias, so there is no
+/// cached-push shortcut — source-encoding retag, frozen_string_literal
+/// stamp). Raise-free and GC-heap-free (`Value::Str` is `Rc`-backed), so
+/// the lite tier serves it unconditionally and the framed tier skips the
+/// generic `step()` round-trip. Like the other specialized simple ops, it
+/// charges no fuel tick and stamps no `ip`.
+unsafe extern "C" fn t2_push_const_str(vm: *mut crate::vm::Vm, sym: i64, pidx: i64) {
+    let vm = unsafe { &mut *vm };
+    let (id, pidx) = (SymId(sym as u32), pidx as usize);
+    let s = vm.interner.resolve(id).clone();
+    let v = Value::new_str(s.to_string());
+    if let Some(enc) = vm.protos[pidx].source_encoding
+        && let Value::Str(rs) = &v
+    {
+        vm.retag_literal_to_source_encoding(rs, enc);
+    }
+    if vm.protos[pidx].frozen_string_literal
+        && let Value::Str(rs) = &v
+    {
+        rs.frozen.set(true);
+    }
+    vm.stack.push(v);
+}
+
 // ---------------------------------------------------------------------------
 // Wave-2 call helpers (ADR 0037 wave 2): the IC-fast `t2_call` family + the
 // `t2_return` frame-pop shortcut.
@@ -2169,6 +2237,72 @@ unsafe extern "C" fn t2_call_local(
     let v = crate::vm::Vm::frame_local_get(f, &vm.locals_arena, slot as usize);
     vm.stack.push(v);
     t2_call_impl(vm, SymId(name as u32), 0, cid as u32, false)
+}
+
+/// Shared miss path for the framed const helpers: exactly one generic-
+/// helper iteration (`t2_op`'s body with the op value rebuilt — no baked
+/// pointer needed): stamp `ip` past the op, run the interpreter's own arm
+/// (autoload / qualified-path walk / const_missing / NameError / cache
+/// refill), drive any frames it pushed, report the exit status.
+#[cold]
+fn t2_const_miss(vm: &mut crate::vm::Vm, op: Op, ip: i64) -> i64 {
+    let depth = vm.frames.len();
+    let pidx = {
+        let f = vm
+            .frames
+            .last_mut()
+            .expect("ICE: t2_const with empty frame stack");
+        f.ip = ip as usize + 1;
+        f.proto_idx
+    };
+    if vm.t2_op_stats.is_some() {
+        t2_census_note_op(vm, &op);
+    }
+    if let Err(t) = vm.step(op, pidx) {
+        vm.t2_trap = Some(t);
+        return T2_TRAP;
+    }
+    t2_finish(vm, depth)
+}
+
+/// `Op::LoadConst(sym)` in a FRAMED tier-2 body (ADR 0037 tail): the
+/// interpreter's own flat inline-constant cache served without the generic
+/// `step()` round-trip. Hit (generation-tagged, and the name is not a
+/// registered `private_constant` — the interpreter arm runs that check
+/// BEFORE its cache read, so it gates the fast path too) → clone-push +
+/// CONTINUE; miss → the interpreter's full arm via `t2_const_miss`. Like
+/// the specialized simple ops, the hit path charges no fuel tick and
+/// stamps no `ip` (nothing after the push can fault).
+unsafe extern "C" fn t2_const_flat(vm: *mut crate::vm::Vm, sym: i64, ip: i64) -> i64 {
+    let vm = unsafe { &mut *vm };
+    let name_id = SymId(sym as u32);
+    if (vm.private_consts.is_empty() || !vm.private_consts.contains(&name_id))
+        && let Some((v, g)) = vm.const_cache_flat.get(&name_id)
+        && *g == vm.const_gen
+    {
+        let v = v.clone();
+        vm.stack.push(v);
+        return T2_CONTINUE;
+    }
+    t2_const_miss(vm, Op::LoadConst(name_id), ip)
+}
+
+/// `Op::LoadConstChain(idx)` in a FRAMED tier-2 body: the `(proto, chain
+/// slot)` inline constant cache, same hit/miss split as `t2_const_flat`.
+/// `pidx` is baked by the codegen (a framed body only ever runs against
+/// its own frame, so it equals `frame.proto_idx` — the interpreter arm's
+/// cache key).
+unsafe extern "C" fn t2_const_chain(vm: *mut crate::vm::Vm, ci: i64, pidx: i64, ip: i64) -> i64 {
+    let vm = unsafe { &mut *vm };
+    let key = (pidx as u32, ci as u32);
+    if let Some((v, g)) = vm.const_cache_chain.get(&key)
+        && *g == vm.const_gen
+    {
+        let v = v.clone();
+        vm.stack.push(v);
+        return T2_CONTINUE;
+    }
+    t2_const_miss(vm, Op::LoadConstChain(ci as u32), ip)
 }
 
 /// `Op::CallBlock` / `Op::CallNoRecvBlock` — the block-passing call ops
@@ -2654,10 +2788,12 @@ pub(crate) fn t2_admit_lite(proto: &Proto, ctx: &T2Ctx) -> Result<u16, String> {
             }
             // The zero-arg `x.nil?` fusion (same gates as the inline arm).
             Op::Call(name, 0, _) if name.0 == ctx.sym_nil_q => {}
-            // LITE t2_call: plain fixed-argc call ops + IC-cached consts.
+            // LITE t2_call: plain fixed-argc call ops + IC-cached consts +
+            // the (infallible, GC-free: `Value::Str` is `Rc`-backed) fresh
+            // string-literal push.
             Op::Call(_, a, _) | Op::CallNoRecv(_, a, _) if (*a as u16) <= LITE_MAX_ARGC => {}
             Op::LoadLocalCall(s, _, _) if *s < nl => {}
-            Op::LoadConstChain(_) => {}
+            Op::LoadConstChain(_) | Op::LoadConst(_) | Op::LoadConstStr(_) => {}
             other => return Err(format!("op {:?} at {}", other, i)),
         }
     }
@@ -2684,18 +2820,33 @@ pub(crate) fn t2_admit_lite(proto: &Proto, ctx: &T2Ctx) -> Result<u16, String> {
 ///   stay interpreted end-to-end;
 /// - `creates_block` declines (an inner capture needs a real cell), which
 ///   also keeps every own-region slot un-escaped while it lives in the
-///   spill.
+///   spill;
+/// - the rest-only `|*a|` shape (ADR 0037 tail; the walk's hottest binder
+///   shape) IS admitted: by `compile_block`'s slot layout its rest slot is
+///   exactly `ps` (the only param-interface slot) with the body region at
+///   `ps + 1`, so the entry compiles as a plain 1-param binder whose one
+///   arg is the rest Array the serve site pre-allocates — binding, spill
+///   classification and the materialize path are the 1-param entry's
+///   verbatim (`push_lite_block_frame` writes the array at `ps` ==
+///   `rest_slot`, exactly where `invoke_block1`'s framed rest arm binds
+///   it). Rest WITH fixed params (`|a, *b|`) declines — its overflow
+///   collection is genuinely variadic.
 ///
-/// Returns the baked `(param_start, n_params)`.
-pub(crate) fn t2_admit_lite_block(proto: &Proto, ctx: &T2Ctx) -> Result<(u16, u16), String> {
+/// Returns the baked `(param_start, n_params_bound, is_rest)` —
+/// `n_params_bound` counts the operand-stack slots the entry pops (1 for
+/// the rest shape: the pre-built Array).
+pub(crate) fn t2_admit_lite_block(proto: &Proto, ctx: &T2Ctx) -> Result<(u16, u16, bool), String> {
     let Some((ps, np, has_rest, has_kwrest)) = proto.block_shape else {
         return Err("no block shape".into());
     };
     if proto.creates_block {
         return Err("creates_block".into());
     }
-    if has_rest || has_kwrest || np > 2 {
+    if has_kwrest || np > 2 {
         return Err("non-plain block params".into());
+    }
+    if has_rest && np != 0 {
+        return Err("rest with fixed params".into());
     }
     if !proto.block_kw_params.is_empty()
         || proto.block_param_slot.is_some()
@@ -2703,6 +2854,8 @@ pub(crate) fn t2_admit_lite_block(proto: &Proto, ctx: &T2Ctx) -> Result<(u16, u1
     {
         return Err("kw/block/optional params".into());
     }
+    // The rest-only entry binds ONE stack slot: the pre-allocated Array.
+    let np = if has_rest { 1 } else { np };
     if proto.block_body_local_start != ps + np {
         return Err("param/body gap".into());
     }
@@ -2760,11 +2913,11 @@ pub(crate) fn t2_admit_lite_block(proto: &Proto, ctx: &T2Ctx) -> Result<(u16, u1
             Op::Call(name, 0, _) if name.0 == ctx.sym_nil_q => {}
             Op::Call(_, a, _) | Op::CallNoRecv(_, a, _) if (*a as u16) <= LITE_MAX_ARGC => {}
             Op::LoadLocalCall(s, _, _) if *s >= ps && *s < nl => {}
-            Op::LoadConstChain(_) => {}
+            Op::LoadConstChain(_) | Op::LoadConst(_) | Op::LoadConstStr(_) => {}
             other => return Err(format!("op {:?} at {}", other, i)),
         }
     }
-    Ok((ps, np))
+    Ok((ps, np, has_rest))
 }
 
 /// Ops that end a straight-line segment: their `step` arm may retarget
@@ -2873,6 +3026,12 @@ struct HelperRefs {
     lite_call_ns: cranelift_codegen::ir::FuncRef,
     lite_call_local: cranelift_codegen::ir::FuncRef,
     lite_const: cranelift_codegen::ir::FuncRef,
+    // Const tail (ADR 0037): the lite flat-const read, the framed IC-hit
+    // const reads, and the tier-shared string-literal push.
+    lite_const_flat: cranelift_codegen::ir::FuncRef,
+    const_flat: cranelift_codegen::ir::FuncRef,
+    const_chain: cranelift_codegen::ir::FuncRef,
+    push_const_str: cranelift_codegen::ir::FuncRef,
 }
 
 /// Snapshot of the compile-time machine state; slow-edge blocks materialize
@@ -3568,7 +3727,7 @@ fn emit_body(
     let (lite_ps, lite_np) = match lite_mode {
         LiteMode::Off => (0u16, 0u16),
         LiteMode::Method(a) => (0, a),
-        LiteMode::Block(ps, np) => (ps, np),
+        LiteMode::Block(ps, np, _) => (ps, np),
     };
 
     let mut cg = Cg {
@@ -3681,7 +3840,10 @@ fn emit_body(
         // deferred push to the right frame shape.
         let has_ext = code.iter().any(|op| match op {
             Op::Call(name, _, _) => name.0 != t2ctx.sym_nil_q,
-            Op::CallNoRecv(..) | Op::LoadLocalCall(..) | Op::LoadConstChain(_) => true,
+            Op::CallNoRecv(..)
+            | Op::LoadLocalCall(..)
+            | Op::LoadConstChain(_)
+            | Op::LoadConst(_) => true,
             _ => false,
         });
         if has_ext {
@@ -4050,6 +4212,46 @@ fn emit_op(cg: &mut Cg, fb: &mut FunctionBuilder, i: usize) -> bool {
         // cache hit; cold/invalidated → materialize + interpreted refill).
         Op::LoadConstChain(ci) if cg.lite => {
             return cg.emit_lite_ext(fb, i, cg.h.lite_const, &[ci as i64]);
+        }
+        // FRAMED IC-hit const reads (ADR 0037 tail): serve the
+        // interpreter's own inline constant caches without the generic
+        // `step()` round-trip; a miss runs the full arm (autoload /
+        // const_missing / NameError / refill) via `t2_const_miss`.
+        Op::LoadConstChain(ci) if !cg.nocall => {
+            cg.flush(fb);
+            let cic = fb.ins().iconst(types::I64, ci as i64);
+            let pidxc = fb.ins().iconst(types::I64, cg.pidx as i64);
+            let ipc = fb.ins().iconst(types::I64, i as i64);
+            let call = fb.ins().call(cg.h.const_chain, &[vm, cic, pidxc, ipc]);
+            let st = fb.inst_results(call)[0];
+            cg.check_status(fb, st);
+            cg.invalidate_mem();
+            false
+        }
+        Op::LoadConst(sym) if cg.lite => {
+            return cg.emit_lite_ext(fb, i, cg.h.lite_const_flat, &[sym.0 as i64]);
+        }
+        Op::LoadConst(sym) if !cg.nocall => {
+            cg.flush(fb);
+            let symc = fb.ins().iconst(types::I64, sym.0 as i64);
+            let ipc = fb.ins().iconst(types::I64, i as i64);
+            let call = fb.ins().call(cg.h.const_flat, &[vm, symc, ipc]);
+            let st = fb.inst_results(call)[0];
+            cg.check_status(fb, st);
+            cg.invalidate_mem();
+            false
+        }
+        // Fresh string-literal push (both tiers): raise-free, GC-heap-free
+        // (`Rc`-backed `Value::Str`) — a plain infallible helper call, no
+        // status. The interpreter arm's fresh-allocation semantics are
+        // preserved (each execution pushes an independent string).
+        Op::LoadConstStr(id) if !cg.nocall => {
+            cg.flush(fb);
+            let symc = fb.ins().iconst(types::I64, id.0 as i64);
+            let pidxc = fb.ins().iconst(types::I64, cg.pidx as i64);
+            fb.ins().call(cg.h.push_const_str, &[vm, symc, pidxc]);
+            cg.invalidate_mem();
+            false
         }
         // ------------------------------------------------------------------
         // Wave-5 block family: block-passing calls + yield through their
@@ -4846,6 +5048,10 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize, ctx: &T2Ctx) -> Opt
     builder.symbol("t2_lite_call_ns", t2_lite_call_ns as *const u8);
     builder.symbol("t2_lite_call_local", t2_lite_call_local as *const u8);
     builder.symbol("t2_lite_const_chain", t2_lite_const_chain as *const u8);
+    builder.symbol("t2_lite_const_flat", t2_lite_const_flat as *const u8);
+    builder.symbol("t2_const_flat", t2_const_flat as *const u8);
+    builder.symbol("t2_const_chain", t2_const_chain as *const u8);
+    builder.symbol("t2_push_const_str", t2_push_const_str as *const u8);
     let mut module = JITModule::new(builder);
     let ptr_ty = module.target_config().pointer_type();
 
@@ -4863,11 +5069,14 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize, ctx: &T2Ctx) -> Opt
     let lite_mode = if inline_on && !ctx.nolite {
         if proto.block_shape.is_some() {
             match t2_admit_lite_block(proto, ctx) {
-                Ok((ps, np)) => {
+                Ok((ps, np, rest)) => {
                     if dbg {
-                        eprintln!("t2-liteblk admit   {:<28} ({} ops, ps {} np {})", proto.name, n, ps, np);
+                        eprintln!(
+                            "t2-liteblk admit   {:<28} ({} ops, ps {} np {}{})",
+                            proto.name, n, ps, np, if rest { " rest" } else { "" }
+                        );
                     }
-                    LiteMode::Block(ps, np)
+                    LiteMode::Block(ps, np, rest)
                 }
                 Err(why) => {
                     if dbg {
@@ -4965,6 +5174,10 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize, ctx: &T2Ctx) -> Opt
     let f_lite_call_ns = decl(&mut module, "t2_lite_call_ns", "piiiii", true)?;
     let f_lite_call_local = decl(&mut module, "t2_lite_call_local", "piiiii", true)?;
     let f_lite_const = decl(&mut module, "t2_lite_const_chain", "piii", true)?;
+    let f_lite_const_flat = decl(&mut module, "t2_lite_const_flat", "piii", true)?;
+    let f_const_flat = decl(&mut module, "t2_const_flat", "ii", true)?;
+    let f_const_chain = decl(&mut module, "t2_const_chain", "iii", true)?;
+    let f_push_const_str = decl(&mut module, "t2_push_const_str", "ii", false)?;
 
     let make_refs = |module: &mut JITModule,
                      func: &mut cranelift_codegen::ir::Function|
@@ -5014,6 +5227,10 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize, ctx: &T2Ctx) -> Opt
             lite_call_ns: module.declare_func_in_func(f_lite_call_ns, func),
             lite_call_local: module.declare_func_in_func(f_lite_call_local, func),
             lite_const: module.declare_func_in_func(f_lite_const, func),
+            lite_const_flat: module.declare_func_in_func(f_lite_const_flat, func),
+            const_flat: module.declare_func_in_func(f_const_flat, func),
+            const_chain: module.declare_func_in_func(f_const_chain, func),
+            push_const_str: module.declare_func_in_func(f_push_const_str, func),
         }
     };
 
@@ -5086,9 +5303,9 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize, ctx: &T2Ctx) -> Opt
             let p = module.get_finalized_function(lfid);
             (Some((unsafe { std::mem::transmute::<*const u8, T2LiteFn>(p) }, argc)), None)
         }
-        (true, LiteMode::Block(ps, np), Some(lfid)) => {
+        (true, LiteMode::Block(ps, np, rest), Some(lfid)) => {
             let p = module.get_finalized_function(lfid);
-            (None, Some((unsafe { std::mem::transmute::<*const u8, T2LiteBlkFn>(p) }, ps, np)))
+            (None, Some((unsafe { std::mem::transmute::<*const u8, T2LiteBlkFn>(p) }, ps, np, rest)))
         }
         _ => (None, None),
     };

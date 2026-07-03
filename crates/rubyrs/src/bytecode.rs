@@ -958,6 +958,17 @@ pub(crate) struct Proto {
     /// receiver's `@sym` ivar directly, skipping the frame push +
     /// 2-op run + frame pop. `None` for everything else.
     pub(crate) getter_ivar: Option<crate::intern::SymId>,
+    /// ADR 0037 tail — `Some((method, cache_id))` when this BLOCK proto
+    /// is the `&:sym` symbol-to-proc desugar shape
+    /// `{ |*a| a[0].sym(*a.drop(1)) }` (see ast.rs; a user-written
+    /// identical body qualifies too — same semantics by definition).
+    /// For a ONE-arg invocation the whole body is exactly `arg.sym()`
+    /// (`a.drop(1)` is `[]`), so `invoke_block1` serves it as a direct
+    /// zero-arg dispatch — no rest Array, no `drop` Array, no block
+    /// frame (CRuby likewise dispatches sym-procs without a block frame,
+    /// `vm_call_symbol`). `cache_id` is the body `ApplyCall`'s inline
+    /// cache slot — the same call site, so the serve shares its IC.
+    pub(crate) sym_proc: Option<(crate::intern::SymId, u32)>,
     /// ADR 0035 Ph4/5 — CONTENT-VERIFIED flat-ivar slot cache for the
     /// frame-free getter serves (dispatch reads `getter_ivar` directly
     /// with no frame): the last slot this getter resolved to.

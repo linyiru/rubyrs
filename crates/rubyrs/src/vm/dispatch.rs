@@ -22879,6 +22879,7 @@ impl Vm {
                 // for the Locals::Stack representation.
                 creates_block: true,
                 getter_ivar: None,
+                sym_proc: None,
                 getter_slot: std::cell::Cell::new(u32::MAX),
                 frozen_string_literal: false, line_base: 1, source_encoding: None,
                 code: vec![
@@ -22992,6 +22993,7 @@ impl Vm {
                 // Stack-eligible.
                 creates_block: true,
                 getter_ivar: None,
+                sym_proc: None,
                 getter_slot: std::cell::Cell::new(u32::MAX),
                 frozen_string_literal: false, line_base: 1, source_encoding: None,
                 code: vec![
@@ -23223,21 +23225,48 @@ impl Vm {
             && !self.jit_tier2_noliteblk
             && self.jit_flags_get(proto_idx) & crate::vm::JFLAG_TIER2_LITEBLK != 0
             && self.t2_depth < crate::vm::T2_MAX_NATIVE_DEPTH
-            && let Some(&Some((f, ps, np))) = self.t2_lite_blk_ptrs.get(proto_idx)
+            && let Some(&Some((f, ps, np, lite_rest))) = self.t2_lite_blk_ptrs.get(proto_idx)
             // np ≤ 1 ONLY: a 2-param entry pops two stack args — this
             // 1-arg site is the AUTO-SPLAT shape for such a block and
-            // must keep the general binder.
+            // must keep the general binder. A rest entry (`|*a|`, np = 1:
+            // the pre-built Array) requires the exact rest-only handle
+            // shape; rest-only lambda arity is `0+`, always in range, so
+            // lambdas take it too (mirroring the framed rest arm below).
             && np <= 1
             && param_start == ps
-            && n_params == np
-            && rest_slot.is_none()
             && kw_rest_slot.is_none()
-            && (!bh_is_lambda || np == 1)
+            && (if lite_rest {
+                n_params == 0 && rest_slot == Some(ps)
+            } else {
+                n_params == np && rest_slot.is_none() && (!bh_is_lambda || np == 1)
+            })
         {
-            let sw = crate::jit_tier2::lite_self_words(&self_val);
-            if np == 1 {
+            if lite_rest {
+                // The rest Array CRuby semantics require (`a == [arg]`,
+                // fresh per call, exposed to the block) is allocated
+                // BEFORE entering native state — the wave-4 invariant
+                // (no GC under a frameless window) holds because the
+                // interpreter still owns the world here: pin the only
+                // unrooted references across a due collection (GC can
+                // only run inside `maybe_gc`, never `heap.alloc`), then
+                // alloc; the operand-stack push roots the array for the
+                // whole frameless run (the entry binds it at slot
+                // `ps == rest_slot`, exactly where the framed rest arm
+                // writes it).
+                if self.stress_gc || self.heap.should_gc() {
+                    let mut g = crate::vm::PinGuard::new(self);
+                    g.pin(Value::Block(block_id));
+                    g.pin(arg.clone());
+                    g.vm.maybe_gc();
+                }
+                self.check_alloc()?;
+                let rest_val =
+                    Value::Array(self.heap.alloc(HeapObj::Array(vec![arg].into())));
+                self.stack.push(rest_val);
+            } else if np == 1 {
                 self.stack.push(arg);
             }
+            let sw = crate::jit_tier2::lite_self_words(&self_val);
             self.t2_lite_run_blk(f, proto_idx, sw, block_id);
             return Ok(true);
         }
@@ -23260,12 +23289,45 @@ impl Vm {
                 && self.protos[proto_idx].block_kw_params.is_empty()
                 && self.protos[proto_idx].block_param_slot.is_none()
             {
+                // ADR 0037 tail — `&:sym` sym-proc DIRECT SERVE: for the
+                // stamped desugar shape `{ |*a| a[0].sym(*a.drop(1)) }`
+                // a 1-arg invocation is exactly `arg.sym()` (`a.drop(1)`
+                // is `[]`), so dispatch that call directly — no rest
+                // Array, no `drop` Array, no block frame (CRuby likewise
+                // dispatches sym-procs frame-free, vm_call_symbol).
+                // `cid` is the body ApplyCall's own IC slot (same call
+                // site). Visibility (explicit-recv public-only),
+                // method_missing, and raise propagation are `do_call`'s
+                // verbatim — identical to the ApplyCall the framed body
+                // would reach. Rest-only lambda arity is `0+`, so
+                // lambdas serve too. Returns `true`: the value (or the
+                // callee's just-pushed frame) is where a completed /
+                // materialized block serve would leave it, and the
+                // caller's dispatch_until drives it exactly like any
+                // other serve outcome.
+                if n_params == 0
+                    && rest_slot.is_some()
+                    && let Some((m, cid)) = self.protos[proto_idx].sym_proc
+                {
+                    #[cfg(feature = "jit-native")]
+                    if self.jit_stats_on {
+                        self.symproc_serves += 1;
+                    }
+                    self.stack.push(arg);
+                    self.do_call(m, 0, false, cid)?;
+                    return Ok(true);
+                }
                 // (a) rest-only `|*a|`: binds `a = [arg]`. No auto-splat
                 // (CRuby keeps a lone Array intact for a rest-only block);
                 // lambda arity `0+` is always in range, so lambdas take
                 // this arm too. The rest Array is the one unavoidable
                 // alloc — CRuby exposes it to the block.
                 if n_params == 0 && rest_slot.is_some() {
+                    #[cfg(feature = "jit-native")]
+                    if self.jit_stats_on {
+                        self.restblk_census[1] += 1; // TEMP census: ib1 = argc 1
+                        *self.restblk_census_by.entry(proto_idx).or_insert(0) += 1;
+                    }
                     let rest_slot = rest_slot.unwrap() as usize;
                     // Pin arg + block across the collection — but only
                     // when one is actually due (the caller popped both
@@ -23445,8 +23507,9 @@ impl Vm {
             && !self.jit_tier2_noliteblk
             && self.jit_flags_get(proto_idx) & crate::vm::JFLAG_TIER2_LITEBLK != 0
             && self.t2_depth < crate::vm::T2_MAX_NATIVE_DEPTH
-            && let Some(&Some((f, ps, np))) = self.t2_lite_blk_ptrs.get(proto_idx)
+            && let Some(&Some((f, ps, np, lite_rest))) = self.t2_lite_blk_ptrs.get(proto_idx)
             && np == 2
+            && !lite_rest
             && param_start == ps
             && n_params == 2
             && rest_slot.is_none()
@@ -23528,6 +23591,11 @@ impl Vm {
              bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot, bh.lexical_cvar_class.clone(), bh.captured_is_method_scope, bh.captured_yield_block, bh.is_lambda)
         };
         let bp_t1 = crate::vm::bp_now(bp);
+        // TEMP census: rest-only-block argc distribution (general binder).
+        #[cfg(feature = "jit-native")]
+        if self.jit_stats_on && n_params == 0 && rest_slot.is_some() {
+            self.restblk_census[args.len().min(5)] += 1;
+        }
         // `|**opts|` keyword-rest: peel the trailing kwargs Hash off
         // the args BEFORE positional binding (so it doesn't land in
         // a positional slot or the auto-splat), defaulting to an
@@ -27133,6 +27201,7 @@ impl Vm {
                 n_locals: 0,
                 creates_block: false,
                 getter_ivar: Some(ivar_id),
+                sym_proc: None,
                 getter_slot: std::cell::Cell::new(u32::MAX),
                 frozen_string_literal: false, line_base: 1, source_encoding: None,
                 code: vec![Op::LoadIvar(ivar_id, crate::compiler::alloc_cid(&mut self.cache_counter.ivar)), Op::Return],
@@ -27178,6 +27247,7 @@ impl Vm {
                 n_locals: 1,
                 creates_block: false,
                 getter_ivar: None,
+                sym_proc: None,
                 getter_slot: std::cell::Cell::new(u32::MAX),
                 frozen_string_literal: false, line_base: 1, source_encoding: None,
                 code: vec![Op::LoadLocal(0), Op::Dup, Op::StoreIvar(ivar_id, crate::compiler::alloc_cid(&mut self.cache_counter.ivar)), Op::Return],
@@ -27297,6 +27367,7 @@ impl Vm {
             n_locals: 1,
             creates_block: false,
             getter_ivar: None,
+            sym_proc: None,
             getter_slot: std::cell::Cell::new(u32::MAX),
             frozen_string_literal: false, line_base: 1, source_encoding: None,
             code: vec![
@@ -27495,6 +27566,7 @@ impl Vm {
             n_locals: 1,
             creates_block: false,
             getter_ivar: None,
+            sym_proc: None,
             getter_slot: std::cell::Cell::new(u32::MAX),
             frozen_string_literal: false, line_base: 1, source_encoding: None,
             code: vec![
@@ -27673,6 +27745,7 @@ impl Vm {
             n_locals: 1,
             creates_block: false,
             getter_ivar: None,
+            sym_proc: None,
             getter_slot: std::cell::Cell::new(u32::MAX),
             frozen_string_literal: false, line_base: 1, source_encoding: None,
             code: vec![Op::LoadNil, Op::Return],

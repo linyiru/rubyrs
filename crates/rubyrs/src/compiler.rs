@@ -1441,6 +1441,8 @@ impl ProtoBuilder {
         Proto {
             name, params, n_required_positional, local_names,
             getter_ivar,
+            // Block-only marker; `compile_block` stamps it post-build.
+            sym_proc: None,
             getter_slot: std::cell::Cell::new(u32::MAX),
             // Default false; the parse entries (file load / require /
             // eval) stamp `true` across the whole proto range when the
@@ -3283,6 +3285,41 @@ pub(crate) fn compile_block(
     // a BlockHandle in hand (see Proto::block_shape).
     if let Some(p) = protos.last_mut() {
         p.block_shape = Some((param_start, n_params, rest_slot != u16::MAX, kw_rest_slot != u16::MAX));
+        // ADR 0037 tail: recognize the `&:sym` symbol-to-proc desugar
+        // shape `{ |*a| a[0].sym(*a.drop(1)) }` and stamp `sym_proc` so
+        // the 1-arg block invocation sites can serve `arg.sym()`
+        // directly — no rest Array, no `drop` Array, no block frame.
+        // Guards: rest-only call interface (no fixed/kw/optional/
+        // &-params), both `LoadLocal`s read the rest slot, and the rest
+        // param is the desugar's SYNTHESIZED `__sp_a` name (ast.rs) —
+        // a user-written look-alike block keeps its full body, so a
+        // reopened `Array#[]`/`Array#drop` still fires there (CRuby's
+        // native `Symbol#to_proc` never consults them, which is exactly
+        // what the served desugar path matches).
+        if n_params == 0
+            && rest_slot != u16::MAX
+            && kw_rest_slot == u16::MAX
+            && p.block_param_slot.is_none()
+            && p.block_kw_params.is_empty()
+            && p.n_optional_params == 0
+            && p.rest_param.as_deref() == Some("__sp_a")
+            && let [
+                Op::LoadLocal(s0),
+                Op::LoadConstInt(0),
+                Op::Call(idx, 1, _),
+                Op::LoadLocal(s1),
+                Op::LoadConstInt(1),
+                Op::Call(drop, 1, _),
+                Op::ApplyCall(m, cid),
+                Op::Return,
+            ] = p.code.as_slice()
+            && *s0 == rest_slot
+            && *s1 == rest_slot
+            && *idx == interner.intern("[]")
+            && *drop == interner.intern("drop")
+        {
+            p.sym_proc = Some((*m, *cid));
+        }
     }
     if parent.n_locals < block_n_locals {
         parent.n_locals = block_n_locals;
