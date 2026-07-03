@@ -356,11 +356,13 @@ fn regex_cache_stats_lazy_build() {
     rt.eval(r#"raise "no match" unless "alpha42" =~ A"#, "t.rb").unwrap();
     let (total, built) = rt.regex_cache_stats();
     assert_eq!((total, built), (3, 1), "first match builds exactly that engine");
-    // The eager fancy-regex path (lookaround) counts as built at
-    // construction — it pre-fills the cell to keep the error point.
+    // The fancy-regex fallback (lookaround) is ALSO lazy since the
+    // Bridgetown-boot perf arc made fancy engines build on first
+    // match rather than at construction (perf-regex-and-boot):
+    // construction registers the pattern without building.
     rt.eval("D = /foo(?=bar)/", "t.rb").unwrap();
     let (total, built) = rt.regex_cache_stats();
-    assert_eq!((total, built), (4, 2), "fancy fallback is eager-built");
+    assert_eq!((total, built), (4, 1), "fancy fallback is lazy too");
 }
 
 /// Regression: `reset()` must clear the refinement tables.

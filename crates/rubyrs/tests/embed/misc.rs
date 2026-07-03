@@ -406,9 +406,18 @@ fn interpolated_regex_invalid_pattern_returns_syntax_error_trap() {
         "#,
         "bad_interpolated_regex.rb",
     ).unwrap_err();
+    // CRuby raises RegexpError (not SyntaxError) for an invalid
+    // pattern reaching Regexp construction at RUNTIME — the
+    // rubocop graceful-per-cop arc aligned rubyrs with that
+    // (regexes invalid only after interpolation can't be a parse-
+    // time SyntaxError).
+    let is_regexp_error = match &err.err {
+        rubyrs::RubyError::Uncaught { class_name, .. } => class_name == "RegexpError",
+        _ => false,
+    };
     assert!(
-        matches!(err.err, rubyrs::RubyError::SyntaxError { .. }),
-        "expected SyntaxError trap from invalid interpolated regex, got {:?}",
+        is_regexp_error,
+        "expected RegexpError trap from invalid interpolated regex, got {:?}",
         err.err,
     );
 }

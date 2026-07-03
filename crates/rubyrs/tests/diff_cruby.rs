@@ -171,6 +171,7 @@ fn json2_gem_available() -> bool {
 /// `run_diff_gem` + env vars on the rubyrs side, gated on the json-2.x
 /// oracle probe — the runner for the JSON parity battery (native and
 /// RUBYRS_JSON_NO_NATIVE=1 canon variants).
+#[cfg(feature = "stdlib")]
 fn run_diff_json_battery(envs: &[(&str, &str)]) {
     let name = "json_parity_battery";
     if !ruby_available() {
@@ -226,6 +227,10 @@ fn run_diff_json_battery(envs: &[(&str, &str)]) {
     );
 }
 
+// stdlib-gated like `gem_available` (all gem-oracle fixtures are) —
+// this was latent while the pre-fix lib compile failure masked
+// default-feature test builds entirely.
+#[cfg(feature = "stdlib")]
 fn run_diff_gem(name: &str, gem_probe: &str) {
     if !ruby_available() {
         eprintln!("skipping diff_cruby::{} — `ruby` not on PATH", name);
@@ -578,6 +583,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn closure_in_iter_capture() { run_diff("closure_in_iter_capture"); }
 // Shared-binding closure semantics (outer-chain routing): nested blocks,
 // escaped procs, Thread/Fiber bodies, instance_eval, massign/rescue binds.
+// Uses Fiber#resume — needs the `_fiber` battery's host fns. Latent
+// under default features until the dump_jit_stats cfg fix made
+// default-feature test builds compile at all.
+#[cfg(feature = "_fiber")]
 #[test] fn closure_capture_nested() { run_diff("closure_capture_nested"); }
 // invoke_block1's rest-only `|*a|` + single-Array auto-splat fast arms
 // (ADR 0037 block-frame residue) — must bind like the general path.
@@ -1627,6 +1636,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // frame sequencing, port discipline (dump returns port; EOFError at
 // stream end; TypeError before a corrupt frame), StringIO ports. The
 // protocol rubocop --parallel runs across parallel's fork boundary.
+// Marshal-over-IO.pipe needs the stdlib IO wrappers (RubyrsFdReader /
+// RubyrsFdWriter) — same latent-until-compilable story as
+// closure_capture_nested above.
+#[cfg(feature = "stdlib")]
 #[test] fn marshal_io_pipe_frames() { run_diff("marshal_io_pipe_frames"); }
 // Object-graph coverage through the byte stream: link-table shared
 // refs + cycles, nested-class-name user objects, marshal_dump hooks
