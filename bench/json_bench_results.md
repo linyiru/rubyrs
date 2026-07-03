@@ -26,6 +26,27 @@ same residual as keys_repeated) that predates this work. It exists
 as a metric because a context-BLIND bigint scan briefly made this
 shape decline to the pure canon — a 160× regression, now gated.
 
+Honest-notes ledger:
+- **Claim wording**: parse and round_trip are reliably ahead of
+  CRuby across machines; generate is parity-to-ahead depending on
+  the machine's CRuby build (wins best-of and all interleaved
+  rounds on the calibration machine after the 2026-07 wrapper
+  work: conditional method definition kills the per-call
+  NATIVE_AVAILABLE lookup, and the host fn signals decline by
+  returning nil so the hot path carries no begin/rescue frame —
+  ~54 ns/call off the fixed cost).
+- **Bare ≥19-digit INTEGER literals** (unquoted snowflake docs,
+  `{"id":1234567890123456789}` shapes) still decline the whole
+  document to the pure canon: values stay EXACT but at canon
+  speed (~1.5 ms vs CRuby ~5 µs on a 200-record doc). Future
+  work: fold bigint-range integers natively instead of declining.
+  Long IDs in STRING values are unaffected (string-aware scan).
+- **Parse-error columns are byte-based** (probed CRuby json 2.20
+  semantics): multibyte characters before the offending token
+  advance the column by their byte length, and the 32-unit
+  fragment cap in "invalid number" messages is a BYTE cap with
+  CRuby's trailing-multibyte strip quirks, replicated exactly.
+
 **rubyrs beats CRuby stdlib AND Oj on all three metrics.** Byte
 parity with CRuby is pinned by `tests/diff/json_parity_battery.rb`
 (three-way: CRuby oracle == native accelerator ==

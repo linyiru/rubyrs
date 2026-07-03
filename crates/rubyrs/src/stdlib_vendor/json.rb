@@ -527,27 +527,44 @@ module JSON
     # start; an empty frag (number at end of input) renders as
     # bare EOF without quotes.
     def invalid_number(start)
-      frag = ""
+      # Fragment: up to 32 BYTES from the number start (CRuby
+      # counts bytes, not characters), stopping at NUL / space /
+      # tab / CR / LF — a multibyte char may be cut mid-sequence
+      # at the cap. CRuby then strips trailing continuation bytes
+      # AND, if the (new) last byte is a lead byte, that too — so
+      # a multibyte char ENDING exactly at the 32-byte cap is
+      # dropped whole (probed: 30 digits + é keeps only the
+      # digits), and one CUT at the cap loses its partial bytes.
+      bytes = []
       i = start
-      while i < @len && frag.length < 32
+      while i < @len && bytes.length < 32
         c = @chars[i]
         break if c == " " || c == "\t" || c == "\r" || c == "\n" || c == "\0"
-        frag += c
+        c.bytes.each { |b| bytes << b }
         i += 1
       end
+      bytes = bytes[0, 32]
+      while bytes.length > 0 && bytes[-1] >= 0x80 && bytes[-1] < 0xC0
+        bytes.pop
+      end
+      bytes.pop if bytes.length > 0 && bytes[-1] >= 0xC0
+      # Line is newline-counted; column is the 1-based BYTE offset
+      # of the number start within its line (CRuby probed:
+      # '["éé",01]' reports column 9, not 7).
       line = 1
       col = 1
       j = 0
       while j < start
-        if @chars[j] == "\n"
+        c = @chars[j]
+        if c == "\n"
           line += 1
           col = 1
         else
-          col += 1
+          col += c.bytesize
         end
         j += 1
       end
-      shown = frag.empty? ? "EOF" : "'" + frag + "'"
+      shown = bytes.empty? ? "EOF" : "'" + bytes.pack("C*").force_encoding("UTF-8") + "'"
       raise ParserError, "invalid number: " + shown + " at line " + line.to_s + " column " + col.to_s
     end
 
@@ -684,39 +701,48 @@ module JSON
   # see its sole Hash arg eaten as kwargs by rubyrs's call-site
   # lowering, leaving `obj` unbound. The trade is one extra
   # `opts[:key]` lookup per call vs. the deserialisation grenade.
-  def self.generate(obj, opts = nil)
-    # Fast path: the no-opts call needs no State at all — building
-    # one via state_from_opts (State.new + a 6-key Hash) cost
-    # ~3.2 us/call, dominating small-payload generates. The native
-    # emitter IS the default-compact form; on decline (NaN, custom
-    # objects, non-UTF-8 strings, >100 nesting) fall through and
-    # build the State lazily for the canon exactly as before.
-    if opts.nil? && NATIVE_AVAILABLE
-      begin
-        return __rubyrs_json_native_generate(obj)
-      rescue RuntimeError
-        # fall through to the canon path below
+  # Fast path: the no-opts call needs no State at all — building
+  # one via state_from_opts (State.new + a 6-key Hash) cost
+  # ~3.2 us/call, dominating small-payload generates. Shape notes
+  # (each measured on the {} microbench):
+  #   - defined CONDITIONALLY at load so the hot path never
+  #     re-tests NATIVE_AVAILABLE (a per-call const lookup);
+  #   - the host fn returns NIL to signal decline (NaN, custom
+  #     objects, non-UTF-8 strings, >100 nesting) instead of
+  #     raising, so no begin/rescue frame on the hot path — nil is
+  #     unambiguous because generate otherwise always returns a
+  #     String. Declines fall through and build the State lazily
+  #     for the canon exactly as before.
+  if NATIVE_AVAILABLE
+    def self.generate(obj, opts = nil)
+      if opts.nil?
+        r = __rubyrs_json_native_generate(obj)
+        return r unless r.nil?
       end
+      state = state_from_opts(opts, "", "", "", "", false, MAX_NESTING_DEFAULT)
+      generate_from_state(obj, state)
     end
-    state = state_from_opts(opts, "", "", "", "", false, MAX_NESTING_DEFAULT)
-    # Native fast path: serde_json's emit produces the same
-    # compact bytes the canon would, but only for the
-    # deterministic subset (Null / Bool / Integer / Float /
-    # String / Array / Hash). Custom-object `to_json` overrides
-    # OR a State with non-default formatting (indent / space /
-    # newlines) needs the pure canon's recursion. The state
-    # below is "default compact" iff all four formatting knobs
-    # are empty strings.
+  else
+    def self.generate(obj, opts = nil)
+      state = state_from_opts(opts, "", "", "", "", false, MAX_NESTING_DEFAULT)
+      generate_from_state(obj, state)
+    end
+  end
+
+  def self.generate_from_state(obj, state)
+    # Native fast path for explicit-but-default-compact States:
+    # serde_json's emit produces the same compact bytes the canon
+    # would, but only for the deterministic subset (Null / Bool /
+    # Integer / Float / String / Array / Hash). Custom-object
+    # `to_json` overrides OR a State with non-default formatting
+    # (indent / space / newlines) needs the pure canon's
+    # recursion. The state below is "default compact" iff all
+    # four formatting knobs are empty strings. nil from the host
+    # fn = decline (see the wrapper above).
     is_default_compact = state.indent.empty? && state.space.empty? && state.object_nl.empty? && state.array_nl.empty?
     if NATIVE_AVAILABLE && is_default_compact && !state.allow_nan? && state.max_nesting == MAX_NESTING_DEFAULT
-      begin
-        return __rubyrs_json_native_generate(obj)
-      rescue RuntimeError => e
-        # Native bailed (NaN, custom Object, unsupported value
-        # — see json_native.rs's `write_value` fall-through).
-        # Re-run on the pure canon which has full Object#to_json
-        # / NaN-with-allow_nan / nested-mixin coverage.
-      end
+      r = __rubyrs_json_native_generate(obj)
+      return r unless r.nil?
     end
     generate_with(obj, state.indent, state.space, state.object_nl, state.array_nl, state.allow_nan?, state.max_nesting, 0)
   end

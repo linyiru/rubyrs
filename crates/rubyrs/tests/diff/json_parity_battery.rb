@@ -20,6 +20,13 @@
 #   - cross-parse `.equal?` key sharing holds on both (CRuby fstring table /
 #     rubyrs capped key cache) but the rubyrs cache is capped at 8192 texts,
 #     so it is not asserted beyond one document here.
+#   - string-error MESSAGES (control chars, bad \u escapes, surrogates)
+#     are asserted class-only; number-error messages are asserted in full
+#     (byte-based columns + 32-BYTE fragment cap, matching CRuby).
+#
+# Perf note (documented in bench/json_bench_results.md): documents with
+# bare >=19-digit INTEGER literals decline whole to the pure canon —
+# values exact, canon speed. Long digit runs inside STRINGS stay native.
 
 require "json"
 
@@ -209,6 +216,18 @@ puts "== strict number grammar (verifier item 2) =="
 end
 try("snip") { JSON.parse("[012, " + '"x" ,' * 30 + " 1]") }
 try("snipline") { JSON.parse("[1,\n 012]") }
+# CRuby renders error columns and the 32-char fragment cap in BYTES,
+# not characters (probed: multibyte before the bad token shifts the
+# column; a multibyte char ending exactly at the cap is dropped whole,
+# one cut at the cap loses its partial bytes).
+try("mb-col") { JSON.parse('["\u00e9\u00e9",01]') }
+try("mb-line") { JSON.parse("[\"x\",\n \"\u00e9\u00e9\", 01]") }
+try("mb-cap29") { JSON.parse("[01234567890123456789012345678\u00e945678]") }
+try("mb-cap30") { JSON.parse("[012345678901234567890123456789\u00e945678]") }
+try("mb-cap31") { JSON.parse("[0123456789012345678901234567890\u00e945678]") }
+try("mb-wsstrip") { JSON.parse("[01\u00e9 ]") }
+try("mb-eof") { JSON.parse("[01\u00e9") }
+try("mb-emoji-cap") { JSON.parse("[0123456789012345678901234567\u{1F600}8]") }
 try("eofnum2") { JSON.parse("12e") }
 
 puts "== exponent saturation (verifier item 5) =="

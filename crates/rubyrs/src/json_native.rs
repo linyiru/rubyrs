@@ -85,7 +85,18 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
         SCRATCH.with(|cell| {
             let mut out = cell.borrow_mut();
             out.clear();
-            write_value(vm, v, &mut out, 0)?;
+            // DECLINE-AS-NIL contract: every write_value error is a
+            // decline-to-canon condition (NaN/Infinity, unsupported
+            // values, non-UTF-8 strings, >100 nesting) — return nil
+            // instead of a Trap so the Ruby wrapper needs no
+            // begin/rescue on the hot path (a rescue frame costs
+            // ~33 ns/call) and declines skip Trap construction
+            // entirely. nil is unambiguous: JSON.generate otherwise
+            // always produces a String. The arity/VM-null checks
+            // above remain real Traps.
+            if write_value(vm, v, &mut out, 0).is_err() {
+                return Ok(Value::Nil);
+            }
             if out.len() > 65536 {
                 let big = std::mem::replace(&mut *out, Vec::with_capacity(4096));
                 Ok(Value::new_str_bytes(big))
@@ -282,7 +293,18 @@ fn write_value(vm: &crate::vm::Vm, v: &Value, out: &mut Vec<u8>, depth: u32) -> 
             out.push(b'[');
             for (i, item) in items.iter().enumerate() {
                 if i > 0 { out.push(b','); }
-                write_value(vm, item, out, depth + 1)?;
+                // Inline the scalar arms: the recursive call isn't
+                // inlinable (self-recursion) and containers are
+                // mostly scalars — skipping the call for
+                // Int/Nil/Bool measurably trims the hot loop.
+                match item {
+                    Value::Int(n) => write_int(*n, out),
+                    Value::Nil => out.extend_from_slice(b"null"),
+                    Value::Bool(b) => {
+                        out.extend_from_slice(if *b { b"true" } else { b"false" })
+                    }
+                    other => write_value(vm, other, out, depth + 1)?,
+                }
             }
             out.push(b']');
         }
@@ -350,7 +372,14 @@ fn write_value(vm: &crate::vm::Vm, v: &Value, out: &mut Vec<u8>, depth: u32) -> 
                     }
                 }
                 out.push(b':');
-                write_value(vm, val, out, depth + 1)?;
+                match val {
+                    Value::Int(n) => write_int(*n, out),
+                    Value::Nil => out.extend_from_slice(b"null"),
+                    Value::Bool(b) => {
+                        out.extend_from_slice(if *b { b"true" } else { b"false" })
+                    }
+                    other => write_value(vm, other, out, depth + 1)?,
+                }
             }
             out.push(b'}');
         }
