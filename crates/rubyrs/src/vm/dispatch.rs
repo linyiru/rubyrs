@@ -16763,6 +16763,7 @@ impl Vm {
         // interpreter would have enforced here.
         #[cfg(feature = "jit-native")]
         if self.jit_tier2_on
+            && self.jit_flags_get(m.proto_idx) & crate::vm::JFLAG_TIER2_LITE != 0
             && let Some(&Some((lf, la))) = self.t2_lite_ptrs.get(m.proto_idx)
             && la as usize == argc
         {
@@ -17380,6 +17381,7 @@ impl Vm {
         #[cfg(feature = "jit-native")]
         if self.jit_tier2_on
             && block.is_none()
+            && self.jit_flags_get(m.proto_idx) & crate::vm::JFLAG_TIER2_LITE != 0
             && let Some(&Some((lf, la))) = self.t2_lite_ptrs.get(m.proto_idx)
             && la as usize == argc
         {

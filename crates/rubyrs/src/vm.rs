@@ -1006,6 +1006,13 @@ pub(crate) const JFLAG_NO_TIER2: u8 = 8;
 /// `Vm::t2_protos` — serve without probing the hotness map.
 #[cfg(feature = "jit-native")]
 pub(crate) const JFLAG_TIER2_HAS: u8 = 16;
+/// Wave-4: a frame-lite entry EXISTS (and has not been breaker-killed) in
+/// `t2_lite_ptrs`. The serve sites gate on this dense byte (usually already
+/// in cache from the tier-2 flow) before touching the 24-byte-entry lite
+/// table, so the non-serving fixed-arity fast path pays one AND, not a
+/// second table probe. Cleared by the bail-streak breaker.
+#[cfg(feature = "jit-native")]
+pub(crate) const JFLAG_TIER2_LITE: u8 = 32;
 
 /// Tier-2 hotness threshold (ADR 0037 wave 2, compile-cost control): a
 /// proto's frame must be entered `BASE + PER_OP × body_ops` times before it
@@ -3226,6 +3233,7 @@ impl Vm {
                             self.t2_lite_ptrs.resize(pidx + 1, None);
                         }
                         self.t2_lite_ptrs[pidx] = Some(lp);
+                        self.jit_flags_set(pidx, JFLAG_TIER2_LITE);
                     }
                     self.jit_flags_set(pidx, JFLAG_TIER2_HAS);
                     if self.jit_stats_on {
@@ -3331,6 +3339,9 @@ impl Vm {
         if *s >= T2_LITE_KILL_STREAK {
             if let Some(slot) = self.t2_lite_ptrs.get_mut(pidx) {
                 *slot = None; // module stays alive in t2_protos
+            }
+            if let Some(f) = self.jit_flags.get_mut(pidx) {
+                *f &= !JFLAG_TIER2_LITE;
             }
             self.t2_lite_stats[2] += 1;
         }
