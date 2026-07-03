@@ -288,6 +288,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn array_join_binary() { run_diff("array_join_binary"); }
 #[test] fn array_push_variadic() { run_diff("array_push_variadic"); }
 #[test] fn hash_basics() { run_diff("hash_basics"); }
+// 2026-07 small-hash representation battery (SmallVec inline pairs +
+// boxed cold tail): order/boundary/frozen/default/subclass semantics,
+// Hash#rehash, and the instrumented-key hash/eql? call patterns.
+#[test] fn hash_instrumented_key_calls() { run_diff("hash_instrumented_key_calls"); }
 #[test] fn hash_compare_by_identity() { run_diff("hash_compare_by_identity"); }
 #[test] fn index_fast_path() { run_diff("index_fast_path"); }
 #[test] fn hash_key_fast_path() { run_diff("hash_key_fast_path"); }
