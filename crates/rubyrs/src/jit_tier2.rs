@@ -323,11 +323,68 @@ unsafe extern "C" fn t2_op(vm: *mut crate::vm::Vm, op: *const Op, pidx: i64, ip:
         f.ip = ip + 1;
     }
     let op = unsafe { *op };
-    if let Err(t) = vm.step(op, pidx) {
+    // TEMPORARY census (`RUBYRS_T2_FALLBACK_STATS=1`): every op a
+    // compiled body still runs through the generic helper, keyed by
+    // op tag (+ call name for the call family). One `is_some` branch
+    // when disabled.
+    let census = vm.t2_op_stats.is_some();
+    if census {
+        t2_census_note_op(vm, &op);
+    }
+    let r = vm.step(op, pidx);
+    if census {
+        // Clear an untaken call marker (the op's arm may not route
+        // through the do_call family at all).
+        vm.t2_fb_from = false;
+    }
+    if let Err(t) = r {
         vm.t2_trap = Some(t);
         return T2_TRAP;
     }
     t2_finish(vm, depth)
+}
+
+/// TEMPORARY census helper (`RUBYRS_T2_FALLBACK_STATS=1`): record a
+/// generic-helper op execution and, for the call family, set the
+/// one-shot marker so the dispatch the op's arm enters is tagged
+/// t2-originating (see `Vm::t2_fb_from`).
+#[cold]
+fn t2_census_note_op(vm: &mut crate::vm::Vm, op: &Op) {
+    use crate::bytecode::Op::*;
+    let name = match op {
+        Call(n, ..)
+        | CallNoRecv(n, ..)
+        | CallKw(n, ..)
+        | CallKwNoRecv(n, ..)
+        | ApplyCall(n, ..)
+        | ApplyCallNoRecv(n, ..)
+        | ApplyCallKw(n, ..)
+        | ApplyCallKwNoRecv(n, ..)
+        | ApplyCallKwBlock(n, ..)
+        | ApplyCallKwNoRecvBlock(n, ..)
+        | ApplyCallPrimitive(n, ..)
+        | ApplyCallBlock(n, ..)
+        | ApplyCallNoRecvBlock(n, ..)
+        | Super(n, ..)
+        | ApplySuper(n)
+        | ApplySuperBlock(n)
+        | CallBuiltinDirect(n)
+        | CallBlock(n, ..)
+        | CallNoRecvBlock(n, ..)
+        | CallKwBlock(n, ..)
+        | CallKwNoRecvBlock(n, ..)
+        | CallAset(n, ..)
+        | LoadLocalCall(_, n, ..) => Some(*n),
+        _ => None,
+    };
+    if name.is_some() || matches!(op, InterpToS(_)) {
+        vm.t2_fb_from = true;
+    }
+    let dbg = format!("{op:?}");
+    let tag = dbg.split(['(', ' ']).next().unwrap_or("?").to_string();
+    if let Some(m) = vm.t2_op_stats.as_mut() {
+        *m.entry((tag, name)).or_insert(0) += 1;
+    }
 }
 
 /// Shared post-op tail (`t2_op` and the wave-2 call helpers): drive any
@@ -1039,9 +1096,21 @@ unsafe fn lite_ctx(ctx: *const i64, meta: i64) -> LiteCtx {
 
 /// Materialize the CALLER's frame at op `ip` (conservative decline: the
 /// interpreter re-runs the call op against the real frame). Returns the
-/// helper's MATERIALIZED status.
+/// helper's MATERIALIZED status. `reason`/`name`/`cargc` feed the
+/// TEMPORARY `RUBYRS_T2_FALLBACK_STATS` census (reason codes 30..=44,
+/// decode table on `Runtime::t2_fallback_stats_rows`); free when off.
 #[inline]
-fn lite_mat_here(vm: &mut crate::vm::Vm, c: &LiteCtx, ip: usize) -> i64 {
+fn lite_mat_here(
+    vm: &mut crate::vm::Vm,
+    c: &LiteCtx,
+    ip: usize,
+    reason: u8,
+    name: SymId,
+    cargc: usize,
+) -> i64 {
+    if vm.t2_fb_stats.is_some() {
+        vm.t2_fb_record(reason, name, 15, cargc);
+    }
     lite_materialize_core(
         vm, c.pidx, ip, c.argc, c.n_locals, c.n_pop, c.trunc, c.slot, c.self_w0, c.self_w1,
     );
@@ -1110,6 +1179,7 @@ fn lite_serve_m(
     vm: &mut crate::vm::Vm,
     c: &LiteCtx,
     ip: usize,
+    name_id: SymId,
     m: &std::rc::Rc<crate::value::Method>,
     cls: Option<&std::rc::Rc<crate::value::Class>>,
     oid: Option<crate::value::ObjId>,
@@ -1121,7 +1191,7 @@ fn lite_serve_m(
         Some(f) if f.required as usize == cargc => Some(f),
         // Wrong arity for a fixed method: the cascade raises the canonical
         // ArgumentError against the materialized frame.
-        Some(_) => return lite_mat_here(vm, c, ip),
+        Some(_) => return lite_mat_here(vm, c, ip, 36, name_id, cargc),
         None => None,
     };
     if fixed.is_none() {
@@ -1140,7 +1210,7 @@ fn lite_serve_m(
             lite_place(vm, &recv, cargc, Value::Bool(result));
             return 0;
         }
-        return lite_mat_here(vm, c, ip);
+        return lite_mat_here(vm, c, ip, 37, name_id, cargc);
     }
     // Trivial attr_reader: the frame-free getter read (both the explicit
     // and implicit dispatch paths serve this shape before anything else).
@@ -1194,7 +1264,7 @@ fn lite_serve_m(
                 }
                 debug_assert!(deopt);
                 vm.jstat_serve(pidx, 6, true);
-                return lite_mat_here(vm, c, ip);
+                return lite_mat_here(vm, c, ip, 38, name_id, cargc);
             }
         }
         if cargc == 1 && jflags & crate::vm::JFLAG_NO_ONEARG == 0 {
@@ -1227,7 +1297,7 @@ fn lite_serve_m(
                         return 0;
                     }
                     vm.jstat_serve(pidx, 0, true);
-                    return lite_mat_here(vm, c, ip);
+                    return lite_mat_here(vm, c, ip, 38, name_id, cargc);
                 }
             }
             // Object arg → the objparam specialization.
@@ -1249,7 +1319,7 @@ fn lite_serve_m(
                         return 0;
                     }
                     vm.jstat_serve(pidx, 3, true);
-                    return lite_mat_here(vm, c, ip);
+                    return lite_mat_here(vm, c, ip, 38, name_id, cargc);
                 }
             }
         }
@@ -1272,7 +1342,7 @@ fn lite_serve_m(
                     return 0;
                 }
                 vm.jstat_serve(pidx, 2, true);
-                return lite_mat_here(vm, c, ip);
+                return lite_mat_here(vm, c, ip, 38, name_id, cargc);
             }
         }
     }
@@ -1293,7 +1363,7 @@ fn lite_serve_m(
             || vm.frames.len() + vm.t2_lite_pending.len() + 2 > 10_000
             || vm.max_frames.is_some()
         {
-            return lite_mat_here(vm, c, ip);
+            return lite_mat_here(vm, c, ip, 40, name_id, cargc);
         }
         let (n_pop, w) = match &recv {
             LiteRecv::Stack(recv_idx) => (cargc + 1, value_words(&vm.stack[*recv_idx])),
@@ -1355,7 +1425,7 @@ fn lite_serve_m(
         }
         return 1;
     }
-    lite_mat_here(vm, c, ip)
+    lite_mat_here(vm, c, ip, 39, name_id, cargc)
 }
 
 /// `Op::Call(name, argc, cid)` in a FRAMELESS body — explicit receiver.
@@ -1373,27 +1443,27 @@ unsafe extern "C" fn t2_lite_call_ex(
     let c = unsafe { lite_ctx(ctx, meta) };
     let (name_id, cargc, cid, ip) = (SymId(name as u32), cargc as usize, cid as u32, ip as usize);
     if !lite_call_gates(vm, name_id) {
-        return lite_mat_here(vm, &c, ip);
+        return lite_mat_here(vm, &c, ip, 30, name_id, cargc);
     }
     let Some(recv_idx) = vm.stack.len().checked_sub(cargc + 1) else {
-        return lite_mat_here(vm, &c, ip);
+        return lite_mat_here(vm, &c, ip, 31, name_id, cargc);
     };
     match &vm.stack[recv_idx] {
         Value::Object(oid) => {
             let oid = *oid;
             let Some(cls) = vm.heap.try_class_of(oid) else {
-                return lite_mat_here(vm, &c, ip);
+                return lite_mat_here(vm, &c, ip, 33, name_id, cargc);
             };
             let Some(m) = vm.lookup_method_cached(&cls, name_id, cid) else {
-                return lite_mat_here(vm, &c, ip);
+                return lite_mat_here(vm, &c, ip, 34, name_id, cargc);
             };
             if m.visibility.get() != crate::value::Visibility::Public
                 || m.closure.is_some()
                 || m.builtin.is_some()
             {
-                return lite_mat_here(vm, &c, ip);
+                return lite_mat_here(vm, &c, ip, 35, name_id, cargc);
             }
-            lite_serve_m(vm, &c, ip, &m, Some(&cls), Some(oid), LiteRecv::Stack(recv_idx), cargc)
+            lite_serve_m(vm, &c, ip, name_id, &m, Some(&cls), Some(oid), LiteRecv::Stack(recv_idx), cargc)
         }
         _ => {
             // Non-Object receiver: the cascade's own native arms
@@ -1414,7 +1484,7 @@ unsafe extern "C" fn t2_lite_call_ex(
                 }
                 return 0;
             }
-            lite_mat_here(vm, &c, ip)
+            lite_mat_here(vm, &c, ip, 32, name_id, cargc)
         }
     }
 }
@@ -1435,36 +1505,39 @@ unsafe extern "C" fn t2_lite_call_ns(
     let vm = unsafe { &mut *vm };
     let c = unsafe { lite_ctx(ctx, meta) };
     let (name_id, cargc, cid, ip) = (SymId(name as u32), cargc as usize, cid as u32, ip as usize);
-    if !lite_call_gates(vm, name_id) || vm.host_fns.contains_key(&name_id) {
-        return lite_mat_here(vm, &c, ip);
+    if !lite_call_gates(vm, name_id) {
+        return lite_mat_here(vm, &c, ip, 30, name_id, cargc);
+    }
+    if vm.host_fns.contains_key(&name_id) {
+        return lite_mat_here(vm, &c, ip, 42, name_id, cargc);
     }
     let sv = std::mem::ManuallyDrop::new(unsafe { value_from_words([c.self_w0, c.self_w1]) });
     if matches!(&*sv, Value::Nil) || vm.is_main_self(&sv) {
         // Toplevel bare call (`fib(n-1)` at main): the toplevel-method IC.
         // Only the guard-free serves apply (no receiver Object).
         let Some(m) = vm.lookup_toplevel_method_cache_hit(cid) else {
-            return lite_mat_here(vm, &c, ip);
+            return lite_mat_here(vm, &c, ip, 43, name_id, cargc);
         };
         if m.closure.is_some() || m.builtin.is_some() {
-            return lite_mat_here(vm, &c, ip);
+            return lite_mat_here(vm, &c, ip, 35, name_id, cargc);
         }
-        return lite_serve_m(vm, &c, ip, &m, None, None, LiteRecv::SelfWords, cargc);
+        return lite_serve_m(vm, &c, ip, name_id, &m, None, None, LiteRecv::SelfWords, cargc);
     }
     let Value::Object(oid) = &*sv else {
-        return lite_mat_here(vm, &c, ip);
+        return lite_mat_here(vm, &c, ip, 44, name_id, cargc);
     };
     let Some(cls) = vm.heap.try_class_of(*oid) else {
-        return lite_mat_here(vm, &c, ip);
+        return lite_mat_here(vm, &c, ip, 33, name_id, cargc);
     };
     let Some(m) = vm.lookup_method_cached(&cls, name_id, cid) else {
-        return lite_mat_here(vm, &c, ip);
+        return lite_mat_here(vm, &c, ip, 34, name_id, cargc);
     };
     // No visibility gate: implicit-self calls legally reach
     // private/protected methods.
     if m.closure.is_some() || m.builtin.is_some() {
-        return lite_mat_here(vm, &c, ip);
+        return lite_mat_here(vm, &c, ip, 35, name_id, cargc);
     }
-    lite_serve_m(vm, &c, ip, &m, Some(&cls), Some(*oid), LiteRecv::SelfWords, cargc)
+    lite_serve_m(vm, &c, ip, name_id, &m, Some(&cls), Some(*oid), LiteRecv::SelfWords, cargc)
 }
 
 /// `Op::LoadLocalCall(slot, name, cid)` in a FRAMELESS body — the fused
@@ -1486,27 +1559,27 @@ unsafe extern "C" fn t2_lite_call_local(
     let c = unsafe { lite_ctx(ctx, meta) };
     let (name_id, cid, ip) = (SymId(name as u32), cid as u32, ip as usize);
     if !lite_call_gates(vm, name_id) {
-        return lite_mat_here(vm, &c, ip);
+        return lite_mat_here(vm, &c, ip, 30, name_id, 0);
     }
     let recv_ptr = unsafe { c.slot.add(slot as usize * 2) } as *const Value;
     match unsafe { &*recv_ptr } {
         Value::Object(oid) => {
             let oid = *oid;
             let Some(cls) = vm.heap.try_class_of(oid) else {
-                return lite_mat_here(vm, &c, ip);
+                return lite_mat_here(vm, &c, ip, 33, name_id, 0);
             };
             let Some(m) = vm.lookup_method_cached(&cls, name_id, cid) else {
-                return lite_mat_here(vm, &c, ip);
+                return lite_mat_here(vm, &c, ip, 34, name_id, 0);
             };
             if m.visibility.get() != crate::value::Visibility::Public
                 || m.closure.is_some()
                 || m.builtin.is_some()
             {
-                return lite_mat_here(vm, &c, ip);
+                return lite_mat_here(vm, &c, ip, 35, name_id, 0);
             }
-            lite_serve_m(vm, &c, ip, &m, Some(&cls), Some(oid), LiteRecv::LocalSlot(recv_ptr), 0)
+            lite_serve_m(vm, &c, ip, name_id, &m, Some(&cls), Some(oid), LiteRecv::LocalSlot(recv_ptr), 0)
         }
-        _ => lite_mat_here(vm, &c, ip),
+        _ => lite_mat_here(vm, &c, ip, 44, name_id, 0),
     }
 }
 
@@ -1536,7 +1609,12 @@ unsafe extern "C" fn t2_lite_const_chain(
         }
         return 0;
     }
-    lite_mat_here(vm, &c, ip)
+    let census_name = if vm.t2_fb_stats.is_some() {
+        vm.interner.intern("<const-chain>")
+    } else {
+        SymId(0)
+    };
+    lite_mat_here(vm, &c, ip, 41, census_name, 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -1663,6 +1741,40 @@ fn t2_call_impl(
                 }
             }
         };
+        // Mid-cascade WALK FAST BUCKETS (`Vm::try_walk_fast_buckets`, the
+        // zone extracted from `do_call`): probed at the cascade's exact
+        // position — right after the class-singleton sibling, right
+        // before the slow cascade — so the in-body calls those buckets
+        // serve (`===`, `is_a?`, `respond_to?`, Array/Hash size/empty?/
+        // include?/push, send-family re-aims, …) stop paying the full
+        // `do_call` preamble per call. Exactness: `fast` already covers
+        // the boundary gates; the per-KIND singleton gate below mirrors
+        // the str/heap/hash singleton arms that run BEFORE the zone in
+        // `do_call` (no_recv zone arms are self/arg-based — no gate).
+        let served = match served {
+            Ok(false) => {
+                let kind_free = no_recv
+                    || match vm
+                        .stack
+                        .len()
+                        .checked_sub(argc + 1)
+                        .and_then(|i| vm.stack.get(i))
+                    {
+                        Some(Value::Str(_)) => !vm.any_str_singletons,
+                        Some(Value::Array(_)) | Some(Value::Block(_)) => {
+                            !vm.any_heap_singletons
+                        }
+                        Some(Value::Hash(_)) => !vm.any_hash_singletons,
+                        _ => true,
+                    };
+                if kind_free {
+                    vm.try_walk_fast_buckets(name_id, argc, no_recv, cache_id, false, false)
+                } else {
+                    Ok(false)
+                }
+            }
+            r => r,
+        };
         vm.trailing_hash_positional = false;
         match served {
             Ok(true) => {
@@ -1696,6 +1808,20 @@ fn t2_call_impl(
     // including the explicit-brace trailing-Hash-is-positional flag.
     if vm.jit_stats_on {
         vm.t2_call_stats[1] += 1;
+    }
+    // TEMPORARY census (`RUBYRS_T2_FALLBACK_STATS=1`): classify this
+    // fallback edge (reason × name × shape × argc) and mark the
+    // dispatch below as t2-originating for the slow-cascade cross-tab.
+    if vm.t2_fb_stats.is_some() {
+        let path = if fast {
+            2 // the probe ran and declined
+        } else if site_v >= T2_SITE_SETTLE {
+            1 // settled-site skip (a chronic decliner — classify anyway)
+        } else {
+            0 // dispatch-boundary gate
+        };
+        vm.t2_fb_classify_call(name_id, argc, no_recv, cache_id, path);
+        vm.t2_fb_from = true;
     }
     vm.trailing_hash_positional = true;
     let r = vm.do_call(name_id, argc, no_recv, cache_id);
@@ -1797,6 +1923,23 @@ fn t2_call_block_impl(
     no_recv: bool,
 ) -> i64 {
     let depth = vm.frames.len();
+    // TEMPORARY census (`RUBYRS_T2_FALLBACK_STATS=1`): reason 18 =
+    // every in-body block-form call (do_call_block's front-loaded
+    // block IC may still serve it natively; reason 19 inside
+    // `do_call_block` tags the subset that fell past that IC).
+    // Stack here: [.., recv?, block, a1..aN].
+    if vm.t2_fb_stats.is_some() {
+        let shape = if no_recv {
+            12
+        } else {
+            vm.stack
+                .len()
+                .checked_sub(argc + 2)
+                .map_or(11, |i| crate::vm::Vm::t2_fb_shape(&vm.stack[i]))
+        };
+        vm.t2_fb_record(18, name_id, shape, argc);
+        vm.t2_fb_from = true;
+    }
     vm.trailing_hash_positional = true;
     let r = vm.do_call_block(name_id, argc, no_recv, cache_id);
     vm.trailing_hash_positional = false;
@@ -2149,6 +2292,14 @@ pub(crate) fn t2_admit(proto: &Proto) -> Result<(), String> {
 const LITE_MAX_OPS: usize = 48;
 const LITE_MAX_LOCALS: u16 = 12;
 const LITE_MAX_ARGC: u16 = 4;
+
+/// FRAMED-tier cap for routing `Op::Call`/`Op::CallNoRecv` to the IC-fast
+/// `t2_call` family instead of the generic helper. Was 2 through wave 5 (a
+/// wave-2 conservatism, not an ABI limit — the helpers and every serve in
+/// the matrix take `argc` dynamically); the 2026-07 fallback census found
+/// ~15-20K calls/walk at argc 3-4 (`check_tokens`, `Class.new(a,b,c,d)`,
+/// `__send__(:m, a, b)`) stuck on the `step()` round-trip for no reason.
+const T2_CALL_MAX_ARGC: u8 = 8;
 
 /// FRAME-LITE admission (wave 4, conservative leaf tier): the body may run
 /// with NO interpreter frame at all, so every admitted op must either be
@@ -3362,7 +3513,7 @@ fn emit_op(cg: &mut Cg, fb: &mut FunctionBuilder, i: usize) -> bool {
         // survives — callees cannot write a Locals::Stack frame's slots).
         // ------------------------------------------------------------------
         Op::Call(name, argc, cid)
-            if !cg.nocall && (argc <= 2 || (cg.lite && (argc as u16) <= LITE_MAX_ARGC)) =>
+            if !cg.nocall && (argc <= T2_CALL_MAX_ARGC || (cg.lite && (argc as u16) <= LITE_MAX_ARGC)) =>
         {
             // `x.nil?` on a virtual receiver: the interpreter serves this
             // via try_fast_primitive's universal arm for Int/Float/Sym/
@@ -3422,7 +3573,7 @@ fn emit_op(cg: &mut Cg, fb: &mut FunctionBuilder, i: usize) -> bool {
             false
         }
         Op::CallNoRecv(name, argc, cid)
-            if !cg.nocall && (argc <= 2 || (cg.lite && (argc as u16) <= LITE_MAX_ARGC)) =>
+            if !cg.nocall && (argc <= T2_CALL_MAX_ARGC || (cg.lite && (argc as u16) <= LITE_MAX_ARGC)) =>
         {
             if cg.lite {
                 return cg.emit_lite_ext(
