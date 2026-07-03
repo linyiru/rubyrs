@@ -2178,11 +2178,40 @@ impl Vm {
         name_sym: SymId,
         include_private: bool,
     ) -> Result<bool, Trap> {
-        let rtm_id = self.interner.intern("respond_to_missing?");
+        let rtm_id = self.sym_respond_to_missing;
         let m = match recv {
             Value::Object(id) => {
                 let cls = self.heap.class_of(*id);
-                self.lookup_method_uncached(&cls, rtm_id)
+                // Hook-EXISTENCE rides the respond_to? (class, name,
+                // method_gen) memo: this probe runs on EVERY
+                // respond_to? resolution miss (the common case on
+                // the RuboCop walk — absent selector names), and
+                // without the memo it was a second full uncached
+                // ancestor-chain walk per call. The gate is the
+                // TABLE bit, not the answer bits: `respond_to_
+                // missing?` is itself on the `universal_kernel_
+                // private` whitelist (every object answers true
+                // under include_all), so only the table bit says "a
+                // real hook record exists on the chain" (defining a
+                // hook after warm bumps method_gen → stale entry →
+                // re-walk, the send_family_warm_override.rb case).
+                // Only existence is memoized — the hook's RESULT is
+                // arbitrary user code and is invoked fresh below,
+                // exactly as before.
+                let v = self.responds_to_object_memo(&cls, rtm_id);
+                if v & crate::vm::lookup::RESPOND_TABLE_BIT == 0 {
+                    None
+                } else if v & crate::vm::lookup::RESPOND_RTM_DEFAULT_BIT != 0 {
+                    // The resolution is the preamble's default stub
+                    // (pure `return false`, pinned at load_preamble
+                    // time) — answer without re-walking the chain or
+                    // paying a full Ruby invocation for a constant.
+                    // Any user hook/redefinition bumps method_gen →
+                    // the bit clears on refill → invoked as before.
+                    return Ok(false);
+                } else {
+                    self.lookup_method_uncached(&cls, rtm_id)
+                }
             }
             Value::Class(cls) => self.lookup_class_singleton_method(cls, rtm_id),
             // Primitives: a `respond_to_missing?` reopened onto the

@@ -520,6 +520,18 @@ fn main() {
         let (total, built) = rt.regex_cache_stats();
         eprintln!("regex-stats\ttotal={}\tbuilt={}", total, built);
     }
+    // `RUBYRS_RESPOND_MEMO_STATS=1`: dump the respond_to?
+    // (class, name, method_gen) memo counters — hit/miss/stale
+    // discards, wholesale clears, and the key-cardinality high-water
+    // mark (sizes the 8192 cap). Same debug-knob shape as
+    // `RUBYRS_REGEX_STATS`.
+    if std::env::var_os("RUBYRS_RESPOND_MEMO_STATS").is_some() {
+        let (hits, misses, stale, clears, hiwater) = rt.respond_memo_stats();
+        eprintln!(
+            "respond-memo-stats\thits={}\tmisses={}\tstale={}\tclears={}\thiwater={}",
+            hits, misses, stale, clears, hiwater
+        );
+    }
     // TEMPORARY diagnostics (`RUBYRS_CASCADE_STATS=1`): dump the
     // slow-cascade send counters, one row per (name, receiver
     // shape), count-descending. Same debug-knob shape as

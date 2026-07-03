@@ -21,6 +21,59 @@ use crate::value::{BuiltinMeta, Class, Method, Value};
 
 use super::Vm;
 
+/// Bit-encoded `(class, name)` respond_to? verdict for the
+/// Object-receiver memo — covers BOTH `include_all` variants of
+/// `respond_to?` PLUS "does an actual method-table record exist"
+/// from one ancestor-chain walk:
+///   - [`RESPOND_ALL_BIT`]: answers true under `include_all = true`;
+///   - bit 1: answers true under the public-only default (implies
+///     the ALL bit — the two are always set together as
+///     [`RESPOND_PUB_BITS`]);
+///   - [`RESPOND_TABLE_BIT`]: the verdict came from a REAL
+///     `lookup_method_uncached` hit (not the universal whitelist,
+///     not Kernel's private-builtin surface). `try_respond_to_
+///     missing` keys on this bit: `respond_to_missing?` is itself in
+///     `universal_kernel_private` (every object "responds" to it
+///     under include_all), so the ALL bit alone can NOT distinguish
+///     "a user hook exists on the chain" from the whitelist answer.
+///     Only meaningful when the fill reached the table lookup — for
+///     universal/dup-family names the fill early-returns without
+///     consulting the table, and no consumer needs the bit there.
+/// `RESPOND_NONE` (0) = no method-table answer at all; the
+/// respond_to? caller then falls to `try_respond_to_missing`,
+/// exactly as pre-memo.
+pub(crate) const RESPOND_NONE: u8 = 0;
+pub(crate) const RESPOND_ALL_BIT: u8 = 1;
+pub(crate) const RESPOND_PUB_BITS: u8 = 3;
+pub(crate) const RESPOND_TABLE_BIT: u8 = 4;
+/// Set (only for the `respond_to_missing?` name, only alongside
+/// [`RESPOND_TABLE_BIT`]) when the resolved record IS the preamble's
+/// default `Object#respond_to_missing?` stub (`Vm::rtm_default_stub`,
+/// pure `return false`). Lets `try_respond_to_missing` answer false
+/// without re-walking the chain OR invoking a Ruby method whose
+/// result is a constant. A user override/redefinition anywhere bumps
+/// `method_gen` → the refilled verdict resolves the NEW record →
+/// `ptr_eq` fails → the bit clears and the hook is invoked, exactly
+/// as pre-memo.
+pub(crate) const RESPOND_RTM_DEFAULT_BIT: u8 = 8;
+
+thread_local! {
+    /// respond_to? memo counters: (hits, misses, stale-gen or
+    /// dead-Weak discards, wholesale clears, table high-water mark).
+    /// Counted unconditionally (a Cell bump inside an already-taken
+    /// hash-probe path); REPORTED only under
+    /// `RUBYRS_RESPOND_MEMO_STATS=1` (see `main.rs`).
+    static RESPOND_MEMO_STATS: std::cell::Cell<(u64, u64, u64, u64, u64)> =
+        const { std::cell::Cell::new((0, 0, 0, 0, 0)) };
+}
+
+/// Snapshot of the respond_to? memo counters for the
+/// `RUBYRS_RESPOND_MEMO_STATS=1` diagnostics row: (hits, misses,
+/// stale discards, wholesale clears, key-cardinality high-water).
+pub(crate) fn respond_memo_stats() -> (u64, u64, u64, u64, u64) {
+    RESPOND_MEMO_STATS.with(|s| s.get())
+}
+
 /// One way of a per-call-site polymorphic inline cache.
 /// `class_ptr == 0` means the slot is unused.
 #[derive(Clone, Default)]
@@ -1409,6 +1462,200 @@ impl Vm {
         }
     }
 
+    /// Universal `respond_to?` names — every receiver responds to
+    /// these regardless of shape (extracted verbatim from the inline
+    /// `matches!` in `responds_to` so the memoized Object-receiver
+    /// verdict and the general path share one source of truth).
+    /// `send` / `__send__` are here because the `do_call` recogniser
+    /// handles them on any receiver type (primitive or user-defined),
+    /// so `obj.respond_to?(:send)` should be true for every value —
+    /// feature-detection has to agree with what dispatch will
+    /// actually accept.
+    pub(crate) fn universal_respond_name(name: &str) -> bool {
+        matches!(
+            name,
+            "nil?" | "to_s" | "respond_to?" | "class" | "==" | "!=" | "!" | "!@" | "<=>" | "equal?" | "eql?"
+            | "send" | "__send__"
+            // Universal dispatch arms wired by the
+            // object_id/__id__/hash/frozen?/inspect PR. All
+            // succeed on every receiver type, so feature
+            // detection (`obj.respond_to?(:object_id)`) must
+            // agree.
+            | "object_id" | "__id__" | "hash" | "frozen?" | "freeze" | "inspect"
+            // Object-extras family (Kleisli `then`/`yield_self`,
+            // debug `tap`, identity `itself`) — universal arms
+            // in `do_call` succeed on every receiver, so feature
+            // detection has to agree.
+            | "itself" | "tap" | "then" | "yield_self"
+            // The ivar-introspection family (`instance_variables` /
+            // `instance_variable_get` / `instance_variable_set`)
+            // is implemented as universal dispatch arms in
+            // `Vm::do_call`, so feature detection has to agree:
+            // `obj.respond_to?(:instance_variable_get)` should be
+            // true for every value even if the result will be nil
+            // (primitives) or raise FrozenError (set on primitives).
+            | "instance_variables" | "instance_variable_get" | "instance_variable_set"
+            | "instance_variable_defined?"
+            // `instance_exec` is a universal dispatch arm (block-form
+            // self-swap, parity with `instance_eval`). Whitelisted
+            // here so feature detection agrees with what dispatch
+            // accepts on every receiver type. `instance_eval`
+            // joins for the same reason — both are universal
+            // dispatch arms and both surface in BasicObject's
+            // reflection registry.
+            | "instance_exec" | "instance_eval"
+            // Receiver-side method introspection — `methods` /
+            // `public_methods` / `private_methods` /
+            // `protected_methods` / `singleton_methods` are
+            // implemented as universal dispatch arms in
+            // `Vm::do_call`. Non-Object/non-Class receivers
+            // succeed by returning an empty Array (rubyrs's
+            // subset doesn't enumerate Kernel-level entries per
+            // value), so feature detection can stay universal.
+            | "methods" | "public_methods" | "private_methods" | "protected_methods"
+            | "singleton_methods"
+            // Method getter triple — `method` is universal too;
+            // `singleton_method` / `public_method` join as
+            // narrowed siblings (NameError when the lookup
+            // doesn't match the variant's filter). Dispatch
+            // succeeds for every receiver that `method(:name)`
+            // already worked on; primitive arms intercept their
+            // own bound-method shapes elsewhere.
+            | "method" | "singleton_method" | "public_method"
+        )
+    }
+
+    /// The `(class, name)` respond_to? verdict for a `Value::Object`
+    /// receiver, UNCACHED — the bit encoding documented at the
+    /// `RESPOND_*` constants, covering both `include_all` variants
+    /// plus table-hit existence in one ancestor-chain walk.
+    /// Mirrors the pre-memo `responds_to` Object path branch-for-
+    /// branch; the only reordering is `universal_kernel_private`,
+    /// which is commutative here (a plain OR contribution to the
+    /// include-all answer — a method-table hit and the kernel-
+    /// private whitelist can both be true, and the combined verdict
+    /// answers both variants identically either way).
+    fn responds_to_object_verdict(&self, cls: &Rc<Class>, name_id: SymId) -> u8 {
+        let name: &str = self.interner.resolve(name_id);
+        // The universal `dup`/`clone` arm in `Vm::do_call` handles
+        // plain Value::Object via a shallow Instance copy, so report
+        // true even when no user method exists (same for `extend` /
+        // `define_singleton_method`).
+        if Self::universal_respond_name(name)
+            || matches!(name, "dup" | "clone" | "extend" | "define_singleton_method")
+        {
+            return RESPOND_PUB_BITS;
+        }
+        match self.lookup_method_uncached(cls, name_id) {
+            Some(m) if m.visibility.get() == crate::value::Visibility::Public => {
+                RESPOND_PUB_BITS | RESPOND_TABLE_BIT | self.rtm_default_bit(name_id, &m)
+            }
+            Some(m) => RESPOND_ALL_BIT | RESPOND_TABLE_BIT | self.rtm_default_bit(name_id, &m),
+            // Kernel's PRIVATE builtin surface — `respond_to?(name,
+            // true)` must report the no-recv builtins dispatch
+            // actually accepts (CRuby: Kernel private instance
+            // methods live on every object). No table bit: nothing
+            // to invoke behind the whitelist answer.
+            None if Self::universal_kernel_private(name) => RESPOND_ALL_BIT,
+            None => RESPOND_NONE,
+        }
+    }
+
+    /// [`RESPOND_RTM_DEFAULT_BIT`] when `name_id` is
+    /// `respond_to_missing?` and the resolved record is the pinned
+    /// preamble default stub; 0 otherwise. One SymId compare on the
+    /// fill path — every other name short-circuits before touching
+    /// the Rc pointers.
+    #[inline]
+    fn rtm_default_bit(&self, name_id: SymId, m: &Rc<Method>) -> u8 {
+        if name_id == self.sym_respond_to_missing
+            && self
+                .rtm_default_stub
+                .as_ref()
+                .is_some_and(|d| Rc::ptr_eq(d, m))
+        {
+            RESPOND_RTM_DEFAULT_BIT
+        } else {
+            0
+        }
+    }
+
+    /// `(class, name, method_gen)`-memoized twin of
+    /// [`Self::responds_to_object_verdict`] — the RuboCop cop walk
+    /// probes `respond_to?` ~24.7K times per 600-line file
+    /// (`Node#loc?` probes `loc.respond_to?(sym)` per node), and the
+    /// send-family fast bucket absorbed the DISPATCH cost but every
+    /// call still paid an uncached ancestor-chain walk + name-string
+    /// matching in the terminal. Both consumers (the bucket AND the
+    /// canonical cascade arm — plus every internal `responds_to`
+    /// probe) route through here because the memo lives inside
+    /// `responds_to` itself.
+    ///
+    /// Same storage discipline as `class_is_a_cached` /
+    /// `ancestors_cached`:
+    ///   - keyed by the class POINTER (`Rc::as_ptr`) + `SymId`;
+    ///   - validated by the per-entry `method_gen` snapshot (bumped
+    ///     by def / define_method / undef / remove / alias /
+    ///     include / prepend / extend / module_function AND — as of
+    ///     this change — the implicit class-body `private :m` /
+    ///     `public :m` / `protected :m` own-table Cell flip, which
+    ///     historically skipped the bump because the Rc-holding
+    ///     inline caches re-read the Cell at call time; a verdict
+    ///     cache cannot) AND a `Weak<Class>` + `ptr_eq` guard, so a
+    ///     freed anonymous class whose heap address is reused can
+    ///     never serve a stale verdict;
+    ///   - negative results ([`RESPOND_NONE`]) are cached too —
+    ///     `Node#loc?` probes mostly-absent selector names, so the
+    ///     miss verdict is the COMMON case on the walk;
+    ///   - bounded at 8192 entries with a wholesale clear (walk
+    ///     cardinality measured at ~1-2K `(class, name)` keys —
+    ///     see `respond_memo_stats`; stale-gen entries are
+    ///     overwritten in place on re-probe rather than swept).
+    pub(crate) fn responds_to_object_memo(&self, cls: &Rc<Class>, name_id: SymId) -> u8 {
+        thread_local! {
+            #[allow(clippy::type_complexity)]
+            static MEMO: std::cell::RefCell<
+                crate::intern::FxHashMap<
+                    (usize, SymId),
+                    (std::rc::Weak<Class>, u32, u8),
+                >,
+            > = std::cell::RefCell::new(crate::intern::FxHashMap::default());
+        }
+        let cur_gen = self.method_gen;
+        let cls_ptr = Rc::as_ptr(cls) as usize;
+        MEMO.with(|c| {
+            let mut memo = match c.try_borrow_mut() {
+                // responds_to runs no Ruby so this is not normally
+                // re-entrant; fall back to the uncached verdict if it
+                // somehow is (same discipline as class_is_a_cached).
+                Err(_) => return self.responds_to_object_verdict(cls, name_id),
+                Ok(g) => g,
+            };
+            if let Some((weak, g, v)) = memo.get(&(cls_ptr, name_id)) {
+                if *g == cur_gen && weak.upgrade().is_some_and(|rc| Rc::ptr_eq(&rc, cls)) {
+                    RESPOND_MEMO_STATS.with(|s| s.set({ let mut t = s.get(); t.0 += 1; t }));
+                    return *v;
+                }
+                RESPOND_MEMO_STATS.with(|s| s.set({ let mut t = s.get(); t.2 += 1; t }));
+            }
+            RESPOND_MEMO_STATS.with(|s| s.set({ let mut t = s.get(); t.1 += 1; t }));
+            // Bound the table so pathological dynamic-name churn
+            // (respond_to? over interned user input) can't leak it.
+            if memo.len() > 8192 {
+                memo.clear();
+                RESPOND_MEMO_STATS.with(|s| s.set({ let mut t = s.get(); t.3 += 1; t }));
+            }
+            let v = self.responds_to_object_verdict(cls, name_id);
+            memo.insert((cls_ptr, name_id), (Rc::downgrade(cls), cur_gen, v));
+            RESPOND_MEMO_STATS.with(|s| {
+                let mut t = s.get();
+                t.4 = t.4.max(memo.len() as u64);
+                s.set(t);
+            });
+            v
+        })
+    }
+
     pub(crate) fn responds_to(&self, recv: &Value, name_id: SymId, include_private: bool) -> bool {
         // Host fns (`register_fn(...)` — battery / cext / embed-host
         // wiring) are reachable as bareword calls from any frame. The
@@ -1425,6 +1672,29 @@ impl Vm {
         // class, dispatch on them ignores receiver shape.
         if self.host_fns.contains_key(&name_id) {
             return true;
+        }
+        // Value::Object receivers — the RuboCop-walk hot shape
+        // (~95% of the walk's respond_to? receivers) — route through
+        // the `(class, name, method_gen)` memo. Placed AFTER the
+        // `host_fns` probe (host fns can register mid-run — batteries
+        // / cext / embed hosts — and are receiver-agnostic, so they
+        // stay a live per-call check) and BEFORE the name-string
+        // resolution + universal `matches!` chain, both of which the
+        // memo verdict subsumes. The Hash/Str/Array/Block singleton
+        // side-tables below never match Value::Object (an Object
+        // instance's eigenclass is returned BY `try_class_of`, so it
+        // participates in the memo key as its own class pointer).
+        // `try_class_of` misses (exotic non-Instance/TypedData/Fiber
+        // slots) fall through to the pre-memo path unchanged.
+        if let Value::Object(id) = recv
+            && let Some(cls) = self.heap.try_class_of(*id)
+        {
+            let v = self.responds_to_object_memo(&cls, name_id);
+            return if include_private {
+                v & RESPOND_ALL_BIT != 0
+            } else {
+                v & RESPOND_PUB_BITS == RESPOND_PUB_BITS
+            };
         }
         // Class-method shims dispatched by host helpers (`Dir.children`,
         // `Dir.glob`, …) aren't registered Method objects, but reflection must
@@ -1492,62 +1762,7 @@ impl Vm {
             return true;
         }
         // Universal — every receiver responds to these.
-        // `send` / `__send__` go here because the `do_call`
-        // recogniser handles them on any receiver type (primitive
-        // or user-defined), so `obj.respond_to?(:send)` should
-        // be true for every value — feature-detection has to
-        // agree with what dispatch will actually accept.
-        if matches!(
-            name,
-            "nil?" | "to_s" | "respond_to?" | "class" | "==" | "!=" | "!" | "!@" | "<=>" | "equal?" | "eql?"
-            | "send" | "__send__"
-            // Universal dispatch arms wired by the
-            // object_id/__id__/hash/frozen?/inspect PR. All
-            // succeed on every receiver type, so feature
-            // detection (`obj.respond_to?(:object_id)`) must
-            // agree.
-            | "object_id" | "__id__" | "hash" | "frozen?" | "freeze" | "inspect"
-            // Object-extras family (Kleisli `then`/`yield_self`,
-            // debug `tap`, identity `itself`) — universal arms
-            // in `do_call` succeed on every receiver, so feature
-            // detection has to agree.
-            | "itself" | "tap" | "then" | "yield_self"
-            // The ivar-introspection family (`instance_variables` /
-            // `instance_variable_get` / `instance_variable_set`)
-            // is implemented as universal dispatch arms in
-            // `Vm::do_call`, so feature detection has to agree:
-            // `obj.respond_to?(:instance_variable_get)` should be
-            // true for every value even if the result will be nil
-            // (primitives) or raise FrozenError (set on primitives).
-            | "instance_variables" | "instance_variable_get" | "instance_variable_set"
-            | "instance_variable_defined?"
-            // `instance_exec` is a universal dispatch arm (block-form
-            // self-swap, parity with `instance_eval`). Whitelisted
-            // here so feature detection agrees with what dispatch
-            // accepts on every receiver type. `instance_eval`
-            // joins for the same reason — both are universal
-            // dispatch arms and both surface in BasicObject's
-            // reflection registry.
-            | "instance_exec" | "instance_eval"
-            // Receiver-side method introspection — `methods` /
-            // `public_methods` / `private_methods` /
-            // `protected_methods` / `singleton_methods` are
-            // implemented as universal dispatch arms in
-            // `Vm::do_call`. Non-Object/non-Class receivers
-            // succeed by returning an empty Array (rubyrs's
-            // subset doesn't enumerate Kernel-level entries per
-            // value), so feature detection can stay universal.
-            | "methods" | "public_methods" | "private_methods" | "protected_methods"
-            | "singleton_methods"
-            // Method getter triple — `method` is universal too;
-            // `singleton_method` / `public_method` join as
-            // narrowed siblings (NameError when the lookup
-            // doesn't match the variant's filter). Dispatch
-            // succeeds for every receiver that `method(:name)`
-            // already worked on; primitive arms intercept their
-            // own bound-method shapes elsewhere.
-            | "method" | "singleton_method" | "public_method"
-        ) {
+        if Self::universal_respond_name(name) {
             return true;
         }
         let yes = match recv {
@@ -1849,17 +2064,19 @@ impl Vm {
                     })
             }
             Value::Object(id) => {
-                // The universal `dup`/`clone` arm in
-                // `Vm::do_call` handles plain Value::Object via
-                // a shallow Instance copy, so report true even
-                // when no user method exists.
-                if matches!(name, "dup" | "clone" | "extend" | "define_singleton_method") {
-                    return true;
-                }
+                // Normally served by the memoized early-route at the
+                // top of this fn (every slot `try_class_of`
+                // recognises); this arm remains only for the exotic
+                // Value::Object shapes where `class_of` panics —
+                // exactly as it did pre-memo. Delegates to the shared
+                // verdict so the two paths cannot drift.
                 let cls = self.heap.class_of(*id);
-                self.lookup_method_uncached(&cls, name_id).is_some_and(|m| {
-                    include_private || m.visibility.get() == crate::value::Visibility::Public
-                })
+                let v = self.responds_to_object_verdict(&cls, name_id);
+                if include_private {
+                    v & RESPOND_ALL_BIT != 0
+                } else {
+                    v & RESPOND_PUB_BITS == RESPOND_PUB_BITS
+                }
             }
             Value::Block(_) => matches!(
                 name,

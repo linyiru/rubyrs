@@ -2378,13 +2378,30 @@ impl Runtime {
                     );
                 }
                 self.cache_fiber_class();
+                self.cache_default_rtm_stub();
                 self.startup_prof_report(_t_total);
                 return;
             }
         }
         self.load_preamble_inner();
         self.cache_fiber_class();
+        self.cache_default_rtm_stub();
         self.startup_prof_report(_t_total);
+    }
+
+    /// Capture the preamble's default `Object#respond_to_missing?`
+    /// stub (see the `Vm::rtm_default_stub` field doc). Runs on both
+    /// the preamble cache-hit and live-compile paths, before any
+    /// user code — so the captured Rc is provably the untouched
+    /// default (a later user redefinition replaces Object's table
+    /// entry and can never `ptr_eq` this one).
+    fn cache_default_rtm_stub(&mut self) {
+        let object_id = self.vm.interner.intern("Object");
+        self.vm.rtm_default_stub = self
+            .vm
+            .classes
+            .get(&object_id)
+            .and_then(|c| c.methods.borrow().get(&self.vm.sym_respond_to_missing).cloned());
     }
 
     /// Cache the `Fiber` class on the heap so class_of / real_class_of
@@ -3337,6 +3354,17 @@ self.eval_inner(
         let total = self.vm.regex_cache.len();
         let built = self.vm.regex_cache.values().filter(|r| r.is_built()).count();
         (total, built)
+    }
+
+    /// Diagnostics for the respond_to? `(class, name, method_gen)`
+    /// memo (env-gated by `RUBYRS_RESPOND_MEMO_STATS=1` in the CLI,
+    /// same debug-knob shape as `RUBYRS_REGEX_STATS`): (hits,
+    /// misses, stale-gen/dead-Weak discards, wholesale clears,
+    /// key-cardinality high-water mark). Counters live in a
+    /// thread-local next to the memo itself; the Runtime accessor
+    /// reads the calling thread's counters.
+    pub fn respond_memo_stats(&self) -> (u64, u64, u64, u64, u64) {
+        crate::vm::lookup::respond_memo_stats()
     }
 
     /// TEMPORARY diagnostics twin of `regex_cache_stats` (env-gated

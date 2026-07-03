@@ -2135,6 +2135,21 @@ pub(crate) struct Vm {
     /// 600-line-file walk / 13.6%; `public_send` ~7.8K / 4.3%;
     /// `send` ~3.3K / 1.8% — all Sym-named, argc ≤ 3).
     pub(crate) sym_respond_to: SymId,
+    /// `respond_to_missing?` — `try_respond_to_missing` probes it on
+    /// EVERY respond_to? resolution miss (the common case on the
+    /// RuboCop walk: `Node#loc?` probes absent selector names), so
+    /// the name is pre-interned and the hook-existence probe rides
+    /// the respond_to? `(class, name, method_gen)` memo.
+    pub(crate) sym_respond_to_missing: SymId,
+    /// The preamble's default `Object#respond_to_missing?` stub
+    /// (pure `return false`), captured at `load_preamble` time —
+    /// BEFORE any user code can run — so `try_respond_to_missing`
+    /// can recognise "the resolution is the untouched default" by
+    /// `Rc::ptr_eq` and skip the full Ruby invocation of a method
+    /// that provably returns false. Holding the Rc STRONGLY pins the
+    /// allocation, so a user redefinition (which replaces the table
+    /// entry and bumps `method_gen`) can never alias this pointer.
+    pub(crate) rtm_default_stub: Option<std::rc::Rc<crate::value::Method>>,
     pub(crate) sym_send: SymId,
     pub(crate) sym_send_u: SymId,
     pub(crate) sym_public_send: SymId,
@@ -2675,6 +2690,7 @@ impl Vm {
         let sym_eq_op = interner.intern("==");
         let sym_to_sym = interner.intern("to_sym");
         let sym_respond_to = interner.intern("respond_to?");
+        let sym_respond_to_missing = interner.intern("respond_to_missing?");
         let sym_send = interner.intern("send");
         let sym_send_u = interner.intern("__send__");
         let sym_public_send = interner.intern("public_send");
@@ -3052,6 +3068,8 @@ impl Vm {
             sym_eq_op,
             sym_to_sym,
             sym_respond_to,
+            sym_respond_to_missing,
+            rtm_default_stub: None,
             sym_send,
             sym_send_u,
             sym_public_send,
