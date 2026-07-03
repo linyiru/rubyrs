@@ -641,6 +641,118 @@ environment drift predating this wave; the full-CLI runs above carry the
 offense-level parity gate); 4-file `--parallel` == `--no-parallel` (p311
 harness, cache root under `/private/tmp`); fib canary identical.
 
+### Wave-4 follow-on results (2026-07-02; LITE t2_call — call-bearing
+frameless bodies; same box/method, interleaved best-of against a pristine
+aac6b8ad baseline binary)
+
+Design as shipped in `jit_tier2.rs` (the wave-4 finding's named follow-on:
+admit the `Call*`-family + `LoadConstChain` declines — the frame pool's
+last block — into frame-lite):
+
+- **Call ops in lite bodies.** `t2_admit_lite` now admits plain fixed-argc
+  `Call`/`CallNoRecv` (argc ≤ 4), the `LoadLocalCall` fusion, and
+  `LoadConstChain`. Each lowers to a `t2_lite_call_*` helper that resolves
+  through the SAME site IC as the framed `t2_call` family (boundary gates
+  mirrored: `bypass_visibility_once`/`force_primitive_dispatch`/refined
+  names/host-fn precedence/singleton flags), then either SERVES the callee
+  frameless or MATERIALIZES the caller (`ip` at the call op) and returns —
+  the native body exits `T2_BAIL` and the interpreter re-runs the call
+  against the real frame. Frameless-servable families (each provably
+  frame-free, raise-free, and GC-free — jit_native code never runs
+  `maybe_gc`, so the wave-4 "no GC under native state" invariant is
+  untouched): the getter fast path, the zeroarg/int/value/objparam/fparam
+  NativeProto families (cache-hit-only; compilation stays on the
+  interpreted paths), the rest-predicate body-shape serve, the cascade's
+  own fast-prim/fast-index arms for non-Object receivers, IC-hit
+  const-chain reads — and lite→lite native chains.
+- **Cascading materialization (the soundness core).** Before invoking a
+  lite callee, the caller registers a `T2LitePending` record (spill-slot
+  address, stack shape, self words, `resume_ip = call op + 1`, its
+  `defining_class`). Any deeper materialize drains the pending stack
+  OUTERMOST-FIRST — each drained frame's `trunc` adjusted for the
+  recv+args slots removed below it — so `vm.frames` ends up ordered
+  exactly as the interpreter would have built it, and each suspended
+  caller resumes interpreted AFTER its call op with the callee's return
+  value landing at the interpreter's exact stack position. On a completed
+  chain the record pops unused. Depth/capacity: chains share
+  `T2_MAX_NATIVE_DEPTH` (96) and re-check frame-cap headroom
+  (`frames + pending + 2 ≤ 10000`; embedder `max_frames` declines
+  wholesale) before deferring another frame.
+- **`defining_class` hand-off.** Materialized lite frames previously
+  stamped `defining_class: None` (sound while calls were declined). With
+  bare calls admitted, `do_call`'s Nil-self gates can read it — so every
+  lite serve entry stashes the resolving `Method`'s upgraded
+  `defining_class` (`Vm::t2_lite_dc`; chain hand-offs save/restore through
+  the pending record) and the deferred push stamps exactly what the framed
+  push would have.
+- **Fuel exactness (better than the framed tier).** `t2_poll_flags != 0`
+  (fuel or deadline active) declines every lite call up front — the
+  interpreted re-run charges exactly what `step()` would, instead of the
+  framed tier's documented slightly-fewer-ops divergence.
+- **Breaker attribution.** The consecutive-bail streak is charged to the
+  proto that materialized ITSELF (in `lite_materialize_core`), not to the
+  suspended callers a cascade drains — one deep-recursion event no longer
+  burns a whole kill streak, and deep chains keep serving (their DONEs
+  reset the streak). Kills count once (idempotent).
+
+| measurement | baseline (tier2) | +LITE t2_call |
+|---|---:|---:|
+| one-self-call body (ns/call, net of driver) | 153.5 | **121.8 (−21%)** |
+| four-self-calls body | 288.0 | **222.5 (−23%)** |
+| getter-chain (`o.leafv + o.leafv`, explicit recv) | 177.1 | **150.6 (−15%)** |
+| depth-2 lite→lite→lite chain | 223.3 | **176.7 (−21%)** |
+| `LoadLocalCall`-fused getter chain | 143.0 | 146.2 (noise) |
+| fib(30) whole program (tier2 config) | 0.17–0.22s | **0.11–0.13s (−35..40%)** — toplevel lite→lite recursion |
+| fib (default / jit-native) | 0.36–0.42s / 0.048s | identical band / 0.046s |
+| walkonly big1 ×20 (interleaved, 5 rounds) | best 250.5ms, band 250–269 | best 250.9ms, band 251–265 — **flat** (NOLITE hatch also flat: best 248.9) |
+| f1.rb e2e (adaptive) | 1.68–1.71s | 1.69–1.70s (neutral) |
+| big1.rb e2e | 2.30–2.34s | 2.32–2.34s (neutral) |
+| tier-2 compile bill, f1 e2e | 33.7ms / 68 protos | 39.0ms / 68 (+5.3ms for the call-bearing lite siblings; e2e neutral → the threshold economics hold) |
+
+Serve/decline census (walkonly big1 ×10, adaptive, stats build, both
+binaries measured under identical conditions): tier-2 compiles 499 protos;
+lite admits **64 → 253** (the 251 `Call`/`CallNoRecv`/`LoadLocalCall`/
+`LoadConstChain` declines are gone); remaining decline histogram:
+block proto 70, `creates_block` 58, `LoadConstStr` 45, non-plain params
+14, `JumpIfArgGiven` 10, tail 49. Per walk: root lite serves **50.1k →
+147.6k** (+ ~2k lite→lite chain serves), plus 109.6k in-place frameless
+call serves and 3.3k IC-hit const serves INSIDE lite bodies;
+materialize-bails 1.2k/walk, 128 breaker kills (chronic
+interpreted-callee shapes settling back to the framed tier, by design).
+Framed-path traffic moved accordingly: `t2_call` ic_fast 724k → 611k/walk
+and native→native 500k → 427k/walk.
+
+**Finding (the wave-4 lesson, one tier deeper).** Coverage tripled and the
+call ops the census named are all admitted — and the WALK still did not
+move. The calls that now complete frameless were already served by the
+framed tier's IC-fast path at nearly the same per-call cost (the callee
+was frameless there too; only the CALLER's frame is new, worth tens of ns
+on bodies the walk enters ~150k times ≈ noise-floor ms), and the walk's
+residual pool is where wave 5 left it: the `do_call` fallback
+re-resolution (~30% of in-body calls) and the block-invocation
+frame-build. Where the frame pool IS the workload — call-chain bodies
+(−15..23%/call) and whole-program recursion (fib −35..40%) — the design's
+value is real and measured. The walk's next levers remain the fallback
+shapes and `LoadConstStr`/block-proto admission, not deeper frame elision.
+
+Gates: diff_cruby **1073/0** ×4 configs, release profile (default /
+`RUBYRS_JIT_NATIVE=1` / tier2 / tier2+`THRESHOLD=1`; includes the new
+permanent `tier2_litecall_battery` — interpreted-callee raise backtraces
+through a lite caller, `caller` from such a callee, deep lite→lite
+recursion past the depth cap, cascade frame-order via mid-chain raise,
+redefinition-after-warm re-resolve, ensure-in-caller across lite
+activations, const-cache invalidation, toplevel-main and genuinely-nil
+bare-call routing). The debug profile reproduces 4 PRE-EXISTING t2t1
+recursion-fixture failures on the pristine baseline binary
+(`stack_depth_guard`/`json_roundtrip`/`thread_coop_*` — debug Rust frames
+overflow the stack before the depth guards fire; unrelated to this
+change). STRESS_GC=1 + `THRESHOLD=1` green on the litecall battery, the
+frame-lite/writeback/own-capture/block/call-family batteries, the closure
+fixtures, and the six `jit_*_walk` fixtures; rubocop f1/big1
+byte-identical tier-on/off == fresh CRuby oracles; 20-file prism batch ==
+`/tmp/cruby_prism20_fresh.txt` (regenerated and re-verified against CRuby
+first); fib canary above.
+
 ### Amdahl honesty
 
 At 84–100% frame coverage the measured wave-1 win is 0 — coverage without
