@@ -16754,6 +16754,22 @@ impl Vm {
             None => return self.try_invoke_nfa_method_from_stack(&m, None, argc),
         };
         self.check_frames()?;
+        // FRAME-LITE serve (ADR 0037 wave 4): run the compiled frameless
+        // variant INSTEAD of the bind+push+t2_enter sequence — recv+args
+        // stay on the stack (rooted) for the whole run; a completed serve
+        // placed the return value, a materialize-bail pushed the real frame
+        // (see `Vm::t2_lite_run`). Placed after `check_frames` so a
+        // deferred (materialized) push can never exceed the frame cap the
+        // interpreter would have enforced here.
+        #[cfg(feature = "jit-native")]
+        if self.jit_tier2_on
+            && let Some(&Some((lf, la))) = self.t2_lite_ptrs.get(m.proto_idx)
+            && la as usize == argc
+        {
+            let w = crate::jit_tier2::lite_self_words(&self.stack[recv_idx]);
+            self.t2_lite_run(lf, m.proto_idx, w, argc + 1)?;
+            return Ok(true);
+        }
         // Bind the argc args (stack top) into the locals, then drop the recv.
         // Args sit on the stack in slot order (a1..aN), so the arena
         // path moves them in one drain — no per-value refcount churn,
@@ -17354,6 +17370,23 @@ impl Vm {
             }
         }
         self.check_frames()?;
+        // FRAME-LITE serve (ADR 0037 wave 4), implicit-self/toplevel form:
+        // no recv on the stack (`n_pop == argc`); self stays rooted by this
+        // fn's owned `self_val` (and its ultimate owner) for the run's
+        // duration. `block.is_none()`: a lite body has no frame to carry a
+        // block_arg (admission declines every yield/block op, but the
+        // materialized frame must also match the interpreter's push, which
+        // would have carried the block).
+        #[cfg(feature = "jit-native")]
+        if self.jit_tier2_on
+            && block.is_none()
+            && let Some(&Some((lf, la))) = self.t2_lite_ptrs.get(m.proto_idx)
+            && la as usize == argc
+        {
+            let w = crate::jit_tier2::lite_self_words(&self_val);
+            self.t2_lite_run(lf, m.proto_idx, w, argc)?;
+            return Ok(true);
+        }
         let n_locals = fixed.n_locals as usize;
         // Stack-eligible protos go straight to the arena; the rest
         // use one pooled cell for every arity shape (the old

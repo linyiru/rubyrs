@@ -963,15 +963,15 @@ pub(crate) type RefinementList = Vec<(std::rc::Rc<Class>, std::rc::Rc<Class>)>;
 #[derive(Default)]
 pub(crate) struct JitStats {
     /// Indexed by family: 0=int 1=poly 2=fparam 3=objparam 4=objparam2
-    /// 5=value 6=zeroarg 7=tier2. `[attempts, ok, pregate_declines]`.
-    pub(crate) compile: [[u64; 3]; 8],
+    /// 5=value 6=zeroarg 7=tier2 8=t2lite. `[attempts, ok, pregate_declines]`.
+    pub(crate) compile: [[u64; 3]; 9],
     /// (proto_idx, family) → (native calls, deopts).
     pub(crate) exec: crate::intern::FxHashMap<(usize, u8), (u64, u64)>,
 }
 
 #[cfg(feature = "jit-native")]
-pub(crate) const JIT_FAM_NAMES: [&str; 8] =
-    ["int", "poly", "fparam", "objparam", "objparam2", "value", "zeroarg", "tier2"];
+pub(crate) const JIT_FAM_NAMES: [&str; 9] =
+    ["int", "poly", "fparam", "objparam", "objparam2", "value", "zeroarg", "tier2", "t2lite"];
 
 /// Second-arg descriptor for the 2-arg (`objparam2`) native dispatch helper
 /// (`Vm::jit_run_objparam2`): the compiled param1 is either an Int value or a
@@ -1038,6 +1038,14 @@ const T2_THRESHOLD_PER_OP_DEFAULT: u32 = 64;
 /// cost per Ruby frame.
 #[cfg(feature = "jit-native")]
 const T2_MAX_NATIVE_DEPTH: u32 = 96;
+/// Wave-4 frame-lite bail-streak breaker: this many CONSECUTIVE
+/// materialize-bails (no completed frameless serve in between) disable the
+/// proto's lite entry — a chronic shape mismatch (e.g. a Float-operand
+/// predicate whose Int guards never hold) pays entry + materialize per call
+/// for nothing. A completed serve resets the streak, so mixed workloads
+/// with occasional bails keep serving.
+#[cfg(feature = "jit-native")]
+const T2_LITE_KILL_STREAK: u8 = 32;
 
 pub(crate) struct Vm {
     pub(crate) protos: Vec<Proto>,
@@ -1164,6 +1172,30 @@ pub(crate) struct Vm {
     /// `control_signals` and the interrupt flag.
     #[cfg(feature = "jit-native")]
     pub(crate) t2_poll_flags: u8,
+    /// Wave-4 FRAME-LITE entries, dense by proto_idx: `(fn, argc)` when the
+    /// body compiled a frameless variant (see `jit_tier2::T2LiteFn`). Served
+    /// at the fixed-arity dispatch fast paths BEFORE any arg bind / frame
+    /// push; `None` = not compiled (yet) or killed by the bail-streak
+    /// breaker. The machine code is owned by `t2_protos`' module.
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_lite_ptrs: Vec<Option<(crate::jit_tier2::T2LiteFn, u16)>>,
+    /// Consecutive materialize-bail counter per proto (dense): a lite serve
+    /// that completes resets it; `T2_LITE_KILL_STREAK` consecutive bails
+    /// disable the lite entry (each bail costs a wasted native entry plus
+    /// the materialize on top of the interpreted run — chronic mismatches,
+    /// e.g. an always-non-Int operand shape, must settle to the framed
+    /// path). Mixed workloads with occasional bails never accumulate.
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_lite_streak: Vec<u8>,
+    /// Frame-lite counters: `[0]` native serves that completed frameless
+    /// (stats-gated), `[1]` materialize-bails (counted in the helper),
+    /// `[2]` breaker kills.
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_lite_stats: [u64; 3],
+    /// `RUBYRS_JIT_TIER2_NOLITE`: disable wave-4 frame-lite compilation and
+    /// serving (reproduces the wave-3/5 tier) for controlled A/B.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_tier2_nolite: bool,
     /// FLOAT-param specialization of a 1-arg method (`def scale(n); n*1.5; end`
     /// called with a Float arg): the param binds as Float, the i64 arg carries f64
     /// bits. Leaf methods only (no cross-calls — those decline). Keyed by proto,
@@ -2652,6 +2684,14 @@ impl Vm {
             #[cfg(feature = "jit-native")]
             t2_poll_flags: 0,
             #[cfg(feature = "jit-native")]
+            t2_lite_ptrs: Vec::new(),
+            #[cfg(feature = "jit-native")]
+            t2_lite_streak: Vec::new(),
+            #[cfg(feature = "jit-native")]
+            t2_lite_stats: [0; 3],
+            #[cfg(feature = "jit-native")]
+            jit_tier2_nolite: std::env::var_os("RUBYRS_JIT_TIER2_NOLITE").is_some(),
+            #[cfg(feature = "jit-native")]
             jit_native_fparam: crate::intern::FxHashMap::default(),
             #[cfg(feature = "jit-native")]
             jit_native_poly: crate::intern::FxHashMap::default(),
@@ -3165,6 +3205,7 @@ impl Vm {
             let t2ctx = crate::jit_tier2::T2Ctx {
                 nocall: self.jit_tier2_nocall,
                 noinline: self.jit_tier2_noinline,
+                nolite: self.jit_tier2_nolite,
                 interrupt_addr: std::sync::Arc::as_ptr(&self.interrupt_pending) as usize,
                 sym_nil_q: self.sym_nil_q.0,
             };
@@ -3172,11 +3213,20 @@ impl Vm {
             {
                 Some(p) => {
                     let entry = p.ptr;
+                    let lite = p.lite_ptr;
                     self.t2_protos.insert(pidx, p);
                     if self.t2_ptrs.len() <= pidx {
                         self.t2_ptrs.resize(pidx + 1, None);
                     }
                     self.t2_ptrs[pidx] = Some(entry);
+                    // Wave-4 frame-lite entry: served at the fixed-arity
+                    // dispatch fast paths BEFORE any frame is pushed.
+                    if let Some(lp) = lite {
+                        if self.t2_lite_ptrs.len() <= pidx {
+                            self.t2_lite_ptrs.resize(pidx + 1, None);
+                        }
+                        self.t2_lite_ptrs[pidx] = Some(lp);
+                    }
                     self.jit_flags_set(pidx, JFLAG_TIER2_HAS);
                     if self.jit_stats_on {
                         self.jit_stats.compile[7][1] += 1;
@@ -3222,6 +3272,69 @@ impl Vm {
                 .expect("ICE: tier-2 trap status without a stored trap"));
         }
         Ok(true)
+    }
+
+    /// Wave-4 FRAME-LITE serve (ADR 0037): run `pidx`'s frameless variant
+    /// against the current operand stack — recv (when `has_recv`) and the
+    /// `argc` args stay ON the stack (rooted) for the whole run; NO frame is
+    /// pushed, no args are bound. Call sites are the fixed-arity dispatch
+    /// fast paths, AFTER their `check_frames` and arity checks and INSTEAD
+    /// of the bind+push+`t2_enter` sequence. Contract on return:
+    ///
+    /// - `T2_DONE`: recv+args were replaced by the return value — the call
+    ///   is complete (the site returns `Ok(true)`).
+    /// - `T2_BAIL`: the native code MATERIALIZED the real frame (the
+    ///   deferred push: current locals bound, recv+args consumed, `ip` at
+    ///   the resume op) — the site returns `Ok(true)` and its caller
+    ///   continues the frame exactly like any interpreter push (the master
+    ///   loop, or a tier-2 caller's `dispatch_until`). A mode switch, never
+    ///   a re-execution.
+    ///
+    /// `self_words` is a borrowing view of the receiver (the stack slot /
+    /// the caller frame's `self_val` / the site's owned local keeps it
+    /// rooted — no GC can run inside a lite body anyway: no admitted helper
+    /// allocates).
+    #[cfg(feature = "jit-native")]
+    #[inline]
+    pub(crate) fn t2_lite_run(
+        &mut self,
+        f: crate::jit_tier2::T2LiteFn,
+        pidx: usize,
+        self_words: [i64; 2],
+        n_pop: usize,
+    ) -> Result<(), crate::error::Trap> {
+        // Backward-branch poll gate mirror — same per-serve recompute as
+        // `t2_enter_slow` (a fired gate materializes + bails; delivery
+        // stays owned by the dispatch loop heads).
+        self.t2_poll_flags = (self.fuel.is_some() || self.deadline_at.is_some()) as u8;
+        let status = f(self as *mut Vm, self_words[0], self_words[1], n_pop as i64);
+        if status == crate::jit_tier2::T2_DONE {
+            if self.jit_stats_on {
+                self.t2_lite_stats[0] += 1;
+                self.jstat_exec(pidx, 8, false);
+            }
+            if let Some(s) = self.t2_lite_streak.get_mut(pidx) {
+                *s = 0;
+            }
+            return Ok(());
+        }
+        debug_assert_eq!(status, crate::jit_tier2::T2_BAIL, "ICE: lite status");
+        // Materialize-bail: the frame exists now; count toward the breaker.
+        if self.t2_lite_streak.len() <= pidx {
+            self.t2_lite_streak.resize(pidx + 1, 0);
+        }
+        if self.jit_stats_on {
+            self.jstat_exec(pidx, 8, true);
+        }
+        let s = &mut self.t2_lite_streak[pidx];
+        *s = s.saturating_add(1);
+        if *s >= T2_LITE_KILL_STREAK {
+            if let Some(slot) = self.t2_lite_ptrs.get_mut(pidx) {
+                *slot = None; // module stays alive in t2_protos
+            }
+            self.t2_lite_stats[2] += 1;
+        }
+        Ok(())
     }
 
     /// Settle-check for `JFLAG_NO_ONEARG`: set the bit iff all three 1-arg
@@ -3347,6 +3460,12 @@ impl Vm {
             eprintln!(
                 "tier2 blocks invocations={} native_serves={} native_yield_serves={}",
                 self.t2_block_stats[0], self.t2_block_stats[1], self.t2_block_stats[2]
+            );
+        }
+        if self.t2_lite_stats != [0; 3] {
+            eprintln!(
+                "tier2 lite serves={} materialize_bails={} kills={}",
+                self.t2_lite_stats[0], self.t2_lite_stats[1], self.t2_lite_stats[2]
             );
         }
         for (i, name) in JIT_FAM_NAMES.iter().enumerate() {

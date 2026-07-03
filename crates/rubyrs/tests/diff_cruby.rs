@@ -1088,6 +1088,11 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn tier2_call_family() { run_diff("tier2_call_family"); }
 #[test] fn tier2_call_refined() { run_diff("tier2_call_refined"); }
 #[test] fn tier2_block_family() { run_diff("tier2_block_family"); }
+// Wave-3 batteries (previously present but unregistered) + the wave-4
+// frame-lite acid battery (ADR 0037 wave 4).
+#[test] fn tier2_writeback_battery() { run_diff("tier2_writeback_battery"); }
+#[test] fn tier2_own_capture_rebind() { run_diff("tier2_own_capture_rebind"); }
+#[test] fn tier2_framelite_battery() { run_diff("tier2_framelite_battery"); }
 #[test] fn comparable_clamp_range() { run_diff("comparable_clamp_range"); }
 #[test] fn float_precision() { run_diff("float_precision"); }
 #[test] fn compact_filter_map() { run_diff("compact_filter_map"); }
