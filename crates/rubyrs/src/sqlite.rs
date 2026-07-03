@@ -742,7 +742,7 @@ fn collect_rows(
         out.push(Value::Array(row_id));
     }
     let arr_id = vm.heap.alloc(HeapObj::Array(out.into()));
-    let _ = HashObj::with_pairs; // suppress dead-code warning under one cfg combo
+    let _: fn(crate::heap::PairsBuf) -> HashObj = HashObj::with_pairs; // suppress dead-code warning under one cfg combo
     Ok(Value::Array(arr_id))
 }
 
