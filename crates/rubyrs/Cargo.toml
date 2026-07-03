@@ -392,7 +392,12 @@ serde = { version = "1", optional = true, features = ["derive", "rc"] }
 # heapless/COBS embedded paths; `alloc` enables Vec-backed
 # encode/decode, the only mode the cache uses.
 postcard = { version = "1", optional = true, default-features = false, features = ["alloc"] }
-serde_json = { version = "1", optional = true, features = ["preserve_order"] }
+# `float_roundtrip`: serde_json's default float parse is fast but
+# NOT correctly rounded — probed 1-ULP-off vs CRuby (which uses
+# fast_float, correctly rounded) on tie/boundary decimals like
+# 2.2250738585072011e-308. Byte-parity on re-generate requires the
+# exact same f64 bits CRuby gets.
+serde_json = { version = "1", optional = true, features = ["preserve_order", "float_roundtrip"] }
 # `_sqlite` battery deps. rusqlite + bundled SQLite C source
 # (~2 MB compiled). ADR 0027 §1 pins to 0.39 for supply-chain
 # determinism (`= 0.39` not `^0.39`). `lru` backs the per-

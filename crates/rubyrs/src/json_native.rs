@@ -51,14 +51,6 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
                 backtrace: vec![],
             }),
         };
-        // Output buffer pre-sized to 4 KB. Most Rack JSON bodies
-        // fit; bigger payloads grow via the default Vec doubling
-        // (4 → 8 → 16 KB). 4 KB is also the page size on Apple
-        // Silicon, so the first alloc lands on its own page and
-        // the kernel zeroing cost amortises cleanly. Cutting
-        // re-alloc count from 3 (1 → 2 → 4 KB on a 3.4 KB body)
-        // to 0 saves ~0.5 µs on the bench shape.
-        let mut out: Vec<u8> = Vec::with_capacity(4096);
         let ptr = current_vm_ptr();
         if ptr.is_null() {
             return Err(Trap {
@@ -69,13 +61,43 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
             });
         }
         let vm = unsafe { &*ptr };
-        write_value(vm, v, &mut out)?;
-        Ok(Value::new_str_bytes(out))
+        // Emit into a reusable thread-local scratch, then hand the
+        // caller an EXACT-size Vec. `Value::new_str_bytes` MOVES its
+        // Vec (capacity included) into the result String, so the old
+        // per-call `Vec::with_capacity(4096)` pinned 4 KB behind
+        // every small result for its whole lifetime (10k retained
+        // 50-byte bodies = 40 MB, not 500 KB). Measured across
+        // {} / 100 B / 3.4 KB / 1 MB payloads this shape is within
+        // ~15-30 ns/call of the fastest (move-the-4KB-Vec) variant
+        // and strictly better on memory:
+        //   - scratch reuse: no 4 KB malloc/free per call, no growth
+        //     re-allocs after the first big payload;
+        //   - `to_vec`: one exact-size alloc + memcpy (≤ 64 KB);
+        //   - > 64 KB results: move the scratch out instead of
+        //     copying (leaves a fresh 4 KB scratch) so huge bodies
+        //     stay one-pass.
+        // Re-entrancy: `write_value` never runs Ruby code (it
+        // declines non-primitive values), but the RefCell keeps this
+        // panic-shaped rather than UB if that ever changes.
+        thread_local! {
+            static SCRATCH: std::cell::RefCell<Vec<u8>> = std::cell::RefCell::new(Vec::with_capacity(4096));
+        }
+        SCRATCH.with(|cell| {
+            let mut out = cell.borrow_mut();
+            out.clear();
+            write_value(vm, v, &mut out)?;
+            if out.len() > 65536 {
+                let big = std::mem::replace(&mut *out, Vec::with_capacity(4096));
+                Ok(Value::new_str_bytes(big))
+            } else {
+                Ok(Value::new_str_bytes(out.as_slice().to_vec()))
+            }
+        })
     });
 
     rt.register_fn("__rubyrs_json_native_parse", |args| {
         let s = match args {
-            [Value::Str(s)] => s.to_string_lossy(),
+            [Value::Str(s)] => s,
             _ => return Err(Trap {
                 err: RubyError::ArgumentError {
                     msg: "__rubyrs_json_native_parse(json_str: String)".to_string(),
@@ -83,6 +105,21 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
                 backtrace: vec![],
             }),
         };
+        // serde_json requires UTF-8; CRuby's parser passes raw
+        // bytes in string values through untouched. Decline
+        // non-UTF-8 input to the pure canon (the wrapper matches
+        // on "non-utf8") instead of silently U+FFFD-mangling it
+        // (which the old `to_string_lossy` copy did). The check
+        // is O(n) once and cached on the RStr (`utf8_cache`), so
+        // repeated parses of the same buffer don't rescan.
+        if !s.content.is_utf8_cached() {
+            return Err(Trap {
+                err: RubyError::RuntimeError {
+                    msg: "json_native: non-utf8 input".to_string(),
+                },
+                backtrace: vec![],
+            });
+        }
         // Direct-visitor parse: skip the `serde_json::Value`
         // intermediate tree (the obvious-but-slow shape that
         // allocates twice — once into Rust, once into Ruby).
@@ -103,7 +140,14 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
         // for the deserialize call's synchronous duration and
         // isn't stashed anywhere.
         let vm = unsafe { &mut *ptr };
-        let mut de = serde_json::Deserializer::from_str(&s);
+        // Borrow the input bytes directly (no copy). The `Ref`
+        // lives across the visitor's `&mut vm` use — that's fine:
+        // the RStr is Rc-owned by the caller's argument slot (not
+        // a GC-heap object), no Ruby code runs inside the visitor,
+        // and `Heap::alloc` never collects, so nothing can mutate
+        // or free the buffer mid-parse.
+        let bytes = s.content.borrow();
+        let mut de = serde_json::Deserializer::from_slice(&bytes);
         let visitor = VmVisitor { vm };
         let result = serde::de::Deserializer::deserialize_any(&mut de, visitor).map_err(|e| Trap {
             err: RubyError::RuntimeError {

@@ -101,15 +101,42 @@ module JSON
 
   # ---- Parse ----
 
-  # Detected once at first `parse` / `generate` call: are the
-  # `_json_native` host fns registered? If yes, hot calls route
-  # through serde_json — same Ruby Value shape, same emitted
-  # bytes, ~order-of-magnitude faster on big payloads. If no,
-  # the pure-Ruby `Parser` / `generate_with` recursion is the
-  # authoritative path.
-  NATIVE_AVAILABLE = defined?(__rubyrs_json_native_parse) && defined?(__rubyrs_json_native_generate)
+  # Detected once at load: are the `_json_native` host fns
+  # registered? If yes, hot calls route through serde_json — same
+  # Ruby Value shape, same emitted bytes, ~order-of-magnitude
+  # faster on big payloads. If no, the pure-Ruby `Parser` /
+  # `generate_with` recursion is the authoritative path.
+  # `RUBYRS_JSON_NO_NATIVE=1` is the kill switch (debugging /
+  # three-way parity testing — mirrors RUBYRS_PRISM_NO_NATIVE);
+  # it disables the serde accelerator only, NOT the always-on
+  # `__rubyrs_json_float_repr` float formatter (that one is part
+  # of the canon's own emit contract).
+  NATIVE_AVAILABLE = !ENV["RUBYRS_JSON_NO_NATIVE"] &&
+    defined?(__rubyrs_json_native_parse) && defined?(__rubyrs_json_native_generate) ? true : false
 
   def self.parse(str, opts = nil)
+    # Fast path: the overwhelmingly common `JSON.parse(str)` call
+    # (no opts) skips all option digestion. The native host fn
+    # itself validates the input shape; non-String input falls
+    # through to the slow path's is_a? raise below.
+    if opts.nil? && NATIVE_AVAILABLE && str.is_a?(String)
+      begin
+        return __rubyrs_json_native_parse(str)
+      rescue RuntimeError => e
+        # Contract mirror of the option-path rescue below: depth
+        # overflows surface as NestingError, non-UTF-8 input falls
+        # back to the pure canon (CRuby's parser accepts raw bytes;
+        # serde_json requires UTF-8), anything else is a genuine
+        # syntax error -> ParserError.
+        if e.message.include?("recursion limit") || e.message.include?("too deep")
+          raise NestingError, e.message
+        end
+        unless e.message.include?("non-utf8")
+          raise ParserError, e.message
+        end
+        # fall through to the pure canon
+      end
+    end
     raise ParserError, "input must be a String" unless str.is_a?(String)
     symbolize = opts && opts[:symbolize_names] ? true : false
     max_nest = opts && opts.has_key?(:max_nesting) ? opts[:max_nesting] : MAX_NESTING_DEFAULT
@@ -132,16 +159,22 @@ module JSON
         v = __rubyrs_json_native_parse(str)
         return symbolize ? deep_symbolize_keys(v) : v
       rescue RuntimeError => e
-        # serde_json's recursion-limit error reads as "recursion
-        # limit exceeded" — that's the same condition the canon's
-        # `enter_nest` would have raised `JSON::NestingError` for.
-        # Re-raise as the documented class so user rescue clauses
-        # see the contract surface. Other parse errors map to
-        # the generic `JSON::ParserError`.
-        if e.message.include?("recursion limit")
+        # Depth overflow ("nesting of N is too deep" from the
+        # visitor's own depth guard, or serde's "recursion limit
+        # exceeded" backstop) is the condition the canon's
+        # `enter_nest` raises `JSON::NestingError` for. Re-raise
+        # as the documented class so user rescue clauses see the
+        # contract surface. Non-UTF-8 input falls back to the
+        # pure canon (CRuby's parser accepts raw bytes; serde_json
+        # requires UTF-8). Other parse errors map to the generic
+        # `JSON::ParserError`.
+        if e.message.include?("recursion limit") || e.message.include?("too deep")
           raise NestingError, e.message
         end
-        raise ParserError, e.message
+        unless e.message.include?("non-utf8")
+          raise ParserError, e.message
+        end
+        # fall through to the pure canon
       end
     end
 
@@ -507,6 +540,19 @@ module JSON
   # lowering, leaving `obj` unbound. The trade is one extra
   # `opts[:key]` lookup per call vs. the deserialisation grenade.
   def self.generate(obj, opts = nil)
+    # Fast path: the no-opts call needs no State at all — building
+    # one via state_from_opts (State.new + a 6-key Hash) cost
+    # ~3.2 us/call, dominating small-payload generates. The native
+    # emitter IS the default-compact form; on decline (NaN, custom
+    # objects, non-UTF-8 strings, >100 nesting) fall through and
+    # build the State lazily for the canon exactly as before.
+    if opts.nil? && NATIVE_AVAILABLE
+      begin
+        return __rubyrs_json_native_generate(obj)
+      rescue RuntimeError
+        # fall through to the canon path below
+      end
+    end
     state = state_from_opts(opts, "", "", "", "", false, MAX_NESTING_DEFAULT)
     # Native fast path: serde_json's emit produces the same
     # compact bytes the canon would, but only for the
