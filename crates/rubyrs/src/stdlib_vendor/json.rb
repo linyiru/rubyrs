@@ -47,7 +47,10 @@ module JSON
   class JSONError < StandardError; end
   class ParserError < JSONError; end
   class GeneratorError < JSONError; end
-  class NestingError < JSONError; end
+  # CRuby: NestingError < ParserError (not a direct JSONError
+  # child) — `rescue JSON::ParserError` must catch nesting
+  # overflows too.
+  class NestingError < ParserError; end
 
   # Default depth limit for parse + generate. Matches CRuby's
   # `JSON.generate`/`JSON.parse` default (100). Pass `false` or
@@ -122,22 +125,15 @@ module JSON
     if opts.nil? && NATIVE_AVAILABLE && str.is_a?(String)
       begin
         return __rubyrs_json_native_parse(str)
-      rescue RuntimeError => e
-        # Contract mirror of the option-path rescue below: depth
-        # overflows surface as NestingError, non-UTF-8 input falls
-        # back to the pure canon (CRuby's parser accepts raw bytes;
-        # serde_json requires UTF-8), anything else is a genuine
-        # syntax error -> ParserError.
-        if e.message.include?("recursion limit") || e.message.include?("too deep")
-          raise NestingError, e.message
-        end
-        unless e.message.include?("non-utf8") || e.message.include?("bigint") || e.message.include?("out of range")
-          raise ParserError, e.message
-        end
-        # fall through to the pure canon: non-UTF-8 input (CRuby
-        # parses raw bytes), bigint-range integers (serde would
-        # lose precision), float-overflow literals like 1e999
-        # (CRuby yields Infinity; serde errors "out of range").
+      rescue RuntimeError
+        # ANY native decline or serde-side parse error falls
+        # through to the pure canon, which is the single authority
+        # for both values (exact bigints, 1e999 overflow literals,
+        # non-UTF-8 input, lone low surrogates) and error classes
+        # + messages (strict number grammar, nesting rule, control
+        # characters in strings). A second parse is paid only on
+        # decline/error documents; the canon's own recursion is
+        # bounded by its nesting guard.
       end
     end
     raise ParserError, "input must be a String" unless str.is_a?(String)
@@ -161,24 +157,10 @@ module JSON
       begin
         v = __rubyrs_json_native_parse(str)
         return symbolize ? deep_symbolize_keys(v) : v
-      rescue RuntimeError => e
-        # Depth overflow ("nesting of N is too deep" from the
-        # visitor's own depth guard, or serde's "recursion limit
-        # exceeded" backstop) is the condition the canon's
-        # `enter_nest` raises `JSON::NestingError` for. Re-raise
-        # as the documented class so user rescue clauses see the
-        # contract surface. Non-UTF-8 input falls back to the
-        # pure canon (CRuby's parser accepts raw bytes; serde_json
-        # requires UTF-8). Other parse errors map to the generic
-        # `JSON::ParserError`.
-        if e.message.include?("recursion limit") || e.message.include?("too deep")
-          raise NestingError, e.message
-        end
-        unless e.message.include?("non-utf8") || e.message.include?("bigint") || e.message.include?("out of range")
-          raise ParserError, e.message
-        end
-        # fall through to the pure canon (see the no-opts fast
-        # path above for the three decline conditions).
+      rescue RuntimeError
+        # Fall through to the pure canon — see the no-opts fast
+        # path above: the canon is the single value + error
+        # authority on any native decline or serde parse error.
       end
     end
 
@@ -245,6 +227,17 @@ module JSON
   end
 
   class Parser
+    # fstring-equivalent key intern cache — PERSISTENT across
+    # Parser instances (module-level), mirroring both CRuby's
+    # process-global fstring table and the native visitor's
+    # thread-local cache: object keys come out FROZEN and equal
+    # key texts share one String object (`.equal?`) within AND
+    # across separate JSON.parse calls, on every path. Capped
+    # like the native cache; past the cap keys are still frozen,
+    # just not shared.
+    KEY_CACHE = {}
+    KEY_CACHE_CAP = 8192
+
     def initialize(str, symbolize_names = false, max_nesting = MAX_NESTING_DEFAULT, allow_nan = false)
       @chars = str.chars
       @len = @chars.length
@@ -253,27 +246,6 @@ module JSON
       @max_nesting = max_nesting
       @allow_nan = allow_nan
       @depth = 0
-      # fstring-equivalent key dedup (matches CRuby AND the
-      # `_json_native` visitor): object keys come out FROZEN and
-      # duplicate key texts across one parse share the same String
-      # object (`.equal?` — observable via mutation attempts and
-      # object identity). Lifetime = one Parser instance.
-      @key_cache = {}
-    end
-
-    def enter_nest
-      @depth += 1
-      # CRuby (json 2.20, probed): parse allows depth ≤
-      # max_nesting + 1 and raises with the PINNED text
-      # "nesting of {max+1} is too deep" for anything deeper —
-      # the number stays 101 even for a 150-deep document.
-      if @max_nesting > 0 && @depth > @max_nesting + 1
-        raise NestingError, "nesting of #{@max_nesting + 1} is too deep"
-      end
-    end
-
-    def leave_nest
-      @depth -= 1
     end
 
     def parse_top
@@ -364,24 +336,51 @@ module JSON
       neg ? -1.0 / 0.0 : 1.0 / 0.0
     end
 
+    # CRuby (json 2.20, probed): the nesting check fires when
+    # entering a NON-EMPTY container — 101 nested empty arrays
+    # parse fine, 101 nested arrays around any element raise.
+    # The first violation is always at depth max_nesting + 1, so
+    # the reported number equals @depth at the check site.
+    def check_nest
+      if @max_nesting > 0 && @depth > @max_nesting
+        raise NestingError, "nesting of #{@depth} is too deep"
+      end
+    end
+
+    # NOTE `while true` instead of `loop do` in the container
+    # parsers: `loop` costs two extra native frames per nesting
+    # level (the method + its block). Under the fattest JIT
+    # configs (tier-2 with threshold 1) the ~100-level legal
+    # recursion budget overflowed the native stack BEFORE the
+    # depth guard could fire (SystemStackError on a 150-deep
+    # document). Halving frames-per-level keeps NestingError
+    # winning that race in every config.
     def parse_object
-      enter_nest
+      @depth += 1
       @pos += 1
       obj = {}
       skip_ws
       if peek == "}"
         @pos += 1
-        leave_nest
+        @depth -= 1
         return obj
       end
-      loop do
+      check_nest
+      while true
         skip_ws
         raise ParserError, "expected string key at position #{@pos}" unless peek == "\""
         key_str = parse_string
         key = if @symbolize_names
           key_str.to_sym
         else
-          @key_cache[key_str] ||= key_str.freeze
+          cached = KEY_CACHE[key_str]
+          if cached
+            cached
+          elsif KEY_CACHE.size < KEY_CACHE_CAP
+            KEY_CACHE[key_str] = key_str.freeze
+          else
+            key_str.freeze
+          end
         end
         skip_ws
         raise ParserError, "expected ':' at position #{@pos}" unless peek == ":"
@@ -394,7 +393,7 @@ module JSON
           @pos += 1
         elsif c == "}"
           @pos += 1
-          leave_nest
+          @depth -= 1
           return obj
         else
           raise ParserError, "expected ',' or '}' at position #{@pos}"
@@ -403,16 +402,17 @@ module JSON
     end
 
     def parse_array
-      enter_nest
+      @depth += 1
       @pos += 1
       arr = []
       skip_ws
       if peek == "]"
         @pos += 1
-        leave_nest
+        @depth -= 1
         return arr
       end
-      loop do
+      check_nest
+      while true
         skip_ws
         arr << parse_value
         skip_ws
@@ -421,7 +421,7 @@ module JSON
           @pos += 1
         elsif c == "]"
           @pos += 1
-          leave_nest
+          @depth -= 1
           return arr
         else
           raise ParserError, "expected ',' or ']' at position #{@pos}"
@@ -453,28 +453,40 @@ module JSON
           when "t" then out += "\t"
           when "u"
             cp = parse_hex4
-            # Combine a UTF-16 surrogate pair into one astral code
-            # point, matching CRuby: a high surrogate (D800..DBFF)
-            # must be followed by a \uXXXX low surrogate (DC00..DFFF).
-            if cp >= 0xD800 && cp <= 0xDBFF &&
-               @chars[@pos] == "\\" && @chars[@pos + 1] == "u"
+            # UTF-16 surrogate handling, matching CRuby (json 2.20,
+            # probed): a HIGH surrogate must pair with a following
+            # \uXXXX LOW surrogate ("incomplete surrogate pair" /
+            # "invalid surrogate pair" ParserErrors otherwise); a
+            # LONE LOW surrogate is accepted and emits the code
+            # point's raw UTF-8-shaped bytes (WTF-8 — \udc00
+            # becomes ED B0 80, an invalid-UTF-8 string like
+            # CRuby's).
+            if cp >= 0xD800 && cp <= 0xDBFF
+              unless @chars[@pos] == "\\" && @chars[@pos + 1] == "u"
+                raise ParserError, "incomplete surrogate pair at position #{@pos}"
+              end
+              pair_pos = @pos
               @pos += 2
               lo = parse_hex4
-              if lo >= 0xDC00 && lo <= 0xDFFF
-                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00)
-              else
-                # Not a valid low surrogate: emit the high surrogate's
-                # code point and let `lo` fall through as its own char.
-                out += cp.chr(Encoding::UTF_8)
-                cp = lo
+              unless lo >= 0xDC00 && lo <= 0xDFFF
+                raise ParserError, "invalid surrogate pair at position #{pair_pos}"
               end
+              cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00)
+              out += cp.chr(Encoding::UTF_8)
+            elsif cp >= 0xDC00 && cp <= 0xDFFF
+              out += [0xE0 | (cp >> 12), 0x80 | ((cp >> 6) & 0x3F), 0x80 | (cp & 0x3F)].pack("C3").force_encoding("UTF-8")
+            else
+              # Encode as UTF-8 (chr(UTF_8) widens the accepted
+              # range to U+10FFFF; bare chr only covers 0..255).
+              out += cp.chr(Encoding::UTF_8)
             end
-            # Encode the code point as UTF-8 (chr(UTF_8) widens the
-            # accepted range to U+10FFFF; bare chr only covers 0..255).
-            out += cp.chr(Encoding::UTF_8)
           else
             raise ParserError, "bad escape '\\#{esc}' at position #{@pos}"
           end
+        elsif c.ord < 0x20
+          # Raw control characters are invalid inside JSON strings
+          # (CRuby: "invalid ASCII control character in string").
+          raise ParserError, "invalid ASCII control character in string at position #{@pos}"
         else
           out += c
           @pos += 1
@@ -488,61 +500,158 @@ module JSON
       if @pos + 4 > @len
         raise ParserError, "truncated \\u escape at position #{@pos}"
       end
-      hex = @chars[@pos] + @chars[@pos + 1] + @chars[@pos + 2] + @chars[@pos + 3]
-      @pos += 4
-      hex.to_i(16)
-    end
-
-    def parse_number
-      start = @pos
-      @pos += 1 if @chars[@pos] == "-"
-      while @pos < @len && "0123456789".include?(@chars[@pos])
+      v = 0
+      4.times do
+        o = @chars[@pos].ord
+        d = if o >= 48 && o <= 57
+          o - 48
+        elsif o >= 97 && o <= 102
+          o - 87
+        elsif o >= 65 && o <= 70
+          o - 55
+        else
+          # CRuby: "incomplete unicode character escape sequence" —
+          # \uZZZZ must raise, not launder into codepoint 0.
+          raise ParserError, "incomplete unicode character escape sequence at position #{@pos}"
+        end
+        v = v * 16 + d
         @pos += 1
       end
+      v
+    end
+
+    # CRuby's parse-error rendering (json 2.20 parser.c, probed):
+    # "invalid number: '<frag>' at line L column C" — frag is up
+    # to 32 chars from the number start, stopping at NUL / space /
+    # tab / CR / LF; line and column are 1-based at the number
+    # start; an empty frag (number at end of input) renders as
+    # bare EOF without quotes.
+    def invalid_number(start)
+      frag = ""
+      i = start
+      while i < @len && frag.length < 32
+        c = @chars[i]
+        break if c == " " || c == "\t" || c == "\r" || c == "\n" || c == "\0"
+        frag += c
+        i += 1
+      end
+      line = 1
+      col = 1
+      j = 0
+      while j < start
+        if @chars[j] == "\n"
+          line += 1
+          col = 1
+        else
+          col += 1
+        end
+        j += 1
+      end
+      shown = frag.empty? ? "EOF" : "'" + frag + "'"
+      raise ParserError, "invalid number: " + shown + " at line " + line.to_s + " column " + col.to_s
+    end
+
+    # Strict JSON number grammar (CRuby probed: leading zeros,
+    # bare '-', '1.', '1e', '1e+' all raise "invalid number") +
+    # CRuby's exponent-saturation quirks. The serde-backed native
+    # path DECLINES any document with a >=19-digit run to this
+    # parser, so the grammar here is what the default path
+    # enforces for bigint-range documents — it must not be laxer
+    # than CRuby.
+    def parse_number
+      start = @pos
+      neg = false
+      if @chars[@pos] == "-"
+        neg = true
+        @pos += 1
+      end
+      # Integer part: 0 | [1-9][0-9]*
+      int_digits = 0
+      while @pos < @len && "0123456789".include?(@chars[@pos])
+        int_digits += 1
+        @pos += 1
+      end
+      invalid_number(start) if int_digits == 0
+      invalid_number(start) if int_digits > 1 && @chars[start + (neg ? 1 : 0)] == "0"
       is_float = false
+      frac_digits = 0
       if @pos < @len && @chars[@pos] == "."
         is_float = true
         @pos += 1
         while @pos < @len && "0123456789".include?(@chars[@pos])
+          frac_digits += 1
           @pos += 1
         end
+        invalid_number(start) if frac_digits == 0
       end
+      exp_digits = 0
+      exp_neg = false
+      abs_exp = 0
       if @pos < @len && (@chars[@pos] == "e" || @chars[@pos] == "E")
         is_float = true
         @pos += 1
         if @pos < @len && (@chars[@pos] == "+" || @chars[@pos] == "-")
+          exp_neg = @chars[@pos] == "-"
           @pos += 1
         end
         while @pos < @len && "0123456789".include?(@chars[@pos])
+          abs_exp = abs_exp * 10 + (@chars[@pos].ord - 48)
+          exp_digits += 1
           @pos += 1
         end
-      end
-      # Reassemble the slice. Avoid `Array#[start, len]` (not
-      # supported on rubyrs); walk the indices.
-      buf = ""
-      i = start
-      while i < @pos
-        buf += @chars[i]
-        i += 1
+        invalid_number(start) if exp_digits == 0
       end
       if is_float
-        buf.to_f
-      elsif buf.length <= 17
-        # ≤17 chars (sign included) always fits i64.
-        buf.to_i
-      else
-        # rubyrs String#to_i WRAPS past i64 (core gap — tracked
-        # separately); Integer arithmetic promotes to Bignum
-        # exactly, so fold long literals digit-wise. CRuby parses
-        # big JSON integers as exact Integer (probed json 2.20).
-        neg = buf[0] == "-"
-        n = 0
-        i = neg ? 1 : 0
-        while i < buf.length
-          n = n * 10 + (buf[i].ord - 48)
+        # CRuby (json 2.20 parser.c, source-verified + probed): an
+        # exponent LITERAL of >= 20 digits (or abs value past i64)
+        # saturates the exponent to the i64 extreme of its sign
+        # BEFORE the fraction-length adjustment, which then WRAPS
+        # in C (i64::MIN - frac_len -> huge positive). Net
+        # observable rule, signs following the mantissa:
+        #   positive-saturated                  -> ±Infinity
+        #   negative-saturated WITH a fraction  -> ±Infinity (wrap)
+        #   negative-saturated, no fraction     -> ±0.0
+        # So "1e00000000000000000009" is Infinity even though the
+        # exponent VALUE is 9, and "1e-00000000000000000009" is 0.0.
+        if exp_digits >= 20 || abs_exp > 9223372036854775807
+          if !exp_neg || frac_digits > 0
+            return neg ? -Float::INFINITY : Float::INFINITY
+          else
+            return neg ? -0.0 : 0.0
+          end
+        end
+        # Reassemble the slice. Avoid `Array#[start, len]` (not
+        # supported on rubyrs); walk the indices.
+        buf = ""
+        i = start
+        while i < @pos
+          buf += @chars[i]
           i += 1
         end
-        neg ? -n : n
+        buf.to_f
+      else
+        buf = ""
+        i = start
+        while i < @pos
+          buf += @chars[i]
+          i += 1
+        end
+        if buf.length <= 17
+          # ≤17 chars (sign included) always fits i64.
+          buf.to_i
+        else
+          # rubyrs String#to_i WRAPS past i64 (core gap — tracked
+          # separately); Integer arithmetic promotes to Bignum
+          # exactly, so fold long literals digit-wise. CRuby parses
+          # big JSON integers as exact Integer (probed json 2.20).
+          n = 0
+          i = neg ? start + 1 : start
+          while i < @pos
+            n = n * 10 + (@chars[i].ord - 48)
+            i += 1
+          end
+          neg ? -n : n
+        end
       end
     end
 

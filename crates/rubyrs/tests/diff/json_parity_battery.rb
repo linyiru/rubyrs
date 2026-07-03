@@ -175,6 +175,80 @@ puts({ "k" => nil }.to_json)
 puts 1.5e-5.to_json
 puts "s".to_json
 
+puts "== nesting rule: non-empty entry (verifier item 3) =="
+try("e100")  { JSON.parse("[" * 100 + "]" * 100) && "ok" }
+try("e101")  { JSON.parse("[" * 101 + "]" * 101) && "ok" }
+try("e102")  { JSON.parse("[" * 102 + "]" * 102) && "ok" }
+try("n99")   { JSON.parse("[" * 99  + "1" + "]" * 99) && "ok" }
+try("n100")  { JSON.parse("[" * 100 + "1" + "]" * 100) && "ok" }
+try("n101")  { JSON.parse("[" * 101 + "1" + "]" * 101) && "ok" }
+try("o100")  { JSON.parse(('{"k":' * 100) + "1" + ("}" * 100)) && "ok" }
+try("o101")  { JSON.parse(('{"k":' * 101) + "1" + ("}" * 101)) && "ok" }
+try("o101e") { JSON.parse(('{"k":' * 100) + "{}" + ("}" * 100)) && "ok" }
+try("o102e") { JSON.parse(('{"k":' * 101) + "{}" + ("}" * 101)) && "ok" }
+try("m2a")   { JSON.parse("[[1]]", max_nesting: 2) && "ok" }
+try("m2b")   { JSON.parse("[[[1]]]", max_nesting: 2) && "ok" }
+try("m2c")   { JSON.parse("[[[]]]", max_nesting: 2) && "ok" }
+try("m2d")   { JSON.parse("[[[[]]]]", max_nesting: 2) && "ok" }
+try("mix")   { JSON.parse("[" * 50 + '{"a":' + "[" * 51 + "1" + "]" * 51 + "}" + "]" * 50) && "ok" }
+def deep_full(n)
+  a = [1]
+  (n - 1).times { a = [a] }
+  a
+end
+try("gn100") { JSON.generate(deep_full(100)).length }
+try("gn101") { JSON.generate(deep_full(101)) }
+try("gmn5a") { JSON.generate(deep_full(5), max_nesting: 5).length }
+try("gmn5b") { JSON.generate(deep_full(6), max_nesting: 5) }
+
+puts "== strict number grammar (verifier item 2) =="
+["[00000000000000000012]", "[012]", "[1234567890123456789.]", "[1.]",
+ "[1234567890123456789e]", "[1e]", "[1e+]", "[-]", "[1.e5]", "[01.5]",
+ "[-01]", "[0123456789012345678901234]", "[-0]", "[0.0e5]"].each do |s|
+  try("num #{s}") { JSON.parse(s) }
+end
+try("snip") { JSON.parse("[012, " + '"x" ,' * 30 + " 1]") }
+try("snipline") { JSON.parse("[1,\n 012]") }
+try("eofnum2") { JSON.parse("12e") }
+
+puts "== exponent saturation (verifier item 5) =="
+["[1e000000000000000009]", "[1e0000000000000000009]", "[1e00000000000000000009]",
+ "[1e-00000000000000000009]", "[-1e00000000000000000009]", "[0e00000000000000000009]",
+ "[0.000e00000000000000000009]", "[-0.0e-00000000000000000009]",
+ "[1e+00000000000000000009]", "[1.5e-00000000000000000009]",
+ "[1e999999999999999999999]", "[1e-999999999999999999999]",
+ "[123456789012345678901234567890.5]", "[1e309]", "[1e-400]"].each do |s|
+  try("sat #{s}") { JSON.parse(s) }
+end
+
+puts "== string strictness (class parity) =="
+def tryc(label)
+  v = yield
+  puts "#{label} => #{v.inspect}"
+rescue => e
+  puts "#{label} !! #{e.class}"
+end
+tryc("ctrl-nl")  { JSON.parse("[\"a\nb\"]") }
+tryc("ctrl-tab") { JSON.parse("[\"a\tb\"]") }
+tryc("ctrl-nul") { JSON.parse("[\"a\u0000b\"]") }
+tryc("badhex")   { JSON.parse('["\uZZZZ"]') }
+tryc("badhex2")  { JSON.parse('["\u12G4"]') }
+tryc("lonehi")   { JSON.parse('["\ud800"]') }
+tryc("lonehi2")  { JSON.parse('["\ud800x"]') }
+tryc("hipair-badlo") { JSON.parse('["\ud800\ud800"]') }
+tryc("badesc")   { JSON.parse('["\x41"]') }
+tryc("lonelo-bytes") { JSON.parse('["\udc00"]')[0].bytes }
+
+puts "== error hierarchy (verifier item 7) =="
+puts (JSON::NestingError < JSON::ParserError).inspect
+puts (JSON::NestingError < JSON::JSONError).inspect
+puts (JSON::ParserError < JSON::JSONError).inspect
+
+puts "== cross-parse key sharing =="
+k1 = JSON.parse('{"crossparse_key":1}').keys[0]
+k2 = JSON.parse('{"crossparse_key":2}').keys[0]
+puts "cross equal? #{k1.equal?(k2)} frozen #{k1.frozen?}"
+
 puts "== mixed document round-trip =="
 doc = {
   "users" => [

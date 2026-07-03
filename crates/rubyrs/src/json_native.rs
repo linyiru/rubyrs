@@ -515,13 +515,18 @@ fn write_escaped_bytes(s: &[u8], out: &mut Vec<u8>) {
 struct ParseCtx<'a> {
     vm: &'a mut crate::vm::Vm,
     /// Container nesting depth. CRuby's parser (json 2.20,
-    /// probed) allows depth ≤ max_nesting + 1 and raises
-    /// `JSON::NestingError` with the PINNED text "nesting of
-    /// {max+1} is too deep" for anything deeper (the number stays
-    /// 101 even for a 150-deep document). serde_json's own
+    /// probed) checks nesting when entering a NON-EMPTY container:
+    /// 101 nested EMPTY arrays parse fine, while 101 nested arrays
+    /// around any element raise `JSON::NestingError` ("nesting of
+    /// 101 is too deep" — the first violation is always at depth
+    /// max+1, so that is the reported number even for a 150-deep
+    /// document). Equivalent formulation used here: raise when
+    /// parsing any VALUE nested inside more than `max_nesting`
+    /// containers — a value only gets parsed if its container is
+    /// non-empty (see `VmSeed::deserialize`). serde_json's own
     /// recursion limit (128) is far enough out that without this
-    /// guard, depths 102..=128 would silently parse (and >128
-    /// would produce the wrong error text).
+    /// guard, over-deep documents would silently parse (or produce
+    /// the wrong error text past 128).
     depth: u32,
     keys: &'a mut KeyCache,
 }
@@ -796,6 +801,17 @@ impl<'de> serde::de::DeserializeSeed<'de> for VmSeed<'_, '_> {
     where
         D: serde::Deserializer<'de>,
     {
+        // The CRuby nesting rule (see `ParseCtx::depth`): a value
+        // parsed inside more than max_nesting containers raises.
+        // This seed only runs for container ELEMENTS / object
+        // values, so empty containers at the boundary never
+        // trigger it — matching CRuby's non-empty-entry check.
+        if self.ctx.depth > MAX_PARSE_NESTING {
+            return Err(serde::de::Error::custom(format!(
+                "nesting of {} is too deep",
+                self.ctx.depth
+            )));
+        }
         deserializer.deserialize_any(VmVisitor { ctx: self.ctx })
     }
 }
@@ -829,6 +845,16 @@ impl<'de> serde::de::Visitor<'de> for VmVisitor<'_, '_> {
         }
     }
     fn visit_f64<E: serde::de::Error>(self, n: f64) -> Result<Value, E> {
+        // serde_json parses the INTEGER literal "-0" as f64 -0.0
+        // (sign-preserving) — indistinguishable here from the
+        // float literals "-0.0" / "-0e5". CRuby's parser returns
+        // Integer 0 for "-0" and Float -0.0 for the float
+        // spellings, so negative zero declines to the canon,
+        // which re-reads the actual token text. Rare literal;
+        // costs nothing on the fast path.
+        if n == 0.0 && n.is_sign_negative() {
+            return Err(serde::de::Error::custom("negative-zero literal"));
+        }
         Ok(Value::Float(n))
     }
     fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<Value, E> {
@@ -843,12 +869,6 @@ impl<'de> serde::de::Visitor<'de> for VmVisitor<'_, '_> {
         A: serde::de::SeqAccess<'de>,
     {
         self.ctx.depth += 1;
-        if self.ctx.depth > MAX_PARSE_NESTING + 1 {
-            return Err(serde::de::Error::custom(format!(
-                "nesting of {} is too deep",
-                MAX_PARSE_NESTING + 1
-            )));
-        }
         // Pre-size the Vec: serde_json never provides a size hint
         // (JSON arrays are length-unknown until `]`), so default to
         // 8 slots — skips the 0→4→8 growth re-allocs every small
@@ -868,12 +888,6 @@ impl<'de> serde::de::Visitor<'de> for VmVisitor<'_, '_> {
         A: serde::de::MapAccess<'de>,
     {
         self.ctx.depth += 1;
-        if self.ctx.depth > MAX_PARSE_NESTING + 1 {
-            return Err(serde::de::Error::custom(format!(
-                "nesting of {} is too deep",
-                MAX_PARSE_NESTING + 1
-            )));
-        }
         let obj_id = self.ctx.keys.next_obj_gen();
         // Pre-size like visit_seq — 8 covers typical record objects.
         let mut pairs: Vec<(Value, Value)> =
