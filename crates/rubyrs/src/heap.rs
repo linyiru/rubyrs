@@ -591,6 +591,15 @@ impl HashObj {
     ) -> Option<&crate::intern::FxHashMap<i64, Vec<u32>>> {
         self.extras.as_ref().and_then(|e| e.user_index.as_ref())
     }
+    /// Mutable user-key index view WITHOUT allocating extras — `None`
+    /// when the index was never built (callers that only maintain an
+    /// existing index must not force a Box onto a pristine Hash).
+    #[inline]
+    pub(crate) fn user_index_mut(
+        &mut self,
+    ) -> Option<&mut crate::intern::FxHashMap<i64, Vec<u32>>> {
+        self.extras.as_deref_mut().and_then(|e| e.user_index.as_mut())
+    }
     /// Drop both key indexes (pairs mutated in a way they can't
     /// track). No-op — and no extras allocation — on a pristine Hash.
     #[inline]

@@ -244,7 +244,7 @@ impl Vm {
                 h.pairs.push((key, val));
                 // Maintain the bucket incrementally (append never shifts
                 // existing positions, so the index stays valid).
-                if let Some(ui) = h.extras_mut().user_index.as_mut() {
+                if let Some(ui) = h.user_index_mut() {
                     ui.entry(hv).or_default().push(pos);
                 }
                 Ok(None)
