@@ -461,6 +461,11 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // bypass, method_missing routing on visibility failure, respond_to?
 // truthy include_all. CRuby 3.4 probed; see the fixture header.
 #[test] fn send_family_visibility() { run_diff("send_family_visibility"); }
+// The send-family fast buckets' method_gen story: respond_to? /
+// respond_to_missing? / public_send / send overrides (and a target
+// redefinition + a visibility flip) landing AFTER 200-call warm
+// loops — a stale-IC bucket would keep serving the builtin shape.
+#[test] fn send_family_warm_override() { run_diff("send_family_warm_override"); }
 #[test] fn require_caller_dir_isolation() { run_diff("require_caller_dir_isolation"); }
 #[test] fn string_chomp() { run_diff("string_chomp"); }
 #[test] fn multiwrite_global() { run_diff("multiwrite_global"); }

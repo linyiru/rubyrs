@@ -8495,6 +8495,194 @@ impl Vm {
                 return Ok(());
             }
         }
+        // SEND-FAMILY fast bucket #1 — `obj.respond_to?(:name[, inc])`
+        // (RuboCop cop-walk census 2026-07: the single hottest
+        // slow-cascade name — ~24.7K sends per 600-line-file walk,
+        // 13.6% of the walk's residual cascade; `Node#loc?` probes
+        // `loc.respond_to?(sym)` per node). Serves only the
+        // receiver-bearing Value::Object shape with a Sym name; the
+        // terminal logic (`responds_to` → `try_respond_to_missing` →
+        // false) mirrors the canonical arm byte-for-byte, so a
+        // `respond_to_missing?` override anywhere on the chain is
+        // INVOKED exactly like the cascade would (not gated off).
+        // Gates, per the `===` bucket contract:
+        //   - the neighbouring buckets' `!maybe_refined` /
+        //     `!force_primitive` / `!any_undefs` trio;
+        //   - a user `respond_to?` anywhere on the receiver's chain
+        //     declines via an IC-backed `lookup_method_cached` MISS
+        //     requirement (the same slot
+        //     `try_invoke_explicit_recv_cached` probed above, so this
+        //     is an IC hit; a public fixed-arity override was already
+        //     served there, and private/closure/nfa overrides decline
+        //     to the canonical arm, which raises/invokes identically);
+        //   - argc 2 evaluates ANY second value for truthiness —
+        //     matching the canonical arm (CRuby 3.4 include_all rule);
+        //   - Str names / Class receivers decline (cold in the walk;
+        //     the canonical arm handles them).
+        // KNOWN blind spot shared with the neighbouring
+        // Object-receiver buckets: a cext-registered `respond_to?`
+        // instance method would be shadowed — `lookup_method_cached`
+        // doesn't see cext tables (pre-existing limitation, see the
+        // canonical Object arm's cext comment).
+        if !maybe_refined
+            && !force_primitive
+            && !self.any_undefs
+            && !no_recv
+            && name_id == self.sym_respond_to
+            && (argc == 1 || argc == 2)
+            && argc < self.stack.len()
+        {
+            let ridx = self.stack.len() - 1 - argc;
+            if let (Value::Object(oid), Value::Sym(lookup_name)) =
+                (&self.stack[ridx], &self.stack[ridx + 1])
+            {
+                let (oid, lookup_name) = (*oid, *lookup_name);
+                if let Some(cls) = self.heap.try_class_of(oid)
+                    && self.lookup_method_cached(&cls, name_id, cache_id).is_none()
+                {
+                    let include_private = argc == 2 && self.stack[ridx + 2].is_truthy();
+                    let recv = self.stack[ridx].clone();
+                    if self.responds_to(&recv, lookup_name, include_private) {
+                        self.stack.truncate(ridx);
+                        self.stack.push(Value::Bool(true));
+                        return Ok(());
+                    }
+                    // Resolution missed — consult respond_to_missing?
+                    // exactly like the canonical arm (a user hook is
+                    // invoked; the recv stays rooted as the invoked
+                    // frame's self_val, same discipline as the arm).
+                    self.stack.truncate(ridx);
+                    if self.try_respond_to_missing(&recv, lookup_name, include_private)? {
+                        return Ok(());
+                    }
+                    self.stack.push(Value::Bool(false));
+                    return Ok(());
+                }
+            }
+        }
+        // SEND-FAMILY fast bucket #2 — `obj.public_send(:m, a...)` /
+        // `obj.send(:m, a...)` / `obj.__send__(:m, a...)` with a Sym
+        // target and ≤ 2 target args (census: 100% of the walk's
+        // public_send / send calls are Sym-named at argc ≤ 3 —
+        // `Node#loc?`'s `loc.public_send(sym)` and `Force#run_hook`'s
+        // `public_send(method_name, *args)` dominate). A pure NAME
+        // RE-AIM: drop the target Sym out of the operand stack and
+        // serve through `try_invoke_explicit_recv_cached` — the same
+        // serve matrix a direct `obj.m(a...)` call takes (getter /
+        // zero-arg / NFA / tier-2 / frame-lite / JIT arms). That path
+        // serves ONLY public non-closure proto methods: exactly the
+        // set `public_send` may call, and a subset of what
+        // `send`/`__send__` may call. Everything else — missing
+        // target (method_missing), private/protected targets (the
+        // recogniser's strict raise for public_send / bypass invoke
+        // for send), Str names, builtin-arm targets, closures, kwargs
+        // shapes — reinserts the Sym and falls through to the
+        // unchanged cascade recogniser. Extra gate: the TARGET name
+        // must not be refinement-active (the re-entered do_call
+        // applies the refinement detour; serving here would skip it).
+        if !maybe_refined
+            && !force_primitive
+            && !self.any_undefs
+            && !no_recv
+            && (name_id == self.sym_public_send
+                || name_id == self.sym_send
+                || name_id == self.sym_send_u)
+            && (1..=3).contains(&argc)
+            && argc < self.stack.len()
+        {
+            let ridx = self.stack.len() - 1 - argc;
+            if let (Value::Object(oid), Value::Sym(target_sym)) =
+                (&self.stack[ridx], &self.stack[ridx + 1])
+            {
+                let (oid, target_sym) = (*oid, *target_sym);
+                let target_refined = !self.refined_method_names.is_empty()
+                    && self.refined_method_names.contains(&target_sym);
+                // A user `send` / `public_send` override on the
+                // receiver's chain wins (reserved-name rule exempts
+                // `__send__`) — same IC-hit MISS requirement as
+                // bucket #1; the recogniser's own probe stays the
+                // decline path's authority.
+                let override_blocks = if name_id == self.sym_send_u {
+                    false
+                } else {
+                    match self.heap.try_class_of(oid) {
+                        Some(cls) => {
+                            self.lookup_method_cached(&cls, name_id, cache_id).is_some()
+                        }
+                        None => true, // class-less slot → cascade
+                    }
+                };
+                if !target_refined && !override_blocks {
+                    // [.., recv, :m, a1, a2] → [.., recv, a1, a2];
+                    // cache_id u32::MAX — the target name is dynamic,
+                    // the site's IC slot belongs to the send-family
+                    // name (same reason the cascade recogniser
+                    // re-enters with u32::MAX).
+                    self.stack.remove(ridx + 1);
+                    if self.try_invoke_explicit_recv_cached(target_sym, argc - 1, u32::MAX)? {
+                        return Ok(());
+                    }
+                    // Decline: restore the exact pre-bucket stack
+                    // shape and fall through to the cascade.
+                    self.stack.insert(ridx + 1, Value::Sym(target_sym));
+                }
+            }
+        }
+        // SEND-FAMILY fast bucket #3 — bare `send(:m, a...)` /
+        // `__send__(:m, a...)` on an Object self (~0.8K/walk). Same
+        // re-aim, served through `try_invoke_self_recv_cached` — the
+        // implicit-self serve matrix, which applies NO visibility
+        // gate: exactly `send`'s bypass semantics (an implicit-self
+        // call may invoke private/protected anyway). Bare
+        // `public_send` deliberately declines — its strict-visibility
+        // re-aim lives in the cascade recogniser. Host-fn precedence:
+        // a host fn registered under the send-family name would win
+        // in the cascade (`try_dispatch_no_recv_builtin_or_host` runs
+        // before the recogniser), so probe-and-decline; `send` /
+        // `__send__` are not `builtin_call` names.
+        if !maybe_refined
+            && !force_primitive
+            && !self.any_undefs
+            && no_recv
+            && (name_id == self.sym_send || name_id == self.sym_send_u)
+            && (1..=3).contains(&argc)
+            && argc <= self.stack.len()
+            && !self.host_fns.contains_key(&name_id)
+        {
+            let sidx = self.stack.len() - argc;
+            if let Value::Sym(target_sym) = &self.stack[sidx] {
+                let target_sym = *target_sym;
+                let target_refined = !self.refined_method_names.is_empty()
+                    && self.refined_method_names.contains(&target_sym);
+                // User `def send` on the surrounding self wins for
+                // `send` (reserved-name rule exempts `__send__`) —
+                // probe the frame self's chain via the site IC slot
+                // (warmed by `try_invoke_self_recv_cached`'s
+                // identical probe above). Non-Object selves decline:
+                // toplevel/main/class-body bare-send semantics stay
+                // with the cascade recogniser.
+                let override_blocks = if name_id == self.sym_send_u {
+                    false
+                } else {
+                    match self.frames.last().map(|f| f.self_val.clone()) {
+                        Some(Value::Object(id)) => match self.heap.try_class_of(id) {
+                            Some(cls) => {
+                                self.lookup_method_cached(&cls, name_id, cache_id).is_some()
+                            }
+                            None => true,
+                        },
+                        _ => true,
+                    }
+                };
+                if !target_refined && !override_blocks {
+                    self.stack.remove(sidx);
+                    if self.try_invoke_self_recv_cached(target_sym, argc - 1, u32::MAX)? {
+                        return Ok(());
+                    }
+                    self.stack.insert(sidx, Value::Sym(target_sym));
+                }
+            }
+        }
         // TEMPORARY diagnostics (env-gated): count sends that reach
         // the slow cascade, keyed by (name, receiver shape). One
         // `is_some()` branch when disabled. See `Vm::cascade_stats`.

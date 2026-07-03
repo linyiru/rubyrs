@@ -2129,6 +2129,15 @@ pub(crate) struct Vm {
     pub(crate) sym_kernel_array: SymId,
     pub(crate) sym_eq_op: SymId,
     pub(crate) sym_to_sym: SymId,
+    /// Pre-interned send-family names for the send-family fast
+    /// buckets (RuboCop cop-walk census 2026-07: `respond_to?` is
+    /// the single hottest slow-cascade name at ~24.7K sends per
+    /// 600-line-file walk / 13.6%; `public_send` ~7.8K / 4.3%;
+    /// `send` ~3.3K / 1.8% — all Sym-named, argc ≤ 3).
+    pub(crate) sym_respond_to: SymId,
+    pub(crate) sym_send: SymId,
+    pub(crate) sym_send_u: SymId,
+    pub(crate) sym_public_send: SymId,
     /// Collection-index fast-path override guard. The fast path may
     /// serve `h[k]` / `a[i]` directly ONLY while no user `[]` exists
     /// anywhere on the Hash / Array ancestor chain (a reopen, an
@@ -2665,6 +2674,10 @@ impl Vm {
         let sym_kernel_array = interner.intern("Array");
         let sym_eq_op = interner.intern("==");
         let sym_to_sym = interner.intern("to_sym");
+        let sym_respond_to = interner.intern("respond_to?");
+        let sym_send = interner.intern("send");
+        let sym_send_u = interner.intern("__send__");
+        let sym_public_send = interner.intern("public_send");
         // See the `class_singleton_deny` field doc. Union of every
         // name-keyed `do_call` arm that can fire for a Value::Class
         // receiver before the canonical user-singleton lookup, plus
@@ -3038,6 +3051,10 @@ impl Vm {
             sym_kernel_array,
             sym_eq_op,
             sym_to_sym,
+            sym_respond_to,
+            sym_send,
+            sym_send_u,
+            sym_public_send,
             fast_index_checked_gen: 0,
             fast_index_hash_safe: false,
             fast_index_array_safe: false,
