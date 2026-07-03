@@ -132,6 +132,12 @@ fn write_value(vm: &crate::vm::Vm, v: &Value, out: &mut Vec<u8>) -> Result<(), T
         Value::Nil => out.extend_from_slice(b"null"),
         Value::Bool(b) => out.extend_from_slice(if *b { b"true" } else { b"false" }),
         Value::Int(n) => write_int(*n, out),
+        #[cfg(feature = "bignum")]
+        Value::BigInt(id) => {
+            // CRuby's generator emits Bignum via to_s (bare decimal
+            // digits, no quotes) — `generate_json_bignum`.
+            out.extend_from_slice(vm.heap.bigint(*id).to_string().as_bytes());
+        }
         Value::Float(f) => {
             if f.is_nan() || f.is_infinite() {
                 return Err(Trap {
@@ -141,17 +147,13 @@ fn write_value(vm: &crate::vm::Vm, v: &Value, out: &mut Vec<u8>) -> Result<(), T
                     backtrace: vec![],
                 });
             }
-            // Mirror Ruby's Float#to_s: integral floats render as
-            // `1.0`, fractional as `1.5`. Rust's `{}` for f64 gives
-            // `1` for 1.0, so special-case to match. `ryu`-style
-            // shortest-repr would be faster than `write!`, but
-            // dragging in a crate for the < 5 % case isn't worth it.
-            use std::io::Write as _;
-            if *f == f.trunc() && f.is_finite() && f.abs() < 1e16 {
-                let _ = write!(out, "{:.1}", f);
-            } else {
-                let _ = write!(out, "{}", f);
-            }
+            // CRuby's json gem does NOT emit Float#to_s — it runs
+            // fpconv (Grisu2 + fpconv's fixed/scientific window
+            // rule: `1e15` → "1e+15", `1.5e-5` → "0.000015"). The
+            // exact port in json_float.rs is also ~4× faster than
+            // the old `write!(out, "{:.1}", f)` shape (no fmt
+            // machinery, no precision pass).
+            crate::json_float::write_json_float(*f, out);
         }
         Value::Str(s) => {
             let b = s.content.borrow();
@@ -182,9 +184,13 @@ fn write_value(vm: &crate::vm::Vm, v: &Value, out: &mut Vec<u8>) -> Result<(), T
             out.push(b'{');
             for (i, (k, val)) in pairs.iter().enumerate() {
                 if i > 0 { out.push(b','); }
-                // CRuby JSON.generate stringifies non-String
-                // keys via to_s — Symbol → name, Integer →
-                // decimal repr. Mirror the canon's emit shape.
+                // CRuby JSON.generate stringifies non-String keys
+                // via to_s — Symbol → name, Integer → decimal repr,
+                // Float → Float#to_s (NOT the fpconv value form:
+                // `{1e-5 => 1}` emits `{"1.0e-05":1}` on CRuby),
+                // nil → "", true/false → their names. Anything else
+                // (Array / Hash / Object keys) declines to the pure
+                // canon, whose `k.to_s` handles the long tail.
                 match k {
                     Value::Str(s) => {
                         let b = s.content.borrow();
@@ -199,9 +205,30 @@ fn write_value(vm: &crate::vm::Vm, v: &Value, out: &mut Vec<u8>) -> Result<(), T
                         write_int(*n, out);
                         out.push(b'"');
                     }
-                    other => {
-                        let s = format!("{other:?}");
+                    Value::Float(f) => {
+                        // Hash keys go through to_s on CRuby, and
+                        // Float#to_s NaN/Infinity are legal STRING
+                        // keys (`{"NaN":1}`) — no finiteness raise.
+                        let s = crate::heap::format_float(*f);
                         write_escaped_bytes(s.as_bytes(), out);
+                    }
+                    #[cfg(feature = "bignum")]
+                    Value::BigInt(id) => {
+                        out.push(b'"');
+                        out.extend_from_slice(vm.heap.bigint(*id).to_string().as_bytes());
+                        out.push(b'"');
+                    }
+                    Value::Nil => out.extend_from_slice(b"\"\""),
+                    Value::Bool(b) => {
+                        out.extend_from_slice(if *b { b"\"true\"" } else { b"\"false\"" });
+                    }
+                    other => {
+                        return Err(Trap {
+                            err: RubyError::RuntimeError {
+                                msg: format!("json_native: unsupported key {other:?}"),
+                            },
+                            backtrace: vec![],
+                        });
                     }
                 }
                 out.push(b':');

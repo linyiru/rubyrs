@@ -50,6 +50,11 @@ mod heap;
 #[cfg(feature = "_http_server")]
 mod http_server;
 mod intern;
+// CRuby json-gem float serializer (fpconv/Grisu2 port). Not feature-
+// gated: the pure-Ruby JSON canon consumes it through the always-
+// registered `__rubyrs_json_float_repr` host fn, and `_json_native`
+// calls it directly.
+mod json_float;
 #[cfg(feature = "_json_native")]
 mod json_native;
 // ADR 0036 Slice 1: Prism serialize-parse host fns (prism C lib is always linked via
@@ -138,6 +143,11 @@ pub use vm::fiber::register_host_fns as register_fiber_host_fns;
 /// hot paths through serde_json. See [`json_native::register_host_fns`].
 #[cfg(feature = "_json_native")]
 pub use json_native::register_host_fns as register_json_native_host_fns;
+/// Register `__rubyrs_json_float_repr(float) → String` — the CRuby
+/// json-gem (fpconv) float repr the pure-Ruby JSON canon uses so its
+/// generate output is byte-identical to CRuby's, with or without the
+/// `_json_native` accelerator built in. See [`json_float::register_host_fns`].
+pub use json_float::register_host_fns as register_json_float_host_fns;
 
 /// Register the Prism serialize-parse host fns so RuboCop's `parser_prism` engine can build
 /// its AST natively on rubyrs (ADR 0036 Slice 1). See [`prism_native::register_host_fns`].

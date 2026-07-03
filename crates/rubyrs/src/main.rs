@@ -397,6 +397,10 @@ fn main() {
     // the reference behaviour for non-accelerator builds.
     #[cfg(feature = "_json_native")]
     rubyrs::register_json_native_host_fns(&mut rt);
+    // `__rubyrs_json_float_repr`: CRuby json-gem (fpconv) float repr,
+    // always registered so the pure-Ruby JSON canon's generate emits
+    // byte-identical floats to CRuby with or without `_json_native`.
+    rubyrs::register_json_float_host_fns(&mut rt);
     // Prism serialize-parse host fns (ADR 0036 Slice 1): always available — the prism C lib
     // is unconditionally linked. Lets RuboCop's `parser_prism` engine build its AST natively,
     // bypassing the slow interpreted whitequark lexer. Inert unless the prism shim calls them.

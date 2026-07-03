@@ -600,7 +600,7 @@ module JSON
         end
         raise GeneratorError, "#{obj} not allowed in JSON"
       end
-      obj.to_s
+      float_repr(obj)
     when String then escape_string(obj)
     when Symbol then escape_string(obj.to_s)
     when Array
@@ -632,6 +632,56 @@ module JSON
     else
       raise GeneratorError, "cannot generate JSON from #{obj.class}"
     end
+  end
+
+  # CRuby's json gem does NOT render Float values with Float#to_s —
+  # its generator runs fpconv (Grisu2 shortest digits + fpconv's own
+  # fixed/scientific window): `1e15` → "1e+15" (to_s: "1.0e+15"),
+  # `1.5e-5` → "0.000015" (to_s: "1.5e-05"), `5e-324` → "5e-324".
+  # rubyrs registers the exact fpconv port as the always-on
+  # `__rubyrs_json_float_repr` host fn (json_float.rs); embedders
+  # that skip host-fn registration fall back to a pure-Ruby reshape
+  # of Float#to_s into the same layout. The fallback matches fpconv
+  # except on the rare doubles where Grisu2 picks different shortest
+  # digits than Float#to_s's Ryū (both round-trip; e.g. CRuby json
+  # emits 1234567890123456.7 where to_s says ...6.8).
+  HAVE_NATIVE_FLOAT_REPR = defined?(__rubyrs_json_float_repr) ? true : false
+
+  def self.float_repr(f)
+    return __rubyrs_json_float_repr(f) if HAVE_NATIVE_FLOAT_REPR
+    s = f.to_s
+    neg = s.start_with?("-")
+    s = s[1..-1] if neg
+    mant, es = s.split("e")
+    e10 = es ? es.to_i : 0
+    int_part, frac_part = mant.split(".")
+    frac_part = "" if frac_part.nil?
+    raw = int_part + frac_part
+    point = int_part.length + e10   # digits before the decimal point
+    # First significant digit; all-zero means ±0.0.
+    lead = 0
+    lead += 1 while lead < raw.length && raw[lead] == "0"
+    return neg ? "-0.0" : "0.0" if lead == raw.length
+    digits = raw[lead..-1]
+    tail = digits.length
+    tail -= 1 while tail > 1 && digits[tail - 1] == "0"
+    digits = digits[0, tail]
+    decpt = point - lead
+    k = decpt - digits.length
+    exp10 = (decpt - 1).abs
+    body = if k >= 0 && exp10 < 15
+      digits + ("0" * k) + ".0"
+    elsif k < 0 && (k > -7 || exp10 < 10)
+      if decpt <= 0
+        "0." + ("0" * (-decpt)) + digits
+      else
+        digits[0, decpt] + "." + digits[decpt..-1]
+      end
+    else
+      m = digits.length > 1 ? digits[0, 1] + "." + digits[1..-1] : digits
+      m + "e" + (decpt - 1 < 0 ? "-" : "+") + exp10.to_s
+    end
+    neg ? "-" + body : body
   end
 
   def self.escape_string(s)
