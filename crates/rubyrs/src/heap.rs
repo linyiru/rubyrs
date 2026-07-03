@@ -560,7 +560,9 @@ impl HashObj {
         self.extras.as_ref().and_then(|e| e.default_value.as_ref())
     }
     /// `true` when `Hash#[]` on a missing key would NOT just return
-    /// nil (default value or default proc present).
+    /// nil (default value or default proc present). Consumed by the
+    /// jit-native Hash helpers; dead code elsewhere by design.
+    #[cfg_attr(not(feature = "jit-native"), allow(dead_code))]
     #[inline]
     pub(crate) fn has_default(&self) -> bool {
         self.extras
@@ -1161,10 +1163,10 @@ impl Heap {
     /// (`merge`, `select`, …) so the result keeps the receiver's class
     /// (CRuby: `IndifferentHash.new.merge(x).class == IndifferentHash`).
     pub(crate) fn hash_set_class_tag(&mut self, id: ObjId, tag: Option<Rc<Class>>) {
-        if let HeapObj::Hash(h) = self.get_mut(id) {
-            if tag.is_some() || h.extras().is_some() {
-                h.extras_mut().class_tag = tag;
-            }
+        if let HeapObj::Hash(h) = self.get_mut(id)
+            && (tag.is_some() || h.extras().is_some())
+        {
+            h.extras_mut().class_tag = tag;
         }
     }
     /// Read `@name` ivar off a (subclass) Hash; `None` if unset.
