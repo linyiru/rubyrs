@@ -1112,6 +1112,11 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn tier2_own_capture_rebind() { run_diff("tier2_own_capture_rebind"); }
 #[test] fn tier2_framelite_battery() { run_diff("tier2_framelite_battery"); }
 #[test] fn tier2_litecall_battery() { run_diff("tier2_litecall_battery"); }
+// Fallback-census absorption battery (ADR 0037, 2026-07): the extracted
+// walk-fast-bucket zone probed from t2_call, the argc≤8 framed call cap,
+// and the census-ranked buckets (Array#drop/freeze/dup, Hash#fetch,
+// String#dup, Object#class, bare block_given?).
+#[test] fn t2_walk_buckets_battery() { run_diff("t2_walk_buckets_battery"); }
 #[test] fn comparable_clamp_range() { run_diff("comparable_clamp_range"); }
 #[test] fn float_precision() { run_diff("float_precision"); }
 #[test] fn compact_filter_map() { run_diff("compact_filter_map"); }

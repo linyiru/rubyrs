@@ -3278,6 +3278,13 @@ impl Vm {
         self.fast_is_a_nil_safe = !chain_has(self, &nil_cls, self.sym_is_a)
             && !chain_has(self, &nil_cls, self.sym_kind_of);
         self.fast_eq_nil_safe = !chain_has(self, &nil_cls, self.sym_eq_op);
+        // 2026-07 fallback-census bucket twins — same gen, same walk.
+        self.fast_arr_misc_safe = !chain_has(self, &arr_cls, self.sym_drop)
+            && !chain_has(self, &arr_cls, self.sym_freeze)
+            && !chain_has(self, &arr_cls, self.sym_dup);
+        self.fast_hash_fetch_safe = !chain_has(self, &hash_cls, self.sym_fetch);
+        let str_cls = self.classes.get(&str_sym).cloned();
+        self.fast_str_dup_safe = !chain_has(self, &str_cls, self.sym_dup);
         // Rest-predicate serve deps (see `Vm::rest_pred_deps_ok`):
         // every builtin the verified body shapes would dispatch,
         // chain-wide conservative like the twins above.
@@ -7904,7 +7911,865 @@ impl Vm {
         #[allow(dead_code)] // mirror of the jit-native variant; its callers are feature-gated too
         fn jit_should_route(&self, _proto_idx: usize, _argc: usize) -> bool { false }
 
+        /// The mid-cascade WALK FAST BUCKETS (extracted verbatim from
+        /// `do_call`, ADR 0037 fallback census): the `===` case-equality
+        /// bucket, the walk-attributed universal/collection buckets
+        /// (`is_a?`/`kind_of?`, `!`, `nil?`, Array `size`/`length`/
+        /// `empty?`/`include?`/`member?`/`push`/`<<`, Int `-@`/`<<`,
+        /// Sym `to_s`/`to_sym`, Hash `size`/`length`/`empty?`,
+        /// `nil == x`, bare `Kernel#Array` identity) and the
+        /// SEND-FAMILY buckets #1-#3 (`respond_to?`, explicit
+        /// `send`-family re-aim, bare `send`/`__send__` re-aim).
+        ///
+        /// Runs at `do_call`'s exact cascade position (right after the
+        /// class-singleton probe, right before the slow cascade), and
+        /// is ALSO probed by the tier-2 `t2_call` family so in-body
+        /// calls these buckets serve stop paying the full `do_call`
+        /// preamble on every call (census 2026-07: ~200K re-served
+        /// fallbacks per RuboCop walk). Every early exit serves
+        /// (`Ok(true)`); a fall-through (`Ok(false)`) leaves the stack
+        /// untouched for the caller's next arm. Callers must have
+        /// consumed/checked the dispatch-boundary one-shots
+        /// (`bypass_visibility_once` / `require_public`) and pass the
+        /// live `maybe_refined` / `force_primitive` verdicts; the
+        /// tier-2 probe additionally declines receivers whose KIND has
+        /// live per-instance singletons (the str/heap/hash singleton
+        /// gates run BEFORE this zone in `do_call`).
+        pub(crate) fn try_walk_fast_buckets(
+            &mut self,
+            name_id: SymId,
+            argc: usize,
+            no_recv: bool,
+            cache_id: u32,
+            maybe_refined: bool,
+            force_primitive: bool,
+        ) -> Result<bool, Trap> {
+        // `===` case-equality fast path (NodePattern shape): RuboCop's
+        // compiled matchers fire `SYM === node` / `Mod === node` /
+        // `"str" === x` millions of times per cop walk (~20% of the
+        // slow cascade, measured), and every one otherwise walks the
+        // FULL arm chain down to the universal `===` fallback (the
+        // last-resort arm). Mirror that arm's semantics for the three
+        // receiver shapes whose answer never needs user dispatch,
+        // gated like the other fast buckets:
+        //   - Symbol / String → `recv.ruby_eq(arg)` — the same call
+        //     the universal arm makes — gated on the method_gen-
+        //     revalidated `fast_case_eq_{sym,str}_safe` flags (any
+        //     user `===` on the Symbol/String chain flips them off,
+        //     so the reopen-precedence gate keeps winning; String
+        //     per-instance singletons were handled by the
+        //     str_singletons gate above).
+        //   - Class / Module → `arg.is_a?(recv)` via the same
+        //     `class_is_a` reachability the universal arm walks
+        //     (cached variant — answer-identical by construction),
+        //     gated on (a) `fast_case_eq_class_safe` (no `===`
+        //     instance method on the Module/Class chain), (b) a
+        //     per-site `lookup_class_singleton_cached` MISS (a
+        //     `def self.===` anywhere on the receiver's singleton
+        //     chain falls through to the canonical singleton arm,
+        //     exactly as today), and (c) no `class_tag` (a module
+        //     value that is an instance of a Module subclass resolves
+        //     instance methods from its tag class in the slow path).
+        // Regexp receivers are deliberately NOT here (`Regexp#===`
+        // publishes `$~`); Object receivers (rubocop's NodePattern
+        // instances define their own `===`) keep the explicit-recv
+        // cached bucket above / the full cascade. No allocation on a
+        // hit (Bool result), so no `maybe_gc` — same as the arm this
+        // mirrors.
+        if !maybe_refined
+            && !no_recv
+            && argc == 1
+            && name_id == self.sym_case_eq
+            && self.stack.len() >= 2
+        {
+            if self.fast_index_checked_gen != self.method_gen {
+                self.fast_index_revalidate();
+            }
+            let ridx = self.stack.len() - 2;
+            let fast_hit = match &self.stack[ridx] {
+                Value::Sym(_) => self.fast_case_eq_sym_safe,
+                Value::Str(_) => self.fast_case_eq_str_safe,
+                // Int/Float/Bool/Nil (the `Enumerable#any?(pattern)` /
+                // `grep` shape) — same `ruby_eq` the universal arm
+                // reaches; BigInt / Rational deliberately excluded
+                // (rare, and Rational has bespoke eql?-family arms).
+                Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Nil => {
+                    self.fast_case_eq_prim_safe
+                }
+                Value::Class(cls)
+                    if self.fast_case_eq_class_safe && cls.class_tag.is_none() =>
+                {
+                    let cls = cls.clone();
+                    self.lookup_class_singleton_cached(&cls, name_id, cache_id)
+                        .is_none()
+                }
+                _ => false,
+            };
+            if fast_hit {
+                let arg = self
+                    .stack
+                    .pop()
+                    .expect("ICE: === fast path arg underflow");
+                let recv = self
+                    .stack
+                    .pop()
+                    .expect("ICE: === fast path recv underflow");
+                let result = match &recv {
+                    Value::Class(target) => {
+                        // `Mod === obj` ≡ `obj.is_a?(Mod)` — mirrors the
+                        // universal arm byte-for-byte: singleton-aware
+                        // class for heap Objects, `Vm::class_of` for
+                        // everything else.
+                        let start: Option<Rc<Class>> = match &arg {
+                            Value::Object(id) => Some(self.heap.class_of(*id)),
+                            _ => {
+                                let class_val = self.class_of(&arg);
+                                if let Value::Class(c) = class_val {
+                                    Some(c)
+                                } else {
+                                    None
+                                }
+                            }
+                        };
+                        match start {
+                            Some(acls) => self.class_is_a_cached(&acls, target),
+                            None => false,
+                        }
+                    }
+                    _ => recv.ruby_eq(&arg, &self.heap),
+                };
+                self.stack.push(Value::Bool(result));
+                return Ok(true);
+            }
+        }
+        // Walk-attributed fast buckets (RuboCop `Team#investigate`
+        // per-phase attribution, 2026-07): `is_a?`/`kind_of?`, `!`,
+        // `nil?`, Array `size`/`length`/`empty?`/`include?`/
+        // `member?`/`push`/`<<`, Int `-@`/`<<`, and the bare
+        // `Kernel#Array` identity case — together ~40% of the walk's
+        // slow-cascade sends (plus the parse phase's top three).
+        // Same contract as the `===` bucket above: every hit mirrors
+        // the arm the cascade would reach byte-for-byte; anything
+        // uncertain falls through untouched. Guards, per shape:
+        //   - Array receivers: the `fast_arr_*` chain-clean flags
+        //     (method_gen-revalidated) mirror the cascade's
+        //     "primitive-receiver fallback to the user-Class method
+        //     table" gate; tagged subclass instances and frozen /
+        //     byte-capped writes fall through to the canonical arms
+        //     (which own the FrozenError / cap semantics).
+        //   - Int / Bool / Nil receivers: the own-table
+        //     `prim_reopen_mask` bit — the exact gate the cascade
+        //     consults before `primitive_call` answers these names
+        //     (chain methods below the own table are shadowed by
+        //     the primitive arms today, so the bit is sufficient).
+        //   - Object receivers: `is_a?` requires an IC-backed
+        //     `lookup_method_cached` miss (the same slot
+        //     `try_invoke_explicit_recv_cached` just probed, so
+        //     this is an IC hit); `!` / `nil?` need no per-chain
+        //     guard — `primitive_call`'s universal arms answer them
+        //     ahead of every user-chain gate, and a public
+        //     fixed-arity override was already served by
+        //     `try_invoke_explicit_recv_cached` above.
+        //   - `any_undefs` turns the whole bucket off (an
+        //     `undef_method` tombstone walk sits ahead of the
+        //     primitive arms in the cascade; rare, perf-only).
+        // No GC-heap allocation on any hit (Bool/Int results or
+        // in-place Vec append), so no `maybe_gc` — same as the arms
+        // these mirror.
+        if !maybe_refined && !force_primitive && !self.any_undefs {
+            if !no_recv && argc < self.stack.len() {
+                if self.fast_index_checked_gen != self.method_gen {
+                    self.fast_index_revalidate();
+                }
+                let ridx = self.stack.len() - 1 - argc;
+                if argc == 0 {
+                    // `!` — truthiness flip.
+                    if name_id == self.sym_not {
+                        let serve = match &self.stack[ridx] {
+                            Value::Bool(_) => self.prim_reopen_mask & (1 << 5) == 0,
+                            Value::Nil => self.prim_reopen_mask & (1 << 4) == 0,
+                            Value::Object(_) => true,
+                            _ => false,
+                        };
+                        if serve {
+                            let recv = self.stack.pop().expect("ICE: ! fast path recv");
+                            self.stack.push(Value::Bool(!recv.is_truthy()));
+                            return Ok(true);
+                        }
+                    }
+                    // `nil?` on heap shapes (primitive shapes are
+                    // covered by try_fast_primitive) — the universal
+                    // arm's constant `false`.
+                    if name_id == self.sym_nil_q
+                        && matches!(
+                            &self.stack[ridx],
+                            Value::Object(_) | Value::Array(_) | Value::Hash(_)
+                        )
+                    {
+                        self.stack.pop();
+                        self.stack.push(Value::Bool(false));
+                        return Ok(true);
+                    }
+                    // Array#size / #length / #empty? (and the Hash
+                    // twins, same canonical constant-shape arms).
+                    if name_id == self.sym_size
+                        || name_id == self.sym_length
+                        || name_id == self.sym_empty_q
+                    {
+                        if self.fast_arr_read_safe
+                            && let Value::Array(id) = &self.stack[ridx]
+                        {
+                            let id = *id;
+                            if self.heap.array_class_tag(id).is_none() {
+                                let v = if name_id == self.sym_empty_q {
+                                    Value::Bool(self.heap.array(id).is_empty())
+                                } else {
+                                    Value::Int(self.heap.array(id).len() as i64)
+                                };
+                                self.stack.pop();
+                                self.stack.push(v);
+                                return Ok(true);
+                            }
+                        }
+                        if self.fast_hash_read_safe
+                            && let Value::Hash(id) = &self.stack[ridx]
+                        {
+                            let id = *id;
+                            if self.heap.hash_class_tag(id).is_none() {
+                                let v = if name_id == self.sym_empty_q {
+                                    Value::Bool(self.heap.hash(id).is_empty())
+                                } else {
+                                    Value::Int(self.heap.hash(id).len() as i64)
+                                };
+                                self.stack.pop();
+                                self.stack.push(v);
+                                return Ok(true);
+                            }
+                        }
+                    }
+                    // Symbol#to_s / #to_sym — mirrors sym_primitive's
+                    // arms (US-ASCII tag for ascii-only names).
+                    if (name_id == self.sym_to_s || name_id == self.sym_to_sym)
+                        && self.prim_reopen_mask & (1 << 3) == 0
+                        && let Value::Sym(s) = &self.stack[ridx]
+                    {
+                        let s = *s;
+                        let v = if name_id == self.sym_to_sym {
+                            Value::Sym(s)
+                        } else {
+                            let n = self.interner.resolve(s).to_string();
+                            if n.is_ascii() {
+                                Value::new_str_us_ascii(n)
+                            } else {
+                                Value::new_str(n)
+                            }
+                        };
+                        self.stack.pop();
+                        self.stack.push(v);
+                        return Ok(true);
+                    }
+                    // Integer#-@ (unary minus). i64::MIN falls
+                    // through (BigInt promotion path under bignum).
+                    if name_id == self.sym_neg_at
+                        && self.prim_reopen_mask & 1 == 0
+                        && let Value::Int(n) = &self.stack[ridx]
+                    {
+                        let n = *n;
+                        #[cfg(feature = "bignum")]
+                        let fits = n != i64::MIN;
+                        #[cfg(not(feature = "bignum"))]
+                        let fits = true;
+                        if fits {
+                            self.stack.pop();
+                            self.stack.push(Value::Int(n.wrapping_neg()));
+                            return Ok(true);
+                        }
+                    }
+                    // Array#freeze — the canonical arm verbatim (set the
+                    // frozen bit, return the receiver — which is already
+                    // in place at the stack top). 2026-07 census: 3.2K
+                    // sends/walk from compiled bodies, all slow-cascade.
+                    if name_id == self.sym_freeze
+                        && self.fast_arr_misc_safe
+                        && let Value::Array(id) = &self.stack[ridx]
+                    {
+                        let id = *id;
+                        if self.heap.array_class_tag(id).is_none() {
+                            self.heap.set_array_frozen(id);
+                            return Ok(true);
+                        }
+                    }
+                    // Array#dup / String#dup — the canonical shallow-copy
+                    // arms verbatim (Array: elems+ivars clone, frozen
+                    // reset, maybe_gc before alloc — the source array
+                    // stays operand-stack-rooted through the GC point;
+                    // String: fresh cell, frozen reset, encoding tag
+                    // travels; Rc-based, no GC heap alloc). Census:
+                    // ~3K/walk combined, all slow-cascade.
+                    if name_id == self.sym_dup {
+                        if self.fast_arr_misc_safe
+                            && let Value::Array(id) = &self.stack[ridx]
+                        {
+                            let id = *id;
+                            if self.heap.array_class_tag(id).is_none() {
+                                let src = self.heap.array(id).clone();
+                                let ivars = self.heap.array_ivars_clone(id);
+                                self.maybe_gc();
+                                let nid = self.heap.alloc(crate::heap::HeapObj::Array(
+                                    crate::heap::ArrayObj {
+                                        elems: src,
+                                        class_tag: None,
+                                        ivars,
+                                        frozen: std::cell::Cell::new(false),
+                                    },
+                                ));
+                                self.stack[ridx] = Value::Array(nid);
+                                return Ok(true);
+                            }
+                        }
+                        if self.fast_str_dup_safe
+                            && matches!(&self.stack[ridx], Value::Str(_))
+                        {
+                            let v = {
+                                let Value::Str(s) = &self.stack[ridx] else {
+                                    unreachable!("just matched")
+                                };
+                                let copy = s.content.borrow().clone();
+                                let v = Value::new_str_bytes(copy);
+                                if let Value::Str(ref ns) = v {
+                                    ns.encoding.set(s.encoding.get());
+                                }
+                                v
+                            };
+                            self.stack[ridx] = v;
+                            return Ok(true);
+                        }
+                    }
+                    // `Object#class` — the universal arm (`class_of` on
+                    // the receiver), gated like the `is_a?` bucket on an
+                    // IC-backed user-method MISS (a public fixed-arity
+                    // `def class` was already served upstream; any other
+                    // override declines to the canonical resolution).
+                    // Census: 6.4K/walk, all slow-cascade.
+                    if name_id == self.sym_class_name
+                        && let Value::Object(oid) = &self.stack[ridx]
+                    {
+                        let oid = *oid;
+                        if let Some(cls) = self.heap.try_class_of(oid)
+                            && self.lookup_method_cached(&cls, name_id, cache_id).is_none()
+                        {
+                            let recv = self.stack[ridx].clone();
+                            let c = self.class_of(&recv);
+                            self.stack[ridx] = c;
+                            return Ok(true);
+                        }
+                    }
+                } else if argc == 1 {
+                    // Array#include? / #member? — the canonical
+                    // ruby_eq value scan.
+                    if (name_id == self.sym_include_q || name_id == self.sym_member_q)
+                        && self.fast_arr_read_safe
+                        && let Value::Array(id) = &self.stack[ridx]
+                    {
+                        let id = *id;
+                        if self.heap.array_class_tag(id).is_none() {
+                            let needle = &self.stack[ridx + 1];
+                            let hit = self
+                                .heap
+                                .array(id)
+                                .iter()
+                                .any(|x| x.ruby_eq(needle, &self.heap));
+                            self.stack.truncate(ridx);
+                            self.stack.push(Value::Bool(hit));
+                            return Ok(true);
+                        }
+                    }
+                    // `is_a?` / `kind_of?` with a Class/Module
+                    // argument — the universal arm's cached
+                    // ancestor-set walk. Object receivers guard on
+                    // the IC-backed user-method miss; Symbol
+                    // receivers on the chain-clean flag.
+                    if name_id == self.sym_is_a || name_id == self.sym_kind_of {
+                        let target: Option<Rc<crate::value::Class>> =
+                            match &self.stack[ridx + 1] {
+                                Value::Class(c) => Some(c.clone()),
+                                _ => None,
+                            };
+                        if let Some(target) = target {
+                            match &self.stack[ridx] {
+                                Value::Object(oid) => {
+                                    let oid = *oid;
+                                    if let Some(cls) = self.heap.try_class_of(oid)
+                                        && self
+                                            .lookup_method_cached(&cls, name_id, cache_id)
+                                            .is_none()
+                                    {
+                                        // Mirrors the arm: the walk class for
+                                        // an Object is the singleton-aware
+                                        // `heap.class_of` (same Rc as
+                                        // `try_class_of` here).
+                                        let result = self.class_is_a_cached(&cls, &target);
+                                        self.stack.truncate(ridx);
+                                        self.stack.push(Value::Bool(result));
+                                        return Ok(true);
+                                    }
+                                }
+                                Value::Sym(s) if self.fast_is_a_sym_safe => {
+                                    let sv = Value::Sym(*s);
+                                    if let Value::Class(c) = self.class_of(&sv) {
+                                        let result = self.class_is_a_cached(&c, &target);
+                                        self.stack.truncate(ridx);
+                                        self.stack.push(Value::Bool(result));
+                                        return Ok(true);
+                                    }
+                                }
+                                Value::Nil if self.fast_is_a_nil_safe => {
+                                    if let Value::Class(c) = self.class_of(&Value::Nil) {
+                                        let result = self.class_is_a_cached(&c, &target);
+                                        self.stack.truncate(ridx);
+                                        self.stack.push(Value::Bool(result));
+                                        return Ok(true);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    // `nil == x` — the universal cross-type `==`
+                    // fallback reduces to `ruby_eq(Nil, x)`: true
+                    // iff x is nil.
+                    if name_id == self.sym_eq_op
+                        && self.fast_eq_nil_safe
+                        && matches!(&self.stack[ridx], Value::Nil)
+                    {
+                        let eq = matches!(&self.stack[ridx + 1], Value::Nil);
+                        self.stack.truncate(ridx);
+                        self.stack.push(Value::Bool(eq));
+                        return Ok(true);
+                    }
+                    // Array#<< — in-place append; frozen / tagged /
+                    // byte-capped receivers keep their semantics in
+                    // the canonical arm.
+                    if name_id == self.sym_shovel {
+                        if self.fast_arr_shovel_safe
+                            && self.max_value_bytes.is_none()
+                            && let Value::Array(id) = &self.stack[ridx]
+                        {
+                            let id = *id;
+                            if self.heap.array_class_tag(id).is_none()
+                                && !self.heap.array_frozen(id)
+                            {
+                                let v = self.stack.pop().expect("ICE: << fast path arg");
+                                self.stack.pop();
+                                self.heap.array_mut(id).push(v);
+                                self.stack.push(Value::Array(id));
+                                return Ok(true);
+                            }
+                        }
+                        // Integer#<< (bit shift) — mirrors the
+                        // numeric arm: lossless left shift or
+                        // clamped right shift via negative count;
+                        // overflow falls through (BigInt promotion
+                        // under bignum).
+                        if self.prim_reopen_mask & 1 == 0
+                            && let (Value::Int(a), Value::Int(b)) =
+                                (&self.stack[ridx], &self.stack[ridx + 1])
+                        {
+                            let (a, b) = (*a, *b);
+                            let shifted: Option<i64> = if b >= 0 {
+                                #[cfg(feature = "bignum")]
+                                {
+                                    super::numeric::try_int_shl_lossless(a, b)
+                                }
+                                #[cfg(not(feature = "bignum"))]
+                                {
+                                    Some(a.wrapping_shl((b as u32).min(63)))
+                                }
+                            } else {
+                                let mag =
+                                    if b == i64::MIN { 63 } else { (-b).min(63) as u32 };
+                                Some(a.wrapping_shr(mag))
+                            };
+                            if let Some(r) = shifted {
+                                self.stack.truncate(ridx);
+                                self.stack.push(Value::Int(r));
+                                return Ok(true);
+                            }
+                        }
+                    }
+                    // Array#drop(Int) — the canonical arm verbatim
+                    // (skip-clone, maybe_gc BEFORE alloc; the source
+                    // array stays operand-stack-rooted through the GC
+                    // point, so its element ids — shared by `out` —
+                    // stay reachable). Negative n declines (the
+                    // canonical arm raises the ArgumentError); non-Int
+                    // args decline likewise. 2026-07 census: 23.7K
+                    // sends/walk from compiled bodies — the single
+                    // hottest slow-cascade shape.
+                    if name_id == self.sym_drop
+                        && self.fast_arr_misc_safe
+                        && let Value::Array(id) = &self.stack[ridx]
+                    {
+                        let id = *id;
+                        if self.heap.array_class_tag(id).is_none()
+                            && let Value::Int(n) = &self.stack[ridx + 1]
+                            && *n >= 0
+                        {
+                            let n = *n as usize;
+                            let out: Vec<Value> =
+                                self.heap.array(id).iter().skip(n).cloned().collect();
+                            self.maybe_gc();
+                            let nid = self
+                                .heap
+                                .alloc(crate::heap::HeapObj::Array(out.into()));
+                            self.stack.truncate(ridx);
+                            self.stack.push(Value::Array(nid));
+                            return Ok(true);
+                        }
+                    }
+                    // Hash#fetch(k) — HIT only (a miss declines so the
+                    // canonical arm raises the KeyError with its exact
+                    // message). Key discipline mirrors `try_fast_index`'s
+                    // Hash read: exotic Object/Class keys that need a
+                    // user `hash` dispatch decline via
+                    // `hash_key_needs_slow`.
+                    if name_id == self.sym_fetch
+                        && self.fast_hash_fetch_safe
+                        && let Value::Hash(id) = &self.stack[ridx]
+                    {
+                        let id = *id;
+                        if self.heap.hash_class_tag(id).is_none() {
+                            let key_slow = matches!(
+                                &self.stack[ridx + 1],
+                                Value::Object(_) | Value::Class(_)
+                            ) && !self.hash_is_by_identity(id)
+                                && {
+                                    let probe = self.stack[ridx + 1].clone();
+                                    self.hash_key_needs_slow(&probe)
+                                };
+                            if !key_slow
+                                && let Some(pos) =
+                                    self.heap.hash_index_lookup(id, &self.stack[ridx + 1])
+                            {
+                                let v = self.heap.hash(id)[pos].1.clone();
+                                self.stack.truncate(ridx);
+                                self.stack.push(v);
+                                return Ok(true);
+                            }
+                        }
+                    }
+                } else if argc == 2 {
+                    // Hash#fetch(k, default) — the canonical arm verbatim
+                    // (hit → value, miss → the default argument; the
+                    // default is never evaluated lazily — it's already on
+                    // the stack). Same key discipline as the 1-arg form.
+                    if name_id == self.sym_fetch
+                        && self.fast_hash_fetch_safe
+                        && let Value::Hash(id) = &self.stack[ridx]
+                    {
+                        let id = *id;
+                        if self.heap.hash_class_tag(id).is_none() {
+                            let key_slow = matches!(
+                                &self.stack[ridx + 1],
+                                Value::Object(_) | Value::Class(_)
+                            ) && !self.hash_is_by_identity(id)
+                                && {
+                                    let probe = self.stack[ridx + 1].clone();
+                                    self.hash_key_needs_slow(&probe)
+                                };
+                            if !key_slow {
+                                let v = match self
+                                    .heap
+                                    .hash_index_lookup(id, &self.stack[ridx + 1])
+                                {
+                                    Some(pos) => self.heap.hash(id)[pos].1.clone(),
+                                    None => self.stack[ridx + 2].clone(),
+                                };
+                                self.stack.truncate(ridx);
+                                self.stack.push(v);
+                                return Ok(true);
+                            }
+                        }
+                    }
+                }
+                // Array#push — variadic append (argc 0 is a no-op
+                // returning self; matches the canonical arm).
+                if name_id == self.sym_push
+                    && self.fast_arr_push_safe
+                    && self.max_value_bytes.is_none()
+                    && let Value::Array(id) = &self.stack[ridx]
+                {
+                    let id = *id;
+                    if self.heap.array_class_tag(id).is_none() && !self.heap.array_frozen(id) {
+                        if argc == 1 {
+                            let v = self.stack.pop().expect("ICE: push fast path arg");
+                            self.stack.pop();
+                            self.heap.array_mut(id).push(v);
+                        } else {
+                            let split = self.stack.len() - argc;
+                            let vs: Vec<Value> = self.stack.drain(split..).collect();
+                            self.stack.pop();
+                            let arr = self.heap.array_mut(id);
+                            for v in vs {
+                                arr.push(v);
+                            }
+                        }
+                        self.stack.push(Value::Array(id));
+                        return Ok(true);
+                    }
+                }
+            } else if no_recv
+                && argc == 1
+                && name_id == self.sym_kernel_array
+                && !self.host_fns.contains_key(&name_id)
+                && matches!(self.stack.last(), Some(Value::Array(_)))
+            {
+                // Bare `Array(x)` with an Array argument — the
+                // builtin's identity case (`args[0].clone()`): the
+                // argument already on the stack IS the result.
+                // Builtin precedence for the "Array" name mirrors
+                // the cascade (`is_builtin_name` excludes it from
+                // the toplevel fast path; a host fn would win, hence
+                // the `host_fns` probe).
+                return Ok(true);
+            } else if no_recv
+                && argc == 0
+                && name_id == self.sym_block_given_q
+                && !self.host_fns.contains_key(&name_id)
+            {
+                // Bare `block_given?` on an Object self — the kernel
+                // builtin arm's exact resolution (a block frame reads
+                // its captured `captured_yield_block`, a method frame
+                // its own `block_arg` — see the canonical arm's
+                // deferred-Proc rationale). Gated on an IC-backed
+                // user-method MISS on the self chain (a public
+                // fixed-arity override was already served by
+                // `try_invoke_self_recv_cached`; any other override
+                // declines to the canonical order). Non-Object selves
+                // (toplevel/main/class body) decline — a toplevel
+                // user `def block_given?` resolution stays with the
+                // cascade. Census: 6.4K sends/walk, all slow-cascade.
+                let self_shape = self.frames.last().map(|f| {
+                    (
+                        f.self_val.clone(),
+                        if f.is_block {
+                            f.captured_yield_block.is_some()
+                        } else {
+                            f.block_arg.is_some()
+                        },
+                    )
+                });
+                if let Some((Value::Object(oid), has_block)) = self_shape
+                    && let Some(cls) = self.heap.try_class_of(oid)
+                    && self.lookup_method_cached(&cls, name_id, cache_id).is_none()
+                {
+                    self.stack.push(Value::Bool(has_block));
+                    return Ok(true);
+                }
+            }
+        }
+        // SEND-FAMILY fast bucket #1 — `obj.respond_to?(:name[, inc])`
+        // (RuboCop cop-walk census 2026-07: the single hottest
+        // slow-cascade name — ~24.7K sends per 600-line-file walk,
+        // 13.6% of the walk's residual cascade; `Node#loc?` probes
+        // `loc.respond_to?(sym)` per node). Serves only the
+        // receiver-bearing Value::Object shape with a Sym name; the
+        // terminal logic (`responds_to` → `try_respond_to_missing` →
+        // false) mirrors the canonical arm byte-for-byte, so a
+        // `respond_to_missing?` override anywhere on the chain is
+        // INVOKED exactly like the cascade would (not gated off).
+        // Gates, per the `===` bucket contract:
+        //   - the neighbouring buckets' `!maybe_refined` /
+        //     `!force_primitive` / `!any_undefs` trio;
+        //   - a user `respond_to?` anywhere on the receiver's chain
+        //     declines via an IC-backed `lookup_method_cached` MISS
+        //     requirement (the same slot
+        //     `try_invoke_explicit_recv_cached` probed above, so this
+        //     is an IC hit; a public fixed-arity override was already
+        //     served there, and private/closure/nfa overrides decline
+        //     to the canonical arm, which raises/invokes identically);
+        //   - argc 2 evaluates ANY second value for truthiness —
+        //     matching the canonical arm (CRuby 3.4 include_all rule);
+        //   - Str names / Class receivers decline (cold in the walk;
+        //     the canonical arm handles them).
+        // KNOWN blind spot shared with the neighbouring
+        // Object-receiver buckets: a cext-registered `respond_to?`
+        // instance method would be shadowed — `lookup_method_cached`
+        // doesn't see cext tables (pre-existing limitation, see the
+        // canonical Object arm's cext comment).
+        if !maybe_refined
+            && !force_primitive
+            && !self.any_undefs
+            && !no_recv
+            && name_id == self.sym_respond_to
+            && (argc == 1 || argc == 2)
+            && argc < self.stack.len()
+        {
+            let ridx = self.stack.len() - 1 - argc;
+            if let (Value::Object(oid), Value::Sym(lookup_name)) =
+                (&self.stack[ridx], &self.stack[ridx + 1])
+            {
+                let (oid, lookup_name) = (*oid, *lookup_name);
+                if let Some(cls) = self.heap.try_class_of(oid)
+                    && self.lookup_method_cached(&cls, name_id, cache_id).is_none()
+                {
+                    let include_private = argc == 2 && self.stack[ridx + 2].is_truthy();
+                    let recv = self.stack[ridx].clone();
+                    if self.responds_to(&recv, lookup_name, include_private) {
+                        self.stack.truncate(ridx);
+                        self.stack.push(Value::Bool(true));
+                        return Ok(true);
+                    }
+                    // Resolution missed — consult respond_to_missing?
+                    // exactly like the canonical arm (a user hook is
+                    // invoked; the recv stays rooted as the invoked
+                    // frame's self_val, same discipline as the arm).
+                    self.stack.truncate(ridx);
+                    if self.try_respond_to_missing(&recv, lookup_name, include_private)? {
+                        return Ok(true);
+                    }
+                    self.stack.push(Value::Bool(false));
+                    return Ok(true);
+                }
+            }
+        }
+        // SEND-FAMILY fast bucket #2 — `obj.public_send(:m, a...)` /
+        // `obj.send(:m, a...)` / `obj.__send__(:m, a...)` with a Sym
+        // target and ≤ 2 target args (census: 100% of the walk's
+        // public_send / send calls are Sym-named at argc ≤ 3 —
+        // `Node#loc?`'s `loc.public_send(sym)` and `Force#run_hook`'s
+        // `public_send(method_name, *args)` dominate). A pure NAME
+        // RE-AIM: drop the target Sym out of the operand stack and
+        // serve through `try_invoke_explicit_recv_cached` — the same
+        // serve matrix a direct `obj.m(a...)` call takes (getter /
+        // zero-arg / NFA / tier-2 / frame-lite / JIT arms). That path
+        // serves ONLY public non-closure proto methods: exactly the
+        // set `public_send` may call, and a subset of what
+        // `send`/`__send__` may call. Everything else — missing
+        // target (method_missing), private/protected targets (the
+        // recogniser's strict raise for public_send / bypass invoke
+        // for send), Str names, builtin-arm targets, closures, kwargs
+        // shapes — reinserts the Sym and falls through to the
+        // unchanged cascade recogniser. Extra gate: the TARGET name
+        // must not be refinement-active (the re-entered do_call
+        // applies the refinement detour; serving here would skip it).
+        if !maybe_refined
+            && !force_primitive
+            && !self.any_undefs
+            && !no_recv
+            && (name_id == self.sym_public_send
+                || name_id == self.sym_send
+                || name_id == self.sym_send_u)
+            && (1..=3).contains(&argc)
+            && argc < self.stack.len()
+        {
+            let ridx = self.stack.len() - 1 - argc;
+            if let (Value::Object(oid), Value::Sym(target_sym)) =
+                (&self.stack[ridx], &self.stack[ridx + 1])
+            {
+                let (oid, target_sym) = (*oid, *target_sym);
+                let target_refined = !self.refined_method_names.is_empty()
+                    && self.refined_method_names.contains(&target_sym);
+                // A user `send` / `public_send` override on the
+                // receiver's chain wins (reserved-name rule exempts
+                // `__send__`) — same IC-hit MISS requirement as
+                // bucket #1; the recogniser's own probe stays the
+                // decline path's authority.
+                let override_blocks = if name_id == self.sym_send_u {
+                    false
+                } else {
+                    match self.heap.try_class_of(oid) {
+                        Some(cls) => {
+                            self.lookup_method_cached(&cls, name_id, cache_id).is_some()
+                        }
+                        None => true, // class-less slot → cascade
+                    }
+                };
+                if !target_refined && !override_blocks {
+                    // [.., recv, :m, a1, a2] → [.., recv, a1, a2];
+                    // cache_id u32::MAX — the target name is dynamic,
+                    // the site's IC slot belongs to the send-family
+                    // name (same reason the cascade recogniser
+                    // re-enters with u32::MAX).
+                    self.stack.remove(ridx + 1);
+                    if self.try_invoke_explicit_recv_cached(target_sym, argc - 1, u32::MAX)? {
+                        return Ok(true);
+                    }
+                    // Decline: restore the exact pre-bucket stack
+                    // shape and fall through to the cascade.
+                    self.stack.insert(ridx + 1, Value::Sym(target_sym));
+                }
+            }
+        }
+        // SEND-FAMILY fast bucket #3 — bare `send(:m, a...)` /
+        // `__send__(:m, a...)` on an Object self (~0.8K/walk). Same
+        // re-aim, served through `try_invoke_self_recv_cached` — the
+        // implicit-self serve matrix, which applies NO visibility
+        // gate: exactly `send`'s bypass semantics (an implicit-self
+        // call may invoke private/protected anyway). Bare
+        // `public_send` deliberately declines — its strict-visibility
+        // re-aim lives in the cascade recogniser. Host-fn precedence:
+        // a host fn registered under the send-family name would win
+        // in the cascade (`try_dispatch_no_recv_builtin_or_host` runs
+        // before the recogniser), so probe-and-decline; `send` /
+        // `__send__` are not `builtin_call` names.
+        if !maybe_refined
+            && !force_primitive
+            && !self.any_undefs
+            && no_recv
+            && (name_id == self.sym_send || name_id == self.sym_send_u)
+            && (1..=3).contains(&argc)
+            && argc <= self.stack.len()
+            && !self.host_fns.contains_key(&name_id)
+        {
+            let sidx = self.stack.len() - argc;
+            if let Value::Sym(target_sym) = &self.stack[sidx] {
+                let target_sym = *target_sym;
+                let target_refined = !self.refined_method_names.is_empty()
+                    && self.refined_method_names.contains(&target_sym);
+                // User `def send` on the surrounding self wins for
+                // `send` (reserved-name rule exempts `__send__`) —
+                // probe the frame self's chain via the site IC slot
+                // (warmed by `try_invoke_self_recv_cached`'s
+                // identical probe above). Non-Object selves decline:
+                // toplevel/main/class-body bare-send semantics stay
+                // with the cascade recogniser.
+                let override_blocks = if name_id == self.sym_send_u {
+                    false
+                } else {
+                    match self.frames.last().map(|f| f.self_val.clone()) {
+                        Some(Value::Object(id)) => match self.heap.try_class_of(id) {
+                            Some(cls) => {
+                                self.lookup_method_cached(&cls, name_id, cache_id).is_some()
+                            }
+                            None => true,
+                        },
+                        _ => true,
+                    }
+                };
+                if !target_refined && !override_blocks {
+                    self.stack.remove(sidx);
+                    if self.try_invoke_self_recv_cached(target_sym, argc - 1, u32::MAX)? {
+                        return Ok(true);
+                    }
+                    self.stack.insert(sidx, Value::Sym(target_sym));
+                }
+            }
+        }
+        Ok(false)
+        }
+
+
         pub(crate) fn do_call(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u32) -> Result<(), Trap> {
+        // TEMPORARY census (`RUBYRS_T2_FALLBACK_STATS=1`): consume the
+        // one-shot "this dispatch is a tier-2 in-body fallback" marker
+        // at the boundary (exact first-level attribution — nested
+        // dispatches under a served arm are NOT tagged); re-read at
+        // the slow-cascade point below. Never set unless the census
+        // map is on, so the disabled cost is the `is_some` branch.
+        #[cfg(feature = "jit-native")]
+        let census_from_t2 =
+            self.t2_fb_stats.is_some() && std::mem::take(&mut self.t2_fb_from);
         // Consume `bypass_visibility_once` at the dispatch
         // boundary, before any arm runs. A naive consume-at-the-
         // vis-check would leak the flag whenever the dispatch
@@ -8107,610 +8972,12 @@ impl Vm {
         {
             return Ok(());
         }
-        // `===` case-equality fast path (NodePattern shape): RuboCop's
-        // compiled matchers fire `SYM === node` / `Mod === node` /
-        // `"str" === x` millions of times per cop walk (~20% of the
-        // slow cascade, measured), and every one otherwise walks the
-        // FULL arm chain down to the universal `===` fallback (the
-        // last-resort arm). Mirror that arm's semantics for the three
-        // receiver shapes whose answer never needs user dispatch,
-        // gated like the other fast buckets:
-        //   - Symbol / String → `recv.ruby_eq(arg)` — the same call
-        //     the universal arm makes — gated on the method_gen-
-        //     revalidated `fast_case_eq_{sym,str}_safe` flags (any
-        //     user `===` on the Symbol/String chain flips them off,
-        //     so the reopen-precedence gate keeps winning; String
-        //     per-instance singletons were handled by the
-        //     str_singletons gate above).
-        //   - Class / Module → `arg.is_a?(recv)` via the same
-        //     `class_is_a` reachability the universal arm walks
-        //     (cached variant — answer-identical by construction),
-        //     gated on (a) `fast_case_eq_class_safe` (no `===`
-        //     instance method on the Module/Class chain), (b) a
-        //     per-site `lookup_class_singleton_cached` MISS (a
-        //     `def self.===` anywhere on the receiver's singleton
-        //     chain falls through to the canonical singleton arm,
-        //     exactly as today), and (c) no `class_tag` (a module
-        //     value that is an instance of a Module subclass resolves
-        //     instance methods from its tag class in the slow path).
-        // Regexp receivers are deliberately NOT here (`Regexp#===`
-        // publishes `$~`); Object receivers (rubocop's NodePattern
-        // instances define their own `===`) keep the explicit-recv
-        // cached bucket above / the full cascade. No allocation on a
-        // hit (Bool result), so no `maybe_gc` — same as the arm this
-        // mirrors.
-        if !maybe_refined
-            && !no_recv
-            && argc == 1
-            && name_id == self.sym_case_eq
-            && self.stack.len() >= 2
-        {
-            if self.fast_index_checked_gen != self.method_gen {
-                self.fast_index_revalidate();
-            }
-            let ridx = self.stack.len() - 2;
-            let fast_hit = match &self.stack[ridx] {
-                Value::Sym(_) => self.fast_case_eq_sym_safe,
-                Value::Str(_) => self.fast_case_eq_str_safe,
-                // Int/Float/Bool/Nil (the `Enumerable#any?(pattern)` /
-                // `grep` shape) — same `ruby_eq` the universal arm
-                // reaches; BigInt / Rational deliberately excluded
-                // (rare, and Rational has bespoke eql?-family arms).
-                Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Nil => {
-                    self.fast_case_eq_prim_safe
-                }
-                Value::Class(cls)
-                    if self.fast_case_eq_class_safe && cls.class_tag.is_none() =>
-                {
-                    let cls = cls.clone();
-                    self.lookup_class_singleton_cached(&cls, name_id, cache_id)
-                        .is_none()
-                }
-                _ => false,
-            };
-            if fast_hit {
-                let arg = self
-                    .stack
-                    .pop()
-                    .expect("ICE: === fast path arg underflow");
-                let recv = self
-                    .stack
-                    .pop()
-                    .expect("ICE: === fast path recv underflow");
-                let result = match &recv {
-                    Value::Class(target) => {
-                        // `Mod === obj` ≡ `obj.is_a?(Mod)` — mirrors the
-                        // universal arm byte-for-byte: singleton-aware
-                        // class for heap Objects, `Vm::class_of` for
-                        // everything else.
-                        let start: Option<Rc<Class>> = match &arg {
-                            Value::Object(id) => Some(self.heap.class_of(*id)),
-                            _ => {
-                                let class_val = self.class_of(&arg);
-                                if let Value::Class(c) = class_val {
-                                    Some(c)
-                                } else {
-                                    None
-                                }
-                            }
-                        };
-                        match start {
-                            Some(acls) => self.class_is_a_cached(&acls, target),
-                            None => false,
-                        }
-                    }
-                    _ => recv.ruby_eq(&arg, &self.heap),
-                };
-                self.stack.push(Value::Bool(result));
-                return Ok(());
-            }
-        }
-        // Walk-attributed fast buckets (RuboCop `Team#investigate`
-        // per-phase attribution, 2026-07): `is_a?`/`kind_of?`, `!`,
-        // `nil?`, Array `size`/`length`/`empty?`/`include?`/
-        // `member?`/`push`/`<<`, Int `-@`/`<<`, and the bare
-        // `Kernel#Array` identity case — together ~40% of the walk's
-        // slow-cascade sends (plus the parse phase's top three).
-        // Same contract as the `===` bucket above: every hit mirrors
-        // the arm the cascade would reach byte-for-byte; anything
-        // uncertain falls through untouched. Guards, per shape:
-        //   - Array receivers: the `fast_arr_*` chain-clean flags
-        //     (method_gen-revalidated) mirror the cascade's
-        //     "primitive-receiver fallback to the user-Class method
-        //     table" gate; tagged subclass instances and frozen /
-        //     byte-capped writes fall through to the canonical arms
-        //     (which own the FrozenError / cap semantics).
-        //   - Int / Bool / Nil receivers: the own-table
-        //     `prim_reopen_mask` bit — the exact gate the cascade
-        //     consults before `primitive_call` answers these names
-        //     (chain methods below the own table are shadowed by
-        //     the primitive arms today, so the bit is sufficient).
-        //   - Object receivers: `is_a?` requires an IC-backed
-        //     `lookup_method_cached` miss (the same slot
-        //     `try_invoke_explicit_recv_cached` just probed, so
-        //     this is an IC hit); `!` / `nil?` need no per-chain
-        //     guard — `primitive_call`'s universal arms answer them
-        //     ahead of every user-chain gate, and a public
-        //     fixed-arity override was already served by
-        //     `try_invoke_explicit_recv_cached` above.
-        //   - `any_undefs` turns the whole bucket off (an
-        //     `undef_method` tombstone walk sits ahead of the
-        //     primitive arms in the cascade; rare, perf-only).
-        // No GC-heap allocation on any hit (Bool/Int results or
-        // in-place Vec append), so no `maybe_gc` — same as the arms
-        // these mirror.
-        if !maybe_refined && !force_primitive && !self.any_undefs {
-            if !no_recv && argc < self.stack.len() {
-                if self.fast_index_checked_gen != self.method_gen {
-                    self.fast_index_revalidate();
-                }
-                let ridx = self.stack.len() - 1 - argc;
-                if argc == 0 {
-                    // `!` — truthiness flip.
-                    if name_id == self.sym_not {
-                        let serve = match &self.stack[ridx] {
-                            Value::Bool(_) => self.prim_reopen_mask & (1 << 5) == 0,
-                            Value::Nil => self.prim_reopen_mask & (1 << 4) == 0,
-                            Value::Object(_) => true,
-                            _ => false,
-                        };
-                        if serve {
-                            let recv = self.stack.pop().expect("ICE: ! fast path recv");
-                            self.stack.push(Value::Bool(!recv.is_truthy()));
-                            return Ok(());
-                        }
-                    }
-                    // `nil?` on heap shapes (primitive shapes are
-                    // covered by try_fast_primitive) — the universal
-                    // arm's constant `false`.
-                    if name_id == self.sym_nil_q
-                        && matches!(
-                            &self.stack[ridx],
-                            Value::Object(_) | Value::Array(_) | Value::Hash(_)
-                        )
-                    {
-                        self.stack.pop();
-                        self.stack.push(Value::Bool(false));
-                        return Ok(());
-                    }
-                    // Array#size / #length / #empty? (and the Hash
-                    // twins, same canonical constant-shape arms).
-                    if name_id == self.sym_size
-                        || name_id == self.sym_length
-                        || name_id == self.sym_empty_q
-                    {
-                        if self.fast_arr_read_safe
-                            && let Value::Array(id) = &self.stack[ridx]
-                        {
-                            let id = *id;
-                            if self.heap.array_class_tag(id).is_none() {
-                                let v = if name_id == self.sym_empty_q {
-                                    Value::Bool(self.heap.array(id).is_empty())
-                                } else {
-                                    Value::Int(self.heap.array(id).len() as i64)
-                                };
-                                self.stack.pop();
-                                self.stack.push(v);
-                                return Ok(());
-                            }
-                        }
-                        if self.fast_hash_read_safe
-                            && let Value::Hash(id) = &self.stack[ridx]
-                        {
-                            let id = *id;
-                            if self.heap.hash_class_tag(id).is_none() {
-                                let v = if name_id == self.sym_empty_q {
-                                    Value::Bool(self.heap.hash(id).is_empty())
-                                } else {
-                                    Value::Int(self.heap.hash(id).len() as i64)
-                                };
-                                self.stack.pop();
-                                self.stack.push(v);
-                                return Ok(());
-                            }
-                        }
-                    }
-                    // Symbol#to_s / #to_sym — mirrors sym_primitive's
-                    // arms (US-ASCII tag for ascii-only names).
-                    if (name_id == self.sym_to_s || name_id == self.sym_to_sym)
-                        && self.prim_reopen_mask & (1 << 3) == 0
-                        && let Value::Sym(s) = &self.stack[ridx]
-                    {
-                        let s = *s;
-                        let v = if name_id == self.sym_to_sym {
-                            Value::Sym(s)
-                        } else {
-                            let n = self.interner.resolve(s).to_string();
-                            if n.is_ascii() {
-                                Value::new_str_us_ascii(n)
-                            } else {
-                                Value::new_str(n)
-                            }
-                        };
-                        self.stack.pop();
-                        self.stack.push(v);
-                        return Ok(());
-                    }
-                    // Integer#-@ (unary minus). i64::MIN falls
-                    // through (BigInt promotion path under bignum).
-                    if name_id == self.sym_neg_at
-                        && self.prim_reopen_mask & 1 == 0
-                        && let Value::Int(n) = &self.stack[ridx]
-                    {
-                        let n = *n;
-                        #[cfg(feature = "bignum")]
-                        let fits = n != i64::MIN;
-                        #[cfg(not(feature = "bignum"))]
-                        let fits = true;
-                        if fits {
-                            self.stack.pop();
-                            self.stack.push(Value::Int(n.wrapping_neg()));
-                            return Ok(());
-                        }
-                    }
-                } else if argc == 1 {
-                    // Array#include? / #member? — the canonical
-                    // ruby_eq value scan.
-                    if (name_id == self.sym_include_q || name_id == self.sym_member_q)
-                        && self.fast_arr_read_safe
-                        && let Value::Array(id) = &self.stack[ridx]
-                    {
-                        let id = *id;
-                        if self.heap.array_class_tag(id).is_none() {
-                            let needle = &self.stack[ridx + 1];
-                            let hit = self
-                                .heap
-                                .array(id)
-                                .iter()
-                                .any(|x| x.ruby_eq(needle, &self.heap));
-                            self.stack.truncate(ridx);
-                            self.stack.push(Value::Bool(hit));
-                            return Ok(());
-                        }
-                    }
-                    // `is_a?` / `kind_of?` with a Class/Module
-                    // argument — the universal arm's cached
-                    // ancestor-set walk. Object receivers guard on
-                    // the IC-backed user-method miss; Symbol
-                    // receivers on the chain-clean flag.
-                    if name_id == self.sym_is_a || name_id == self.sym_kind_of {
-                        let target: Option<Rc<crate::value::Class>> =
-                            match &self.stack[ridx + 1] {
-                                Value::Class(c) => Some(c.clone()),
-                                _ => None,
-                            };
-                        if let Some(target) = target {
-                            match &self.stack[ridx] {
-                                Value::Object(oid) => {
-                                    let oid = *oid;
-                                    if let Some(cls) = self.heap.try_class_of(oid)
-                                        && self
-                                            .lookup_method_cached(&cls, name_id, cache_id)
-                                            .is_none()
-                                    {
-                                        // Mirrors the arm: the walk class for
-                                        // an Object is the singleton-aware
-                                        // `heap.class_of` (same Rc as
-                                        // `try_class_of` here).
-                                        let result = self.class_is_a_cached(&cls, &target);
-                                        self.stack.truncate(ridx);
-                                        self.stack.push(Value::Bool(result));
-                                        return Ok(());
-                                    }
-                                }
-                                Value::Sym(s) if self.fast_is_a_sym_safe => {
-                                    let sv = Value::Sym(*s);
-                                    if let Value::Class(c) = self.class_of(&sv) {
-                                        let result = self.class_is_a_cached(&c, &target);
-                                        self.stack.truncate(ridx);
-                                        self.stack.push(Value::Bool(result));
-                                        return Ok(());
-                                    }
-                                }
-                                Value::Nil if self.fast_is_a_nil_safe => {
-                                    if let Value::Class(c) = self.class_of(&Value::Nil) {
-                                        let result = self.class_is_a_cached(&c, &target);
-                                        self.stack.truncate(ridx);
-                                        self.stack.push(Value::Bool(result));
-                                        return Ok(());
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    // `nil == x` — the universal cross-type `==`
-                    // fallback reduces to `ruby_eq(Nil, x)`: true
-                    // iff x is nil.
-                    if name_id == self.sym_eq_op
-                        && self.fast_eq_nil_safe
-                        && matches!(&self.stack[ridx], Value::Nil)
-                    {
-                        let eq = matches!(&self.stack[ridx + 1], Value::Nil);
-                        self.stack.truncate(ridx);
-                        self.stack.push(Value::Bool(eq));
-                        return Ok(());
-                    }
-                    // Array#<< — in-place append; frozen / tagged /
-                    // byte-capped receivers keep their semantics in
-                    // the canonical arm.
-                    if name_id == self.sym_shovel {
-                        if self.fast_arr_shovel_safe
-                            && self.max_value_bytes.is_none()
-                            && let Value::Array(id) = &self.stack[ridx]
-                        {
-                            let id = *id;
-                            if self.heap.array_class_tag(id).is_none()
-                                && !self.heap.array_frozen(id)
-                            {
-                                let v = self.stack.pop().expect("ICE: << fast path arg");
-                                self.stack.pop();
-                                self.heap.array_mut(id).push(v);
-                                self.stack.push(Value::Array(id));
-                                return Ok(());
-                            }
-                        }
-                        // Integer#<< (bit shift) — mirrors the
-                        // numeric arm: lossless left shift or
-                        // clamped right shift via negative count;
-                        // overflow falls through (BigInt promotion
-                        // under bignum).
-                        if self.prim_reopen_mask & 1 == 0
-                            && let (Value::Int(a), Value::Int(b)) =
-                                (&self.stack[ridx], &self.stack[ridx + 1])
-                        {
-                            let (a, b) = (*a, *b);
-                            let shifted: Option<i64> = if b >= 0 {
-                                #[cfg(feature = "bignum")]
-                                {
-                                    super::numeric::try_int_shl_lossless(a, b)
-                                }
-                                #[cfg(not(feature = "bignum"))]
-                                {
-                                    Some(a.wrapping_shl((b as u32).min(63)))
-                                }
-                            } else {
-                                let mag =
-                                    if b == i64::MIN { 63 } else { (-b).min(63) as u32 };
-                                Some(a.wrapping_shr(mag))
-                            };
-                            if let Some(r) = shifted {
-                                self.stack.truncate(ridx);
-                                self.stack.push(Value::Int(r));
-                                return Ok(());
-                            }
-                        }
-                    }
-                }
-                // Array#push — variadic append (argc 0 is a no-op
-                // returning self; matches the canonical arm).
-                if name_id == self.sym_push
-                    && self.fast_arr_push_safe
-                    && self.max_value_bytes.is_none()
-                    && let Value::Array(id) = &self.stack[ridx]
-                {
-                    let id = *id;
-                    if self.heap.array_class_tag(id).is_none() && !self.heap.array_frozen(id) {
-                        if argc == 1 {
-                            let v = self.stack.pop().expect("ICE: push fast path arg");
-                            self.stack.pop();
-                            self.heap.array_mut(id).push(v);
-                        } else {
-                            let split = self.stack.len() - argc;
-                            let vs: Vec<Value> = self.stack.drain(split..).collect();
-                            self.stack.pop();
-                            let arr = self.heap.array_mut(id);
-                            for v in vs {
-                                arr.push(v);
-                            }
-                        }
-                        self.stack.push(Value::Array(id));
-                        return Ok(());
-                    }
-                }
-            } else if no_recv
-                && argc == 1
-                && name_id == self.sym_kernel_array
-                && !self.host_fns.contains_key(&name_id)
-                && matches!(self.stack.last(), Some(Value::Array(_)))
-            {
-                // Bare `Array(x)` with an Array argument — the
-                // builtin's identity case (`args[0].clone()`): the
-                // argument already on the stack IS the result.
-                // Builtin precedence for the "Array" name mirrors
-                // the cascade (`is_builtin_name` excludes it from
-                // the toplevel fast path; a host fn would win, hence
-                // the `host_fns` probe).
-                return Ok(());
-            }
-        }
-        // SEND-FAMILY fast bucket #1 — `obj.respond_to?(:name[, inc])`
-        // (RuboCop cop-walk census 2026-07: the single hottest
-        // slow-cascade name — ~24.7K sends per 600-line-file walk,
-        // 13.6% of the walk's residual cascade; `Node#loc?` probes
-        // `loc.respond_to?(sym)` per node). Serves only the
-        // receiver-bearing Value::Object shape with a Sym name; the
-        // terminal logic (`responds_to` → `try_respond_to_missing` →
-        // false) mirrors the canonical arm byte-for-byte, so a
-        // `respond_to_missing?` override anywhere on the chain is
-        // INVOKED exactly like the cascade would (not gated off).
-        // Gates, per the `===` bucket contract:
-        //   - the neighbouring buckets' `!maybe_refined` /
-        //     `!force_primitive` / `!any_undefs` trio;
-        //   - a user `respond_to?` anywhere on the receiver's chain
-        //     declines via an IC-backed `lookup_method_cached` MISS
-        //     requirement (the same slot
-        //     `try_invoke_explicit_recv_cached` probed above, so this
-        //     is an IC hit; a public fixed-arity override was already
-        //     served there, and private/closure/nfa overrides decline
-        //     to the canonical arm, which raises/invokes identically);
-        //   - argc 2 evaluates ANY second value for truthiness —
-        //     matching the canonical arm (CRuby 3.4 include_all rule);
-        //   - Str names / Class receivers decline (cold in the walk;
-        //     the canonical arm handles them).
-        // KNOWN blind spot shared with the neighbouring
-        // Object-receiver buckets: a cext-registered `respond_to?`
-        // instance method would be shadowed — `lookup_method_cached`
-        // doesn't see cext tables (pre-existing limitation, see the
-        // canonical Object arm's cext comment).
-        if !maybe_refined
-            && !force_primitive
-            && !self.any_undefs
-            && !no_recv
-            && name_id == self.sym_respond_to
-            && (argc == 1 || argc == 2)
-            && argc < self.stack.len()
-        {
-            let ridx = self.stack.len() - 1 - argc;
-            if let (Value::Object(oid), Value::Sym(lookup_name)) =
-                (&self.stack[ridx], &self.stack[ridx + 1])
-            {
-                let (oid, lookup_name) = (*oid, *lookup_name);
-                if let Some(cls) = self.heap.try_class_of(oid)
-                    && self.lookup_method_cached(&cls, name_id, cache_id).is_none()
-                {
-                    let include_private = argc == 2 && self.stack[ridx + 2].is_truthy();
-                    let recv = self.stack[ridx].clone();
-                    if self.responds_to(&recv, lookup_name, include_private) {
-                        self.stack.truncate(ridx);
-                        self.stack.push(Value::Bool(true));
-                        return Ok(());
-                    }
-                    // Resolution missed — consult respond_to_missing?
-                    // exactly like the canonical arm (a user hook is
-                    // invoked; the recv stays rooted as the invoked
-                    // frame's self_val, same discipline as the arm).
-                    self.stack.truncate(ridx);
-                    if self.try_respond_to_missing(&recv, lookup_name, include_private)? {
-                        return Ok(());
-                    }
-                    self.stack.push(Value::Bool(false));
-                    return Ok(());
-                }
-            }
-        }
-        // SEND-FAMILY fast bucket #2 — `obj.public_send(:m, a...)` /
-        // `obj.send(:m, a...)` / `obj.__send__(:m, a...)` with a Sym
-        // target and ≤ 2 target args (census: 100% of the walk's
-        // public_send / send calls are Sym-named at argc ≤ 3 —
-        // `Node#loc?`'s `loc.public_send(sym)` and `Force#run_hook`'s
-        // `public_send(method_name, *args)` dominate). A pure NAME
-        // RE-AIM: drop the target Sym out of the operand stack and
-        // serve through `try_invoke_explicit_recv_cached` — the same
-        // serve matrix a direct `obj.m(a...)` call takes (getter /
-        // zero-arg / NFA / tier-2 / frame-lite / JIT arms). That path
-        // serves ONLY public non-closure proto methods: exactly the
-        // set `public_send` may call, and a subset of what
-        // `send`/`__send__` may call. Everything else — missing
-        // target (method_missing), private/protected targets (the
-        // recogniser's strict raise for public_send / bypass invoke
-        // for send), Str names, builtin-arm targets, closures, kwargs
-        // shapes — reinserts the Sym and falls through to the
-        // unchanged cascade recogniser. Extra gate: the TARGET name
-        // must not be refinement-active (the re-entered do_call
-        // applies the refinement detour; serving here would skip it).
-        if !maybe_refined
-            && !force_primitive
-            && !self.any_undefs
-            && !no_recv
-            && (name_id == self.sym_public_send
-                || name_id == self.sym_send
-                || name_id == self.sym_send_u)
-            && (1..=3).contains(&argc)
-            && argc < self.stack.len()
-        {
-            let ridx = self.stack.len() - 1 - argc;
-            if let (Value::Object(oid), Value::Sym(target_sym)) =
-                (&self.stack[ridx], &self.stack[ridx + 1])
-            {
-                let (oid, target_sym) = (*oid, *target_sym);
-                let target_refined = !self.refined_method_names.is_empty()
-                    && self.refined_method_names.contains(&target_sym);
-                // A user `send` / `public_send` override on the
-                // receiver's chain wins (reserved-name rule exempts
-                // `__send__`) — same IC-hit MISS requirement as
-                // bucket #1; the recogniser's own probe stays the
-                // decline path's authority.
-                let override_blocks = if name_id == self.sym_send_u {
-                    false
-                } else {
-                    match self.heap.try_class_of(oid) {
-                        Some(cls) => {
-                            self.lookup_method_cached(&cls, name_id, cache_id).is_some()
-                        }
-                        None => true, // class-less slot → cascade
-                    }
-                };
-                if !target_refined && !override_blocks {
-                    // [.., recv, :m, a1, a2] → [.., recv, a1, a2];
-                    // cache_id u32::MAX — the target name is dynamic,
-                    // the site's IC slot belongs to the send-family
-                    // name (same reason the cascade recogniser
-                    // re-enters with u32::MAX).
-                    self.stack.remove(ridx + 1);
-                    if self.try_invoke_explicit_recv_cached(target_sym, argc - 1, u32::MAX)? {
-                        return Ok(());
-                    }
-                    // Decline: restore the exact pre-bucket stack
-                    // shape and fall through to the cascade.
-                    self.stack.insert(ridx + 1, Value::Sym(target_sym));
-                }
-            }
-        }
-        // SEND-FAMILY fast bucket #3 — bare `send(:m, a...)` /
-        // `__send__(:m, a...)` on an Object self (~0.8K/walk). Same
-        // re-aim, served through `try_invoke_self_recv_cached` — the
-        // implicit-self serve matrix, which applies NO visibility
-        // gate: exactly `send`'s bypass semantics (an implicit-self
-        // call may invoke private/protected anyway). Bare
-        // `public_send` deliberately declines — its strict-visibility
-        // re-aim lives in the cascade recogniser. Host-fn precedence:
-        // a host fn registered under the send-family name would win
-        // in the cascade (`try_dispatch_no_recv_builtin_or_host` runs
-        // before the recogniser), so probe-and-decline; `send` /
-        // `__send__` are not `builtin_call` names.
-        if !maybe_refined
-            && !force_primitive
-            && !self.any_undefs
-            && no_recv
-            && (name_id == self.sym_send || name_id == self.sym_send_u)
-            && (1..=3).contains(&argc)
-            && argc <= self.stack.len()
-            && !self.host_fns.contains_key(&name_id)
-        {
-            let sidx = self.stack.len() - argc;
-            if let Value::Sym(target_sym) = &self.stack[sidx] {
-                let target_sym = *target_sym;
-                let target_refined = !self.refined_method_names.is_empty()
-                    && self.refined_method_names.contains(&target_sym);
-                // User `def send` on the surrounding self wins for
-                // `send` (reserved-name rule exempts `__send__`) —
-                // probe the frame self's chain via the site IC slot
-                // (warmed by `try_invoke_self_recv_cached`'s
-                // identical probe above). Non-Object selves decline:
-                // toplevel/main/class-body bare-send semantics stay
-                // with the cascade recogniser.
-                let override_blocks = if name_id == self.sym_send_u {
-                    false
-                } else {
-                    match self.frames.last().map(|f| f.self_val.clone()) {
-                        Some(Value::Object(id)) => match self.heap.try_class_of(id) {
-                            Some(cls) => {
-                                self.lookup_method_cached(&cls, name_id, cache_id).is_some()
-                            }
-                            None => true,
-                        },
-                        _ => true,
-                    }
-                };
-                if !target_refined && !override_blocks {
-                    self.stack.remove(sidx);
-                    if self.try_invoke_self_recv_cached(target_sym, argc - 1, u32::MAX)? {
-                        return Ok(());
-                    }
-                    self.stack.insert(sidx, Value::Sym(target_sym));
-                }
-            }
+        // Mid-cascade walk fast buckets (`===`, universal/collection
+        // arms, send-family #1-#3) — extracted to
+        // `try_walk_fast_buckets` so the tier-2 `t2_call` family can
+        // probe the SAME buckets at the same cascade position.
+        if self.try_walk_fast_buckets(name_id, argc, no_recv, cache_id, maybe_refined, force_primitive)? {
+            return Ok(());
         }
         // TEMPORARY diagnostics (env-gated): count sends that reach
         // the slow cascade, keyed by (name, receiver shape). One
@@ -8739,6 +9006,21 @@ impl Vm {
             if let Some(m) = self.cascade_stats.as_mut() {
                 *m.entry((name_id, shape)).or_insert(0) += 1;
             }
+        }
+        // TEMPORARY census (`RUBYRS_T2_FALLBACK_STATS=1`): a tier-2
+        // in-body fallback that fell through EVERY fast bucket above
+        // and is now paying the full slow cascade (reason 20 —
+        // cross-tab against the fallback-edge reasons).
+        #[cfg(feature = "jit-native")]
+        if census_from_t2 {
+            let shape = if no_recv {
+                12
+            } else if argc < self.stack.len() {
+                Self::t2_fb_shape(&self.stack[self.stack.len() - 1 - argc])
+            } else {
+                11
+            };
+            self.t2_fb_record(20, name_id, shape, argc);
         }
         let name = self.interner.resolve(name_id).clone();
         // Universal-Object bare-call routing. Several universal
@@ -16359,6 +16641,146 @@ impl Vm {
         }
     }
 
+    /// TEMPORARY census (env `RUBYRS_T2_FALLBACK_STATS=1`, ADR 0037
+    /// fallback census): receiver-shape code, same encoding as the
+    /// `cascade_stats` block (decoded by `SHAPES` in lib.rs).
+    #[cfg(feature = "jit-native")]
+    pub(crate) fn t2_fb_shape(v: &Value) -> u8 {
+        match v {
+            Value::Int(_) => 0,
+            Value::Float(_) => 1,
+            Value::Str(_) => 2,
+            Value::Sym(_) => 3,
+            Value::Bool(_) => 4,
+            Value::Nil => 5,
+            Value::Array(_) => 6,
+            Value::Hash(_) => 7,
+            Value::Class(_) => 8,
+            Value::Object(_) => 9,
+            Value::Block(_) => 10,
+            _ => 11,
+        }
+    }
+
+    /// Census row bump (only call when `t2_fb_stats` is Some — the
+    /// callers all guard). Reason-code decode table:
+    /// `Runtime::t2_fallback_stats_rows`.
+    #[cfg(feature = "jit-native")]
+    #[cold]
+    pub(crate) fn t2_fb_record(&mut self, reason: u8, name_id: SymId, shape: u8, argc: usize) {
+        if let Some(m) = self.t2_fb_stats.as_mut() {
+            *m.entry((reason, name_id, shape, argc.min(15) as u8)).or_insert(0) += 1;
+        }
+    }
+
+    /// Classify a `t2_call` fast-probe fallback for the census:
+    /// derive the receiver (explicit: on-stack below the args;
+    /// implicit: the frame self), then re-derive WHY the serve
+    /// matrix declined — post-hoc, via the UNCACHED lookup so the
+    /// site IC is not polluted. `path`: 0 = a dispatch-boundary gate
+    /// skipped the probe, 1/2 = settled-skip / probe-declined (both
+    /// classified by underlying cause — a settled site is just a
+    /// chronic decliner).
+    #[cfg(feature = "jit-native")]
+    #[cold]
+    pub(crate) fn t2_fb_classify_call(
+        &mut self,
+        name_id: SymId,
+        argc: usize,
+        no_recv: bool,
+        cache_id: u32,
+        path: u8,
+    ) {
+        let recv: Value = if no_recv {
+            match self.frames.last() {
+                Some(f) => f.self_val.clone(),
+                None => Value::Nil,
+            }
+        } else {
+            match self
+                .stack
+                .len()
+                .checked_sub(argc + 1)
+                .and_then(|i| self.stack.get(i))
+            {
+                Some(v) => v.clone(),
+                None => {
+                    self.t2_fb_record(2, name_id, 11, argc); // underflow
+                    return;
+                }
+            }
+        };
+        let shape = if no_recv { 12 } else { Self::t2_fb_shape(&recv) };
+        if path == 0 {
+            self.t2_fb_record(0, name_id, shape, argc); // boundary gate
+            return;
+        }
+        if no_recv && self.host_fns.contains_key(&name_id) {
+            self.t2_fb_record(3, name_id, shape, argc); // host-fn precedence
+            return;
+        }
+        if no_recv && (matches!(recv, Value::Nil) || self.is_main_self(&recv)) {
+            // Toplevel bare call: IC miss, or the resolved method was
+            // not fixed-arity-servable (classified below when hit).
+            match self.lookup_toplevel_method_cache_hit(cache_id) {
+                None => {
+                    self.t2_fb_record(4, name_id, shape, argc); // toplevel IC miss
+                    return;
+                }
+                Some(m) => {
+                    let r = self.t2_fb_method_reason(&m, argc, true);
+                    self.t2_fb_record(r, name_id, shape, argc);
+                    return;
+                }
+            }
+        }
+        let reason = match &recv {
+            Value::Object(id) => match self.heap.try_class_of(*id) {
+                None => 5, // class-less heap slot
+                Some(cls) => match self.lookup_method_uncached(&cls, name_id) {
+                    None => 6, // lookup miss (method_missing / universal arms)
+                    Some(m) => self.t2_fb_method_reason(&m, argc, no_recv),
+                },
+            },
+            Value::Class(_) => 16, // class-recv (singleton probe declined)
+            _ => 17,               // primitive receiver (shape says which)
+        };
+        self.t2_fb_record(reason, name_id, shape, argc);
+    }
+
+    /// Sub-classifier for a RESOLVED method the serve matrix still
+    /// declined: visibility / closure / builtin / arity / non-fixed
+    /// param shape (kw / rest / blk / opt) / "eligible but declined"
+    /// (route-to-hook or a native-family deopt).
+    #[cfg(feature = "jit-native")]
+    fn t2_fb_method_reason(&self, m: &Rc<Method>, argc: usize, no_recv: bool) -> u8 {
+        if !no_recv && m.visibility.get() != Visibility::Public {
+            return 7;
+        }
+        if m.closure.is_some() {
+            return 8;
+        }
+        if m.builtin.is_some() {
+            return 9;
+        }
+        match m.fixed_arity {
+            Some(f) if f.required as usize == argc => 11, // eligible, declined deeper
+            Some(_) => 10,                                // arity mismatch
+            None => {
+                let proto = &self.protos[m.proto_idx];
+                if !proto.kw_param_defaults.is_empty() || proto.kw_rest_param.is_some() {
+                    12 // kwargs shape
+                } else if proto.rest_param.is_some() {
+                    13 // splat shape
+                } else if proto.block_param.is_some() {
+                    14 // &blk shape
+                } else {
+                    15 // optionals/post shape
+                }
+            }
+        }
+    }
+
     /// Fetch (computing + caching on first touch) the ADR-0031
     /// increment-2 binding plan for `proto_idx`. `None` = ineligible:
     /// any keyword param or `**kwrest` in the signature (the trailing-
@@ -22785,6 +23207,13 @@ impl Vm {
 
 
     pub(crate) fn do_call_block(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u32) -> Result<(), Trap> {
+        // TEMPORARY census (`RUBYRS_T2_FALLBACK_STATS=1`): same
+        // one-shot marker consume as `do_call` — reason 19 tags a
+        // tier-2 in-body BLOCK-form call that fell past the
+        // front-loaded block IC into the generic path below.
+        #[cfg(feature = "jit-native")]
+        let census_from_t2 =
+            self.t2_fb_stats.is_some() && std::mem::take(&mut self.t2_fb_from);
         let name = self.interner.resolve(name_id).clone();
         // Consume `bypass_visibility_once` at the dispatch boundary
         // — same reasoning as `do_call`. `do_call_block` itself
@@ -22815,6 +23244,21 @@ impl Vm {
         // runs exactly as before.
         if !no_recv && self.try_invoke_explicit_recv_block_cached(name_id, argc, cache_id)? {
             return Ok(());
+        }
+        // TEMPORARY census: the block-form IC declined (or the call is
+        // no_recv, which has no block IC today) — classify the shape.
+        // Stack here: [.., recv?, block, a1..aN].
+        #[cfg(feature = "jit-native")]
+        if census_from_t2 {
+            let shape = if no_recv {
+                12
+            } else {
+                match self.stack.len().checked_sub(argc + 2) {
+                    Some(i) => Self::t2_fb_shape(&self.stack[i]),
+                    None => 11,
+                }
+            };
+            self.t2_fb_record(19, name_id, shape, argc);
         }
         let split = self.stack.len() - argc;
         let args: Vec<Value> = self.stack.drain(split..).collect();
