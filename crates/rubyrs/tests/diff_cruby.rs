@@ -494,6 +494,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // invoke_block1's rest-only `|*a|` + single-Array auto-splat fast arms
 // (ADR 0037 block-frame residue) — must bind like the general path.
 #[test] fn block_binder_fast_arms() { run_diff("block_binder_fast_arms"); }
+// LITE-BLOCK battery (frameless block bodies, ADR 0037): capture writes
+// land in the original cells, break/next/nlr/$~/redo parity, escaped
+// procs, re-entrant recursion, mixed-tag bails.
+#[test] fn tier2_liteblock_battery() { run_diff("tier2_liteblock_battery"); }
 // define_method bodies: per-call params/body-locals over a shared outer
 // binding (the optional-default staleness fix).
 #[test] fn closure_define_method_binding() { run_diff("closure_define_method_binding"); }

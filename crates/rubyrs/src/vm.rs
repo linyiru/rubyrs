@@ -1052,6 +1052,11 @@ pub(crate) const JFLAG_TIER2_HAS: u8 = 16;
 /// second table probe. Cleared by the bail-streak breaker.
 #[cfg(feature = "jit-native")]
 pub(crate) const JFLAG_TIER2_LITE: u8 = 32;
+/// Set when the proto's tier-2 compile produced a LITE-BLOCK entry
+/// (`T2Proto::lite_blk_ptr`, ADR 0037 block-frame residue) — the block
+/// serve sites gate their frameless path on this dense byte before
+/// touching `t2_lite_blk_ptrs`.
+pub(crate) const JFLAG_TIER2_LITEBLK: u8 = 64;
 
 /// Tier-2 hotness threshold (ADR 0037 wave 2, compile-cost control): a
 /// proto's frame must be entered `BASE + PER_OP × body_ops` times before it
@@ -1122,6 +1127,12 @@ pub(crate) struct T2LitePending {
     pub(crate) self_w1: i64,
     pub(crate) resume_ip: usize,
     pub(crate) dc: Option<std::rc::Rc<crate::value::Class>>,
+    /// LITE-BLOCK caller: the suspended activation's BlockHandle id + 1
+    /// (0 = a method activation). A cascade drain pushes a BLOCK frame
+    /// (`push_lite_block_frame`) for such a record.
+    pub(crate) blk: i64,
+    /// The suspended block's own-region start (0 for methods).
+    pub(crate) ps: usize,
 }
 
 pub(crate) struct Vm {
@@ -1269,6 +1280,21 @@ pub(crate) struct Vm {
     /// `[2]` breaker kills.
     #[cfg(feature = "jit-native")]
     pub(crate) t2_lite_stats: [u64; 3],
+    /// LITE-BLOCK entries, dense by proto: `(entry, param_start, n_params)`.
+    /// The `param_start`/`n_params` copies double as the serve-site guard —
+    /// the invoking BlockHandle must match them exactly (paranoia against a
+    /// proto ever being shared across CreateBlock sites).
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_lite_blk_ptrs: Vec<Option<(crate::jit_tier2::T2LiteBlkFn, u16, u16)>>,
+    /// `RUBYRS_JIT_TIER2_NOLITEBLK`: disable lite-block SERVING (the
+    /// sibling still compiles) for controlled A/B.
+    #[cfg(feature = "jit-native")]
+    pub(crate) jit_tier2_noliteblk: bool,
+    /// Stats-gated LITE-BLOCK counters: [0] frameless entries,
+    /// [1] completed frameless (DONE). Materialize-bails land in
+    /// `t2_lite_stats[1]` like every lite materialize.
+    #[cfg(feature = "jit-native")]
+    pub(crate) t2_lite_blk_stats: [u64; 2],
     /// `RUBYRS_JIT_TIER2_NOLITE`: disable wave-4 frame-lite compilation and
     /// serving (reproduces the wave-3/5 tier) for controlled A/B.
     #[cfg(feature = "jit-native")]
@@ -2888,6 +2914,12 @@ impl Vm {
             #[cfg(feature = "jit-native")]
             t2_lite_stats: [0; 3],
             #[cfg(feature = "jit-native")]
+            t2_lite_blk_ptrs: Vec::new(),
+            #[cfg(feature = "jit-native")]
+            jit_tier2_noliteblk: std::env::var_os("RUBYRS_JIT_TIER2_NOLITEBLK").is_some(),
+            #[cfg(feature = "jit-native")]
+            t2_lite_blk_stats: [0; 2],
+            #[cfg(feature = "jit-native")]
             jit_tier2_nolite: std::env::var_os("RUBYRS_JIT_TIER2_NOLITE").is_some(),
             #[cfg(feature = "jit-native")]
             t2_lite_pending: Vec::new(),
@@ -3451,6 +3483,7 @@ impl Vm {
                 Some(p) => {
                     let entry = p.ptr;
                     let lite = p.lite_ptr;
+                    let lite_blk = p.lite_blk_ptr;
                     self.t2_protos.insert(pidx, p);
                     if self.t2_ptrs.len() <= pidx {
                         self.t2_ptrs.resize(pidx + 1, None);
@@ -3464,6 +3497,16 @@ impl Vm {
                         }
                         self.t2_lite_ptrs[pidx] = Some(lp);
                         self.jit_flags_set(pidx, JFLAG_TIER2_LITE);
+                    }
+                    // LITE-BLOCK entry: served by the block-invocation
+                    // sites (`invoke_block1`'s frameless arm) BEFORE the
+                    // block frame is built.
+                    if let Some(lbp) = lite_blk {
+                        if self.t2_lite_blk_ptrs.len() <= pidx {
+                            self.t2_lite_blk_ptrs.resize(pidx + 1, None);
+                        }
+                        self.t2_lite_blk_ptrs[pidx] = Some(lbp);
+                        self.jit_flags_set(pidx, JFLAG_TIER2_LITEBLK);
                     }
                     self.jit_flags_set(pidx, JFLAG_TIER2_HAS);
                     if self.jit_stats_on {
@@ -3577,6 +3620,46 @@ impl Vm {
         Ok(())
     }
 
+    /// LITE-BLOCK serve (ADR 0037 block-frame residue): run `pidx`'s
+    /// frameless BLOCK variant. The serve site (invoke_block1's frameless
+    /// arm) has already pushed the block's bound arg(s) onto the operand
+    /// stack (rooted; `n_pop = n_params` is baked into the entry) and
+    /// checked the handle against the baked call shape. `self_words`
+    /// borrows the handle's `self_val` (the handle outlives the frameless
+    /// window — no GC can run inside it). Same DONE/BAIL contract as
+    /// `t2_lite_run`; `defining_class` is `None` by block-frame
+    /// construction, so the hand-off slot stays empty.
+    #[cfg(feature = "jit-native")]
+    #[inline]
+    pub(crate) fn t2_lite_run_blk(
+        &mut self,
+        f: crate::jit_tier2::T2LiteBlkFn,
+        pidx: usize,
+        self_words: [i64; 2],
+        block_id: crate::value::ObjId,
+    ) {
+        self.t2_poll_flags = (self.fuel.is_some() || self.deadline_at.is_some()) as u8;
+        debug_assert!(self.t2_lite_pending.is_empty(), "ICE: lite-blk serve inside a lite chain");
+        if self.jit_stats_on {
+            self.t2_lite_blk_stats[0] += 1;
+        }
+        self.t2_depth += 1;
+        let status = f(self as *mut Vm, self_words[0], self_words[1], block_id.0 as i64);
+        self.t2_depth -= 1;
+        if status == crate::jit_tier2::T2_DONE {
+            if self.jit_stats_on {
+                self.t2_lite_blk_stats[1] += 1;
+                self.jstat_exec(pidx, 8, false);
+            }
+            if let Some(s) = self.t2_lite_streak.get_mut(pidx) {
+                *s = 0;
+            }
+            return;
+        }
+        debug_assert_eq!(status, crate::jit_tier2::T2_BAIL, "ICE: lite-blk status");
+        debug_assert!(self.t2_lite_dc.is_none(), "ICE: lite-blk bail left dc set");
+    }
+
     /// Breaker bookkeeping for a lite materialize-bail — called by
     /// `jit_tier2::lite_materialize_core` for the proto that materialized
     /// ITSELF (cascade-drained callers are not charged): bump the proto's
@@ -3598,8 +3681,12 @@ impl Vm {
                 *slot = None; // module stays alive in t2_protos
                 self.t2_lite_stats[2] += 1; // count actual kills once
             }
+            if let Some(slot @ Some(_)) = self.t2_lite_blk_ptrs.get_mut(pidx) {
+                *slot = None;
+                self.t2_lite_stats[2] += 1;
+            }
             if let Some(f) = self.jit_flags.get_mut(pidx) {
-                *f &= !JFLAG_TIER2_LITE;
+                *f &= !(JFLAG_TIER2_LITE | JFLAG_TIER2_LITEBLK);
             }
         }
     }
@@ -3777,6 +3864,12 @@ impl Vm {
             eprintln!(
                 "tier2 blocks invocations={} native_serves={} native_yield_serves={}",
                 self.t2_block_stats[0], self.t2_block_stats[1], self.t2_block_stats[2]
+            );
+        }
+        if self.t2_lite_blk_stats != [0; 2] {
+            eprintln!(
+                "tier2 lite_blk entries={} done={}",
+                self.t2_lite_blk_stats[0], self.t2_lite_blk_stats[1]
             );
         }
         if self.t2_lite_stats != [0; 3] {

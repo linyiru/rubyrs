@@ -16304,7 +16304,7 @@ impl Vm {
     /// each live invocation to own distinct scratch. Both fall back to
     /// `block_locals_from_captured` + a `(captured, param_start)`
     /// write-back.
-    fn block_frame_locals(
+    pub(crate) fn block_frame_locals(
         &mut self,
         captured: &Rc<RefCell<Vec<Value>>>,
         proto_idx: usize,
@@ -22512,6 +22512,7 @@ impl Vm {
                 // rest) or written by the proto's own emitted
                 // ops. `u16::MAX` skips the per-invocation reset.
                 block_body_local_start: u16::MAX,
+                block_shape: None,
                 n_optional_params: 0,
                 byte_literals: Vec::new(),
                 const_chains: Vec::new(),
@@ -22626,6 +22627,7 @@ impl Vm {
                 // rest) or written by the proto's own emitted
                 // ops. `u16::MAX` skips the per-invocation reset.
                 block_body_local_start: u16::MAX,
+                block_shape: None,
                 n_optional_params: 0,
                 byte_literals: Vec::new(),
                 const_chains: Vec::new(),
@@ -22766,7 +22768,7 @@ impl Vm {
     /// codegen.
     #[inline]
     #[allow(clippy::too_many_arguments)]
-    fn push_block_frame(
+    pub(crate) fn push_block_frame(
         &mut self,
         proto_idx: usize,
         block_cell: Rc<RefCell<Vec<Value>>>,
@@ -22806,7 +22808,15 @@ impl Vm {
     /// back to `invoke_block` — the fallback re-reads the block
     /// handle, which is fine for that rare shape. Locals setup and
     /// the Frame it pushes are byte-identical to the general path.
-    pub(crate) fn invoke_block1(&mut self, block_id: ObjId, arg: Value) -> Result<(), Trap> {
+    /// Returns `true` when the invocation was LITE-BLOCK-served (ADR 0037):
+    /// the block body ran frameless (value on the operand stack, frames
+    /// unchanged) or materialized its frame mid-body (`frame.ip` at the
+    /// resume op). Either way the caller must NOT run `t2_enter_block`
+    /// (the framed tier-2 entry always starts at op 0 — running it against
+    /// a completed caller frame or a mid-body materialized frame would
+    /// re-execute); its `dispatch_until` handles both shapes as-is.
+    /// `false` = the ordinary framed push happened.
+    pub(crate) fn invoke_block1(&mut self, block_id: ObjId, arg: Value) -> Result<bool, Trap> {
         let bp = self.block_prof_on;
         let bp_t0 = crate::vm::bp_now(bp);
         self.check_frames()?;
@@ -22816,6 +22826,38 @@ impl Vm {
              bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot, bh.lexical_cvar_class.clone(), bh.captured_is_method_scope, bh.captured_yield_block, bh.is_lambda)
         };
         let bp_t1 = crate::vm::bp_now(bp);
+        // LITE-BLOCK serve (ADR 0037 block-frame residue): run the block
+        // body frameless when its tier-2 lite-block sibling exists and the
+        // handle matches the baked call shape exactly (the same conditions
+        // under which the plain ib1 binder below would run, minus the
+        // frame). The bound arg is pushed onto the operand stack (rooted
+        // for the whole frameless window; `n_pop = n_params` is baked) —
+        // a 0-param block's arg is dropped here exactly like the plain
+        // binder never binding it.
+        #[cfg(feature = "jit-native")]
+        if self.jit_tier2_on
+            && !self.jit_tier2_noblock
+            && !self.jit_tier2_noliteblk
+            && self.jit_flags_get(proto_idx) & crate::vm::JFLAG_TIER2_LITEBLK != 0
+            && self.t2_depth < crate::vm::T2_MAX_NATIVE_DEPTH
+            && let Some(&Some((f, ps, np))) = self.t2_lite_blk_ptrs.get(proto_idx)
+            // np ≤ 1 ONLY: a 2-param entry pops two stack args — this
+            // 1-arg site is the AUTO-SPLAT shape for such a block and
+            // must keep the general binder.
+            && np <= 1
+            && param_start == ps
+            && n_params == np
+            && rest_slot.is_none()
+            && kw_rest_slot.is_none()
+            && (!bh_is_lambda || np == 1)
+        {
+            let sw = crate::jit_tier2::lite_self_words(&self_val);
+            if np == 1 {
+                self.stack.push(arg);
+            }
+            self.t2_lite_run_blk(f, proto_idx, sw, block_id);
+            return Ok(true);
+        }
         // A LAMBDA with any arity other than exactly one falls back so the
         // general path's strict positional-arity check raises CRuby's
         // ArgumentError (`[1].each(&->() {})` / `yield 1` to a 0-param
@@ -22888,7 +22930,7 @@ impl Vm {
                         p.t[4] += bp_t4 - bp_t3;
                         p.t[5] += bp_t5 - bp_t4;
                     }
-                    return Ok(());
+                    return Ok(false);
                 }
                 // (b) auto-splat: a single Array arg into a plain
                 // multi-param PROC block (`|a, b[, ...]|`) — bind the
@@ -22935,11 +22977,11 @@ impl Vm {
                         p.t[4] += bp_t4 - bp_t3;
                         p.t[5] += bp_t5 - bp_t4;
                     }
-                    return Ok(());
+                    return Ok(false);
                 }
             }
             if bp { self.block_prof.n[3] += 1; }
-            return self.invoke_block(block_id, vec![arg]);
+            return self.invoke_block(block_id, vec![arg]).map(|()| false);
         }
         let proto = &self.protos[proto_idx];
         let needed = proto.n_locals as usize;
@@ -22988,7 +23030,7 @@ impl Vm {
             p.t[4] += bp_t4 - bp_t3;
             p.t[5] += bp_t5 - bp_t4;
         }
-        Ok(())
+        Ok(false)
     }
 
     /// Two-positional-args twin of `invoke_block1`, for the
@@ -22999,7 +23041,9 @@ impl Vm {
     /// (Hash#each paid three allocations per pair). Anything else
     /// (rest / kw-rest / n_params != 2) falls back to the general
     /// path with the exact Vec the old call sites built.
-    pub(crate) fn invoke_block2(&mut self, block_id: ObjId, a: Value, b: Value) -> Result<(), Trap> {
+    /// Same lite-serve return contract as `invoke_block1` (`true` = served
+    /// frameless / mid-body materialized — skip `t2_enter_block`).
+    pub(crate) fn invoke_block2(&mut self, block_id: ObjId, a: Value, b: Value) -> Result<bool, Trap> {
         let bp = self.block_prof_on;
         let bp_t0 = crate::vm::bp_now(bp);
         self.check_frames()?;
@@ -23009,11 +23053,33 @@ impl Vm {
              bh.param_start, bh.n_params, bh.rest_slot, bh.kw_rest_slot, bh.lexical_cvar_class.clone(), bh.captured_is_method_scope, bh.captured_yield_block, bh.is_lambda)
         };
         let bp_t1 = crate::vm::bp_now(bp);
+        // LITE-BLOCK serve, 2-param twin of invoke_block1's arm (`|k, v|`
+        // iter drivers). Baked n_pop = 2; binding order matches the plain
+        // binder below (a then b).
+        #[cfg(feature = "jit-native")]
+        if self.jit_tier2_on
+            && !self.jit_tier2_noblock
+            && !self.jit_tier2_noliteblk
+            && self.jit_flags_get(proto_idx) & crate::vm::JFLAG_TIER2_LITEBLK != 0
+            && self.t2_depth < crate::vm::T2_MAX_NATIVE_DEPTH
+            && let Some(&Some((f, ps, np))) = self.t2_lite_blk_ptrs.get(proto_idx)
+            && np == 2
+            && param_start == ps
+            && n_params == 2
+            && rest_slot.is_none()
+            && kw_rest_slot.is_none()
+        {
+            let sw = crate::jit_tier2::lite_self_words(&self_val);
+            self.stack.push(a);
+            self.stack.push(b);
+            self.t2_lite_run_blk(f, proto_idx, sw, block_id);
+            return Ok(true);
+        }
         if rest_slot.is_some() || kw_rest_slot.is_some() || n_params != 2
             || !self.protos[proto_idx].block_kw_params.is_empty()
             || self.protos[proto_idx].block_param_slot.is_some() {
             if bp { self.block_prof.n[3] += 1; }
-            return self.invoke_block(block_id, vec![a, b]);
+            return self.invoke_block(block_id, vec![a, b]).map(|()| false);
         }
         let proto = &self.protos[proto_idx];
         let needed = proto.n_locals as usize;
@@ -23063,7 +23129,7 @@ impl Vm {
             let bp_t5 = crate::vm::bp_now(true);
             self.block_prof.t[5] += bp_t5 - bp_t4;
         }
-        Ok(())
+        Ok(false)
     }
 
     pub(crate) fn invoke_block(&mut self, block_id: ObjId, mut args: Vec<Value>) -> Result<(), Trap> {
@@ -26626,6 +26692,7 @@ impl Vm {
                 op_spans: vec![Span::ZERO; 2],
                 filename: "<attr_accessor>".into(),
                 block_body_local_start: u16::MAX,
+                block_shape: None,
                 n_optional_params: 0,
                 byte_literals: vec![],
                 const_chains: vec![],
@@ -26670,6 +26737,7 @@ impl Vm {
                 op_spans: vec![Span::ZERO; 4],
                 filename: "<attr_accessor>".into(),
                 block_body_local_start: u16::MAX,
+                block_shape: None,
                 n_optional_params: 0,
                 byte_literals: vec![],
                 const_chains: vec![],
@@ -26797,6 +26865,7 @@ impl Vm {
             op_spans: vec![Span::ZERO; 4],
             filename: "<primitive-alias>".into(),
             block_body_local_start: u16::MAX,
+                block_shape: None,
                 n_optional_params: 0,
             byte_literals: vec![],
             const_chains: vec![],
@@ -26993,6 +27062,7 @@ impl Vm {
             op_spans: vec![Span::ZERO; 3],
             filename: "<kernel-alias>".into(),
             block_body_local_start: u16::MAX,
+                block_shape: None,
                 n_optional_params: 0,
             byte_literals: vec![],
             const_chains: vec![],
@@ -27162,6 +27232,7 @@ impl Vm {
             op_spans: vec![Span::ZERO; 2],
             filename: "<lifecycle-noop>".into(),
             block_body_local_start: u16::MAX,
+                block_shape: None,
                 n_optional_params: 0,
             byte_literals: vec![],
             const_chains: vec![],

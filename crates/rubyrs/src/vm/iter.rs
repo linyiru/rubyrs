@@ -192,10 +192,14 @@ impl Vm {
         if self.fiber_yield_pending.is_some() {
             return Ok(BlockStep::Value(Value::Nil));
         }
-        self.invoke_block2(block, a, b)?;
-        // TIER-2 wave 5: see `step_block`.
+        let served = self.invoke_block2(block, a, b)?;
+        // TIER-2 wave 5: see `step_block`; skipped on a lite-block serve.
         #[cfg(feature = "jit-native")]
-        self.t2_enter_block(false)?;
+        if !served {
+            self.t2_enter_block(false)?;
+        }
+        #[cfg(not(feature = "jit-native"))]
+        let _ = served;
         self.dispatch_until(pre_frames)?;
         if self.method_return.is_some() {
             return Ok(BlockStep::MethodReturn);
@@ -230,10 +234,16 @@ impl Vm {
         if let Some(r) = self.try_native_block1(block, &arg) {
             return Ok(BlockStep::Value(Value::Int(r)));
         }
-        self.invoke_block1(block, arg)?;
-        // TIER-2 wave 5: see `step_block`.
+        let served = self.invoke_block1(block, arg)?;
+        // TIER-2 wave 5: see `step_block`. Skipped when the invocation was
+        // LITE-BLOCK-served (frameless or mid-body materialized — the
+        // framed tier-2 entry always starts at op 0).
         #[cfg(feature = "jit-native")]
-        self.t2_enter_block(false)?;
+        if !served {
+            self.t2_enter_block(false)?;
+        }
+        #[cfg(not(feature = "jit-native"))]
+        let _ = served;
         self.dispatch_until(pre_frames)?;
         if self.method_return.is_some() {
             return Ok(BlockStep::MethodReturn);

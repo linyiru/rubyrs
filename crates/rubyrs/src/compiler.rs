@@ -1470,6 +1470,7 @@ impl ProtoBuilder {
             // this via the dedicated setter on the resulting Proto.
             block_body_local_start: u16::MAX,
             n_optional_params: 0,
+            block_shape: None,
             byte_literals: self.byte_literals,
             const_chains: self.const_chains,
             lexical_scope,
@@ -3276,6 +3277,12 @@ pub(crate) fn compile_block(
     if !block_kw_params.is_empty()
         && let Some(p) = protos.last_mut() {
         p.block_kw_params = block_kw_params;
+    }
+    // ADR 0037 lite blocks: stamp the call-interface constants on the
+    // block Proto so tier-2 admission/codegen can classify slots without
+    // a BlockHandle in hand (see Proto::block_shape).
+    if let Some(p) = protos.last_mut() {
+        p.block_shape = Some((param_start, n_params, rest_slot != u16::MAX, kw_rest_slot != u16::MAX));
     }
     if parent.n_locals < block_n_locals {
         parent.n_locals = block_n_locals;

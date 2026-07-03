@@ -6304,16 +6304,23 @@ impl Vm {
         let yguard = crate::vm::YieldDepthGuard::enter(self)?;
         yguard.vm.frames[yielding_idx].pending_yield = true;
 
-        // Push block frame + drive to completion.
+        // Push block frame + drive to completion. `served` = the 1-arg
+        // shape was LITE-BLOCK-served (frameless / mid-body materialized)
+        // — the t2_enter_block hook below must be skipped for it (the
+        // framed entry starts at op 0); dispatch_until handles both
+        // serve outcomes as-is.
         let invoked = match yargs {
             YArgs::One(a) => yguard.vm.invoke_block1(block, a),
             YArgs::Two(a, b) => yguard.vm.invoke_block2(block, a, b),
-            YArgs::Many(args) => yguard.vm.invoke_block(block, args),
+            YArgs::Many(args) => yguard.vm.invoke_block(block, args).map(|()| false),
         };
-        if let Err(trap) = invoked {
-            yguard.vm.frames[yielding_idx].pending_yield = false;
-            return Err(trap);
-        }
+        let served = match invoked {
+            Ok(s) => s,
+            Err(trap) => {
+                yguard.vm.frames[yielding_idx].pending_yield = false;
+                return Err(trap);
+            }
+        };
         // TIER-2 wave 5 (ADR 0037): run the just-pushed block frame
         // natively when compiled — the native→native yield when the
         // caller is a compiled method (its generic Yield helper lands
@@ -6324,12 +6331,14 @@ impl Vm {
         // the dispatch_until error path's cleanup (the native run may
         // have consumed frames, so bounds-check the yielding index).
         #[cfg(feature = "jit-native")]
-        if let Err(trap) = yguard.vm.t2_enter_block(true) {
+        if !served && let Err(trap) = yguard.vm.t2_enter_block(true) {
             if yielding_idx < yguard.vm.frames.len() {
                 yguard.vm.frames[yielding_idx].pending_yield = false;
             }
             return Err(trap);
         }
+        #[cfg(not(feature = "jit-native"))]
+        let _ = served;
         if let Err(trap) = yguard.vm.dispatch_until(pre_frames) {
             // Block raised; clear pending_yield and
             // propagate so rescue can catch.

@@ -106,6 +106,18 @@ pub(crate) struct T2Proto {
     /// bails — a mode switch, never a re-execution. See `emit_body`'s lite
     /// entry + `t2_lite_materialize`.
     pub(crate) lite_ptr: Option<(T2LiteFn, u16)>,
+    /// LITE-BLOCK entry (`(vm, self_w0, self_w1, block_id) -> status`) plus
+    /// the baked `(param_start, n_params)`, when the body passed the
+    /// lite-block admission (`t2_admit_lite_block`). Runs a BLOCK body
+    /// without pushing a block frame: the site pushes the bound arg(s) onto
+    /// the operand stack (rooted), the own region (params + body locals)
+    /// lives in a native spill slot, and captured-outer slot accesses
+    /// (`< param_start`) route through the canonical binding cells via the
+    /// `t2_lite_blk_outer_*` helpers — exactly where a frame's
+    /// `outer_cell_for` routing would land them. Any unservable edge
+    /// materializes the real BLOCK frame (share/copy decision + routing by
+    /// the interpreter's own `block_frame_locals`) and BAILs.
+    pub(crate) lite_blk_ptr: Option<(T2LiteBlkFn, u16, u16)>,
 }
 
 /// Frame-lite entry ABI (wave 4): `(vm, self_w0, self_w1, n_pop) -> status`.
@@ -120,6 +132,26 @@ pub(crate) struct T2Proto {
 /// `frame.ip` at the resume op) and the caller continues it exactly like
 /// any freshly pushed frame.
 pub(crate) type T2LiteFn = extern "C" fn(*mut crate::vm::Vm, i64, i64, i64) -> i64;
+
+/// LITE-BLOCK entry ABI: `(vm, self_w0, self_w1, block_id) -> status`.
+/// `self_w0/w1` borrow the BlockHandle's `self_val` (the handle stays live
+/// for the whole frameless window — no GC can run); `block_id` is the
+/// handle's heap id, used by the outer-slot helpers and the block-frame
+/// materialize. The block's `n_params` bound args are the operand-stack top
+/// (pushed by the serve site; `n_pop = n_params` is baked). Same DONE/BAIL
+/// contract as `T2LiteFn`.
+pub(crate) type T2LiteBlkFn = extern "C" fn(*mut crate::vm::Vm, i64, i64, i64) -> i64;
+
+/// Which frameless variant `emit_body` is emitting (`Off` = the framed
+/// tier-2 body).
+#[derive(Clone, Copy)]
+enum LiteMode {
+    Off,
+    /// Wave-4 method frame-lite: baked plain-fixed argc.
+    Method(u16),
+    /// Lite-block: baked `(param_start, n_params)`.
+    Block(u16, u16),
+}
 
 /// Compile-environment snapshot the serving site passes to `compile_tier2`
 /// (values that live on the Vm and can't be reached from a bare `&Proto`).
@@ -748,6 +780,41 @@ unsafe extern "C" fn t2_lite_materialize(
         slot,
         self_w0,
         self_w1,
+        0,
+        0,
+    );
+}
+
+/// LITE-BLOCK twin of `t2_lite_materialize`: the bail edge of a frameless
+/// BLOCK body. No self words (the handle carries `self_val`); `blk` is the
+/// BlockHandle id + 1, `ps` the own-region start.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn t2_lite_materialize_blk(
+    vm: *mut crate::vm::Vm,
+    pidx: i64,
+    ip: i64,
+    argc: i64,
+    n_locals: i64,
+    n_pop: i64,
+    trunc: i64,
+    slot: *const i64,
+    blk: i64,
+    ps: i64,
+) {
+    let vm = unsafe { &mut *vm };
+    lite_materialize_core(
+        vm,
+        pidx as usize,
+        ip as usize,
+        argc as usize,
+        n_locals as usize,
+        n_pop as usize,
+        trunc as usize,
+        slot,
+        0,
+        0,
+        blk,
+        ps as usize,
     );
 }
 
@@ -769,25 +836,41 @@ fn lite_materialize_core(
     slot: *const i64,
     self_w0: i64,
     self_w1: i64,
+    blk: i64,
+    ps: usize,
 ) {
     if !vm.t2_lite_pending.is_empty() {
         let recs = std::mem::take(&mut vm.t2_lite_pending);
         let mut removed = 0usize;
         for r in recs {
             unsafe {
-                push_lite_frame(
-                    vm,
-                    r.pidx,
-                    r.resume_ip,
-                    r.argc,
-                    r.n_locals,
-                    r.n_pop,
-                    r.trunc - removed,
-                    r.slot,
-                    r.self_w0,
-                    r.self_w1,
-                    r.dc,
-                );
+                if r.blk != 0 {
+                    push_lite_block_frame(
+                        vm,
+                        crate::value::ObjId((r.blk - 1) as u32),
+                        r.pidx,
+                        r.resume_ip,
+                        r.n_locals,
+                        r.n_pop,
+                        r.trunc - removed,
+                        r.slot,
+                        r.ps,
+                    );
+                } else {
+                    push_lite_frame(
+                        vm,
+                        r.pidx,
+                        r.resume_ip,
+                        r.argc,
+                        r.n_locals,
+                        r.n_pop,
+                        r.trunc - removed,
+                        r.slot,
+                        r.self_w0,
+                        r.self_w1,
+                        r.dc,
+                    );
+                }
             }
             removed += r.n_pop;
             if vm.jit_stats_on {
@@ -798,9 +881,23 @@ fn lite_materialize_core(
     }
     let dc = vm.t2_lite_dc.take();
     unsafe {
-        push_lite_frame(
-            vm, pidx, ip, argc, n_locals, n_pop, trunc, slot, self_w0, self_w1, dc,
-        );
+        if blk != 0 {
+            push_lite_block_frame(
+                vm,
+                crate::value::ObjId((blk - 1) as u32),
+                pidx,
+                ip,
+                n_locals,
+                n_pop,
+                trunc,
+                slot,
+                ps,
+            );
+        } else {
+            push_lite_frame(
+                vm, pidx, ip, argc, n_locals, n_pop, trunc, slot, self_w0, self_w1, dc,
+            );
+        }
     }
     if vm.jit_stats_on {
         vm.t2_lite_stats[1] += 1;
@@ -886,6 +983,75 @@ unsafe fn push_lite_frame(
         outer_rest: None,
         captured_yield_block: None,
     });
+}
+
+/// Push ONE deferred LITE-BLOCK frame — the block-frame push the serve site
+/// deferred, executed with the current native state. The share/copy locals
+/// decision, capture routing, and writeback identity all come from the
+/// interpreter's own `block_frame_locals`, so the pushed frame is
+/// indistinguishable from `invoke_block1`'s: the cell's own region
+/// `[param_start, n_locals)` is overwritten from the native spill
+/// (ownership accounting as in `push_lite_frame`: a non-trivial spill word
+/// is the untouched borrow of the bound arg's stack slot, which is
+/// forgotten below — outer slots `< param_start` were never spilled, their
+/// reads/writes routed through the canonical cells all along).
+#[allow(clippy::too_many_arguments)]
+unsafe fn push_lite_block_frame(
+    vm: &mut crate::vm::Vm,
+    block_id: crate::value::ObjId,
+    pidx: usize,
+    ip: usize,
+    n_locals: usize,
+    n_pop: usize,
+    trunc: usize,
+    slot: *const i64,
+    ps: usize,
+) {
+    let (captured, self_val, lexical_cvar_class, cim, cyb, is_lambda) = {
+        let bh = vm.heap.block(block_id);
+        (
+            bh.captured.clone(),
+            bh.self_val.clone(),
+            bh.lexical_cvar_class.clone(),
+            bh.captured_is_method_scope,
+            bh.captured_yield_block,
+            bh.is_lambda,
+        )
+    };
+    let (cell, writeback, routing) =
+        vm.block_frame_locals(&captured, pidx, n_locals, ps as u16, cim, block_id);
+    {
+        let mut locals = cell.borrow_mut();
+        debug_assert!(locals.len() >= n_locals, "ICE: lite block cell size");
+        for s in ps..n_locals {
+            let w0 = unsafe { slot.add(s * 2).read() };
+            let w1 = unsafe { slot.add(s * 2 + 1).read() };
+            locals[s] = unsafe { value_from_words([w0, w1]) };
+        }
+    }
+    // Remove the bound arg slots [trunc, trunc + n_pop) WITHOUT dropping
+    // (their ownership moved into the cell above); flushed temporaries
+    // above shift down and become the frame's operand entries.
+    let l = vm.stack.len();
+    debug_assert!(l >= trunc + n_pop, "ICE: lite block materialize stack shape");
+    unsafe {
+        let p = vm.stack.as_mut_ptr();
+        std::ptr::copy(p.add(trunc + n_pop), p.add(trunc), l - trunc - n_pop);
+        vm.stack.set_len(l - n_pop);
+    }
+    vm.push_block_frame(
+        pidx,
+        cell,
+        self_val,
+        lexical_cvar_class,
+        is_lambda,
+        writeback,
+        routing,
+        cyb,
+    );
+    let f = vm.frames.last_mut().expect("ICE: just pushed");
+    f.ip = ip;
+    f.base_sp = trunc;
 }
 
 /// Frame-lite `Op::Return` with the return value in registers (virtual,
@@ -1018,6 +1184,99 @@ pub(crate) fn lite_self_words(v: &Value) -> [i64; 2] {
     value_words(v)
 }
 
+/// LITE-BLOCK captured-outer slot READ (`slot < param_start`): route to the
+/// canonical binding cell — the handle's `captured` for
+/// `slot >= creator_start`, the ancestor chain below that (exactly where a
+/// frame's `outer_cell_for` routing lands, for BOTH the share-direct and
+/// copy shapes: `captured` is canonical for its region in each). The value
+/// is CLONED onto the real operand stack (an `Rc`/id copy — no GC
+/// allocation, no raise; a missing slot reads Nil like the interpreter's
+/// defensive arm). Returns 0 (always serves).
+unsafe extern "C" fn t2_lite_blk_outer_get(
+    vm: *mut crate::vm::Vm,
+    blkid: i64,
+    slot: i64,
+) -> i64 {
+    let vm = unsafe { &mut *vm };
+    let slot = slot as usize;
+    let v = {
+        let bh = vm.heap.block(crate::value::ObjId(blkid as u32));
+        let cell = if slot >= bh.creator_start as usize {
+            &bh.captured
+        } else {
+            match &bh.outer_chain {
+                Some(chain) => crate::value::chain_owner_cell(chain, slot),
+                None => &bh.captured, // creator_start == 0 by construction
+            }
+        };
+        let b = cell.borrow();
+        b.get(slot).cloned().unwrap_or(Value::Nil)
+    };
+    vm.stack.push(v);
+    0
+}
+
+/// LITE-BLOCK captured-outer slot READ into registers (via `out`, a
+/// scratch slot): a BORROWING word copy of the cell's current value, for
+/// the fused-operand lowerings (BinOpLocalLocal) whose guards must run
+/// with NO stack effect so a guard-fail can materialize at the op
+/// boundary and let the interpreter re-run the whole fused op. The words
+/// are only ever consumed under an Int-tag guard or discarded — never
+/// treated as owned. Effect-free; always serves.
+unsafe extern "C" fn t2_lite_blk_outer_read(
+    vm: *mut crate::vm::Vm,
+    blkid: i64,
+    slot: i64,
+    out: *mut i64,
+) {
+    let vm = unsafe { &mut *vm };
+    let slot = slot as usize;
+    let bh = vm.heap.block(crate::value::ObjId(blkid as u32));
+    let cell = if slot >= bh.creator_start as usize {
+        &bh.captured
+    } else {
+        match &bh.outer_chain {
+            Some(chain) => crate::value::chain_owner_cell(chain, slot),
+            None => &bh.captured,
+        }
+    };
+    let b = cell.borrow();
+    let w = match b.get(slot) {
+        Some(v) => value_words(v),
+        None => value_words(&Value::Nil),
+    };
+    unsafe {
+        out.write(w[0]);
+        out.add(1).write(w[1]);
+    }
+}
+
+/// LITE-BLOCK captured-outer slot WRITE: pops the (owned) value off the
+/// real operand stack and stores it through the same canonical-cell routing
+/// as the read helper (`cell_store` grows the cell defensively — a Rust
+/// alloc, no GC). Never fails.
+unsafe extern "C" fn t2_lite_blk_outer_set(
+    vm: *mut crate::vm::Vm,
+    blkid: i64,
+    slot: i64,
+) {
+    let vm = unsafe { &mut *vm };
+    let slot = slot as usize;
+    let v = vm.stack.pop().expect("ICE: lite blk outer set with empty stack");
+    let cell = {
+        let bh = vm.heap.block(crate::value::ObjId(blkid as u32));
+        if slot >= bh.creator_start as usize {
+            bh.captured.clone()
+        } else {
+            match &bh.outer_chain {
+                Some(chain) => crate::value::chain_owner_cell(chain, slot).clone(),
+                None => bh.captured.clone(),
+            }
+        }
+    };
+    crate::vm::cell_store(&cell, slot, v);
+}
+
 // ---------------------------------------------------------------------------
 // LITE t2_call (ADR 0037 wave-4 follow-on): call ops inside FRAMELESS bodies.
 //
@@ -1063,11 +1322,12 @@ pub(crate) fn lite_self_words(v: &Value) -> [i64; 2] {
 // ---------------------------------------------------------------------------
 
 /// Caller-context view for the lite call/const helpers. The native entry of
-/// a call-bearing lite body fills a 5-word stack slot
-/// `[locals_slot_addr, trunc, n_pop, self_w0, self_w1]` (the runtime
-/// values); `pidx`/`argc`/`n_locals` are compile-time constants packed into
-/// the helper's `meta` immediate (low 32 = pidx, bits 32..40 = n_locals,
-/// bits 40..44 = argc).
+/// a call-bearing lite body fills a 6-word stack slot
+/// `[locals_slot_addr, trunc, n_pop, self_w0, self_w1, blk]` (the runtime
+/// values; `blk` = the BlockHandle id + 1 for a LITE-BLOCK caller, 0 for a
+/// method caller); `pidx`/`argc`/`n_locals`/`param_start` are compile-time
+/// constants packed into the helper's `meta` immediate (low 32 = pidx,
+/// bits 32..40 = n_locals, bits 40..44 = argc, bits 44..60 = param_start).
 struct LiteCtx {
     slot: *const i64,
     trunc: usize,
@@ -1077,6 +1337,10 @@ struct LiteCtx {
     pidx: usize,
     argc: usize,
     n_locals: usize,
+    /// BlockHandle id + 1 for a lite-BLOCK activation; 0 = method.
+    blk: i64,
+    /// The block's own-region start (0 for methods).
+    ps: usize,
 }
 
 #[inline]
@@ -1091,6 +1355,8 @@ unsafe fn lite_ctx(ctx: *const i64, meta: i64) -> LiteCtx {
         pidx: (m & 0xffff_ffff) as usize,
         n_locals: ((m >> 32) & 0xff) as usize,
         argc: ((m >> 40) & 0xf) as usize,
+        blk: unsafe { ctx.add(5).read() },
+        ps: ((m >> 44) & 0xffff) as usize,
     }
 }
 
@@ -1113,6 +1379,7 @@ fn lite_mat_here(
     }
     lite_materialize_core(
         vm, c.pidx, ip, c.argc, c.n_locals, c.n_pop, c.trunc, c.slot, c.self_w0, c.self_w1,
+        c.blk, c.ps,
     );
     if vm.jit_stats_on {
         vm.t2_lite_call_stats[1] += 1;
@@ -1392,6 +1659,8 @@ fn lite_serve_m(
             self_w1: c.self_w1,
             resume_ip: ip + 1,
             dc: caller_dc,
+            blk: c.blk,
+            ps: c.ps,
         });
         vm.t2_lite_dc = m.defining_class.as_ref().and_then(|w| w.upgrade());
         let pend_depth = vm.t2_lite_pending.len();
@@ -2395,6 +2664,109 @@ pub(crate) fn t2_admit_lite(proto: &Proto, ctx: &T2Ctx) -> Result<u16, String> {
     Ok(argc)
 }
 
+/// LITE-BLOCK admission (ADR 0037 block-frame residue): a BLOCK body may run
+/// with no block frame at all. On top of the wave-4 envelope, the block
+/// wrinkles:
+///
+/// - plain call interface only: `n_params ≤ 1`, no rest / kw-rest / named-kw
+///   / `&param`, no optionals, and no gap slots between the params and the
+///   body-local region (`block_body_local_start == param_start + n_params`)
+///   so the entry's Nil-init mirrors the interpreter binder exactly;
+/// - own-region ops get the wave-3/4 lowering against the native spill;
+///   captured-outer slots (`< param_start`) are admitted for plain
+///   `LoadLocal`/`StoreLocal` (served by the `t2_lite_blk_outer_*`
+///   cell-routing helpers) but NOT for the slot-fused forms
+///   (`IncLocal`/`BinOpLocalLocal`/`LoadLocalCall`) whose lowerings read
+///   the spill directly;
+/// - `next` is the block's `Op::Return` (a frameless return);
+///   `break`/`return`-from-block (`Op::Break`/`Op::ReturnMethod`) already
+///   decline `t2_admit`, so no lite body can contain them — those shapes
+///   stay interpreted end-to-end;
+/// - `creates_block` declines (an inner capture needs a real cell), which
+///   also keeps every own-region slot un-escaped while it lives in the
+///   spill.
+///
+/// Returns the baked `(param_start, n_params)`.
+pub(crate) fn t2_admit_lite_block(proto: &Proto, ctx: &T2Ctx) -> Result<(u16, u16), String> {
+    let Some((ps, np, has_rest, has_kwrest)) = proto.block_shape else {
+        return Err("no block shape".into());
+    };
+    if proto.creates_block {
+        return Err("creates_block".into());
+    }
+    if has_rest || has_kwrest || np > 2 {
+        return Err("non-plain block params".into());
+    }
+    if !proto.block_kw_params.is_empty()
+        || proto.block_param_slot.is_some()
+        || proto.n_optional_params != 0
+    {
+        return Err("kw/block/optional params".into());
+    }
+    if proto.block_body_local_start != ps + np {
+        return Err("param/body gap".into());
+    }
+    if proto.n_locals < ps + np {
+        return Err("slot layout".into());
+    }
+    // Own region within the wave-4 cap; the whole spill (which is sized
+    // n_locals and includes the never-touched outer prefix) within the
+    // meta encoding's 8-bit n_locals field.
+    if proto.n_locals - ps > LITE_MAX_LOCALS || proto.n_locals > 200 {
+        return Err("locals cap".into());
+    }
+    let n = proto.code.len();
+    if n == 0 || n > LITE_MAX_OPS {
+        return Err("size cap".into());
+    }
+    let nl = proto.n_locals;
+    for (i, op) in proto.code.iter().enumerate() {
+        match op {
+            Op::LoadConstInt(_)
+            | Op::LoadConstFloat(_)
+            | Op::LoadNil
+            | Op::LoadTrue
+            | Op::LoadFalse
+            | Op::LoadSymbol(_)
+            | Op::LoadSelf
+            | Op::LoadIvar(..)
+            | Op::StoreIvar(..)
+            | Op::Dup
+            | Op::Pop
+            | Op::Swap
+            | Op::Return => {}
+            // Plain local reads/writes: own-region slots lower against the
+            // spill; outer slots route through the cell helpers.
+            Op::LoadLocal(s) | Op::StoreLocal(s) if *s < nl => {}
+            // Slot-fused forms read the spill directly — own region only.
+            Op::IncLocal(s) | Op::IncLocalNoPush(s) if *s >= ps && *s < nl => {}
+            Op::BinOp(k) | Op::BinOpInt(k, _) if binop_inlineable(*k) => {}
+            // Fused two-slot arithmetic: outer operands are served by the
+            // effect-free register read (`t2_lite_blk_outer_read`), so any
+            // in-range slot pair admits.
+            Op::BinOpLocalLocal(k, a, b)
+                if binop_inlineable(*k) && *a < nl && *b < nl => {}
+            Op::CaseEqLit(lit, _) if case_lit_kind(lit).is_some() => {}
+            Op::Jump(off) => {
+                if jump_target(i, *off) >= n {
+                    return Err(format!("jump target out of range at {}", i));
+                }
+            }
+            Op::JumpIfFalse(off) => {
+                if jump_target(i, *off) >= n || i + 1 >= n {
+                    return Err(format!("cond target out of range at {}", i));
+                }
+            }
+            Op::Call(name, 0, _) if name.0 == ctx.sym_nil_q => {}
+            Op::Call(_, a, _) | Op::CallNoRecv(_, a, _) if (*a as u16) <= LITE_MAX_ARGC => {}
+            Op::LoadLocalCall(s, _, _) if *s >= ps && *s < nl => {}
+            Op::LoadConstChain(_) => {}
+            other => return Err(format!("op {:?} at {}", other, i)),
+        }
+    }
+    Ok((ps, np))
+}
+
 /// Ops that end a straight-line segment: their `step` arm may retarget
 /// `frame.ip` (branches) or pop the frame (`Return`). Everything else in an
 /// admitted body advances `ip` by exactly 1.
@@ -2487,6 +2859,11 @@ struct HelperRefs {
     yield_: cranelift_codegen::ir::FuncRef,
     // Wave-4 frame-lite family.
     lite_mat: cranelift_codegen::ir::FuncRef,
+    // Lite-block family (ADR 0037 block-frame residue).
+    lite_mat_blk: cranelift_codegen::ir::FuncRef,
+    blk_outer_get: cranelift_codegen::ir::FuncRef,
+    blk_outer_read: cranelift_codegen::ir::FuncRef,
+    blk_outer_set: cranelift_codegen::ir::FuncRef,
     lite_ret_v: cranelift_codegen::ir::FuncRef,
     lite_ret_s: cranelift_codegen::ir::FuncRef,
     lite_ivar_get: cranelift_codegen::ir::FuncRef,
@@ -2567,6 +2944,15 @@ struct Cg<'a> {
     lite_n_pop: Option<ClValue>,
     /// Baked plain-fixed argc (lite mode only).
     lite_argc: u16,
+    /// LITE-BLOCK mode: this lite body is a BLOCK proto — the entry's 4th
+    /// param is the BlockHandle id (not n_pop), outer slots
+    /// (`< lite_ps`) route through the `t2_lite_blk_outer_*` helpers, and
+    /// the bail edge materializes a BLOCK frame.
+    lite_blk: bool,
+    /// The block's own-region start (`param_start`; 0 in method mode).
+    lite_ps: u16,
+    /// The runtime block_id entry parameter (lite-block mode only).
+    lite_blkid: Option<ClValue>,
     /// Per-backward-target poll blocks (shared: entry state is canonical),
     /// created on demand and filled after the main emission loop.
     poll_blocks: crate::intern::FxHashMap<usize, Block>,
@@ -2918,6 +3304,19 @@ impl<'a> Cg<'a> {
         let n_pop = self.lite_n_pop.expect("lite n_pop");
         let trunc = self.lite_trunc.expect("lite trunc");
         let slot = self.lite_slot.expect("lite slot");
+        if self.lite_blk {
+            // LITE-BLOCK: the handle carries self; pass blk (id + 1) + ps.
+            let blkid = self.lite_blkid.expect("lite blkid");
+            let blk1 = fb.ins().iadd_imm(blkid, 1);
+            let psc = fb.ins().iconst(types::I64, self.lite_ps as i64);
+            fb.ins().call(
+                self.h.lite_mat_blk,
+                &[self.vm, pidxc, ipc, argcc, nlc, n_pop, trunc, slot, blk1, psc],
+            );
+            let st = fb.ins().iconst(types::I64, T2_BAIL);
+            fb.ins().return_(&[st]);
+            return;
+        }
         let (sw0, sw1) = (
             self.self_w0.expect("lite self regs"),
             self.self_w1.expect("lite self regs"),
@@ -2953,7 +3352,8 @@ impl<'a> Cg<'a> {
         self.flush(fb);
         let meta = (self.pidx as u64)
             | ((self.cache.len() as u64) << 32)
-            | ((self.lite_argc as u64) << 40);
+            | ((self.lite_argc as u64) << 40)
+            | ((self.lite_ps as u64) << 44);
         let metac = fb.ins().iconst(types::I64, meta as i64);
         let mut call_args = vec![self.vm, ctx, metac];
         for &a in args {
@@ -3147,7 +3547,7 @@ fn emit_body(
     t2ctx: &T2Ctx,
     inline_on: bool,
     cacheable: bool,
-    lite_argc: Option<u16>,
+    lite_mode: LiteMode,
 ) -> bool {
     let tags = t2_tags();
     let entry = fb.create_block();
@@ -3161,7 +3561,15 @@ fn emit_body(
 
     fb.switch_to_block(entry);
     let vm = fb.block_params(entry)[0];
-    let lite = lite_argc.is_some();
+    let lite = !matches!(lite_mode, LiteMode::Off);
+    let lite_blk = matches!(lite_mode, LiteMode::Block(..));
+    // The entry's arg count: bound params for a block, plain argc for a
+    // method (n_pop additionally counts the recv slot at runtime there).
+    let (lite_ps, lite_np) = match lite_mode {
+        LiteMode::Off => (0u16, 0u16),
+        LiteMode::Method(a) => (0, a),
+        LiteMode::Block(ps, np) => (ps, np),
+    };
 
     let mut cg = Cg {
         ptr_ty,
@@ -3183,7 +3591,10 @@ fn emit_body(
         lite_ctx: None,
         lite_trunc: None,
         lite_n_pop: None,
-        lite_argc: lite_argc.unwrap_or(0),
+        lite_argc: lite_np,
+        lite_blk,
+        lite_ps,
+        lite_blkid: None,
         poll_blocks: crate::intern::FxHashMap::default(),
         vst: Vec::new(),
         cache: vec![None; proto.n_locals as usize],
@@ -3202,17 +3613,28 @@ fn emit_body(
         off_reopen: offset_of!(crate::vm::Vm, prim_reopen_mask) as i32,
     };
 
-    if let Some(argc) = lite_argc {
-        // FRAME-LITE entry: params are (vm, self_w0, self_w1, n_pop). The
-        // args are the operand stack's top `argc` slots — left IN PLACE
+    if lite {
+        // FRAME-LITE entry: params are (vm, self_w0, self_w1, n_pop) —
+        // lite-BLOCK entries carry the BlockHandle id in the 4th slot
+        // instead (their n_pop = n_params is a compile-time constant).
+        // The args are the operand stack's top slots — left IN PLACE
         // (rooted, owned by the stack until return/materialize); their raw
-        // words are copied into the native spill slot as borrowing views.
-        // Non-arg slots initialize to Nil, mirroring the interpreter's
-        // binder.
+        // words are copied into the native spill slot as borrowing views:
+        // method args at slots [0, argc), block args at
+        // [param_start, param_start + n_params). Non-arg OWN-region slots
+        // initialize to Nil, mirroring the interpreter's binder (a block's
+        // outer prefix `[0, param_start)` is never spilled — those slots
+        // route through the canonical cells).
         let params: Vec<ClValue> = fb.block_params(entry).to_vec();
-        let (sw0, sw1, n_pop) = (params[1], params[2], params[3]);
+        let (sw0, sw1) = (params[1], params[2]);
         cg.self_w0 = Some(sw0);
         cg.self_w1 = Some(sw1);
+        let n_pop = if lite_blk {
+            cg.lite_blkid = Some(params[3]);
+            fb.ins().iconst(types::I64, lite_np as i64)
+        } else {
+            params[3]
+        };
         cg.lite_n_pop = Some(n_pop);
         let ss = fb.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 32, 3));
         cg.scratch = Some(fb.ins().stack_addr(ptr_ty, ss, 0));
@@ -3227,6 +3649,8 @@ fn emit_body(
         let sp = cg.stack_ptr(fb);
         let len = cg.stack_len(fb);
         cg.lite_trunc = Some(fb.ins().isub(len, n_pop));
+        let argc = lite_np;
+        let arg_base = lite_ps as i32; // 0 in method mode
         if argc > 0 {
             // &stack[len] — args at negative offsets from it.
             let end_off = fb.ins().ishl_imm(len, 4);
@@ -3235,14 +3659,14 @@ fn emit_body(
                 let off = -16 * (argc as i32 - i);
                 let w0 = fb.ins().load(types::I64, fl(), sp_end, off);
                 let w1 = fb.ins().load(types::I64, fl(), sp_end, off + 8);
-                fb.ins().store(fl(), w0, lsa, i * 16);
-                fb.ins().store(fl(), w1, lsa, i * 16 + 8);
+                fb.ins().store(fl(), w0, lsa, (arg_base + i) * 16);
+                fb.ins().store(fl(), w1, lsa, (arg_base + i) * 16 + 8);
             }
         }
-        if (proto.n_locals as i32) > argc as i32 {
+        if (proto.n_locals as i32) > arg_base + argc as i32 {
             let nil0 = fb.ins().iconst(types::I64, tags.nil as i64);
             let zero = fb.ins().iconst(types::I64, 0);
-            for s in argc as i32..proto.n_locals as i32 {
+            for s in (arg_base + argc as i32)..proto.n_locals as i32 {
                 fb.ins().store(fl(), nil0, lsa, s * 16);
                 fb.ins().store(fl(), zero, lsa, s * 16 + 8);
             }
@@ -3250,9 +3674,11 @@ fn emit_body(
         // LITE t2_call caller-context slot: bodies containing admitted
         // call/const ops (the `nil?`-fusion Call doesn't count — its
         // empty-vst fallback keeps the wave-4 materialize path) get a
-        // 5-word slot the helpers read: [slot_addr, trunc, n_pop,
-        // self_w0, self_w1]. Filled ONCE here (the values are entry
-        // constants for the whole activation).
+        // 6-word slot the helpers read: [slot_addr, trunc, n_pop,
+        // self_w0, self_w1, blk]. Filled ONCE here (the values are entry
+        // constants for the whole activation). `blk` = block_id + 1 for a
+        // lite-block caller, 0 for a method — it routes the cascade's
+        // deferred push to the right frame shape.
         let has_ext = code.iter().any(|op| match op {
             Op::Call(name, _, _) => name.0 != t2ctx.sym_nil_q,
             Op::CallNoRecv(..) | Op::LoadLocalCall(..) | Op::LoadConstChain(_) => true,
@@ -3260,7 +3686,7 @@ fn emit_body(
         });
         if has_ext {
             let cslot =
-                fb.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 40, 3));
+                fb.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 48, 3));
             let ca = fb.ins().stack_addr(ptr_ty, cslot, 0);
             let trunc = cg.lite_trunc.expect("lite trunc");
             fb.ins().store(fl(), lsa, ca, 0);
@@ -3268,6 +3694,12 @@ fn emit_body(
             fb.ins().store(fl(), n_pop, ca, 16);
             fb.ins().store(fl(), sw0, ca, 24);
             fb.ins().store(fl(), sw1, ca, 32);
+            let blk = if let Some(blkid) = cg.lite_blkid {
+                fb.ins().iadd_imm(blkid, 1)
+            } else {
+                fb.ins().iconst(types::I64, 0)
+            };
+            fb.ins().store(fl(), blk, ca, 40);
             cg.lite_ctx = Some(ca);
         }
     } else if cg.inline_on {
@@ -3721,6 +4153,32 @@ fn emit_op(cg: &mut Cg, fb: &mut FunctionBuilder, i: usize) -> bool {
             cg.vst.push(VVal::raw(sw0, sw1));
             false
         }
+        // LITE-BLOCK captured-outer slot access (`s < param_start`): the
+        // slot lives in the canonical binding cell, not the native spill —
+        // route through the cell helpers. The read pushes a CLONE onto the
+        // real operand stack (an owned root; the vst is flushed first so
+        // stack order is exact); the write pops the (flushed) top into the
+        // cell. Neither can fail, raise, or GC-allocate; no SSA caching
+        // (own-region only, the wave-3 discipline).
+        Op::LoadLocal(s) if cg.lite_blk && s < cg.lite_ps => {
+            cg.flush(fb);
+            let blkid = cg.lite_blkid.expect("lite blkid");
+            let slotc = fb.ins().iconst(types::I64, s as i64);
+            fb.ins().call(cg.h.blk_outer_get, &[vm, blkid, slotc]);
+            cg.invalidate_mem();
+            false
+        }
+        Op::StoreLocal(s) if cg.lite_blk && s < cg.lite_ps => {
+            cg.flush(fb);
+            let blkid = cg.lite_blkid.expect("lite blkid");
+            let slotc = fb.ins().iconst(types::I64, s as i64);
+            fb.ins().call(cg.h.blk_outer_set, &[vm, blkid, slotc]);
+            cg.invalidate_mem();
+            // Outer slots are never SSA-cached, but clear defensively so a
+            // future lowering can't observe a stale pair.
+            cg.cache[s as usize] = None;
+            false
+        }
         Op::LoadLocal(s) if cg.cacheable && (s as usize) < cg.cache.len() => {
             if let Some((w0, w1)) = cg.cache[s as usize] {
                 cg.vst.push(VVal::raw(w0, w1));
@@ -4141,6 +4599,18 @@ fn emit_binop(
         }
         Some(BinRhs::Locals(a_slot, b_slot)) => {
             let read = |cg: &mut Cg, fb: &mut FunctionBuilder, s: u16| {
+                // LITE-BLOCK outer operand: an effect-free register read
+                // through the canonical cell (never cached — the cell is
+                // not the spill, and outer StoreLocal wouldn't refresh it).
+                if cg.lite_blk && s < cg.lite_ps {
+                    let blkid = cg.lite_blkid.expect("lite blkid");
+                    let out = cg.scratch.expect("lite scratch");
+                    let slotc = fb.ins().iconst(types::I64, s as i64);
+                    fb.ins().call(cg.h.blk_outer_read, &[cg.vm, blkid, slotc, out]);
+                    let w0 = fb.ins().load(types::I64, fl(), out, 0);
+                    let w1 = fb.ins().load(types::I64, fl(), out, 8);
+                    return (Operand { w0, w1, tag: None }, false);
+                }
                 if let Some((w0, w1)) = cg.cache[s as usize] {
                     (Operand { w0, w1, tag: None }, false)
                 } else {
@@ -4172,7 +4642,9 @@ fn emit_binop(
         if !cg.guard_tag(fb, &rhs, int_tag, &mut fail_b, &snap, i) {
             unreachable!("static tag mismatch handled above");
         }
-        // Both-Int certified: cache freshly-loaded local operands.
+        // Both-Int certified: cache freshly-loaded local operands
+        // (`l_fresh`/`r_fresh` are false for lite-block outer operands —
+        // their register reads never enter the cache).
         if let Some((a_slot, b_slot, l_fresh, r_fresh)) = cache_slots {
             if l_fresh {
                 cg.cache[a_slot as usize] = Some((lhs.w0, lhs.w1));
@@ -4362,6 +4834,10 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize, ctx: &T2Ctx) -> Opt
     builder.symbol("t2_call_norecv_block", t2_call_norecv_block as *const u8);
     builder.symbol("t2_yield", t2_yield as *const u8);
     builder.symbol("t2_lite_materialize", t2_lite_materialize as *const u8);
+    builder.symbol("t2_lite_materialize_blk", t2_lite_materialize_blk as *const u8);
+    builder.symbol("t2_lite_blk_outer_get", t2_lite_blk_outer_get as *const u8);
+    builder.symbol("t2_lite_blk_outer_read", t2_lite_blk_outer_read as *const u8);
+    builder.symbol("t2_lite_blk_outer_set", t2_lite_blk_outer_set as *const u8);
     builder.symbol("t2_lite_return_v", t2_lite_return_v as *const u8);
     builder.symbol("t2_lite_return_s", t2_lite_return_s as *const u8);
     builder.symbol("t2_lite_ivar_get", t2_lite_ivar_get as *const u8);
@@ -4381,23 +4857,43 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize, ctx: &T2Ctx) -> Opt
     let fid = module.declare_function("t2body", Linkage::Export, &sig).ok()?;
     // Wave-4 frame-lite sibling function (same module): admitted bodies get
     // a second, frameless entry `(vm, self_w0, self_w1, n_pop) -> status`.
-    let lite_argc = if inline_on && !ctx.nolite {
-        match t2_admit_lite(proto, ctx) {
-            Ok(a) => {
-                if dbg {
-                    eprintln!("t2-lite admit   {:<28} ({} ops, argc {})", proto.name, n, a);
+    // Block protos get the LITE-BLOCK sibling instead
+    // (`(vm, self_w0, self_w1, block_id) -> status`, ADR 0037 block-frame
+    // residue) — a proto is one or the other.
+    let lite_mode = if inline_on && !ctx.nolite {
+        if proto.block_shape.is_some() {
+            match t2_admit_lite_block(proto, ctx) {
+                Ok((ps, np)) => {
+                    if dbg {
+                        eprintln!("t2-liteblk admit   {:<28} ({} ops, ps {} np {})", proto.name, n, ps, np);
+                    }
+                    LiteMode::Block(ps, np)
                 }
-                Some(a)
+                Err(why) => {
+                    if dbg {
+                        eprintln!("t2-liteblk decline {:<28} ({} ops): {}", proto.name, n, why);
+                    }
+                    LiteMode::Off
+                }
             }
-            Err(why) => {
-                if dbg {
-                    eprintln!("t2-lite decline {:<28} ({} ops): {}", proto.name, n, why);
+        } else {
+            match t2_admit_lite(proto, ctx) {
+                Ok(a) => {
+                    if dbg {
+                        eprintln!("t2-lite admit   {:<28} ({} ops, argc {})", proto.name, n, a);
+                    }
+                    LiteMode::Method(a)
                 }
-                None
+                Err(why) => {
+                    if dbg {
+                        eprintln!("t2-lite decline {:<28} ({} ops): {}", proto.name, n, why);
+                    }
+                    LiteMode::Off
+                }
             }
         }
     } else {
-        None
+        LiteMode::Off
     };
     let mut lite_sig = module.make_signature();
     lite_sig.params.push(AbiParam::new(ptr_ty)); // vm
@@ -4405,7 +4901,7 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize, ctx: &T2Ctx) -> Opt
     lite_sig.params.push(AbiParam::new(types::I64)); // self_w1
     lite_sig.params.push(AbiParam::new(types::I64)); // n_pop
     lite_sig.returns.push(AbiParam::new(types::I64)); // status
-    let lite_fid = if lite_argc.is_some() {
+    let lite_fid = if !matches!(lite_mode, LiteMode::Off) {
         Some(module.declare_function("t2lite", Linkage::Export, &lite_sig).ok()?)
     } else {
         None
@@ -4457,6 +4953,10 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize, ctx: &T2Ctx) -> Opt
     let f_call_norecv_block = decl(&mut module, "t2_call_norecv_block", "iiii", true)?;
     let f_yield = decl(&mut module, "t2_yield", "ii", true)?;
     let f_lite_mat = decl(&mut module, "t2_lite_materialize", "iiiiiipii", false)?;
+    let f_lite_mat_blk = decl(&mut module, "t2_lite_materialize_blk", "iiiiiipii", false)?;
+    let f_blk_outer_get = decl(&mut module, "t2_lite_blk_outer_get", "ii", true)?;
+    let f_blk_outer_read = decl(&mut module, "t2_lite_blk_outer_read", "iip", false)?;
+    let f_blk_outer_set = decl(&mut module, "t2_lite_blk_outer_set", "ii", false)?;
     let f_lite_ret_v = decl(&mut module, "t2_lite_return_v", "iii", true)?;
     let f_lite_ret_s = decl(&mut module, "t2_lite_return_s", "i", true)?;
     let f_lite_ivar_get = decl(&mut module, "t2_lite_ivar_get", "iip", true)?;
@@ -4502,6 +5002,10 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize, ctx: &T2Ctx) -> Opt
             call_norecv_block: module.declare_func_in_func(f_call_norecv_block, func),
             yield_: module.declare_func_in_func(f_yield, func),
             lite_mat: module.declare_func_in_func(f_lite_mat, func),
+            lite_mat_blk: module.declare_func_in_func(f_lite_mat_blk, func),
+            blk_outer_get: module.declare_func_in_func(f_blk_outer_get, func),
+            blk_outer_read: module.declare_func_in_func(f_blk_outer_read, func),
+            blk_outer_set: module.declare_func_in_func(f_blk_outer_set, func),
             lite_ret_v: module.declare_func_in_func(f_lite_ret_v, func),
             lite_ret_s: module.declare_func_in_func(f_lite_ret_s, func),
             lite_ivar_get: module.declare_func_in_func(f_lite_ivar_get, func),
@@ -4519,7 +5023,7 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize, ctx: &T2Ctx) -> Opt
         let h = make_refs(&mut module, fb.func);
         let ok = emit_body(
             &mut fb, &h, proto, proto_idx, code, n, &leader, ptr_ty, ctx, inline_on, cacheable,
-            None,
+            LiteMode::Off,
         );
         if ok {
             fb.finalize();
@@ -4540,17 +5044,17 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize, ctx: &T2Ctx) -> Opt
     }
     module.clear_context(&mut clctx);
 
-    // Second pass: the frame-lite sibling. A lite failure never fails the
-    // whole compile — the framed body still ships.
+    // Second pass: the frame-lite / lite-block sibling. A lite failure
+    // never fails the whole compile — the framed body still ships.
     let mut lite_ok = false;
-    if let (Some(argc), Some(lfid)) = (lite_argc, lite_fid) {
+    if let (false, Some(lfid)) = (matches!(lite_mode, LiteMode::Off), lite_fid) {
         clctx.func.signature = lite_sig.clone();
         let emitted = {
             let mut fb = FunctionBuilder::new(&mut clctx.func, &mut fbctx);
             let h = make_refs(&mut module, fb.func);
             let ok = emit_body(
                 &mut fb, &h, proto, proto_idx, code, n, &leader, ptr_ty, ctx, true, true,
-                Some(argc),
+                lite_mode,
             );
             if ok {
                 fb.finalize();
@@ -4577,12 +5081,16 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize, ctx: &T2Ctx) -> Opt
     let ptr = unsafe {
         std::mem::transmute::<*const u8, extern "C" fn(*mut crate::vm::Vm) -> i64>(code_ptr)
     };
-    let lite_ptr = match (lite_ok, lite_argc, lite_fid) {
-        (true, Some(argc), Some(lfid)) => {
+    let (lite_ptr, lite_blk_ptr) = match (lite_ok, lite_mode, lite_fid) {
+        (true, LiteMode::Method(argc), Some(lfid)) => {
             let p = module.get_finalized_function(lfid);
-            Some((unsafe { std::mem::transmute::<*const u8, T2LiteFn>(p) }, argc))
+            (Some((unsafe { std::mem::transmute::<*const u8, T2LiteFn>(p) }, argc)), None)
         }
-        _ => None,
+        (true, LiteMode::Block(ps, np), Some(lfid)) => {
+            let p = module.get_finalized_function(lfid);
+            (None, Some((unsafe { std::mem::transmute::<*const u8, T2LiteBlkFn>(p) }, ps, np)))
+        }
+        _ => (None, None),
     };
-    Some(T2Proto { _module: module, ptr, lite_ptr })
+    Some(T2Proto { _module: module, ptr, lite_ptr, lite_blk_ptr })
 }

@@ -994,6 +994,15 @@ pub(crate) struct Proto {
     /// rest) are present. 0 for methods and option-less blocks. Stamped
     /// post-`build()` by compile_block alongside `block_body_local_start`.
     pub(crate) n_optional_params: u16,
+    /// Block call-interface constants, stamped post-`build()` by
+    /// `compile_block` (ADR 0037 lite blocks): `(param_start, n_params,
+    /// has_rest, has_kw_rest)`. Every `BlockHandle` minted for this proto
+    /// carries the same values (one `Op::CreateBlock` site per proto) —
+    /// this copy makes them available at COMPILE time, where the
+    /// lite-block admission must classify local slots as captured-outer
+    /// (`< param_start`, cell-routed) vs own-region (native spill).
+    /// `None` for methods / class bodies / toplevel / synthetic protos.
+    pub(crate) block_shape: Option<(u16, u16, bool, bool)>,
     /// Per-proto pool of binary string literals — bytes from
     /// `\xNN` escapes that aren't valid UTF-8. Indexed by
     /// `Op::LoadConstStrBytes(u32)`. The global interner (which
