@@ -1107,6 +1107,620 @@ static STARTUP_PROF_AST_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::At
 static STARTUP_PROF_COMPILE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static STARTUP_PROF_RUN_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// The inline core preamble chunk (`"<rubyrs:preamble>"`) — stub
+/// classes for built-in types plus the pure-Ruby core the other
+/// chunks build on. Module-scope (rather than local to
+/// `load_preamble_inner`) so `PREAMBLE_BAKED_SOURCES` can reference
+/// the same baked bytes the load path evals.
+const INLINE_PREAMBLE: &str = r#"
+## Stub classes for built-in types. Without these, `5.class` and
+## friends have nothing to return; the bodies stay empty because
+## built-in method dispatch goes through `primitive_call` /
+## `collection_call` before any class-table lookup. Re-opening
+## these from user code does work (`class Integer; def foo; end`)
+## but adding methods that way won't shadow the primitive arms —
+## see docs/SUBSET.md.
+## `class Object; end` is loaded from `preamble/object.rb` BEFORE
+## this `PREAMBLE` eval, so subsequent `class Foo < Object` shapes
+## here resolve without ordering hazards.
+class Integer
+end
+class Float
+end
+class String
+end
+class Symbol
+end
+class Array
+  ## `bsearch_index { |x| ... }` — binary search over a receiver sorted
+  ## w.r.t. the block, returning the matching INDEX (or nil). Two modes,
+  ## selected by the block's return value (CRuby): find-minimum when it
+  ## yields true/false (first index where true), find-any when it yields
+  ## an Integer (0 = hit, <0 = search left, >0 = search right). Defined
+  ## in Ruby (not native) so `Array.method_defined?(:bsearch_index)`
+  ## reports it — parser/source/buffer.rb gates its line-lookup on that.
+  def bsearch_index
+    return to_enum(:bsearch_index) unless block_given?
+    low = 0
+    high = size
+    satisfied = nil
+    while low < high
+      mid = low + (high - low) / 2
+      res = yield(self[mid])
+      case res
+      when true
+        satisfied = mid
+        high = mid
+      when false, nil
+        low = mid + 1
+      when Integer
+        return mid if res == 0
+        if res < 0
+          high = mid
+        else
+          low = mid + 1
+        end
+      else
+        raise TypeError, "wrong argument type #{res.class} (must be numeric, true, false or nil)"
+      end
+    end
+    satisfied
+  end
+  # NOTE: `Array#bsearch` itself is implemented natively (vm/iter.rs);
+  # only `bsearch_index` was missing. Defining it here (in Ruby) also
+  # makes `Array.method_defined?(:bsearch_index)` true, which
+  # parser/source/buffer.rb gates its line lookup on.
+
+  ## `Array#fetch(index)` / `fetch(index, default)` / `fetch(index) {
+  ## |i| ... }` — element at `index` (negative counts from the end);
+  ## out of range raises IndexError unless a default or block is given.
+  ## Driver: parser's `Source::Buffer#source_line` does
+  ## `@lines.fetch(line - 1)` (used by nearly every Layout/Lint cop).
+  def fetch(index, *default)
+    i = index
+    i += size if i < 0
+    if i >= 0 && i < size
+      self[i]
+    elsif block_given?
+      yield(index)
+    elsif !default.empty?
+      default[0]
+    else
+      raise IndexError, "index #{index} outside of array bounds: #{-size}...#{size}"
+    end
+  end
+end
+class Hash
+end
+class Range
+  ## `Range#bsearch { |x| ... }` — binary search over an INTEGER range
+  ## (find-minimum for a boolean block, find-any for an Integer block),
+  ## returning the matching value or nil. Driver: parser's
+  ## tree_rewriter does `(from...size).bsearch { |i| ... }` during
+  ## autocorrection. Only integer endpoints are modelled (Float-range
+  ## bsearch isn't needed here).
+  def bsearch
+    return to_enum(:bsearch) unless block_given?
+    lo = self.begin
+    hi = self.end
+    raise TypeError, "can't do binary search for #{lo.class}" unless lo.is_a?(Integer) || lo.nil?
+    lo = 0 if lo.nil?
+    return nil if hi.nil? # endless range unsupported here
+    hi -= 1 if exclude_end?
+    satisfied = nil
+    while lo <= hi
+      mid = lo + (hi - lo) / 2
+      res = yield(mid)
+      case res
+      when true
+        satisfied = mid
+        hi = mid - 1
+      when false, nil
+        lo = mid + 1
+      when Integer
+        return mid if res == 0
+        if res < 0
+          hi = mid - 1
+        else
+          lo = mid + 1
+        end
+      else
+        raise TypeError, "wrong argument type #{res.class} (must be numeric, true, false or nil)"
+      end
+    end
+    satisfied
+  end
+end
+class TrueClass
+end
+class FalseClass
+end
+class NilClass
+end
+class Proc
+end
+## Method — `Object#method(:foo)` returns a BoundMethod value
+## whose class reports as Method. Stub class so `m.class.name`
+## resolves to "Method".
+class Method
+end
+## UnboundMethod — `Method#unbind` returns this; `bind(obj)`
+## rehydrates it into a Method.
+class UnboundMethod
+end
+## Module — empty preamble shell so `is_a?(Module)` /
+## `class_of` reach a real class table entry. CRuby's
+## hierarchy: `Class < Module < Object`; rubyrs mirrors
+## the inheritance so `Class.is_a?(Module)` walks
+## superclass → Module → true via the existing
+## `class_is_a` helper. `module` keyword sets
+## `is_module: true` on the Class shell (`Op::DefModule`).
+module Module
+end
+class Class < Module
+end
+## File — class-method dispatch is wired host-side in
+## `Vm::file_class_dispatch`. The class body is intentionally
+## empty; methods are not defined here.
+class File
+  ## CRuby exposes path-separator constants on File for
+  ## platform-portable path joining. Rack 3 `rack/utils.rb:607`
+  ## evaluates
+  ##   `Regexp.union(*[::File::SEPARATOR, ::File::ALT_SEPARATOR].compact)`
+  ## at class-body time during the P3 Sinatra spike. POSIX
+  ## values mirror CRuby (forward-slash + nil); on Windows
+  ## CRuby sets ALT_SEPARATOR to "\\" — rubyrs's Tier 1 build
+  ## is POSIX-only here, so we follow the POSIX values.
+  SEPARATOR = "/"
+  ALT_SEPARATOR = nil
+  PATH_SEPARATOR = ":"
+  Separator = SEPARATOR
+  ## The null device. POSIX value (Windows is "NUL"); rubyrs Tier 1
+  ## is POSIX-only. rack's spec_etag opens `File::NULL` to build a
+  ## zero-length sendfile body; CRuby exposes it on File.
+  NULL = "/dev/null"
+  ## POSIX open(2) flag constants. CRuby exposes these (via
+  ## File::Constants) so user code can OR them when opening
+  ## files. rubyrs doesn't open files in Tier 1, but
+  ## logger 1.7 `log_device.rb:69`
+  ##   MODE = File::WRONLY | File::APPEND
+  ## is evaluated at class-body load time during the P3
+  ## Sinatra spike, so the constants must resolve. Values
+  ## mirror Linux POSIX — the OR'd result is never passed to
+  ## an actual open() call in the stub build.
+  RDONLY = 0
+  WRONLY = 1
+  RDWR = 2
+  APPEND = 1024
+  CREAT = 64
+  EXCL = 128
+  TRUNC = 512
+  NOCTTY = 256
+  NONBLOCK = 2048
+  SYNC = 1052672
+  BINARY = 0
+  SHARE_DELETE = 0
+  ## `File.fnmatch` flag bitmask (File::Constants in CRuby). The
+  ## matcher lives host-side in `Vm::file_class_dispatch` → `fnmatch`;
+  ## these let user code OR the flags (`File::FNM_PATHNAME` etc.).
+  ## FNM_SYSCASE is 0 on case-sensitive platforms — matches the
+  ## `ruby --disable=gems` parity oracle.
+  FNM_NOESCAPE = 1
+  FNM_PATHNAME = 2
+  FNM_DOTMATCH = 4
+  FNM_CASEFOLD = 8
+  FNM_EXTGLOB = 16
+  FNM_SYSCASE = 0
+end
+## Dir — class-method dispatch (glob / `[]` / entries / children /
+## exist? / pwd / __chdir) is wired host-side in
+## `Vm::dir_class_dispatch`. Added for the P3 Jekyll spike — Liquid's
+## liquid.rb loads its tag files via a Dir glob of its tags
+## directory, and Jekyll globs site sources extensively.
+class Dir
+  ## `Dir.home(user = nil)` — the home directory. The no-arg form reads
+  ## $HOME (then $USERPROFILE), raising ArgumentError when neither is
+  ## set, like CRuby. The per-user lookup isn't modelled. RuboCop's
+  ## ConfigFinder#find_user_dotfile resolves ~/.rubocop.yml via this.
+  def self.home(user = nil)
+    raise NotImplementedError, "Dir.home(user) is not supported" unless user.nil?
+    h = ENV["HOME"] || ENV["USERPROFILE"]
+    raise ArgumentError, "couldn't find HOME environment -- expanding `~'" if h.nil? || h.empty?
+    h
+  end
+
+  ## `Dir.chdir(path)` / `Dir.chdir(path) { ... }`. The actual cwd
+  ## move is the host primitive `Dir.__chdir`; the block form's
+  ## save-and-restore bracketing lives here so it reuses Ruby's
+  ## `yield` + `ensure` (CRuby restores the original cwd even when
+  ## the block raises, and yields the new directory to the block).
+  ## Non-block form returns 0, matching CRuby. Jekyll's
+  ## `layout_reader.rb#within` uses the block form to scope a
+  ## relative `Dir["**/*.*"]` glob.
+  def self.chdir(path = nil)
+    if block_given?
+      old = Dir.pwd
+      Dir.__chdir(path) unless path.nil?
+      begin
+        yield(path.nil? ? old : path)
+      ensure
+        Dir.__chdir(old)
+      end
+    else
+      Dir.__chdir(path) unless path.nil?
+      0
+    end
+  end
+
+  ## `Dir.foreach(path) { |entry| ... }` — yield each directory entry
+  ## (including "." and "..") via the host `Dir.entries` primitive.
+  ## Rack::Directory lists a folder by iterating it. Non-block form
+  ## returns an Enumerator over the same names. Returns nil (CRuby).
+  def self.foreach(path)
+    names = Dir.entries(path)
+    return names.each unless block_given?
+    names.each { |e| yield e }
+    nil
+  end
+
+  ## `Dir.each_child(path) { |basename| ... }` — like `foreach` but
+  ## EXCLUDES "." and ".." (uses the host `Dir.children` primitive).
+  ## Non-block form returns an Enumerator over the same names. Returns
+  ## nil (CRuby). zeitwerk's `Loader::Helpers#ls` walks an autoload
+  ## directory this way, so it gates every gem that autoloads via
+  ## zeitwerk (Bridgetown, Hanami).
+  def self.each_child(path)
+    names = Dir.children(path)
+    return names.each unless block_given?
+    names.each { |e| yield e }
+    nil
+  end
+end
+## RubyrsSass — anchor for the `RubyrsSass.compile(scss) -> css` host
+## primitive (wired in vm/dispatch.rs to crate::sass::compile, the
+## grass-backed `sass` battery). The jekyll-sass-converter shim's
+## `convert` delegates here; defined always so the primitive is
+## reachable even without the shim loaded.
+class RubyrsSass
+end
+## RubyrsDigest — anchor for the `RubyrsDigest.hexdigest(algo, data)`
+## / `.digest(algo, data)` host primitives (wired in vm/dispatch.rs
+## to crate::digest, pure-Rust SHA-256/SHA-1/MD5). The Digest::*
+## veneer (stdlib_vendor/digest.rb) delegates here; defined always
+## so the primitive is reachable in every build.
+class RubyrsDigest
+end
+## `class Mutex; ... end` (single-threaded no-op shim) is loaded
+## from `preamble/mutex.rb` BEFORE this `PREAMBLE` eval.
+## Kernel is now defined as a real Module in `preamble/object.rb`
+## (mixed into Object via `class Object < BasicObject; include
+## Kernel; end`), so the inline stub here was removed — keeping
+## both would re-define Kernel as a class and corrupt its
+## superclass chain. The is_primitive_class_name / bind-skip
+## machinery still works because Kernel's name is the same
+## sentinel; the receiver is just a Module now instead of a
+## Class.
+##
+## DIVERGENCE (preserved): in CRuby, an UnboundMethod captured
+## from Kernel bypasses receiver-overridden methods (so
+## `bind(liar).call` returns the real `#class` even if `liar`
+## defines its own). We route through normal do_call — the
+## override wins. Tilt's scope objects don't override `#class`,
+## so the practical impact is metaprogramming-only.
+## Encoding — minimal stub for codebases that use the encoding
+## API (ERB's compiler does at lib/erb/compiler.rb:317 / :461
+## to detect the source encoding from a magic comment). rubyrs
+## stores raw bytes with no per-string encoding tag, so every
+## String reports as UTF-8 and every encoding is treated as
+## ASCII-compatible / non-dummy. `Encoding.find(name)` returns
+## the predefined constant for the standard names (singleton
+## identity stable across calls) and raises ArgumentError for
+## unknown names. Identity guarantee: `s.encoding ==
+## Encoding.find("UTF-8")` works because the find returns the
+## same `Encoding::UTF_8` instance the dispatch.rs intercept
+## reads.
+##
+## Predefined constants cover the names ERB / cgi/util / similar
+## stdlib-shaped consumers reach for; add more as real targets
+## need them. `Encoding::BINARY` is the canonical CRuby alias
+## for `ASCII_8BIT`.
+class Encoding
+  ## `Encoding.find(name)` returns the singleton instance for each
+  ## of the four predefined encoding names. Identity is stable for
+  ## the standard names — `Encoding.find("UTF-8").equal?(Encoding::UTF_8)`
+  ## — because we return the same constant on every call. There is
+  ## NO Hash cache; a case-over-name dispatch hits the four named
+  ## constants directly.
+  ##
+  ## Why no Hash cache: `Runtime::with_config` applies `Config`
+  ## (including `max_value_bytes`) BEFORE `load_preamble` runs, so
+  ## any Hash mutation inside the preamble would count against tiny
+  ## caps used in resource-limit tests and fail preamble load
+  ## entirely.
+  ##
+  ## Unknown names raise `ArgumentError`, matching CRuby's
+  ## `Encoding.find("missing")` shape (and avoiding the equality-
+  ## breaking trap of returning two different `.new` instances for
+  ## the same name).
+  ## Process-default encodings. rubyrs's string model is UTF-8
+  ## throughout (binary tags exist per-string; see RStr.encoding),
+  ## so both defaults are the UTF-8 singleton — equivalent to
+  ## CRuby launched with `-Eutf-8`. Writers accept-and-ignore
+  ## non-UTF-8 values rather than raising: callers like minitest's
+  ## suite guard (`Encoding.default_external != Encoding::UTF_8`
+  ## → warn) only ever read.
+  ## E3: the REAL process-wide default — tag-less `File.read`
+  ## stamps this tag (Vm::default_external, set through the host
+  ## fn). The getter mirrors the last successful assignment.
+  def self.default_external
+    @default_external || UTF_8
+  end
+
+  def self.default_external=(enc)
+    name = enc.is_a?(Encoding) ? enc.name : enc.to_s
+    __rubyrs_set_default_external(name)
+    @default_external = Encoding.find(name)
+  end
+
+  ## E3: nil by default (CRuby — no implicit conversion). When
+  ## set, tag-less / single-name File.read transcodes
+  ## external→internal.
+  def self.default_internal
+    @default_internal
+  end
+
+  def self.default_internal=(enc)
+    if enc.nil?
+      __rubyrs_set_default_internal(nil)
+      @default_internal = nil
+    else
+      name = enc.is_a?(Encoding) ? enc.name : enc.to_s
+      __rubyrs_set_default_internal(name)
+      @default_internal = Encoding.find(name)
+    end
+  end
+
+  def self.find(name)
+    # Case-insensitive only — match CRuby's actual behaviour.
+    # ERB and similar consumers feed values from magic-comment
+    # regex captures ("utf-8", "UTF-8", ...); without
+    # normalization, lowercase magic comments would surprise
+    # users with ArgumentError. CRuby does NOT fold '_' → '-'
+    # (it rejects "UTF_8") and does NOT accept "UTF8" (the
+    # un-hyphenated form), but does fold "ASCII" → US-ASCII
+    # and "BINARY" → ASCII-8BIT — verified empirically vs
+    # CRuby 3.4.
+    ## The named-constant family resolves in EVERY build (the
+    ## constants are name-registered singletons below); actual
+    ## transcoding to/from the non-core encodings still needs
+    ## `_encoding_full`. Alias spellings verified against CRuby
+    ## 3.4.1 one by one — CRuby REJECTS "KOI8R", "SHIFT-JIS",
+    ## "UTF16LE"/"UTF16"/"UTF32…" (no un-hyphenated UTF forms),
+    ## so those stay unknown here too.
+    case name.to_s.upcase
+    when "UTF-8" then UTF_8
+    when "US-ASCII", "ASCII" then US_ASCII
+    when "ASCII-8BIT", "BINARY" then ASCII_8BIT
+    when "ISO-8859-1", "ISO8859-1" then ISO_8859_1
+    when "WINDOWS-1252", "CP1252" then Windows_1252
+    when "ISO-8859-15", "ISO8859-15" then ISO_8859_15
+    when "KOI8-R" then KOI8_R
+    when "WINDOWS-31J", "CP932", "SJIS" then Windows_31J
+    when "SHIFT_JIS" then Shift_JIS
+    when "ISO-2022-JP", "ISO2022-JP" then ISO_2022_JP
+    when "EUC-JP", "EUCJP" then EUC_JP
+    when "GBK", "CP936" then GBK
+    when "GB18030" then GB18030
+    when "BIG5" then Big5
+    when "UTF-16LE" then UTF_16LE
+    when "UTF-16BE" then UTF_16BE
+    when "UTF-16" then UTF_16
+    when "UTF-32LE" then UTF_32LE
+    when "UTF-32BE" then UTF_32BE
+    when "UTF-32" then UTF_32
+    else raise ArgumentError, "unknown encoding name - " + name.to_s
+    end
+  end
+
+  ## Reflection trio (CRuby shapes, registry-sized): every build
+  ## serves the three built-ins plus the name-registered family
+  ## (constants below). The list and alias map are a SUBSET of
+  ## CRuby's ~100-encoding registry (which also carries locale/
+  ## external/filesystem pseudo-names and historical spellings) —
+  ## documented narrowing, asserted by intersection in the
+  ## fixture.
+  def self.list
+    [ASCII_8BIT, UTF_8, US_ASCII,
+     ISO_8859_1, Windows_1252, ISO_8859_15, KOI8_R,
+     Windows_31J, EUC_JP, GBK, GB18030, Big5, UTF_16LE, UTF_16BE, UTF_16,
+     UTF_32LE, UTF_32BE, UTF_32, Shift_JIS, ISO_2022_JP]
+  end
+
+  def self.name_list
+    list.map(&:name) + aliases.keys
+  end
+
+  ## Alias pairs verified against CRuby 3.4.1's Encoding.aliases
+  ## (exact key => value spellings).
+  def self.aliases
+    { "BINARY" => "ASCII-8BIT", "ASCII" => "US-ASCII",
+      "ISO8859-1" => "ISO-8859-1", "CP1252" => "Windows-1252",
+      "ISO8859-15" => "ISO-8859-15", "CP932" => "Windows-31J",
+      "SJIS" => "Windows-31J", "CP936" => "GBK" }
+  end
+
+  def initialize(name)
+    @name = name
+  end
+
+  def name
+    @name
+  end
+
+  def to_s
+    @name
+  end
+
+  def inspect
+    # Built with concat — using the quote-then-hash sequence
+    # inline would close the outer raw-string delimiter at
+    # Rust parse time.
+    #
+    # ASCII-8BIT renders with CRuby 3.x's dual-name form
+    # (BINARY was promoted to the display name; .name and
+    # .to_s stay "ASCII-8BIT").
+    if @name == 'ASCII-8BIT'
+      '#<Encoding:BINARY (ASCII-8BIT)>'
+    elsif dummy?
+      # CRuby renders dummy encodings with a "(dummy)" suffix:
+      # #<Encoding:ISO-2022-JP (dummy)> — verified vs 3.4.1.
+      '#<Encoding:' + @name + ' (dummy)>'
+    else
+      '#<Encoding:' + @name + '>'
+    end
+  end
+
+  ## Name-driven, CRuby-verified (3.4.1): among the registered
+  ## family, exactly ISO-2022-JP (stateful escape sequences) and
+  ## the byte-order-ambiguous BOM forms UTF-16/UTF-32 are dummy
+  ## encodings. The fixed-endianness UTF-16LE/BE, UTF-32LE/BE are
+  ## NOT dummy. ERB's compiler gates on `enc.dummy?` — String
+  ## encodings can never BE these in the core build, so the happy
+  ## path is unaffected.
+  def dummy?
+    @name == 'ISO-2022-JP' || @name == 'UTF-16' || @name == 'UTF-32'
+  end
+
+  ## Name-driven, CRuby-verified (3.4.1): the whole UTF-16/UTF-32
+  ## family (code units wider than a byte) and ISO-2022-JP are NOT
+  ## ASCII-compatible; every other registered name is.
+  def ascii_compatible?
+    case @name
+    when 'UTF-16LE', 'UTF-16BE', 'UTF-16', 'UTF-32LE', 'UTF-32BE', 'UTF-32', 'ISO-2022-JP'
+      false
+    else
+      true
+    end
+  end
+end
+## The Encoding constant FAMILY (UTF_8 / US_ASCII / ASCII /
+## ASCII_8BIT / BINARY / ISO_2022_JP + the 16 name-registered common
+## encodings ISO-8859-1 … Shift_JIS) is installed NATIVELY at boot by
+## `Runtime::register_encoding_constants` (lib.rs, called from
+## `load_preamble` on both the preamble-cache hit and miss paths) —
+## zero interpreted statements. The full rationale — why the family
+## is always-on in every build (rack references Encoding::ISO_2022_JP,
+## activesupport references Encoding::GB18030 at class-body load
+## time) and why registration is native (each interpreted top-level
+## preamble statement costs ~19µs of boot; even batched into one
+## statement the family measured +1.4-1.8% of hello-world startup) —
+## lives on that function's doc comment. The objects are ordinary
+## instances of the `class Encoding` above (same @name ivar the
+## interpreted `Encoding.new` would set), so every method here works
+## on them unchanged.
+
+## Version sentinels. Real codebases use `RUBY_VERSION >= '3'`
+## (tilt does at template.rb:239) to pick between bind_call and
+## bind.call paths. We claim a recent CRuby version to opt into
+## the modern branches. RUBY_PLATFORM identifies the host
+## interpreter — "rubyrs" makes it obvious in any platform-
+## conditional code that this isn't CRuby. RUBY_ENGINE follows
+## CRuby's convention — "ruby" for MRI; engine-specific gems
+## (msgpack's Factory::Pool, sidekiq, etc.) gate behaviour on
+## `RUBY_ENGINE == "ruby"`, and reporting the canonical value
+## opts into those branches. The truthful "rubyrs" engine tag
+## lives in RUBY_PLATFORM for the rare consumer that wants to
+## detect us specifically.
+RUBY_VERSION = "3.4.0".freeze
+RUBY_PLATFORM = "rubyrs".freeze
+RUBY_ENGINE = "ruby".freeze
+## MRI also exposes RUBY_DESCRIPTION (the `ruby -v` banner) and
+## RUBY_PATCHLEVEL. Gems parse the description to sniff the engine /
+## old-version bugs (rspec-mocks does `RUBY_DESCRIPTION.include?(
+## '2.0.0p247')`), so ship a plausible MRI-shaped string keyed off the
+## version above. PATCHLEVEL is an Integer (0 = a released build).
+RUBY_DESCRIPTION = "ruby 3.4.0 (rubyrs) [rubyrs]".freeze
+RUBY_PATCHLEVEL = 0
+RUBY_ENGINE_VERSION = "3.4.0".freeze
+## M27 GAP #4: the unambiguous "we're rubyrs" sentinel for
+## library adapter shims. CRuby leaves this undefined; rubyrs
+## pins it to a frozen String so `defined?(RUBYRS)` is the
+## canonical detection idiom and value-equality
+## (`RUBYRS == "rubyrs"`) also works.
+##
+## Why a sibling sentinel, not changing RUBY_ENGINE itself —
+## existing gems (msgpack, sidekiq, …) gate behaviour on
+## `RUBY_ENGINE == "ruby"` to opt into modern code paths; a
+## "rubyrs" RUBY_ENGINE would break those, masking real bugs
+## behind degraded fallbacks. RUBYRS is the additive surface
+## that lets external adapter shims (per ADR 0026 v2
+## §Anti-pattern) feature-detect us without disrupting the
+## "look like MRI for gem-compat" posture.
+##
+## Anti-pattern reminder (ADR 0026 v2): this constant is for
+## EXTERNAL shim files (e.g. `sinatra_compat.rb`) only — the
+## blessed in-tree reimpls (`rubyrs/sinatra`, etc.) MUST NOT
+## engine-branch on it, because that creates parity-test escape
+## hatches the CI matrix can't observe.
+RUBYRS = "rubyrs".freeze
+## `class MatchData; ... end` is loaded from
+## `preamble/match_data.rb` BEFORE this `PREAMBLE` eval — the
+## Rust-side `Vm::materialize_match_data` needs the class to
+## exist before any `String#match` hit lands.
+## `class Comparable; ... end` is loaded from
+## `preamble/comparable.rb` BEFORE this `PREAMBLE` eval. The
+## comment that used to describe Comparable here (about
+## `include Comparable` semantics and the ArgumentError-on-nil
+## rule) moved to the externalised file's header.
+## `module Enumerable; end` (empty stub so `include Enumerable`
+## doesn't crash; a Module so `Mod.include?(Enumerable)` passes the
+## expected-Module check) is loaded from `preamble/enumerable.rb`
+## AFTER this `PREAMBLE` eval; the full rationale lives in the
+## externalised file's header.
+"#;
+
+/// Every `include_str!`-baked preamble chunk, `(filename, source)`,
+/// in load order — the same statics `load_preamble_inner`'s
+/// `eval_inner` calls pass (rustc interns identical literals, so the
+/// table adds no data to the binary). The preamble cache uses this
+/// to serialize a baked chunk's `vm.sources` entry as a bare table
+/// INDEX instead of ~318 KB of owned source text: the cache key
+/// hashes the executable's identity, so a blob is only ever decoded
+/// by the binary that wrote it and an index always resolves to the
+/// identical bytes. Entries carry the load site's cfg gates; the
+/// three tiny stdlib autoload/trampoline literals and any battery
+/// preamble (`_socket` / `_openssl` / ...) are deliberately NOT here
+/// — they fall back to the blob's owned-sources section.
+#[cfg(feature = "preamble-cache")]
+pub(crate) static PREAMBLE_BAKED_SOURCES: &[(&str, &str)] = &[
+    ("<rubyrs:preamble:exceptions>", include_str!("preamble/exceptions.rb")),
+    ("<rubyrs:preamble:object>", include_str!("preamble/object.rb")),
+    ("<rubyrs:preamble:float>", include_str!("preamble/float.rb")),
+    ("<rubyrs:preamble:numeric>", include_str!("preamble/numeric.rb")),
+    ("<rubyrs:preamble:throw_catch>", include_str!("preamble/throw_catch.rb")),
+    ("<rubyrs:preamble:comparable>", include_str!("preamble/comparable.rb")),
+    ("<rubyrs:preamble:match_data>", include_str!("preamble/match_data.rb")),
+    ("<rubyrs:preamble:complex>", include_str!("preamble/complex.rb")),
+    ("<rubyrs:preamble:mutex>", include_str!("preamble/mutex.rb")),
+    ("<rubyrs:preamble:struct>", include_str!("preamble/struct.rb")),
+    ("<rubyrs:preamble:thread>", include_str!("preamble/thread.rb")),
+    #[cfg(feature = "_fiber")]
+    ("<rubyrs:preamble:fiber>", include_str!("preamble/fiber.rb")),
+    ("<rubyrs:preamble:gem>", include_str!("preamble/gem.rb")),
+    ("<rubyrs:preamble>", INLINE_PREAMBLE),
+    ("<rubyrs:preamble:file>", include_str!("preamble/file.rb")),
+    ("<rubyrs:preamble:enumerable>", include_str!("preamble/enumerable.rb")),
+    ("<rubyrs:preamble:enumerator>", include_str!("preamble/enumerator.rb")),
+    ("<rubyrs:preamble:symbol>", include_str!("preamble/symbol.rb")),
+    ("<rubyrs:preamble:string_ext>", include_str!("preamble/string_ext.rb")),
+    ("<rubyrs:preamble:random>", include_str!("preamble/random.rb")),
+    ("<rubyrs:preamble:securerandom>", include_str!("preamble/securerandom.rb")),
+    ("<rubyrs:preamble:time>", include_str!("preamble/time.rb")),
+    ("<rubyrs:preamble:signal>", include_str!("preamble/signal.rb")),
+    ("<rubyrs:preamble:process>", include_str!("preamble/process.rb")),
+    ("<rubyrs:preamble:math>", include_str!("preamble/math.rb")),
+];
+
 /// Per-process slot used by the wizer pre-initialize path. On
 /// wasm32-wasip1, the binary exports `wizer.initialize` (below)
 /// which constructs a default Runtime and stashes it here; Wizer
@@ -2719,573 +3333,7 @@ impl Runtime {
             "<rubyrs:preamble:gem>",
         )
             .expect("ICE: failed to load Gem preamble");
-        const PREAMBLE: &str = r#"
-## Stub classes for built-in types. Without these, `5.class` and
-## friends have nothing to return; the bodies stay empty because
-## built-in method dispatch goes through `primitive_call` /
-## `collection_call` before any class-table lookup. Re-opening
-## these from user code does work (`class Integer; def foo; end`)
-## but adding methods that way won't shadow the primitive arms —
-## see docs/SUBSET.md.
-## `class Object; end` is loaded from `preamble/object.rb` BEFORE
-## this `PREAMBLE` eval, so subsequent `class Foo < Object` shapes
-## here resolve without ordering hazards.
-class Integer
-end
-class Float
-end
-class String
-end
-class Symbol
-end
-class Array
-  ## `bsearch_index { |x| ... }` — binary search over a receiver sorted
-  ## w.r.t. the block, returning the matching INDEX (or nil). Two modes,
-  ## selected by the block's return value (CRuby): find-minimum when it
-  ## yields true/false (first index where true), find-any when it yields
-  ## an Integer (0 = hit, <0 = search left, >0 = search right). Defined
-  ## in Ruby (not native) so `Array.method_defined?(:bsearch_index)`
-  ## reports it — parser/source/buffer.rb gates its line-lookup on that.
-  def bsearch_index
-    return to_enum(:bsearch_index) unless block_given?
-    low = 0
-    high = size
-    satisfied = nil
-    while low < high
-      mid = low + (high - low) / 2
-      res = yield(self[mid])
-      case res
-      when true
-        satisfied = mid
-        high = mid
-      when false, nil
-        low = mid + 1
-      when Integer
-        return mid if res == 0
-        if res < 0
-          high = mid
-        else
-          low = mid + 1
-        end
-      else
-        raise TypeError, "wrong argument type #{res.class} (must be numeric, true, false or nil)"
-      end
-    end
-    satisfied
-  end
-  # NOTE: `Array#bsearch` itself is implemented natively (vm/iter.rs);
-  # only `bsearch_index` was missing. Defining it here (in Ruby) also
-  # makes `Array.method_defined?(:bsearch_index)` true, which
-  # parser/source/buffer.rb gates its line lookup on.
-
-  ## `Array#fetch(index)` / `fetch(index, default)` / `fetch(index) {
-  ## |i| ... }` — element at `index` (negative counts from the end);
-  ## out of range raises IndexError unless a default or block is given.
-  ## Driver: parser's `Source::Buffer#source_line` does
-  ## `@lines.fetch(line - 1)` (used by nearly every Layout/Lint cop).
-  def fetch(index, *default)
-    i = index
-    i += size if i < 0
-    if i >= 0 && i < size
-      self[i]
-    elsif block_given?
-      yield(index)
-    elsif !default.empty?
-      default[0]
-    else
-      raise IndexError, "index #{index} outside of array bounds: #{-size}...#{size}"
-    end
-  end
-end
-class Hash
-end
-class Range
-  ## `Range#bsearch { |x| ... }` — binary search over an INTEGER range
-  ## (find-minimum for a boolean block, find-any for an Integer block),
-  ## returning the matching value or nil. Driver: parser's
-  ## tree_rewriter does `(from...size).bsearch { |i| ... }` during
-  ## autocorrection. Only integer endpoints are modelled (Float-range
-  ## bsearch isn't needed here).
-  def bsearch
-    return to_enum(:bsearch) unless block_given?
-    lo = self.begin
-    hi = self.end
-    raise TypeError, "can't do binary search for #{lo.class}" unless lo.is_a?(Integer) || lo.nil?
-    lo = 0 if lo.nil?
-    return nil if hi.nil? # endless range unsupported here
-    hi -= 1 if exclude_end?
-    satisfied = nil
-    while lo <= hi
-      mid = lo + (hi - lo) / 2
-      res = yield(mid)
-      case res
-      when true
-        satisfied = mid
-        hi = mid - 1
-      when false, nil
-        lo = mid + 1
-      when Integer
-        return mid if res == 0
-        if res < 0
-          hi = mid - 1
-        else
-          lo = mid + 1
-        end
-      else
-        raise TypeError, "wrong argument type #{res.class} (must be numeric, true, false or nil)"
-      end
-    end
-    satisfied
-  end
-end
-class TrueClass
-end
-class FalseClass
-end
-class NilClass
-end
-class Proc
-end
-## Method — `Object#method(:foo)` returns a BoundMethod value
-## whose class reports as Method. Stub class so `m.class.name`
-## resolves to "Method".
-class Method
-end
-## UnboundMethod — `Method#unbind` returns this; `bind(obj)`
-## rehydrates it into a Method.
-class UnboundMethod
-end
-## Module — empty preamble shell so `is_a?(Module)` /
-## `class_of` reach a real class table entry. CRuby's
-## hierarchy: `Class < Module < Object`; rubyrs mirrors
-## the inheritance so `Class.is_a?(Module)` walks
-## superclass → Module → true via the existing
-## `class_is_a` helper. `module` keyword sets
-## `is_module: true` on the Class shell (`Op::DefModule`).
-module Module
-end
-class Class < Module
-end
-## File — class-method dispatch is wired host-side in
-## `Vm::file_class_dispatch`. The class body is intentionally
-## empty; methods are not defined here.
-class File
-  ## CRuby exposes path-separator constants on File for
-  ## platform-portable path joining. Rack 3 `rack/utils.rb:607`
-  ## evaluates
-  ##   `Regexp.union(*[::File::SEPARATOR, ::File::ALT_SEPARATOR].compact)`
-  ## at class-body time during the P3 Sinatra spike. POSIX
-  ## values mirror CRuby (forward-slash + nil); on Windows
-  ## CRuby sets ALT_SEPARATOR to "\\" — rubyrs's Tier 1 build
-  ## is POSIX-only here, so we follow the POSIX values.
-  SEPARATOR = "/"
-  ALT_SEPARATOR = nil
-  PATH_SEPARATOR = ":"
-  Separator = SEPARATOR
-  ## The null device. POSIX value (Windows is "NUL"); rubyrs Tier 1
-  ## is POSIX-only. rack's spec_etag opens `File::NULL` to build a
-  ## zero-length sendfile body; CRuby exposes it on File.
-  NULL = "/dev/null"
-  ## POSIX open(2) flag constants. CRuby exposes these (via
-  ## File::Constants) so user code can OR them when opening
-  ## files. rubyrs doesn't open files in Tier 1, but
-  ## logger 1.7 `log_device.rb:69`
-  ##   MODE = File::WRONLY | File::APPEND
-  ## is evaluated at class-body load time during the P3
-  ## Sinatra spike, so the constants must resolve. Values
-  ## mirror Linux POSIX — the OR'd result is never passed to
-  ## an actual open() call in the stub build.
-  RDONLY = 0
-  WRONLY = 1
-  RDWR = 2
-  APPEND = 1024
-  CREAT = 64
-  EXCL = 128
-  TRUNC = 512
-  NOCTTY = 256
-  NONBLOCK = 2048
-  SYNC = 1052672
-  BINARY = 0
-  SHARE_DELETE = 0
-  ## `File.fnmatch` flag bitmask (File::Constants in CRuby). The
-  ## matcher lives host-side in `Vm::file_class_dispatch` → `fnmatch`;
-  ## these let user code OR the flags (`File::FNM_PATHNAME` etc.).
-  ## FNM_SYSCASE is 0 on case-sensitive platforms — matches the
-  ## `ruby --disable=gems` parity oracle.
-  FNM_NOESCAPE = 1
-  FNM_PATHNAME = 2
-  FNM_DOTMATCH = 4
-  FNM_CASEFOLD = 8
-  FNM_EXTGLOB = 16
-  FNM_SYSCASE = 0
-end
-## Dir — class-method dispatch (glob / `[]` / entries / children /
-## exist? / pwd / __chdir) is wired host-side in
-## `Vm::dir_class_dispatch`. Added for the P3 Jekyll spike — Liquid's
-## liquid.rb loads its tag files via a Dir glob of its tags
-## directory, and Jekyll globs site sources extensively.
-class Dir
-  ## `Dir.home(user = nil)` — the home directory. The no-arg form reads
-  ## $HOME (then $USERPROFILE), raising ArgumentError when neither is
-  ## set, like CRuby. The per-user lookup isn't modelled. RuboCop's
-  ## ConfigFinder#find_user_dotfile resolves ~/.rubocop.yml via this.
-  def self.home(user = nil)
-    raise NotImplementedError, "Dir.home(user) is not supported" unless user.nil?
-    h = ENV["HOME"] || ENV["USERPROFILE"]
-    raise ArgumentError, "couldn't find HOME environment -- expanding `~'" if h.nil? || h.empty?
-    h
-  end
-
-  ## `Dir.chdir(path)` / `Dir.chdir(path) { ... }`. The actual cwd
-  ## move is the host primitive `Dir.__chdir`; the block form's
-  ## save-and-restore bracketing lives here so it reuses Ruby's
-  ## `yield` + `ensure` (CRuby restores the original cwd even when
-  ## the block raises, and yields the new directory to the block).
-  ## Non-block form returns 0, matching CRuby. Jekyll's
-  ## `layout_reader.rb#within` uses the block form to scope a
-  ## relative `Dir["**/*.*"]` glob.
-  def self.chdir(path = nil)
-    if block_given?
-      old = Dir.pwd
-      Dir.__chdir(path) unless path.nil?
-      begin
-        yield(path.nil? ? old : path)
-      ensure
-        Dir.__chdir(old)
-      end
-    else
-      Dir.__chdir(path) unless path.nil?
-      0
-    end
-  end
-
-  ## `Dir.foreach(path) { |entry| ... }` — yield each directory entry
-  ## (including "." and "..") via the host `Dir.entries` primitive.
-  ## Rack::Directory lists a folder by iterating it. Non-block form
-  ## returns an Enumerator over the same names. Returns nil (CRuby).
-  def self.foreach(path)
-    names = Dir.entries(path)
-    return names.each unless block_given?
-    names.each { |e| yield e }
-    nil
-  end
-
-  ## `Dir.each_child(path) { |basename| ... }` — like `foreach` but
-  ## EXCLUDES "." and ".." (uses the host `Dir.children` primitive).
-  ## Non-block form returns an Enumerator over the same names. Returns
-  ## nil (CRuby). zeitwerk's `Loader::Helpers#ls` walks an autoload
-  ## directory this way, so it gates every gem that autoloads via
-  ## zeitwerk (Bridgetown, Hanami).
-  def self.each_child(path)
-    names = Dir.children(path)
-    return names.each unless block_given?
-    names.each { |e| yield e }
-    nil
-  end
-end
-## RubyrsSass — anchor for the `RubyrsSass.compile(scss) -> css` host
-## primitive (wired in vm/dispatch.rs to crate::sass::compile, the
-## grass-backed `sass` battery). The jekyll-sass-converter shim's
-## `convert` delegates here; defined always so the primitive is
-## reachable even without the shim loaded.
-class RubyrsSass
-end
-## RubyrsDigest — anchor for the `RubyrsDigest.hexdigest(algo, data)`
-## / `.digest(algo, data)` host primitives (wired in vm/dispatch.rs
-## to crate::digest, pure-Rust SHA-256/SHA-1/MD5). The Digest::*
-## veneer (stdlib_vendor/digest.rb) delegates here; defined always
-## so the primitive is reachable in every build.
-class RubyrsDigest
-end
-## `class Mutex; ... end` (single-threaded no-op shim) is loaded
-## from `preamble/mutex.rb` BEFORE this `PREAMBLE` eval.
-## Kernel is now defined as a real Module in `preamble/object.rb`
-## (mixed into Object via `class Object < BasicObject; include
-## Kernel; end`), so the inline stub here was removed — keeping
-## both would re-define Kernel as a class and corrupt its
-## superclass chain. The is_primitive_class_name / bind-skip
-## machinery still works because Kernel's name is the same
-## sentinel; the receiver is just a Module now instead of a
-## Class.
-##
-## DIVERGENCE (preserved): in CRuby, an UnboundMethod captured
-## from Kernel bypasses receiver-overridden methods (so
-## `bind(liar).call` returns the real `#class` even if `liar`
-## defines its own). We route through normal do_call — the
-## override wins. Tilt's scope objects don't override `#class`,
-## so the practical impact is metaprogramming-only.
-## Encoding — minimal stub for codebases that use the encoding
-## API (ERB's compiler does at lib/erb/compiler.rb:317 / :461
-## to detect the source encoding from a magic comment). rubyrs
-## stores raw bytes with no per-string encoding tag, so every
-## String reports as UTF-8 and every encoding is treated as
-## ASCII-compatible / non-dummy. `Encoding.find(name)` returns
-## the predefined constant for the standard names (singleton
-## identity stable across calls) and raises ArgumentError for
-## unknown names. Identity guarantee: `s.encoding ==
-## Encoding.find("UTF-8")` works because the find returns the
-## same `Encoding::UTF_8` instance the dispatch.rs intercept
-## reads.
-##
-## Predefined constants cover the names ERB / cgi/util / similar
-## stdlib-shaped consumers reach for; add more as real targets
-## need them. `Encoding::BINARY` is the canonical CRuby alias
-## for `ASCII_8BIT`.
-class Encoding
-  ## `Encoding.find(name)` returns the singleton instance for each
-  ## of the four predefined encoding names. Identity is stable for
-  ## the standard names — `Encoding.find("UTF-8").equal?(Encoding::UTF_8)`
-  ## — because we return the same constant on every call. There is
-  ## NO Hash cache; a case-over-name dispatch hits the four named
-  ## constants directly.
-  ##
-  ## Why no Hash cache: `Runtime::with_config` applies `Config`
-  ## (including `max_value_bytes`) BEFORE `load_preamble` runs, so
-  ## any Hash mutation inside the preamble would count against tiny
-  ## caps used in resource-limit tests and fail preamble load
-  ## entirely.
-  ##
-  ## Unknown names raise `ArgumentError`, matching CRuby's
-  ## `Encoding.find("missing")` shape (and avoiding the equality-
-  ## breaking trap of returning two different `.new` instances for
-  ## the same name).
-  ## Process-default encodings. rubyrs's string model is UTF-8
-  ## throughout (binary tags exist per-string; see RStr.encoding),
-  ## so both defaults are the UTF-8 singleton — equivalent to
-  ## CRuby launched with `-Eutf-8`. Writers accept-and-ignore
-  ## non-UTF-8 values rather than raising: callers like minitest's
-  ## suite guard (`Encoding.default_external != Encoding::UTF_8`
-  ## → warn) only ever read.
-  ## E3: the REAL process-wide default — tag-less `File.read`
-  ## stamps this tag (Vm::default_external, set through the host
-  ## fn). The getter mirrors the last successful assignment.
-  def self.default_external
-    @default_external || UTF_8
-  end
-
-  def self.default_external=(enc)
-    name = enc.is_a?(Encoding) ? enc.name : enc.to_s
-    __rubyrs_set_default_external(name)
-    @default_external = Encoding.find(name)
-  end
-
-  ## E3: nil by default (CRuby — no implicit conversion). When
-  ## set, tag-less / single-name File.read transcodes
-  ## external→internal.
-  def self.default_internal
-    @default_internal
-  end
-
-  def self.default_internal=(enc)
-    if enc.nil?
-      __rubyrs_set_default_internal(nil)
-      @default_internal = nil
-    else
-      name = enc.is_a?(Encoding) ? enc.name : enc.to_s
-      __rubyrs_set_default_internal(name)
-      @default_internal = Encoding.find(name)
-    end
-  end
-
-  def self.find(name)
-    # Case-insensitive only — match CRuby's actual behaviour.
-    # ERB and similar consumers feed values from magic-comment
-    # regex captures ("utf-8", "UTF-8", ...); without
-    # normalization, lowercase magic comments would surprise
-    # users with ArgumentError. CRuby does NOT fold '_' → '-'
-    # (it rejects "UTF_8") and does NOT accept "UTF8" (the
-    # un-hyphenated form), but does fold "ASCII" → US-ASCII
-    # and "BINARY" → ASCII-8BIT — verified empirically vs
-    # CRuby 3.4.
-    ## The named-constant family resolves in EVERY build (the
-    ## constants are name-registered singletons below); actual
-    ## transcoding to/from the non-core encodings still needs
-    ## `_encoding_full`. Alias spellings verified against CRuby
-    ## 3.4.1 one by one — CRuby REJECTS "KOI8R", "SHIFT-JIS",
-    ## "UTF16LE"/"UTF16"/"UTF32…" (no un-hyphenated UTF forms),
-    ## so those stay unknown here too.
-    case name.to_s.upcase
-    when "UTF-8" then UTF_8
-    when "US-ASCII", "ASCII" then US_ASCII
-    when "ASCII-8BIT", "BINARY" then ASCII_8BIT
-    when "ISO-8859-1", "ISO8859-1" then ISO_8859_1
-    when "WINDOWS-1252", "CP1252" then Windows_1252
-    when "ISO-8859-15", "ISO8859-15" then ISO_8859_15
-    when "KOI8-R" then KOI8_R
-    when "WINDOWS-31J", "CP932", "SJIS" then Windows_31J
-    when "SHIFT_JIS" then Shift_JIS
-    when "ISO-2022-JP", "ISO2022-JP" then ISO_2022_JP
-    when "EUC-JP", "EUCJP" then EUC_JP
-    when "GBK", "CP936" then GBK
-    when "GB18030" then GB18030
-    when "BIG5" then Big5
-    when "UTF-16LE" then UTF_16LE
-    when "UTF-16BE" then UTF_16BE
-    when "UTF-16" then UTF_16
-    when "UTF-32LE" then UTF_32LE
-    when "UTF-32BE" then UTF_32BE
-    when "UTF-32" then UTF_32
-    else raise ArgumentError, "unknown encoding name - " + name.to_s
-    end
-  end
-
-  ## Reflection trio (CRuby shapes, registry-sized): every build
-  ## serves the three built-ins plus the name-registered family
-  ## (constants below). The list and alias map are a SUBSET of
-  ## CRuby's ~100-encoding registry (which also carries locale/
-  ## external/filesystem pseudo-names and historical spellings) —
-  ## documented narrowing, asserted by intersection in the
-  ## fixture.
-  def self.list
-    [ASCII_8BIT, UTF_8, US_ASCII,
-     ISO_8859_1, Windows_1252, ISO_8859_15, KOI8_R,
-     Windows_31J, EUC_JP, GBK, GB18030, Big5, UTF_16LE, UTF_16BE, UTF_16,
-     UTF_32LE, UTF_32BE, UTF_32, Shift_JIS, ISO_2022_JP]
-  end
-
-  def self.name_list
-    list.map(&:name) + aliases.keys
-  end
-
-  ## Alias pairs verified against CRuby 3.4.1's Encoding.aliases
-  ## (exact key => value spellings).
-  def self.aliases
-    { "BINARY" => "ASCII-8BIT", "ASCII" => "US-ASCII",
-      "ISO8859-1" => "ISO-8859-1", "CP1252" => "Windows-1252",
-      "ISO8859-15" => "ISO-8859-15", "CP932" => "Windows-31J",
-      "SJIS" => "Windows-31J", "CP936" => "GBK" }
-  end
-
-  def initialize(name)
-    @name = name
-  end
-
-  def name
-    @name
-  end
-
-  def to_s
-    @name
-  end
-
-  def inspect
-    # Built with concat — using the quote-then-hash sequence
-    # inline would close the outer raw-string delimiter at
-    # Rust parse time.
-    #
-    # ASCII-8BIT renders with CRuby 3.x's dual-name form
-    # (BINARY was promoted to the display name; .name and
-    # .to_s stay "ASCII-8BIT").
-    if @name == 'ASCII-8BIT'
-      '#<Encoding:BINARY (ASCII-8BIT)>'
-    elsif dummy?
-      # CRuby renders dummy encodings with a "(dummy)" suffix:
-      # #<Encoding:ISO-2022-JP (dummy)> — verified vs 3.4.1.
-      '#<Encoding:' + @name + ' (dummy)>'
-    else
-      '#<Encoding:' + @name + '>'
-    end
-  end
-
-  ## Name-driven, CRuby-verified (3.4.1): among the registered
-  ## family, exactly ISO-2022-JP (stateful escape sequences) and
-  ## the byte-order-ambiguous BOM forms UTF-16/UTF-32 are dummy
-  ## encodings. The fixed-endianness UTF-16LE/BE, UTF-32LE/BE are
-  ## NOT dummy. ERB's compiler gates on `enc.dummy?` — String
-  ## encodings can never BE these in the core build, so the happy
-  ## path is unaffected.
-  def dummy?
-    @name == 'ISO-2022-JP' || @name == 'UTF-16' || @name == 'UTF-32'
-  end
-
-  ## Name-driven, CRuby-verified (3.4.1): the whole UTF-16/UTF-32
-  ## family (code units wider than a byte) and ISO-2022-JP are NOT
-  ## ASCII-compatible; every other registered name is.
-  def ascii_compatible?
-    case @name
-    when 'UTF-16LE', 'UTF-16BE', 'UTF-16', 'UTF-32LE', 'UTF-32BE', 'UTF-32', 'ISO-2022-JP'
-      false
-    else
-      true
-    end
-  end
-end
-## The Encoding constant FAMILY (UTF_8 / US_ASCII / ASCII /
-## ASCII_8BIT / BINARY / ISO_2022_JP + the 16 name-registered common
-## encodings ISO-8859-1 … Shift_JIS) is installed NATIVELY at boot by
-## `Runtime::register_encoding_constants` (lib.rs, called from
-## `load_preamble` on both the preamble-cache hit and miss paths) —
-## zero interpreted statements. The full rationale — why the family
-## is always-on in every build (rack references Encoding::ISO_2022_JP,
-## activesupport references Encoding::GB18030 at class-body load
-## time) and why registration is native (each interpreted top-level
-## preamble statement costs ~19µs of boot; even batched into one
-## statement the family measured +1.4-1.8% of hello-world startup) —
-## lives on that function's doc comment. The objects are ordinary
-## instances of the `class Encoding` above (same @name ivar the
-## interpreted `Encoding.new` would set), so every method here works
-## on them unchanged.
-
-## Version sentinels. Real codebases use `RUBY_VERSION >= '3'`
-## (tilt does at template.rb:239) to pick between bind_call and
-## bind.call paths. We claim a recent CRuby version to opt into
-## the modern branches. RUBY_PLATFORM identifies the host
-## interpreter — "rubyrs" makes it obvious in any platform-
-## conditional code that this isn't CRuby. RUBY_ENGINE follows
-## CRuby's convention — "ruby" for MRI; engine-specific gems
-## (msgpack's Factory::Pool, sidekiq, etc.) gate behaviour on
-## `RUBY_ENGINE == "ruby"`, and reporting the canonical value
-## opts into those branches. The truthful "rubyrs" engine tag
-## lives in RUBY_PLATFORM for the rare consumer that wants to
-## detect us specifically.
-RUBY_VERSION = "3.4.0".freeze
-RUBY_PLATFORM = "rubyrs".freeze
-RUBY_ENGINE = "ruby".freeze
-## MRI also exposes RUBY_DESCRIPTION (the `ruby -v` banner) and
-## RUBY_PATCHLEVEL. Gems parse the description to sniff the engine /
-## old-version bugs (rspec-mocks does `RUBY_DESCRIPTION.include?(
-## '2.0.0p247')`), so ship a plausible MRI-shaped string keyed off the
-## version above. PATCHLEVEL is an Integer (0 = a released build).
-RUBY_DESCRIPTION = "ruby 3.4.0 (rubyrs) [rubyrs]".freeze
-RUBY_PATCHLEVEL = 0
-RUBY_ENGINE_VERSION = "3.4.0".freeze
-## M27 GAP #4: the unambiguous "we're rubyrs" sentinel for
-## library adapter shims. CRuby leaves this undefined; rubyrs
-## pins it to a frozen String so `defined?(RUBYRS)` is the
-## canonical detection idiom and value-equality
-## (`RUBYRS == "rubyrs"`) also works.
-##
-## Why a sibling sentinel, not changing RUBY_ENGINE itself —
-## existing gems (msgpack, sidekiq, …) gate behaviour on
-## `RUBY_ENGINE == "ruby"` to opt into modern code paths; a
-## "rubyrs" RUBY_ENGINE would break those, masking real bugs
-## behind degraded fallbacks. RUBYRS is the additive surface
-## that lets external adapter shims (per ADR 0026 v2
-## §Anti-pattern) feature-detect us without disrupting the
-## "look like MRI for gem-compat" posture.
-##
-## Anti-pattern reminder (ADR 0026 v2): this constant is for
-## EXTERNAL shim files (e.g. `sinatra_compat.rb`) only — the
-## blessed in-tree reimpls (`rubyrs/sinatra`, etc.) MUST NOT
-## engine-branch on it, because that creates parity-test escape
-## hatches the CI matrix can't observe.
-RUBYRS = "rubyrs".freeze
-## `class MatchData; ... end` is loaded from
-## `preamble/match_data.rb` BEFORE this `PREAMBLE` eval — the
-## Rust-side `Vm::materialize_match_data` needs the class to
-## exist before any `String#match` hit lands.
-## `class Comparable; ... end` is loaded from
-## `preamble/comparable.rb` BEFORE this `PREAMBLE` eval. The
-## comment that used to describe Comparable here (about
-## `include Comparable` semantics and the ArgumentError-on-nil
-## rule) moved to the externalised file's header.
-## `module Enumerable; end` (empty stub so `include Enumerable`
-## doesn't crash; a Module so `Mod.include?(Enumerable)` passes the
-## expected-Module check) is loaded from `preamble/enumerable.rb`
-## AFTER this `PREAMBLE` eval; the full rationale lives in the
-## externalised file's header.
-"#;
-        self.eval_inner(PREAMBLE, "<rubyrs:preamble>")
+        self.eval_inner(INLINE_PREAMBLE, "<rubyrs:preamble>")
             .expect("ICE: failed to load built-in exception preamble");
         // `Set` is an autoloaded core class since Ruby 3.2 — available
         // without an explicit `require "set"` (modern gems like multi_json

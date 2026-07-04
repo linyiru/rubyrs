@@ -49,7 +49,7 @@ use crate::vm::Vm;
 pub(crate) const STEP_INSTALL_BUILTINS: u32 = u32::MAX;
 
 const MAGIC: &[u8; 4] = b"RBPC";
-const FORMAT_VERSION: u32 = 3; // bumped: ivar-site cids on LoadIvar/StoreIvar/IncIvar* + ivar_counter (ADR 0035 Ph4/5)
+const FORMAT_VERSION: u32 = 4; // bumped: baked_sources indices replace owned preamble source text
 
 /// Owned (deserialize) shape. `SnapshotRef` below is the borrow
 /// twin used at encode time so `store` doesn't clone the proto
@@ -78,8 +78,17 @@ struct Snapshot {
     /// chunk order, with `STEP_INSTALL_BUILTINS` marking the
     /// host-side builtin-install step.
     steps: Vec<u32>,
-    /// `vm.sources` pairs (filename, source) for backtrace
+    /// `vm.sources` entries whose text is `include_str!`-baked into
+    /// this binary, as indices into `crate::PREAMBLE_BAKED_SOURCES`
+    /// (the exe-identity cache key guarantees encoder and decoder
+    /// share the table). ~318 KB of preamble text this blob does NOT
+    /// carry — the dominant share of both blob size and decode time.
+    baked_sources: Vec<u32>,
+    /// Remaining `vm.sources` pairs (filename, source) for backtrace
     /// resolution — the live path inserts these in `eval_inner`.
+    /// After the baked split this is only the handful of tiny inline
+    /// literals (stdlib autoload registrations) plus any battery
+    /// preamble a feature build loads.
     sources: Vec<(String, String)>,
 }
 
@@ -92,6 +101,7 @@ struct SnapshotRef<'a> {
     cache_counter: u32,
     ivar_counter: u32,
     steps: &'a [u32],
+    baked_sources: Vec<u32>,
     sources: Vec<(&'a str, &'a str)>,
 }
 
@@ -154,7 +164,9 @@ fn dbg_miss(stage: &str) {
 /// and leaves `vm` untouched, so the caller falls back to the live
 /// compile path.
 pub(crate) fn try_load(vm: &mut Vm, dir: &Path, key: u64) -> Option<ReplayPlan> {
+    let t_read = std::time::Instant::now();
     let Ok(bytes) = std::fs::read(cache_file(dir, key)) else { dbg_miss("read"); return None };
+    let read_ns = t_read.elapsed().as_nanos() as u64;
     if bytes.len() < 16 || &bytes[0..4] != MAGIC {
         return None;
     }
@@ -164,10 +176,13 @@ pub(crate) fn try_load(vm: &mut Vm, dir: &Path, key: u64) -> Option<ReplayPlan> 
     if u64::from_le_bytes(bytes[8..16].try_into().ok()?) != key {
         return None;
     }
+    let t_decode = std::time::Instant::now();
     let snap: Snapshot = match postcard::from_bytes(&bytes[16..]) {
         Ok(s) => s,
         Err(e) => { dbg_miss(&format!("decode: {e}")); return None }
     };
+    let decode_ns = t_decode.elapsed().as_nanos() as u64;
+    let t_apply = std::time::Instant::now();
     // Verify the pre-preamble state matches what the blob was
     // stored against. The key already hashes all of this; the
     // explicit re-check is belt-and-braces against hash collision
@@ -186,6 +201,17 @@ pub(crate) fn try_load(vm: &mut Vm, dir: &Path, key: u64) -> Option<ReplayPlan> 
             return None;
         }
     }
+    // Baked-source indices must resolve inside this binary's table
+    // (checked BEFORE the commit point below — an out-of-range index
+    // means a corrupt/foreign blob and must fall back, not panic).
+    if snap
+        .baked_sources
+        .iter()
+        .any(|&i| i as usize >= crate::PREAMBLE_BAKED_SOURCES.len())
+    {
+        dbg_miss("baked-source index out of range");
+        return None;
+    }
     // Apply. From here on the snapshot is committed — every step
     // below is infallible (or panics on ICE, same as the live
     // path's `.expect`).
@@ -197,8 +223,21 @@ pub(crate) fn try_load(vm: &mut Vm, dir: &Path, key: u64) -> Option<ReplayPlan> 
     vm.cache_counter = crate::compiler::CidGen { call: snap.cache_counter, ivar: snap.ivar_counter };
     vm.ensure_call_caches(snap.cache_counter as usize);
     vm.ensure_ivar_caches(snap.ivar_counter as usize);
+    for &i in &snap.baked_sources {
+        let (f, src) = crate::PREAMBLE_BAKED_SOURCES[i as usize];
+        vm.sources.insert(Rc::from(f), Rc::from(src));
+    }
     for (f, src) in snap.sources {
         vm.sources.insert(Rc::from(f.as_str()), Rc::from(src.as_str()));
+    }
+    if std::env::var_os("RUBYRS_STARTUP_PROF").is_some() {
+        eprintln!(
+            "startup-prof: preamble-cache blob={}B read={:.3}ms decode={:.3}ms verify+apply={:.3}ms",
+            bytes.len(),
+            read_ns as f64 / 1e6,
+            decode_ns as f64 / 1e6,
+            t_apply.elapsed().as_nanos() as f64 / 1e6,
+        );
     }
     Some(ReplayPlan { steps: snap.steps })
 }
@@ -219,6 +258,23 @@ pub(crate) fn store(
     pre_protos_len: u32,
     steps: &[u32],
 ) {
+    // Split `vm.sources` into baked-table indices and owned pairs.
+    // A baked reference requires BOTH the filename and the full
+    // source text to match the table entry (content compare, miss
+    // path only) — belt-and-braces so a hypothetical divergence
+    // degrades to carrying the owned text, never to serving wrong
+    // source.
+    let mut baked_sources: Vec<u32> = Vec::new();
+    let mut owned_sources: Vec<(&str, &str)> = Vec::new();
+    for (k, v) in vm.sources.iter() {
+        match crate::PREAMBLE_BAKED_SOURCES
+            .iter()
+            .position(|(name, text)| *name == &**k && *text == &**v)
+        {
+            Some(i) => baked_sources.push(i as u32),
+            None => owned_sources.push((&**k, &**v)),
+        }
+    }
     let snap = SnapshotRef {
         pre_interner_len,
         pre_protos_len,
@@ -229,11 +285,8 @@ pub(crate) fn store(
         cache_counter: vm.cache_counter.call,
         ivar_counter: vm.cache_counter.ivar,
         steps,
-        sources: vm
-            .sources
-            .iter()
-            .map(|(k, v)| (&**k, &**v))
-            .collect(),
+        baked_sources,
+        sources: owned_sources,
     };
     let Ok(body) = postcard::to_allocvec(&snap) else { return };
     let mut bytes = Vec::with_capacity(16 + body.len());
