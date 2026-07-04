@@ -1499,7 +1499,10 @@ mod tests {
     // ---- serde <-> from_str f64 equivalence (pairing soundness) ---------
 
     enum Num {
-        I(i64),
+        // Payload captured to mirror serde's visit_i64 delivery; the
+        // bigint sweep only asserts on U/F (an I is out-of-range-proof
+        // by construction), so the i64 itself is never read.
+        I(#[allow(dead_code)] i64),
         U(u64),
         F(f64),
     }

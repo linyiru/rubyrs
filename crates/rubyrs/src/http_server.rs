@@ -3749,7 +3749,6 @@ mod tests {
         let client_addr = server_addr.clone();
 
         let client_thread = thread::spawn({
-            let server_addr = server_addr.clone();
             move || {
             // Retry the connect for up to 2 s with 25 ms backoff
             // instead of a single shot at 250 ms. The server's
