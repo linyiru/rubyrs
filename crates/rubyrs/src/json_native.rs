@@ -528,6 +528,15 @@ const EXP_FENCE_DIGITS: usize = 10;
 /// in a MALFORMED document) still just decline to the canon,
 /// whose strict number grammar raises like CRuby.
 fn has_exp_out_of_range(bytes: &[u8]) -> bool {
+    // Tier 0: no exponent marker anywhere → no fence work at all.
+    // memchr's SIMD sweep is ~an order of magnitude cheaper than
+    // the stride walk on e-free payloads (pure number arrays,
+    // ID-in-string documents), and an e-prefixed digit run can
+    // only START after the first `e`/`E` byte — so the stride
+    // walk begins there.
+    let Some(first_e) = memchr::memchr2(b'e', b'E', bytes) else {
+        return false;
+    };
     const STRIDE: usize = EXP_FENCE_DIGITS;
     // Left-expansion cap: probes landing deep inside very long
     // digit runs (>40 digits) hand the whole document to the
@@ -535,7 +544,7 @@ fn has_exp_out_of_range(bytes: &[u8]) -> bool {
     // (keeps the filter linear on digit-blob inputs).
     const EXPAND_CAP: usize = 40;
     let n = bytes.len();
-    let mut i = STRIDE - 1;
+    let mut i = first_e + 1;
     while i < n {
         if !bytes[i].is_ascii_digit() {
             i += STRIDE;

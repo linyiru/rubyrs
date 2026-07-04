@@ -190,7 +190,7 @@ _fiber = []
 # accelerator is for hot loops (Rack JSON responses, parsing
 # request bodies, …) where bytecode-level dispatch overhead
 # would otherwise dominate.
-_json_native = ["dep:serde_json", "dep:serde"]
+_json_native = ["dep:serde_json", "dep:serde", "dep:memchr"]
 # `_rouge_native` — carmine-backed accelerator for the rouge gem's
 # RegexLexer. After `require "rouge"` a shim patches `lex` + the HTML
 # formatter to route supported lexers through the native engine
@@ -398,6 +398,12 @@ postcard = { version = "1", optional = true, default-features = false, features 
 # 2.2250738585072011e-308. Byte-parity on re-generate requires the
 # exact same f64 bits CRuby gets.
 serde_json = { version = "1", optional = true, features = ["preserve_order", "float_roundtrip"] }
+# json_native's exponent-fence pre-scan: a SIMD memchr2(e,E) sweep
+# short-circuits the whole scan on exponent-free payloads (pure
+# number arrays, ID-in-string docs) ~10x cheaper than a stride
+# walk. Already in the dependency graph transitively (regex
+# engines); direct-dep adds no new code.
+memchr = { version = "2", optional = true }
 # `_sqlite` battery deps. rusqlite + bundled SQLite C source
 # (~2 MB compiled). ADR 0027 §1 pins to 0.39 for supply-chain
 # determinism (`= 0.39` not `^0.39`). `lru` backs the per-
