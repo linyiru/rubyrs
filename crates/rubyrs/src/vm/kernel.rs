@@ -6706,7 +6706,15 @@ impl MarshalReader<'_> {
                     }
                     Value::Hash(hid) => {
                         if let crate::heap::HeapObj::Hash(h) = vm.heap.get_mut(*hid) {
-                            h.extras_mut().class_tag = Some(cls);
+                            if cname == "Hash" {
+                                // `C :Hash {…}` is CRuby's encoding of a
+                                // compare_by_identity Hash (the class is the
+                                // builtin itself, not a subclass) — restore
+                                // the flag instead of a bogus class tag.
+                                h.by_identity.set(true);
+                            } else {
+                                h.extras_mut().class_tag = Some(cls);
+                            }
                         }
                     }
                     _ => return Err("unsupported `C` subclass payload (rubyrs: Array/Hash only)".into()),
@@ -7143,11 +7151,12 @@ impl MarshalWriter {
                     self.write_long(i as i64);
                     return Ok(());
                 }
-                let (has_block, default, sub) = match vm.heap.get(*id) {
+                let (has_block, default, sub, by_id) = match vm.heap.get(*id) {
                     crate::heap::HeapObj::Hash(h) => {
-                        (h.default_block().is_some(), h.default_value().cloned(), h.class_tag().cloned())
+                        (h.default_block().is_some(), h.default_value().cloned(),
+                         h.class_tag().cloned(), h.by_identity.get())
                     }
-                    _ => (false, None, None),
+                    _ => (false, None, None, false),
                 };
                 // A block default (`Hash.new { ... }`) wraps a Proc — not
                 // serialisable; fall back to the token.
@@ -7161,6 +7170,14 @@ impl MarshalWriter {
                         Some(s) => s,
                         None => return Err(()),
                     };
+                    self.out.push(b'C');
+                    self.write_symbol(vm, csym);
+                } else if by_id {
+                    // compare_by_identity — CRuby dumps it as `C :Hash {…}`
+                    // (probed 3.4: `Marshal.dump({}.compare_by_identity)`
+                    // is "\x04\bC:\tHash{\x00"); the loader restores the
+                    // flag from the class-being-plain-Hash shape.
+                    let csym = vm.interner.intern("Hash");
                     self.out.push(b'C');
                     self.write_symbol(vm, csym);
                 }

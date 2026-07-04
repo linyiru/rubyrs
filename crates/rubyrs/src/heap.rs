@@ -2488,6 +2488,14 @@ impl Value {
             _ => self.to_display(heap, interner),
         }
     }
+    /// True when exactly one of the two Hashes is `compare_by_identity` —
+    /// CRuby's rb_hash_equal refuses to equate non-empty hashes across the
+    /// flag (shared by the `ruby_eq` / `ruby_eql` Hash arms below).
+    fn hash_cbi_flags_differ_impl(heap: &Heap, a: ObjId, b: ObjId) -> bool {
+        let ca = matches!(heap.get(a), HeapObj::Hash(h) if h.by_identity.get());
+        let cb = matches!(heap.get(b), HeapObj::Hash(h) if h.by_identity.get());
+        ca != cb
+    }
     /// CRuby's `Object#eql?` — like `==` but WITHOUT cross-numeric-type
     /// coercion. `1.eql?(1.0)` is `false`; `1 == 1.0` is `true`.
     /// Used for Hash key collision / lookup so `{ 1.0 => :a, 1 => :b }`
@@ -2568,6 +2576,12 @@ impl Value {
                 if a == b { return true; }
                 let x = heap.hash(*a); let y = heap.hash(*b);
                 if x.len() != y.len() { return false; }
+                // CRuby: NON-empty hashes whose compare_by_identity flags
+                // differ are never equal (empty pairs compare equal before
+                // the flag matters) — probed on 3.4.
+                if !x.is_empty() && Self::hash_cbi_flags_differ_impl(heap, *a, *b) {
+                    return false;
+                }
                 x.iter().all(|(k, v)| {
                     y.iter().any(|(k2, v2)| k.ruby_eql(k2, heap) && v.ruby_eql(v2, heap))
                 })
@@ -2766,6 +2780,12 @@ impl Value {
                 if a == b { return true; }
                 let x = heap.hash(*a); let y = heap.hash(*b);
                 if x.len() != y.len() { return false; }
+                // CRuby: NON-empty hashes whose compare_by_identity flags
+                // differ are never == (empty pairs compare equal before
+                // the flag matters) — probed on 3.4.
+                if !x.is_empty() && Self::hash_cbi_flags_differ_impl(heap, *a, *b) {
+                    return false;
+                }
                 // Order-insensitive: for each (k, v) in `x`, find a
                 // matching key in `y` with equal value. O(n*m) but
                 // the lookup is unavoidable until we hash keys

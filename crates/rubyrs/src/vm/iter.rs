@@ -2068,7 +2068,9 @@ impl Vm {
                 g.pin(Value::Hash(id));
                 g.pin(Value::Block(block));
                 g.pin(k.clone());
-                match g.vm.heap.hash_delete(id, &k) {
+                // `vm_hash_delete` — user `hash`/`eql?` keys honored
+                // (plain keys keep the identity heap delete).
+                match g.vm.vm_hash_delete(id, &k)? {
                     Some(v) => Some(v),
                     None => {
                         let pre_frames = g.vm.frames.len();

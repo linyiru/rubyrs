@@ -326,6 +326,13 @@ impl Vm {
         if self.heap.hash(a).len() != self.heap.hash(b).len() {
             return Ok(false);
         }
+        // CRuby: non-empty hashes whose compare_by_identity flags differ
+        // are never equal (same rule as the native ruby_eq/ruby_eql arms).
+        if !self.heap.hash(a).is_empty()
+            && self.hash_is_by_identity(a) != self.hash_is_by_identity(b)
+        {
+            return Ok(false);
+        }
         let pairs: Vec<(Value, Value)> = self.heap.hash(a).to_vec();
         let mut g = PinGuard::new(self);
         g.pin(Value::Hash(a));
@@ -797,12 +804,18 @@ impl Vm {
                     // identical for the string/symbol keys real
                     // callers (rack Headers#assoc supers here) use.
                     ("assoc", [k]) => {
+                        // CRuby assoc returns the STORED pair (probed:
+                        // `{-0.0 => 2}.assoc(0.0)` is `[-0.0, 2]`), not the
+                        // argument key.
                         let found = self.vm_hash_find(id, k)?
-                            .map(|pos| self.heap.hash(id)[pos].1.clone());
+                            .map(|pos| self.heap.hash(id)[pos].clone());
                         match found {
-                            Some(v) => {
-                                self.maybe_gc();
-                                let nid = self.heap.alloc(HeapObj::Array(vec![k.clone(), v].into()));
+                            Some((sk, v)) => {
+                                let mut g = PinGuard::new(self);
+                                if sk.is_gc_heap_ref() { g.pin(sk.clone()); }
+                                if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                                g.vm.maybe_gc();
+                                let nid = g.vm.heap.alloc(HeapObj::Array(vec![sk, v].into()));
                                 Some(Value::Array(nid))
                             }
                             None => Some(Value::Nil),
@@ -888,19 +901,21 @@ impl Vm {
                     // miss yields the hash's scalar default, else nil — a
                     // default PROC is not fired here, a minor divergence).
                     ("values_at", keys) => {
-                        // Key lookup via `vm_hash_find` — honors user
-                        // `hash`/`eql?` keys (plain keys keep the identity
-                        // path). Pin the receiver: the user `hash` dispatch
-                        // can GC and the receiver was popped off the stack.
-                        let dflt = self.heap.hash_default_value(id);
+                        // CRuby values_at is an aref per key (rb_hash_aref):
+                        // full `[]` semantics — user `hash`/`eql?` honored,
+                        // and a miss consults the scalar default AND the
+                        // default proc (probed: `Hash.new { "p" }
+                        // .values_at(:x)` is `["p"]`). Re-dispatch through
+                        // the canonical `[]` arm per key so the two can't
+                        // drift. Pin the receiver + accumulated values (the
+                        // `[]` default-block / user-hash dispatch can GC).
                         let mut g = PinGuard::new(self);
                         g.pin(Value::Hash(id));
                         let mut out: Vec<Value> = Vec::with_capacity(keys.len());
                         for key in keys {
-                            let v = match g.vm.vm_hash_find(id, key)? {
-                                Some(p) => g.vm.heap.hash(id)[p].1.clone(),
-                                None => dflt.clone().unwrap_or(Value::Nil),
-                            };
+                            let v = g.vm
+                                .hash_collection_call(id, "[]", &[key.clone()])?
+                                .unwrap_or(Value::Nil);
                             if v.is_gc_heap_ref() { g.pin(v.clone()); }
                             out.push(v);
                         }
@@ -1860,8 +1875,22 @@ impl Vm {
                     // `deep_transform_keys!` (and the deep symbolize/
                     // stringify bang methods built on it) rely on it.
                     ("replace", [Value::Hash(other)]) => {
-                        let pairs: Vec<(Value, Value)> = self.heap.hash(*other).to_vec();
+                        let other = *other;
+                        let pairs: Vec<(Value, Value)> = self.heap.hash(other).to_vec();
                         *self.heap.hash_mut(id) = pairs.into();
+                        // CRuby rb_hash_replace also copies (or clears) the
+                        // OTHER hash's default — value or proc — and its
+                        // compare_by_identity flag (probed on 3.4: a
+                        // `Hash.new(:D)` replaced with a defaultless hash
+                        // reports `default == nil`, and vice versa).
+                        let dv = self.heap.hash_default_value(other);
+                        let db = self.heap.hash_default_block(other);
+                        self.heap.hash_set_default_value(id, dv);
+                        self.heap.hash_set_default_block(id, db);
+                        let cbi = self.hash_is_by_identity(other);
+                        if let HeapObj::Hash(h) = self.heap.get(id) {
+                            h.by_identity.set(cbi);
+                        }
                         Some(Value::Hash(id))
                     }
                     // `Hash#clear` — remove all pairs, return self.
@@ -2058,10 +2087,13 @@ impl Vm {
                                 && !taken.contains(&p)
                             {
                                 taken.push(p);
-                                let pair = g.vm.heap.hash(id)[p].clone();
-                                if pair.0.is_gc_heap_ref() { g.pin(pair.0.clone()); }
-                                if pair.1.is_gc_heap_ref() { g.pin(pair.1.clone()); }
-                                pairs.push(pair);
+                                // CRuby slice asets the ARGUMENT key into the
+                                // result (probed: `{-0.0 => 2}.slice(0.0)` is
+                                // `{0.0 => 2}`), not the stored key.
+                                let v = g.vm.heap.hash(id)[p].1.clone();
+                                if k.is_gc_heap_ref() { g.pin(k.clone()); }
+                                if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                                pairs.push((k.clone(), v));
                             }
                         }
                         g.vm.maybe_gc();

@@ -206,6 +206,33 @@ h[K.new(33)]
 h[K.new(33)] = :two
 puts "proc-insert:   size=#{h.size} #{h.inspect}"
 
+# -- 11. adjacent shapes surfaced by the fuzz battery -------------------
+# delete-with-block honors user eql?
+h = { K.new(35) => :val }
+puts "del-blk:       #{h.delete(K.new(35)) { |k| "missing #{k.inspect}" }.inspect} size=#{h.size}"
+puts "del-blk-miss:  #{h.delete(K.new(35)) { |k| "missing #{k.inspect}" }.inspect}"
+
+# slice puts the ARGUMENT key in the result; assoc returns the STORED pair
+p({ -0.0 => 2 }.slice(0.0))
+p({ -0.0 => 2 }.assoc(0.0))
+
+# non-empty hashes with mismatched compare_by_identity flags are never ==
+p({ x: 1 }.compare_by_identity == { x: 1 })
+p({} == {}.compare_by_identity)
+cbik = K.new(36)
+p({ cbik => 1 }.compare_by_identity == { cbik => 1 })
+
+# replace copies the other hash's default (value or proc) + cbi flag
+h = Hash.new(:D); h.replace({ x: 1 }); p h.default
+h = {}; h.replace(Hash.new(:E)); p h.default
+h = Hash.new(:D); h.replace(Hash.new { |hh, k| "p:#{k}" }); p h[:zz]
+h = {}; h.replace({}.compare_by_identity); p h.compare_by_identity?
+
+# values_at fires the default proc per missing key (aref semantics)
+h = Hash.new { |hh, k| "p:#{k.inspect}" }
+h[K.new(37)] = :hit
+p h.values_at(K.new(37), K.new(38), :plain)
+
 # dup/clone then dup-insert into the copy
 src = { K.new(34) => :a }
 d = src.dup
