@@ -433,8 +433,8 @@ impl Vm {
         &mut self,
         pairs: &mut crate::heap::PairsBuf,
     ) -> Result<Option<crate::intern::FxHashMap<i64, Vec<u32>>>, Trap> {
-        let hash_sym = self.interner.intern("hash");
-        let eql_sym = self.interner.intern("eql?");
+        let hash_sym = self.sym_key_hash;
+        let eql_sym = self.sym_key_eql;
         let has_user = pairs
             .iter()
             .any(|(k, _)| self.key_needs_ruby_hash(k, hash_sym, eql_sym));
@@ -495,6 +495,12 @@ impl Vm {
                 }
             }
             return Ok(Some(ui));
+        }
+        // 0/1-pair plain literal — nothing can collide (the user-key
+        // insert contract was handled above): skip the hash pre-pass.
+        // Record-shaped literals (`{"sid" => 1}`) hit this constantly.
+        if pairs.len() <= 1 {
+            return Ok(None);
         }
         {
             // Hash-prefiltered pairwise dedup: `ruby_hash` is consistent
