@@ -476,7 +476,18 @@ jobs:
           # vm.rs are now distributed across the per-type submodules
           # below; vm.rs itself holds only the Vm struct + shared
           # scaffolding (no panic-class code).
-          check crates/rubyrs/src/vm.rs               0
+          # Bumped 0 → 3 (+3) on 2026-07-04 catch-up: (a)+(b) the
+          # pooled frame-aux accessor `top_aux_mut` (3397804a) — one
+          # `frames.last_mut().expect("ICE: aux access with no
+          # frame")` (ops only run with an entry frame pushed) and
+          # one `f.aux.as_mut().unwrap()` two lines after the
+          # accessor itself sets `f.aux = Some(..)`; (c) the tier-2
+          # serve path (5a264917) `.expect("ICE: tier-2 trap status
+          # without a stored trap")` — every `return T2_TRAP` in
+          # jit_tier2.rs stores `vm.t2_trap = Some(t)` first
+          # (verified: 18/18 return sites, 5 via t2_call_prologue).
+          # All ICE-class; not user-reachable.
+          check crates/rubyrs/src/vm.rs               3
           # Per-submodule budgets — total is 87 (one count higher
           # than the pre-split 76 due to F-series feature work in
           # B6 / F4 / F6 that landed new ICE-class invariants in
@@ -560,7 +571,21 @@ jobs:
           # Bumped 59 → 60 on 2026-06-12 (same day): the String
           # per-instance eigenclass gate adds the twin stack-shape
           # ICE expect ("ICE: str-singleton recv").
-          check crates/rubyrs/src/vm/dispatch.rs     76
+          # Bumped 76 → 83 (+7 net) on 2026-07-04 catch-up for the
+          # ADR 0034 / rubocop-campaign master commits that landed
+          # without bumping: five interpreter fast-path stack-shape
+          # expects (`=== fast path` arg+recv bbfe3a2b, `!` / `<<` /
+          # `push` fast paths 1699ff99, `nfa fast path` 3e44fc84) —
+          # same compiler-emit stack-depth invariant as the ~40
+          # existing fast-path expects; one guarded
+          # `frames.last().expect("checked above")` (60e766e6); one
+          # `jit_native.get(&proto_idx).unwrap()` on the entry map
+          # (37d99525) — same present-by-caller-gate contract as the
+          # eight existing jit_native_*_loop map unwraps; plus the
+          # instance_eval-definee `frames.last_mut().unwrap()`
+          # (afb7257c, dispatch always runs with a frame). All
+          # ICE-class; not user-reachable.
+          check crates/rubyrs/src/vm/dispatch.rs     83
           # Bumped 52 → 64 by PRs #78 (break/next through ensure —
           # loop-transfer landing arms + frame/stack assertions in
           # the new control-flow ops) and #79 (GlobalVariableRead /
@@ -609,7 +634,9 @@ jobs:
           # `Op::JumpIfKwArgGiven` handler adds one ICE-class
           # `.expect("ICE: JumpIfKwArgGiven no frame")`, mirroring
           # the existing JumpIfArgGiven handler's pattern.
-          check crates/rubyrs/src/vm/step.rs         88
+          # Ratcheted 88 → 85 (-3) on 2026-07-04: refactors removed
+          # three sites; locking the win in.
+          check crates/rubyrs/src/vm/step.rs         85
           # Bumped 10 → 14 (+4) by PR #178 (step-block iter
           # refactor extracting Select/Reject accumulator logic).
           # Each accumulator path adds one `acc_id.unwrap()` —
@@ -623,8 +650,13 @@ jobs:
           # `step_block` gains one `frames.last().expect("ICE: ...")`
           # in the per-invocation-locals path. ICE-class invariant
           # on frame stack; not user-reachable.
-          check crates/rubyrs/src/vm/iter.rs         17
-          check crates/rubyrs/src/vm/cext.rs          6
+          # Ratcheted 17 → 15 (-2) on 2026-07-04: two sites removed
+          # by refactors; locking the win in.
+          check crates/rubyrs/src/vm/iter.rs         15
+          # Ratcheted 6 → 0 (-6) on 2026-07-04: the cext reentrance
+          # rework converted every panic-class site to Trap/contract
+          # returns; cext.rs is panic-free.
+          check crates/rubyrs/src/vm/cext.rs          0
           # Bumped 3 → 10 by PR #78 (break/next through ensure).
           # The proper unwinder needs frame/rescue-stack invariant
           # asserts at the loop-transfer entry, landing, and pop
@@ -636,8 +668,19 @@ jobs:
           # plus the rescue-handler `pending_method_break.is_none`
           # ICE-class asserts. All `.expect("ICE: ...")` invariants
           # at frame / pending-slot transitions; not user-reachable.
-          check crates/rubyrs/src/vm/raise.rs        17
-          check crates/rubyrs/src/vm/lookup.rs        3
+          # Bumped 17 → 20 (+3 net) on 2026-07-04 catch-up: the
+          # frame-aux pooling refactor (3397804a) re-shaped the
+          # rescue-filter / unwind frame reads (three
+          # `frames.last().expect("ICE: rescue filter with no
+          # frame")` + one unwind expect) and the loop-transfer
+          # rework (f7fdf03b) added begin/continue/landing frame
+          # asserts plus a length-check-guarded `rescues` expect —
+          # net +3 after removed sites. Same frame-stack ICE class
+          # as the ADR 0024 machinery; not user-reachable.
+          check crates/rubyrs/src/vm/raise.rs        20
+          # Ratcheted 3 → 1 (-2) on 2026-07-04: two sites removed
+          # (lookup cycle-guard rework); locking the win in.
+          check crates/rubyrs/src/vm/lookup.rs        1
           check crates/rubyrs/src/vm/range.rs         1
           # Bumped 1 → 4 (+3) from PR #163 (String#dump — hex pair
           # `char::from_digit(N, 16).unwrap()` for high/low nibbles)
@@ -658,7 +701,9 @@ jobs:
           # `String#match` `caps.get(0).unwrap()` after a successful
           # regex match. All ICE-class — the guard above each
           # unwrap makes Some statically true.
-          check crates/rubyrs/src/vm/string.rs       10
+          # Ratcheted 10 → 8 (-2) on 2026-07-04: two sites removed
+          # by refactors; locking the win in.
+          check crates/rubyrs/src/vm/string.rs        8
           # The remaining vm/* submodules (array, fileops, gc, hash,
           # numeric, primitive, sprintf, util) have zero panic-class
           # sites; ratcheting them at 0 keeps them honest.
@@ -728,7 +773,11 @@ jobs:
           # own CI without bumping the budget — PR #14 picks up
           # the increase via the merge-result count). Pre-existing
           # master bug, not introduced by this PR.
-          check crates/rubyrs/src/ast.rs       8
+          # Ratcheted 8 → 0 (-8) on 2026-07-04: the prism-direct
+          # translator rework removed every panic-class site — the
+          # user-reachable "unsupported AST" paths flagged above are
+          # gone (they decline/Trap now). ast.rs is panic-free.
+          check crates/rubyrs/src/ast.rs       0
           # Bumped 1 → 10 (+9) — net of two waves:
           #
           #   (a) +3 from PRs that added pure-Ruby preamble files
@@ -823,7 +872,14 @@ jobs:
           # Bumped 27 → 28 on 2026-06-12: preamble/math.rb chunk
           # (Math over __rubyrs_math) adds the same standard
           # load-tail `.expect`.
-          check crates/rubyrs/src/lib.rs       34
+          # Bumped 34 → 36 (+2 net) on 2026-07-04 catch-up: the
+          # Encoding-constant boot registration adds three expects
+          # ("Encoding class missing after preamble load", "heap cap
+          # exceeded registering Encoding constants", "Encoding
+          # alias target missing") minus one removed site. All run
+          # at preamble/boot time before any user code — same
+          # bootstrap ICE class as the preamble load-tail expects.
+          check crates/rubyrs/src/lib.rs       36
           # Bumped from 1 → 2 in 8cfe48b ("Add default method arguments")
           # which introduced literal_to_value's ICE panic. The ratchet
           # never went down, just up here. See docs/PANIC_AUDIT.md.
@@ -857,18 +913,114 @@ jobs:
           # ratchet catch-up, NOT a claim every site is ICE-class.
           # Audit these and convert user-reachable ones to Trap, then
           # ratchet down. See docs/PANIC_AUDIT.md.
-          check crates/rubyrs/src/value.rs            2
+          # Bumped 2 → 3 (+1) on 2026-07-04 catch-up: the shape-table
+          # interner (948f8913) adds `u32::try_from(names.len())
+          # .expect("ICE: > u32::MAX ivar names on one class")` — a
+          # resource-exhaustion bound (4 billion distinct ivar names
+          # on one class; allocation dies first). ICE-class.
+          check crates/rubyrs/src/value.rs            3
           check crates/rubyrs/src/http_server.rs      5
           check crates/rubyrs/src/sqlite.rs           4
-          check crates/rubyrs/src/jit_native.rs       6
+          # Bumped 6 → 7 (+1) on 2026-07-04 catch-up: `NpEntry::call2`
+          # (37d99525, ADR 0034 piece 1+8) adds `self.ptr2.expect(
+          # "ICE: call2 on a non-2-arg NpEntry")` — the doc comment on
+          # the method states the caller contract (proto comes from
+          # `jit_native_objparam2`). ICE-class contract assert.
+          check crates/rubyrs/src/jit_native.rs       7
           check crates/rubyrs/src/bcrypt.rs           3
           check crates/rubyrs/src/oj.rs               1
           check crates/rubyrs/src/openssl.rs          1
-          check crates/rubyrs/src/regex_engine.rs     1
+          # Bumped 1 → 3 (+2) on 2026-07-04 catch-up: the
+          # duplicate-named-group backref rewrite (0def4381) adds two
+          # `String::from_utf8(out).unwrap()` on its rebuilt pattern
+          # buffer. `out` is a resplice of the original valid-UTF-8
+          # pattern cut only at ASCII delimiters (`>`/`'`/`)`) plus
+          # ASCII insertions (`\<digits>`), so invalid UTF-8 is
+          # unreachable by construction. ICE-class. (The function's
+          # final return uses the belt-and-braces `unwrap_or_else`;
+          # converting these two early returns to match is a
+          # candidate ratchet-down.)
+          check crates/rubyrs/src/regex_engine.rs     3
           check crates/rubyrs/src/sass.rs             1
           check crates/rubyrs/src/socket.rs           1
           check crates/rubyrs/src/yaml_native.rs      1
           check crates/rubyrs/src/vm/fiber.rs         1
+          # ---- Files first budgeted 2026-07-04 (fail-closed sweep
+          # catch-up; every site audited — classification recorded in
+          # docs/PANIC_AUDIT.md "2026-07-04 addendum"). None is
+          # user-reachable: malformed script/JSON/regex input on
+          # these paths declines or Traps before any listed site.
+          #
+          # jit_tier2.rs (ADR 0034/0037 tier-2 JIT): 71 sites in two
+          # clusters. (a) ~35 runtime-helper asserts (`t2_*` extern
+          # fns called from generated code): frame-stack /
+          # operand-stack `.expect("ICE: ...")` — generated code only
+          # runs after t2_serve pushes the entry frame and the
+          # emitter knows the stack depth at each helper call; same
+          # invariant class as the budgeted step.rs/dispatch.rs op
+          # handlers. (b) ~36 codegen contract asserts inside the
+          # Cranelift emitter: `lay.expect(...)` (probed Vec layout —
+          # Some iff `inline_on`, set at Cg init), `blocks[t]
+          # .expect(...)` (block table has Some at every leader
+          # index; branch targets are always leaders), `lite_*
+          # .expect(...)` (set in the lite prologue before body
+          # emission, read only under `cg.lite` paths), and
+          # match-guard-checked pops (`vst.pop().expect("checked
+          # nonempty")` under `!cg.vst.is_empty()` guards,
+          # `case_lit_kind(..).expect("checked")` under an
+          # `is_some()` arm guard). A trip is an emitter bug, not
+          # script-reachable; unsupported shapes decline to the
+          # interpreter before these paths.
+          check crates/rubyrs/src/jit_tier2.rs       71
+          # prism_wq (prism→whitequark lexer/AST bridge, rubocop
+          # campaign): processes script-derived source, so each site
+          # was audited for user-input reachability — all 14 are
+          # guard-adjacent, and malformed/unsupported source returns
+          # `Decline` (falls back to the parser gem), never panics.
+          # lexer.rs 7: comment-newline `is_some()`-guarded unwrap;
+          # short-circuit `tokens.is_empty() ||` before `last()`;
+          # `matches!(next_token, Some(..))`-guarded unwrap; `match
+          # quote { Some(..) => quote.unwrap() }`; heredoc-stack
+          # `map().unwrap_or(false)`-guarded `last()`; hex
+          # `to_digit(16)` under `is_ascii_hexdigit` while-guard;
+          # `\uNNNN` `from_utf8`+`from_str_radix` under an
+          # `all(is_ascii_hexdigit)` gate (4 hex digits always
+          # parse). ICE-class by local guards.
+          check crates/rubyrs/src/prism_wq/lexer.rs   7
+          # compiler.rs 6: two `last_mut().unwrap()` after a loop
+          # that pushes ≥1 element (`extra` ≥ 1 on both arms); one
+          # `all_args.last().unwrap()` after an `is_empty` decline;
+          # two heredoc `opening_loc.unwrap()` guarded by
+          # `matches!(opening_loc, Some(..))`-derived conditions; one
+          # `inner_params.unwrap()` behind `procarg0()` which
+          # returns false for None. ICE-class by local guards.
+          check crates/rubyrs/src/prism_wq/compiler.rs 6
+          # builder.rs 1: `args.last().unwrap()` on an arm requiring
+          # `any` (⇒ non-empty) plus a `!matches!(args.last(), ..)`
+          # check. ICE-class.
+          check crates/rubyrs/src/prism_wq/builder.rs 1
+          # snapshot.rs 3: two 4-byte `try_into().unwrap()` after the
+          # `bytes.len() < 12` reject (short/corrupt images are
+          # Rejected, not panicked); one `c.unwrap()` after the fill
+          # loop that assigns `Some` to every remaining None slot.
+          # ICE-class.
+          check crates/rubyrs/src/snapshot.rs         3
+          # preamble_cache.rs 2: 8-byte `try_into().unwrap()` inside
+          # `chunks_exact(32)` (slice length fixed by the iterator);
+          # `cold_iter.next().unwrap()` under a `peek().is_some_and`
+          # guard. Corrupt cache bytes return None (fall back to
+          # live compile) before either site. ICE-class.
+          check crates/rubyrs/src/preamble_cache.rs   2
+          # commdrv.rs 1: `s.as_ref().unwrap()` inside the match
+          # guard of a `Some(s @ Some(_))` binding — Some by the
+          # pattern itself. ICE-class.
+          check crates/rubyrs/src/commdrv.rs          1
+          # json_native.rs 1 (user-JSON path, audited): `ctx.exact
+          # .as_ref().expect("exact queue present on pass 2")` — the
+          # field is set to `Some(..)` 13 lines above in the same
+          # closure and nothing takes it; malformed JSON flows
+          # through `map_parse_err` → Trap, never here. ICE-class.
+          check crates/rubyrs/src/json_native.rs      1
           # ---- Fail-closed sweep: every other crates/rubyrs/src/*.rs
           # is held at budget 0, so a new file (or a new panic site in a
           # file that has none today) fails this gate until someone adds

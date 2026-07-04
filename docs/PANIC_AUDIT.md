@@ -167,6 +167,37 @@ master; re-grep after touch-ups):
   positions that hold a `Jump` / `JumpIfFalse` op. Misuse is a
   compiler bug.
 
+## 2026-07-04 addendum — fail-closed sweep catch-up
+
+Eight files reached the fail-closed default (budget 0) without a
+reviewed budget line, and seven existing budgets had drifted (master
+commits landing sites without bumping). Every site was audited; the
+per-site justifications live next to each `check` line in
+`.github/workflows/ci.yml` (the per-change ledger — the table above
+predates the vm/ split and is retained as the original audit record).
+Summary of the newly budgeted files:
+
+| File | Count | Class |
+|---|---|---|
+| `crates/rubyrs/src/jit_tier2.rs` | 71 | 🟢 ICE — ~35 t2 runtime-helper frame/stack invariants (same class as step.rs/dispatch.rs op handlers) + ~36 Cranelift-emitter contract asserts (probed-layout/leader-block/lite-prologue fields, match-guard-checked pops) |
+| `crates/rubyrs/src/prism_wq/lexer.rs` | 7 | 🟢 ICE — all guard-adjacent; malformed source `Decline`s to the parser gem |
+| `crates/rubyrs/src/prism_wq/compiler.rs` | 6 | 🟢 ICE — all guard-adjacent (decline-on-empty, `matches!` guards, `procarg0` gate) |
+| `crates/rubyrs/src/snapshot.rs` | 3 | 🟢 ICE — length-guarded header reads (corrupt images are `Rejected`); fill-loop-guaranteed `Some` |
+| `crates/rubyrs/src/preamble_cache.rs` | 2 | 🟢 ICE — `chunks_exact` slice + peek-guarded next; corrupt cache returns `None` first |
+| `crates/rubyrs/src/commdrv.rs` | 1 | 🟢 ICE — `Some(s @ Some(_))` match-binding guard |
+| `crates/rubyrs/src/prism_wq/builder.rs` | 1 | 🟢 ICE — non-empty by the arm's `any` condition |
+| `crates/rubyrs/src/json_native.rs` | 1 | 🟢 ICE — field set to `Some` in the same closure; malformed JSON Traps via `map_parse_err` before it |
+
+The prism_wq and json_native files process user-controlled input
+(script source / JSON documents) and were specifically audited for
+user-input reachability: none of the sites is reachable from input —
+error paths uniformly `Decline` (prism_wq) or Trap (json_native)
+before any listed site. No 🔴 user-reachable sites were found in the
+sweep. Ratchets DOWN were also locked in where counts had dropped
+(step.rs 88→85, iter.rs 17→15, cext.rs 6→0, lookup.rs 3→1,
+string.rs 10→8, ast.rs 8→0 — ast.rs's 🔴 unsupported-node sites are
+gone).
+
 ## Doc-comment occurrences
 
 `.unwrap()` appearing inside `//!` or `///` doc examples (such
