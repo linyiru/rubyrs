@@ -542,6 +542,21 @@ impl Vm {
             self.heap.next_gc = usize::MAX;
             return;
         }
+        self.gc_now();
+    }
+
+    /// The collection itself — root gather + `Heap::collect` —
+    /// WITHOUT `maybe_gc`'s threshold / stress / disable gating.
+    /// Two callers: `maybe_gc` (the normal allocation-pressure
+    /// path) and `Runtime`'s post-preamble-snapshot capture, which
+    /// forces one FULL collection (via `Heap::schedule_major`) so
+    /// the captured baseline contains no still-uncollected
+    /// preamble garbage. Without that, a post-snapshot sweep frees
+    /// pre-snapshot slots, user allocs recycle them BELOW the
+    /// high-water mark, and `reset()`'s truncate-based rewind
+    /// can't reach them (the zombie-Array dangle the nightly-fuzz
+    /// reset loop surfaced).
+    pub(crate) fn gc_now(&mut self) {
         // Gather roots: stack + every frame's locals + self_val + swap_return
         // + pinned (native-code accumulators). class_stack holds Rc<Class>
         // which isn't GC-managed, so we don't need to walk it.

@@ -1392,6 +1392,18 @@ impl Heap {
     }
     pub(crate) fn should_gc(&self) -> bool { self.live_count >= self.next_gc }
 
+    /// Minor collections between majors (see `collect`'s
+    /// minor/major split). Hoisted from a `collect`-local const so
+    /// `schedule_major` can reference it.
+    pub(crate) const MAJOR_EVERY: u32 = 8;
+
+    /// Make the NEXT collection take the major (full-heap) path.
+    /// Used by `Runtime`'s post-preamble snapshot capture to force
+    /// a garbage-free baseline (see `Vm::gc_now`).
+    pub(crate) fn schedule_major(&mut self) {
+        self.minors_since_major = Self::MAJOR_EVERY - 1;
+    }
+
     /// Run a mark-and-sweep collection.
     ///
     /// Returns a list of pending TypedData `dfree` callbacks for
@@ -1413,8 +1425,7 @@ impl Heap {
         // can hold a young object) to keep their young children alive. A major
         // (every `MAJOR_EVERY` collections, or while there is no old gen yet)
         // resets ALL marks and walks the whole heap, reclaiming old garbage.
-        const MAJOR_EVERY: u32 = 8;
-        let minor = self.minors_since_major + 1 < MAJOR_EVERY;
+        let minor = self.minors_since_major + 1 < Self::MAJOR_EVERY;
         if minor {
             self.minors_since_major += 1;
             // Reset ONLY the young region's marks (O(young)); old objects RETAIN

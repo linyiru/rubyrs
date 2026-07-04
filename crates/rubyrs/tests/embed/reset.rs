@@ -880,6 +880,112 @@ fn refill_fuel_lets_runaway_trap_then_recover() {
     assert!(matches!(v, rubyrs::Value::Int(3)));
 }
 
+/// `reset()` must rewind the generational GC's slot-indexed
+/// bookkeeping (`young_slots` / `remembered` / `old` /
+/// `minors_since_major`) along with the heap vectors themselves.
+///
+/// The nightly fuzz harness (one cached Runtime, `reset()` between
+/// inputs — see crates/rubyrs/fuzz/src/lib.rs) caught the miss:
+/// `young_slots` entries above the post-preamble high-water mark
+/// survived reset, and the next MINOR collection's mark-reset
+/// (`marks[yi] = false` in heap.rs) indexed the truncated `marks`
+/// vector out of bounds — "index out of bounds: the len is 4091
+/// but the index is 4095", red on every scheduled fuzz run
+/// 2026-06-30 through 2026-07-04.
+///
+/// `stress_gc` forces a collection at every allocation, so the
+/// first post-reset alloc walks the young list immediately; the
+/// two grow/reset rounds cover the minor/major cadence wherever
+/// the previous eval left it (a stale-counter major on round one
+/// would otherwise mask the stale-young-list minor on round two).
+#[test]
+fn reset_rewinds_generational_gc_young_state() {
+    let mut rt = Runtime::with_config(Config { stress_gc: true, ..Default::default() });
+    for round in 0..3 {
+        // Grow the heap well past the preamble high-water mark;
+        // under stress-GC the tail allocations leave high slot
+        // indices in `young_slots`.
+        rt.eval(
+            "arrs = []; i = 0; while i < 300; arrs << [i, i + 1]; i = i + 1; end",
+            "grow.rb",
+        )
+        .unwrap_or_else(|e| panic!("grow eval (round {round}) must succeed: {:?}", e.err));
+        rt.reset();
+        // Fresh eval allocates + collects immediately. With stale
+        // young entries this panicked before the fix.
+        rt.eval(
+            "xs = []; j = 0; while j < 50; xs << [j]; j = j + 1; end",
+            "post_reset.rb",
+        )
+        .unwrap_or_else(|e| panic!("post-reset eval (round {round}) must succeed: {:?}", e.err));
+        rt.reset();
+    }
+}
+
+/// Harness-shape soak: ONE cached Runtime under the fuzz `parse`
+/// target's tight caps, `reset()` between inputs, every repo
+/// fixture (`tests/diff` + `tests/fixtures`, recursively) as the
+/// input sequence — exactly the seed corpus the nightly fuzz
+/// workflow feeds through `rubyrs_fuzz::run`. Scripts trapping
+/// (fuel / heap / deadline exhaustion, raises) is expected and
+/// ignored; the failure mode this pins is a host-side Rust panic
+/// from cross-input state the reset failed to rewind (the
+/// 2026-06-30..07-04 nightly-fuzz reds: stale generational-GC
+/// young slots, free-list-recycled zombie objects, dangling
+/// `main_obj`).
+///
+/// Runs the corpus in sorted order for determinism. Kept as a
+/// regular (non-#[ignore]) test: one pass over ~1k fixtures under
+/// a 50k-op fuel cap is seconds, and it's the only in-repo
+/// coverage of the cached-Runtime + reset() usage pattern the
+/// fuzz harness and per-request embedders rely on.
+#[test]
+fn reset_survives_fixture_corpus_soak_under_tight_caps() {
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rb") {
+                out.push(p);
+            }
+        }
+    }
+    // Caps::tight() from crates/rubyrs/fuzz/src/lib.rs.
+    let mut rt = Runtime::with_config(Config {
+        fuel: Some(50_000),
+        max_frames: Some(64),
+        max_heap_objects: Some(1024),
+        max_value_bytes: Some(1 << 16),
+        max_symbols: Some(1 << 14),
+        deadline: Some(std::time::Duration::from_millis(500)),
+        // Honour the repo's STRESS_GC=1 rerun convention: the
+        // stressed pass is the one that surfaces reset()-missed
+        // dangling heap references deterministically (a collection
+        // fires on every allocation, so a stale root can't hide
+        // behind GC timing).
+        stress_gc: std::env::var_os("STRESS_GC").is_some_and(|v| v == "1"),
+        ..Default::default()
+    });
+    let mut files = Vec::new();
+    walk(std::path::Path::new("tests/diff"), &mut files);
+    walk(std::path::Path::new("tests/fixtures"), &mut files);
+    files.sort();
+    assert!(
+        files.len() > 100,
+        "fixture corpus went missing? found {} .rb files",
+        files.len(),
+    );
+    for f in &files {
+        let src = std::fs::read_to_string(f).expect("fixture readable");
+        rt.reset();
+        // Traps are correct VM behaviour under the tight caps;
+        // only a Rust panic (which aborts the test) is a failure.
+        let _ = rt.eval(&src, "fuzz.rb");
+    }
+}
+
 // --- helpers ---
 //
 // These reach into private Vm state through the test-only Runtime

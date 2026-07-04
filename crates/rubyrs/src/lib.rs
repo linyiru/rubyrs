@@ -959,6 +959,28 @@ struct PostPreambleSnapshot {
     /// `live_count` keeps each reset+eval cycle behaviourally
     /// indistinguishable from a fresh Runtime.
     heap_next_gc: usize,
+    /// The heap's GC bookkeeping at preamble completion, restored
+    /// verbatim by `reset()` so a rewound Runtime's collector state
+    /// is bit-identical to a fresh one:
+    ///
+    /// - `heap_free` — the free-slot list. Load-bearing beyond
+    ///   book-keeping parity: `alloc` recycles free slots BELOW the
+    ///   high-water mark, so `reset()` walks this list to deaden
+    ///   user objects that truncation cannot reach.
+    /// - `heap_marks` / `heap_old` — slot-parallel mark + old-gen
+    ///   flags (a minor collection relies on old objects RETAINING
+    ///   their last-collection mark).
+    /// - `heap_young_slots` / `heap_remembered` — the young region
+    ///   and the write-barrier's old-mutated record; entries naming
+    ///   dropped user slots made the minor mark-reset index out of
+    ///   bounds (the 2026-06-30 nightly-fuzz crash).
+    /// - `heap_minors_since_major` — minor/major cadence counter.
+    heap_free: Vec<u32>,
+    heap_marks: Vec<bool>,
+    heap_old: Vec<bool>,
+    heap_young_slots: Vec<u32>,
+    heap_remembered: Vec<u32>,
+    heap_minors_since_major: u32,
     /// `vm.interner.len()` at preamble completion. `reset()`
     /// truncates `interner.vec` and drains stale `interner.map`
     /// entries — but never past any SymId still referenced by
@@ -1958,6 +1980,12 @@ impl PostPreambleSnapshot {
             heap_slot_count: rt.vm.heap.slots.len(),
             heap_live_count: rt.vm.heap.live_count,
             heap_next_gc: rt.vm.heap.next_gc,
+            heap_free: rt.vm.heap.free.clone(),
+            heap_marks: rt.vm.heap.marks.clone(),
+            heap_old: rt.vm.heap.old.clone(),
+            heap_young_slots: rt.vm.heap.young_slots.clone(),
+            heap_remembered: rt.vm.heap.remembered.clone(),
+            heap_minors_since_major: rt.vm.heap.minors_since_major,
             interner_len: rt.vm.interner.len(),
             call_caches_len: rt.vm.call_caches.len(),
             ivar_caches_len: rt.vm.ivar_caches.len(),
@@ -2162,6 +2190,15 @@ impl Runtime {
             guard.rt.load_preamble();
             // guard drops here; lifted settings restored.
         }
+        // One forced FULL collection before the snapshot: the
+        // captured baseline must contain NO uncollected preamble
+        // garbage. If it did, a post-snapshot sweep would free
+        // pre-snapshot slots, user allocs would recycle them BELOW
+        // the high-water mark, and `reset()`'s truncate + free-list
+        // deaden could not tell those zombies from live preamble
+        // objects (found by the nightly fuzz harness's reset loop).
+        rt.vm.heap.schedule_major();
+        rt.vm.gc_now();
         rt.post_preamble = Some(PostPreambleSnapshot::capture(&rt));
         rt
     }
@@ -2270,6 +2307,10 @@ impl Runtime {
     fn new_default_impl() -> Self {
         let mut rt = Self::build_skeleton();
         rt.load_preamble();
+        // Garbage-free baseline before capture — see the
+        // `with_config` twin site for the full rationale.
+        rt.vm.heap.schedule_major();
+        rt.vm.gc_now();
         rt.post_preamble = Some(PostPreambleSnapshot::capture(&rt));
         rt
     }
@@ -2483,23 +2524,75 @@ impl Runtime {
         // ruled out at the type level by `&mut self`: you can't
         // hold a `&mut Runtime` borrow inside a host_fn AND
         // call `reset` on the same Runtime simultaneously.)
-        // --- Heap: truncate user-allocated slots ---
-        // `Vec::truncate` is O(removed) and drops the HeapObj enum
-        // variants (including their Rc<...> inner data), releasing
-        // their ref counts. Any preamble-allocated slots beyond
-        // the high-water mark would also be released — by
-        // definition there are none, since the snapshot captures
-        // `slots.len()` immediately after preamble.
+        // --- Heap: drop user-allocated slots ---
+        // User allocations live in TWO places, not one:
+        //
+        //   1. Slots pushed past the post-preamble high-water mark
+        //      (`snapshot.heap_slot_count`) — removed by the
+        //      `truncate` below.
+        //   2. Slots RECYCLED from the preamble-era free list.
+        //      `alloc` pops the free list before growing, so a
+        //      user object can sit BELOW the high-water mark in a
+        //      slot that was `Dead` at snapshot time (a preamble-
+        //      time collection leaves such slots; the nightly fuzz
+        //      harness's reset loop surfaced this as a zombie user
+        //      Array whose elements dangled into the truncated
+        //      region). Deaden those explicitly.
+        //
+        // `Vec::truncate` / the `Slot::Dead` overwrite drop the
+        // HeapObj enum variants (including their Rc<...> inner
+        // data), releasing their ref counts. (`HeapObj::TypedData`
+        // dfree hooks are NOT invoked on either path — pre-existing
+        // posture of the truncate; a cext resource allocated by a
+        // rolled-back eval leaks its native side. Sweep-order
+        // parity for reset is a separate concern.)
+        for &idx in &snapshot.heap_free {
+            let slot = &mut self.vm.heap.slots[idx as usize];
+            if !matches!(slot, crate::heap::Slot::Dead) {
+                *slot = crate::heap::Slot::Dead;
+            }
+        }
         self.vm.heap.slots.truncate(snapshot.heap_slot_count);
-        self.vm.heap.marks.truncate(snapshot.heap_slot_count);
-        // `free` is the GC-reclaimed-slot index list. Any entries
-        // beyond the high-water are now out of range; entries
-        // below are still valid preamble-era slots that were
-        // freed pre-snapshot (none exist in practice, but clearing
-        // is safer than asserting empty).
-        self.vm.heap.free.retain(|&idx| (idx as usize) < snapshot.heap_slot_count);
+        // --- Heap: restore the GC bookkeeping to the snapshot ---
+        // All of these are slot-parallel vectors or slot-INDEX
+        // lists; every one of them must agree with the restored
+        // slot array or the next collection walks stale state:
+        //
+        //   - `marks`/`old` longer than `slots` would misalign
+        //     `alloc`'s lockstep pushes;
+        //   - `young_slots`/`remembered` entries naming dropped
+        //     user slots made the minor collection's mark-reset
+        //     index out of bounds (`marks[yi] = false`, the
+        //     heap.rs panic every scheduled fuzz run hit
+        //     2026-06-30..07-04);
+        //   - `free` must return to exactly the snapshot's list so
+        //     the recycled slots deadened above are allocatable
+        //     again.
+        //
+        // Exact clone_from of the captured state (rather than
+        // retain/derive heuristics) makes a post-reset Runtime's
+        // GC state bit-identical to the freshly-constructed one.
+        self.vm.heap.marks.clone_from(&snapshot.heap_marks);
+        self.vm.heap.old.clone_from(&snapshot.heap_old);
+        self.vm.heap.young_slots.clone_from(&snapshot.heap_young_slots);
+        self.vm.heap.remembered.clone_from(&snapshot.heap_remembered);
+        self.vm.heap.minors_since_major = snapshot.heap_minors_since_major;
+        self.vm.heap.free.clone_from(&snapshot.heap_free);
         self.vm.heap.live_count = snapshot.heap_live_count;
         self.vm.heap.next_gc = snapshot.heap_next_gc;
+        #[cfg(feature = "jit-native")]
+        {
+            // ADR 0035: `class_ptrs` is slots-parallel too (the
+            // alloc grow path debug_asserts the length equality);
+            // truncate and refresh the baked-address view the
+            // native JIT loads through. (Recycled-slot entries go
+            // stale but are never read for a Dead slot and are
+            // overwritten by the next alloc into that slot — same
+            // contract as a sweep.)
+            self.vm.heap.class_ptrs.truncate(snapshot.heap_slot_count);
+            self.vm.heap.jit_view.class_ptrs = self.vm.heap.class_ptrs.as_ptr();
+            self.vm.heap.jit_view.class_ptrs_len = self.vm.heap.class_ptrs.len();
+        }
         // --- Interner: drop user-interned symbols, but never
         //     truncate past any SymId referenced by long-lived
         //     tables. ---
@@ -2565,6 +2658,54 @@ impl Runtime {
         self.vm.frames.clear();
         self.vm.dm_share_depth = 0;
         self.vm.pinned.clear();
+        // The locals arena is rooted WHOLE by the GC gather (a
+        // trapped eval leaves its frames' slots in place; the
+        // frame stack was just cleared above but the arena
+        // wasn't). Post-truncation, any leftover slot Value can
+        // name a dropped heap slot — the next eval's first GC
+        // would walk a dangling ObjId (OOB panic before the heap
+        // regrows past it, silent wrong-object retention after).
+        self.vm.locals_arena.clear();
+        // --- Heap-referencing cross-eval state ---
+        // Every field below survives evals BY DESIGN and can hold
+        // ObjIds/Values pointing at user slots the truncation
+        // above just dropped; the GC root gather (vm/gc.rs) walks
+        // each of them, so one stale entry is a use-after-free.
+        // Found by the nightly fuzz harness's cached-Runtime +
+        // reset() iteration loop.
+        //
+        // The lazily-materialised top-level `main` object is
+        // allocated on the FIRST USER EVAL (the preamble runs
+        // before `Object` exists), so its slot sits above the
+        // high-water mark — drop the id and let `main_object()`
+        // re-materialise on next use. This also honours the reset
+        // contract: `self.extend Mod` accumulation on main is
+        // user state. (`filter` rather than `= None` to be exact
+        // about the invariant: only an above-high-water id is
+        // stale.)
+        self.vm.main_obj = self
+            .vm
+            .main_obj
+            .filter(|id| (id.0 as usize) < snapshot.heap_slot_count);
+        self.vm.last_uncaught_exception = None;
+        self.vm.pending_block_arg = None;
+        // String / heap-object eigenclass + ivar side tables are
+        // keyed by pointer identity and hold captured Values; all
+        // of their content is user-eval-era (the preamble installs
+        // none), so wholesale clear matches the baseline.
+        self.vm.str_singletons.clear();
+        self.vm.any_str_singletons = false;
+        self.vm.str_ivars.clear();
+        self.vm.any_str_ivars = false;
+        self.vm.heap_singletons.clear();
+        self.vm.any_heap_singletons = false;
+        // Kernel#binding local snapshots hold captured Values.
+        self.vm.binding_locals.clear();
+        // A fiber suspended when its driving eval trapped leaves
+        // its swapped-out frames + arena (all user state, all
+        // heap-referencing) on the stash stack.
+        #[cfg(feature = "_fiber")]
+        self.vm.fiber_stash_stack.clear();
         self.vm.globals.clear();
         self.vm.toplevel_cvars.clear();
         self.vm.class_stack.clear();
