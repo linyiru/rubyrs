@@ -137,10 +137,11 @@ impl<'vm> M<'vm> {
         if let Some(v) = self.range_cache.get(&(r.b, r.e)) {
             return Ok(v.clone());
         }
-        let mut ivars: Vec<(SymId, Value)> = Vec::new();
-        ivars.push((self.s_source_buffer, self.buffer.clone()));
-        ivars.push((self.s_begin_pos, Value::Int(r.b as i64)));
-        ivars.push((self.s_end_pos, Value::Int(r.e as i64)));
+        let ivars: Vec<(SymId, Value)> = vec![
+            (self.s_source_buffer, self.buffer.clone()),
+            (self.s_begin_pos, Value::Int(r.b as i64)),
+            (self.s_end_pos, Value::Int(r.e as i64)),
+        ];
         let class = self.range_class.clone();
         let v = self.alloc_instance(class, ivars, true)?;
         self.range_cache.insert((r.b, r.e), v.clone());
@@ -494,16 +495,16 @@ pub(crate) fn materialize(
         // Offsets: byte → char.
         let cr = R { b: off.c(start), e: off.c(end) };
         let range_val = m.range(cr)?;
-        let mut map_ivars: Vec<(SymId, Value)> = Vec::new();
-        map_ivars.push((m.s_expression, range_val));
+        let map_ivars: Vec<(SymId, Value)> = vec![(m.s_expression, range_val)];
         let map_val = m.alloc_instance(map_class.clone(), map_ivars, false)?;
         let text_bytes = src.get(start as usize..end as usize).unwrap_or(&[]).to_vec();
         let text_rs = crate::value::RStr::from_bytes(text_bytes);
         text_rs.encoding.set(enc);
         text_rs.frozen.set(true);
-        let mut ivars: Vec<(SymId, Value)> = Vec::new();
-        ivars.push((s_location, map_val));
-        ivars.push((s_text, Value::Str(Rc::new(text_rs))));
+        let ivars: Vec<(SymId, Value)> = vec![
+            (s_location, map_val),
+            (s_text, Value::Str(Rc::new(text_rs))),
+        ];
         comments_out.push(m.alloc_instance(comment_class.clone(), ivars, true)?);
     }
     let comments_val = m.alloc_array(comments_out, false)?;

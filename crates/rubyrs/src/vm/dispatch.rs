@@ -17651,22 +17651,18 @@ impl Vm {
                 },
             };
             if let Some((rid, pop_recv)) = recv_id {
-                match self.rest_pred_eval(rp, m.proto_idx, rid, split, argc) {
-                    Some(result) => {
-                        #[cfg(feature = "jit-native")]
-                        if self.jit_stats_on {
-                            self.rest_pred_stats.0 += 1;
-                        }
-                        self.stack.truncate(split - pop_recv);
-                        self.stack.push(Value::Bool(result));
-                        return Ok(true);
+                if let Some(result) = self.rest_pred_eval(rp, m.proto_idx, rid, split, argc) {
+                    #[cfg(feature = "jit-native")]
+                    if self.jit_stats_on {
+                        self.rest_pred_stats.0 += 1;
                     }
-                    None =>
-                    {
-                        #[cfg(feature = "jit-native")]
-                        if self.jit_stats_on {
-                            self.rest_pred_stats.1 += 1;
-                        }
+                    self.stack.truncate(split - pop_recv);
+                    self.stack.push(Value::Bool(result));
+                    return Ok(true);
+                } else {
+                    #[cfg(feature = "jit-native")]
+                    if self.jit_stats_on {
+                        self.rest_pred_stats.1 += 1;
                     }
                 }
             }
@@ -20590,7 +20586,7 @@ impl Vm {
         let mut written: Option<u32> = None;
         for op in &self.protos[proto_idx].code {
             use crate::bytecode::Op;
-            let mut note = |s: u16, w: bool, cap: &mut Vec<u32>, written: &mut Option<u32>| {
+            let note = |s: u16, w: bool, cap: &mut Vec<u32>, written: &mut Option<u32>| {
                 let s = s as u32;
                 if s < body_start && s != elem {
                     if !cap.contains(&s) {
@@ -20683,7 +20679,7 @@ impl Vm {
         let mut written: Option<u32> = None;
         for op in &self.protos[proto_idx].code {
             use crate::bytecode::Op;
-            let mut note = |s: u16, w: bool, cap: &mut Vec<u32>, written: &mut Option<u32>| {
+            let note = |s: u16, w: bool, cap: &mut Vec<u32>, written: &mut Option<u32>| {
                 let s = s as u32;
                 if s < body_start && s != elem {
                     if !cap.contains(&s) {
@@ -20776,7 +20772,7 @@ impl Vm {
         let mut written: Option<u32> = None;
         for op in &self.protos[proto_idx].code {
             use crate::bytecode::Op;
-            let mut note = |s: u16, w: bool, cap: &mut Vec<u32>, written: &mut Option<u32>| {
+            let note = |s: u16, w: bool, cap: &mut Vec<u32>, written: &mut Option<u32>| {
                 let s = s as u32;
                 if s < body_start && s != elem {
                     if !cap.contains(&s) {
@@ -20872,7 +20868,7 @@ impl Vm {
         let mut written: Option<u32> = None;
         for op in &self.protos[proto_idx].code {
             use crate::bytecode::Op;
-            let mut note = |s: u16, w: bool, cap: &mut Vec<u32>, written: &mut Option<u32>| {
+            let note = |s: u16, w: bool, cap: &mut Vec<u32>, written: &mut Option<u32>| {
                 let s = s as u32;
                 if s < body_start && s != p_elem && s != p_idx {
                     if !cap.contains(&s) {
@@ -23437,13 +23433,13 @@ impl Vm {
                 // lambda arity `0+` is always in range, so lambdas take
                 // this arm too. The rest Array is the one unavoidable
                 // alloc — CRuby exposes it to the block.
-                if n_params == 0 && rest_slot.is_some() {
+                if n_params == 0 && let Some(rest_slot) = rest_slot {
                     #[cfg(feature = "jit-native")]
                     if self.jit_stats_on {
                         self.restblk_census[1] += 1; // TEMP census: ib1 = argc 1
                         *self.restblk_census_by.entry(proto_idx).or_insert(0) += 1;
                     }
-                    let rest_slot = rest_slot.unwrap() as usize;
+                    let rest_slot = rest_slot as usize;
                     // Pin arg + block across the collection — but only
                     // when one is actually due (the caller popped both
                     // off the operand stack, so this fn's locals are
@@ -26013,6 +26009,7 @@ impl Vm {
 ///   - `inherit: false` consults ONLY the module's own method table
 ///     — not includes, not PREPENDS, not superclasses (probed:
 ///     `Foo.method_defined?(:from_prepended_mod, false)` is false).
+///
 /// The inherit=true chain verdict rides the respond_to?
 /// `(class, name, method_gen)` memo (`RESPOND_PROT_BIT` was added
 /// for exactly this split) — the RuboCop cop walk probes

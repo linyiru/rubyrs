@@ -194,7 +194,7 @@ impl Drop for SpanGuard<'_> {
 /// then widened here so they cache too.)
 #[inline]
 pub(crate) fn alloc_cid(cc: &mut u32) -> u32 {
-    if *cc >= u32::MAX {
+    if *cc == u32::MAX {
         u32::MAX
     } else {
         let id = *cc;

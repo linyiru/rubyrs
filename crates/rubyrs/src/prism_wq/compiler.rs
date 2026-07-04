@@ -168,7 +168,7 @@ fn find_forwarding(ctx: &Ctx<'_>, params: Option<&PNode>) -> Fl {
 }
 
 /// `multi_target_elements` — lefts + rest (unless ImplicitRest) + rights.
-fn multi_target_elements<'p>(node: &'p PNode, lefts: usize, rest: usize, rights: usize) -> Vec<&'p PNode> {
+fn multi_target_elements(node: &PNode, lefts: usize, rest: usize, rights: usize) -> Vec<&PNode> {
     let mut elements: Vec<&PNode> = node.list(lefts).iter().collect();
     if let Some(r) = node.opt_node(rest)
         && r.ty != nt::IMPLICIT_REST_NODE
@@ -1335,10 +1335,7 @@ fn visit(ctx: &mut Ctx<'_>, fl: Fl, node: &PNode) -> CRes<Box<WqNode>> {
             }
             } else if fl.in_destructure {
                 let op_t = token(ctx, op_loc);
-                let name_t = match expression {
-                    Some(e) => Some(token(ctx, e.loc)),
-                    None => None,
-                };
+                let name_t = expression.map(|e| token(ctx, e.loc));
                 ctx.b_restarg(op_t, name_t)
             } else if fl.in_pattern {
                 let op_t = token(ctx, op_loc);
@@ -1835,11 +1832,10 @@ fn visit_call_node(ctx: &mut Ctx<'_>, fl: Fl, node: &PNode) -> CRes<Box<WqNode>>
             b"[]=" => {
                 let message_is_brackets_eq = message_loc.map(|l| ctx.slice(l) == b"[]=").unwrap_or(false);
                 if !message_is_brackets_eq
-                    && arguments_node.is_some()
+                    && let Some(args_n) = arguments_node
                     && block.is_none()
                     && node.flags & CALL_SAFE_NAVIGATION == 0
                 {
-                    let args_n = arguments_node.unwrap();
                     let all_args = args_n.list(ids::arguments_node::ARGUMENTS);
                     if all_args.is_empty() {
                         return decline("[]= without arguments");
@@ -1866,7 +1862,11 @@ fn visit_call_node(ctx: &mut Ctx<'_>, fl: Fl, node: &PNode) -> CRes<Box<WqNode>>
     let dot = call_operator(ctx, call_operator_loc)?;
 
     let message_ends_eq = message_loc.map(|l| ctx.slice(l).ends_with(b"=")).unwrap_or(false);
-    let call = if name.ends_with(b"=") && !message_ends_eq && arguments_node.is_some() && block.is_none() {
+    let call = if name.ends_with(b"=")
+        && !message_ends_eq
+        && let Some(args_n) = arguments_node
+        && block.is_none()
+    {
         let recv = visit_opt(ctx, fl, receiver)?;
         let msg_loc = message_loc.ok_or(Decline("attr= without message"))?;
         let msg_bytes = ctx.slice(msg_loc).to_vec();
@@ -1874,7 +1874,6 @@ fn visit_call_node(ctx: &mut Ctx<'_>, fl: Fl, node: &PNode) -> CRes<Box<WqNode>>
         let recv = recv.ok_or(Decline("attr= without receiver"))?;
         let lhs = ctx.b_attr_asgn(recv, dot, &msg_bytes, msg_r)?;
         let eq_r = ctx.r(node.opt_bloc(ids::call_node::EQUAL_LOC).ok_or(Decline("attr= equal"))?);
-        let args_n = arguments_node.unwrap();
         let last = args_n.list(ids::arguments_node::ARGUMENTS).last().ok_or(Decline("attr= arg"))?;
         let value = visit(ctx, fl, last)?;
         ctx.b_assign(lhs, eq_r, value)?
@@ -1896,6 +1895,7 @@ fn visit_call_node(ctx: &mut Ctx<'_>, fl: Fl, node: &PNode) -> CRes<Box<WqNode>>
     visit_block(ctx, fl, call, block)
 }
 
+#[allow(clippy::too_many_arguments)] // Prism node-field indexes — flat by design
 fn visit_call_logical_write(
     ctx: &mut Ctx<'_>,
     fl: Fl,
@@ -1934,6 +1934,7 @@ fn visit_var_op_write(
     ctx.b_op_assign(lhs, &op_bytes, op_r, value)
 }
 
+#[allow(clippy::too_many_arguments)] // Prism node-field indexes — flat by design
 fn visit_index_write_lhs(
     ctx: &mut Ctx<'_>,
     fl: Fl,
@@ -2207,6 +2208,7 @@ fn visit_unless_node(ctx: &mut Ctx<'_>, fl: Fl, node: &PNode) -> CRes<Box<WqNode
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Prism node-field indexes — flat by design
 fn visit_while_like(
     ctx: &mut Ctx<'_>,
     fl: Fl,

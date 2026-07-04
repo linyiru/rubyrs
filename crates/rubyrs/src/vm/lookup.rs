@@ -39,6 +39,7 @@ use super::Vm;
 ///     Only meaningful when the fill reached the table lookup — for
 ///     universal/dup-family names the fill early-returns without
 ///     consulting the table, and no consumer needs the bit there.
+///
 /// `RESPOND_NONE` (0) = no method-table answer at all; the
 /// respond_to? caller then falls to `try_respond_to_missing`,
 /// exactly as pre-memo.
@@ -253,7 +254,7 @@ const TOPLEVEL_METHOD_CACHE_KEY: usize = usize::MAX;
 /// Resolve the flat-ivar slot for `inst`'s class at ivar-cache site
 /// `cid` (ADR 0035 Ph4/5): class-ptr-guarded cache hit -> cached slot;
 /// miss -> shape intern (a PERMANENT verdict — slots never renumber)
-/// + cache fill. `cid == u32::MAX` = uncached site (id space
+/// plus cache fill. `cid == u32::MAX` = uncached site (id space
 /// exhausted / synthesized op). A free function over the cache vector
 /// so callers can hold a `&Instance` borrowed from `Vm::heap` while
 /// mutating the disjoint `Vm::ivar_caches` field.

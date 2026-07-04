@@ -655,19 +655,16 @@ fn rewrite_dup_named_backrefs(pat: &str, base_extended: bool) -> std::borrow::Co
                     Some(&b'\'') => Some(b'\''),
                     _ => None,
                 };
-                if let Some(term) = close {
-                    if let Some((name, j)) = read_until(i + 3, term) {
-                        if dup.contains(&name.as_str()) {
-                            if let Some(&(idx, _)) =
-                                seen.iter().rev().find(|(_, n)| n.as_deref() == Some(&name))
-                            {
-                                out.push(b'\\');
-                                out.extend_from_slice(idx.to_string().as_bytes());
-                                i = j + 1;
-                                continue;
-                            }
-                        }
-                    }
+                if let Some(term) = close
+                    && let Some((name, j)) = read_until(i + 3, term)
+                    && dup.contains(&name.as_str())
+                    && let Some(&(idx, _)) =
+                        seen.iter().rev().find(|(_, n)| n.as_deref() == Some(&name))
+                {
+                    out.push(b'\\');
+                    out.extend_from_slice(idx.to_string().as_bytes());
+                    i = j + 1;
+                    continue;
                 }
             }
             // Verbatim escape: copy `\` + its next byte (backrefs/escapes

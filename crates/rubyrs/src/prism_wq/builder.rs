@@ -218,20 +218,15 @@ fn first_last_expr(parts: &[Ch]) -> CRes<Option<R>> {
 pub(crate) fn collection_map(begin_t: &Option<Tok>, parts: &[Ch], end_t: &Option<Tok>) -> CRes<Map> {
     let b = loc(begin_t);
     let e = loc(end_t);
-    let expr = if b.is_none() || e.is_none() {
-        if let Some(r) = first_last_expr(parts)? {
-            Some(r)
-        } else if let Some(b) = b {
-            Some(b)
-        } else if let Some(e) = e {
-            Some(e)
-        } else {
-            // `collection_map(nil, [], nil)` — a Collection map with a nil
-            // expression (empty paren-less arg lists).
-            None
-        }
+    let expr = if let (Some(b), Some(e)) = (b, e) {
+        Some(b.join(e))
+    } else if let Some(r) = first_last_expr(parts)? {
+        Some(r)
     } else {
-        Some(b.unwrap().join(e.unwrap()))
+        // Falls back to whichever delimiter exists; `collection_map(nil,
+        // [], nil)` — a Collection map with a nil expression (empty
+        // paren-less arg lists) — yields None.
+        b.or(e)
     };
     Ok(Map { expr, k: MK::Collection { b, e } })
 }
@@ -1319,6 +1314,7 @@ impl<'a> Ctx<'a> {
         Ok(n("def", vec![Ch::V(Value::Sym(sym)), Ch::N(args), opt_ch(body)], map))
     }
 
+    #[allow(clippy::too_many_arguments)] // parser-gem builder signature — one Tok per source token
     pub(crate) fn b_def_singleton(
         &mut self,
         def_t: Tok,
@@ -1341,6 +1337,7 @@ impl<'a> Ctx<'a> {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)] // parser-gem builder signature — one Tok per source token
     pub(crate) fn b_def_endless_singleton(
         &mut self,
         def_t: Tok,
@@ -1814,6 +1811,7 @@ impl<'a> Ctx<'a> {
         Ok(n(ty, vec![Ch::N(lhs), Ch::N(rhs)], map))
     }
 
+    #[allow(clippy::too_many_arguments)] // parser-gem builder signature — one Tok per source token
     pub(crate) fn b_condition(
         &mut self,
         cond_t: Tok,
@@ -1934,6 +1932,7 @@ impl<'a> Ctx<'a> {
         Ok(n(ty, vec![Ch::N(cond), Ch::N(body)], map))
     }
 
+    #[allow(clippy::too_many_arguments)] // parser-gem builder signature — one Tok per source token
     pub(crate) fn b_for(
         &mut self,
         for_t: Tok,
@@ -2016,6 +2015,7 @@ impl<'a> Ctx<'a> {
         ))
     }
 
+    #[allow(clippy::vec_box)] // the whole b_* surface traffics in `Box<WqNode>`; the boxes move into `Ch::N` unchanged
     pub(crate) fn b_begin_body(
         &mut self,
         mut compound_stmt: Option<Box<WqNode>>,

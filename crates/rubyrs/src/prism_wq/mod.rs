@@ -648,7 +648,7 @@ impl<'a> Ctx<'a> {
     pub(crate) fn cname(&mut self, node: &PNode, field: usize) -> CRes<crate::intern::SymId> {
         let Some(cid) = node.cid(field) else { return decline("cname: field kind") };
         let Some(bytes) = self.cpool_bytes(cid) else { return decline("cname: pool index") };
-        Ok(self.intern_bytes(&bytes.to_vec()))
+        Ok(self.intern_bytes(bytes))
     }
 
     /// Constant-pool name as owned bytes.

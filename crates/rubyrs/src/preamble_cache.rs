@@ -148,8 +148,9 @@ fn body_checksum(seed: u64, bytes: &[u8]) -> u64 {
 
 /// Marker for types the POD regions may contain.
 ///
-/// # Safety invariant (the keystone of the v5 format)
+/// # Safety
 ///
+/// The invariant below is the keystone of the v5 format.
 /// Implementors are stored/restored by RAW MEMORY COPY. This is
 /// sound only under ALL of:
 ///

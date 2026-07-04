@@ -1180,6 +1180,11 @@ impl ConstLoc {
     }
 }
 
+/// Backing map for [`Vm::nfa_stats`] — key is `(method name, argc
+/// passed, packed param shape, no_recv)`; see the field doc for the
+/// shape-bit layout.
+pub(crate) type NfaStatsMap = FxHashMap<(SymId, u16, u32, bool), u64>;
+
 pub(crate) struct Vm {
     pub(crate) protos: Vec<Proto>,
     #[cfg(feature = "jit-native")]
@@ -2077,6 +2082,7 @@ pub(crate) struct Vm {
     /// from here; the frame-pop sites push back via
     /// `recycle_frame_aux`. Pooled boxes hold NO `Value`s (cleared at
     /// recycle time), so the GC never needs to walk this.
+    #[allow(clippy::vec_box)] // pools the Box ALLOCATIONS: entries move into `Frame::aux: Option<Box<FrameAux>>` without re-boxing
     pub(crate) frame_aux_pool: Vec<Box<FrameAux>>,
     pub(crate) heap: Heap,
     /// Native-code holding pen for heap values across GC points; see ADR 0005.
@@ -2390,6 +2396,7 @@ pub(crate) struct Vm {
     ///     `<<`-only reopen keeps `push` fast).
     ///   - `fast_is_a_sym_safe`: no user `is_a?` / `kind_of?` on
     ///     the Symbol chain.
+    ///
     /// (Int `-@`/`<<` and Bool/Nil `!` need no new flags — their
     /// guard is the existing own-table `prim_reopen_mask` bit,
     /// which is exactly the gate the cascade consults before
@@ -2430,7 +2437,7 @@ pub(crate) struct Vm {
     /// req_post:4 | kw_count:6 | kw_rest:1 | block_param:1 |
     /// closure:1 | non_public:1. Dumped as `nfa-stats` rows by the
     /// CLI at exit alongside `cascade-stats`.
-    pub(crate) nfa_stats: Option<Box<FxHashMap<(SymId, u16, u32, bool), u64>>>,
+    pub(crate) nfa_stats: Option<Box<NfaStatsMap>>,
     /// TEMPORARY census (env `RUBYRS_T2_FALLBACK_STATS=1`, ADR 0037
     /// fallback census): where the in-body calls of tier-2 compiled
     /// frames fall back to, and why. Key = (reason code, method

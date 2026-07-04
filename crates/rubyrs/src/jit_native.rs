@@ -151,7 +151,9 @@ impl NpEntry {
         if r.ovf == 0 { Some(r.res) } else { None }
     }
 
-    /// See [`NativeProto::call2`].
+    /// Run a 2-arg method (ADR 0034 piece 1+8): `arg0` is a `*const Value` to the
+    /// Object param, `arg1` an Int. `None` = deopt. Panics if this proto has no
+    /// 4-arg entry (caller guards on the proto coming from `jit_native_objparam2`).
     #[inline]
     pub(crate) fn call2(
         &self,
@@ -234,16 +236,6 @@ impl NativeProto {
         } else {
             None
         }
-    }
-
-    /// Run a 2-arg method (ADR 0034 piece 1+8): `arg0` is a `*const Value` to the
-    /// Object param, `arg1` an Int. `None` = deopt. Panics if this proto has no
-    /// 4-arg entry (caller guards on the proto coming from `jit_native_objparam2`).
-    #[inline]
-    pub(crate) fn call2(&self, vm: *const crate::vm::Vm, recv: &Value, arg0: i64, arg1: i64) -> Option<i64> {
-        let f = self.ptr2.expect("ICE: call2 on a non-2-arg NativeProto");
-        let r = f(vm, recv as *const Value, arg0, arg1);
-        if r.ovf == 0 { Some(r.res) } else { None }
     }
 
     /// Machine address of the compiled code — registered as a JIT symbol so a
@@ -1343,7 +1335,11 @@ pub(crate) fn compile(
     hgsig.params.push(AbiParam::new(types::I64));
     hgsig.returns.push(AbiParam::new(types::I64));
     hgsig.returns.push(AbiParam::new(types::I8));
-    let hgid = module
+    // NB: distinct binding from the `jit_ivar_hash_get_int` `hgid` above —
+    // a previous `let hgid` here SHADOWED it, wiring `hashget_ref` to this
+    // 3-arg accum import (arity mismatch -> verifier reject -> silent deopt
+    // of the `@h[k]` int-key fusion) and leaving the first `hgid` unused.
+    let hgaid = module
         .declare_function("jit_hash_accum_get_int", Linkage::Import, &hgsig)
         .ok()?;
     // `jit_hash_accum_set_int`: (vm, hash:i64, key:i64, val:i64) -> void.
@@ -1520,7 +1516,7 @@ pub(crate) fn compile(
         let arrnew_ref = module.declare_func_in_func(anid, fb.func);
         let arrpush_ref = module.declare_func_in_func(apid, fb.func);
         let arrpushf_ref = module.declare_func_in_func(apfid, fb.func);
-        let hashget_accum_ref = module.declare_func_in_func(hgid, fb.func);
+        let hashget_accum_ref = module.declare_func_in_func(hgaid, fb.func);
         let hashset_accum_ref = module.declare_func_in_func(hsid, fb.func);
         let hashget_accum_fk_ref = module.declare_func_in_func(hgfkid, fb.func);
         let hashset_accum_fk_ref = module.declare_func_in_func(hsfkid, fb.func);

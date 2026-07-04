@@ -164,27 +164,25 @@ fn rewrite_stacked_quantifiers(s: &str) -> std::borrow::Cow<'_, str> {
             i += 1;
             continue;
         }
-        if c == b'{' && !in_class {
-            if let Some(qe) = parse_count_quantifier(bytes, i) {
-                let stacked = matches!(bytes.get(qe), Some(b'*') | Some(b'{'));
-                if stacked && let Some(atom_start) = stackable_atom_start(&out) {
-                    // Wrap [atom .. `}`] in a non-capturing group; the
-                    // trailing `*`/`{` is left to apply to the group.
-                    let mut wrapped: Vec<u8> = Vec::with_capacity(qe - atom_start + 4);
-                    wrapped.extend_from_slice(b"(?:");
-                    wrapped.extend_from_slice(&out[atom_start..]);
-                    wrapped.extend_from_slice(&bytes[i..qe]);
-                    wrapped.push(b')');
-                    out.truncate(atom_start);
-                    out.extend_from_slice(&wrapped);
-                    i = qe;
-                    continue;
-                }
-                // Not stacked (or unwrappable atom): copy the quantifier.
-                out.extend_from_slice(&bytes[i..qe]);
+        if c == b'{' && !in_class && let Some(qe) = parse_count_quantifier(bytes, i) {
+            let stacked = matches!(bytes.get(qe), Some(b'*') | Some(b'{'));
+            if stacked && let Some(atom_start) = stackable_atom_start(&out) {
+                // Wrap [atom .. `}`] in a non-capturing group; the
+                // trailing `*`/`{` is left to apply to the group.
+                let mut wrapped: Vec<u8> = Vec::with_capacity(qe - atom_start + 4);
+                wrapped.extend_from_slice(b"(?:");
+                wrapped.extend_from_slice(&out[atom_start..]);
+                wrapped.extend_from_slice(&bytes[i..qe]);
+                wrapped.push(b')');
+                out.truncate(atom_start);
+                out.extend_from_slice(&wrapped);
                 i = qe;
                 continue;
             }
+            // Not stacked (or unwrappable atom): copy the quantifier.
+            out.extend_from_slice(&bytes[i..qe]);
+            i = qe;
+            continue;
         }
         out.push(c);
         i += 1;

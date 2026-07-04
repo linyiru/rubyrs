@@ -488,10 +488,10 @@ fn main() {
     }
     let result = rt.eval_file(path);
     #[cfg(feature = "preamble-cache")]
-    if let Some(p) = std::env::var_os("RUBYRS_SNAPSHOT_SAVE") {
-        if let Err(e) = rt.snapshot_save(std::path::Path::new(&p)) {
-            eprintln!("rubyrs: snapshot save failed: {e}");
-        }
+    if let Some(p) = std::env::var_os("RUBYRS_SNAPSHOT_SAVE")
+        && let Err(e) = rt.snapshot_save(std::path::Path::new(&p))
+    {
+        eprintln!("rubyrs: snapshot save failed: {e}");
     }
     trace.at("eval_done");
     match result {

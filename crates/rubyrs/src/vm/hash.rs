@@ -1002,7 +1002,7 @@ impl Vm {
                         let mut out: Vec<Value> = Vec::with_capacity(keys.len());
                         for key in keys {
                             let v = g.vm
-                                .hash_collection_call(id, "[]", &[key.clone()])?
+                                .hash_collection_call(id, "[]", std::slice::from_ref(key))?
                                 .unwrap_or(Value::Nil);
                             if v.is_gc_heap_ref() { g.pin(v.clone()); }
                             out.push(v);

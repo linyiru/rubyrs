@@ -6705,10 +6705,10 @@ impl MarshalReader<'_> {
                 } else {
                     None
                 };
-                if let crate::heap::HeapObj::Hash(h) = vm.heap.get_mut(id) {
-                    if default.is_some() || h.extras().is_some() {
-                        h.extras_mut().default_value = default;
-                    }
+                if let crate::heap::HeapObj::Hash(h) = vm.heap.get_mut(id)
+                    && (default.is_some() || h.extras().is_some())
+                {
+                    h.extras_mut().default_value = default;
                 }
                 Ok(Value::Hash(id))
             }

@@ -469,7 +469,7 @@ pub(crate) struct HashExtras {
     /// the key's RUBY `#hash` (an i64; non-Integer results fold to 0) → the
     /// `pairs` positions that hash there, so `vm_hash_find`/`insert` only
     /// `eql?`-compare within one bucket instead of scanning all pairs. Built
-    /// + maintained at the VM level (`ensure_user_index`) since computing the
+    /// and maintained at the VM level (`ensure_user_index`) since computing the
     /// hash needs method dispatch. `None` = not built / invalidated (a delete
     /// shifts positions). Only u32 offsets, so the GC never marks it. Without
     /// it, RuboCop's `add_offense` dedup (`Set#add?` over Range keys) was

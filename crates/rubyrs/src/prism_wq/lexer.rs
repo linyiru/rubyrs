@@ -399,15 +399,13 @@ pub(crate) fn translate_tokens(ctx: &mut Ctx<'_>, parse: &PParse) -> CRes<Vec<Ou
                 }
                 value = TokVal::Bytes(v);
             }
-            "tLCURLY" => {
-                if state == EXPR_BEG | EXPR_LABEL {
-                    ty = "tLBRACE";
-                }
+            "tLCURLY" if state == EXPR_BEG | EXPR_LABEL => {
+                ty = "tLBRACE";
             }
-            "tLPAREN2" => {
-                if tokens.is_empty() || lparen_conversion_type(tokens.last().unwrap().ty) {
-                    ty = "tLPAREN";
-                }
+            "tLPAREN2"
+                if tokens.is_empty() || lparen_conversion_type(tokens.last().unwrap().ty) =>
+            {
+                ty = "tLPAREN";
             }
             "tNTH_REF" => {
                 let v = lx.value(&token);
