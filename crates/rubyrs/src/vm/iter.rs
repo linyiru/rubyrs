@@ -1738,7 +1738,10 @@ impl Vm {
                             }
                             let k = parr[0].clone();
                             let val = parr[1].clone();
-                            g.vm.heap.hash_insert(hid, k, val);
+                            // User-`hash`/`eql?`-aware upsert (plain keys
+                            // route through the identity heap insert
+                            // unchanged) — CRuby dedups eql?-equal keys.
+                            g.vm.vm_hash_insert(hid, k, val)?;
                         }
                         other => {
                             return Err(g.vm.trap(crate::error::RubyError::TypeError {
@@ -2284,13 +2287,16 @@ impl Vm {
             // absent from the mapping go through the block (CRuby 2.5+).
             (Value::Hash(id), "transform_keys", [] | [Value::Hash(_)]) => {
                 let id = *id;
-                let mapping: Vec<(Value, Value)> = match args.first() {
-                    Some(Value::Hash(mid)) => self.heap.hash(*mid).to_vec(),
-                    _ => Vec::new(),
+                let mapping: Option<crate::value::ObjId> = match args.first() {
+                    Some(Value::Hash(mid)) => Some(*mid),
+                    _ => None,
                 };
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(id));
                 g.pin(Value::Block(block));
+                if let Some(mid) = mapping {
+                    g.pin(Value::Hash(mid));
+                }
                 let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).to_vec();
                 g.vm.maybe_gc();
                 g.vm.check_alloc()?;
@@ -2299,10 +2305,17 @@ impl Vm {
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for (k, v) in snapshot {
-                    // Mapping wins over the block; unmapped keys are yielded.
-                    let mapped = mapping.iter()
-                        .find(|(mk, _)| mk.ruby_eql(&k, &g.vm.heap))
-                        .map(|(_, mv)| mv.clone());
+                    if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                    // Mapping wins over the block; unmapped keys are
+                    // yielded. The mapping lookup honors a user
+                    // `hash`/`eql?` on the key (`vm_hash_find` on the
+                    // live mapping Hash — CRuby looks the key up with
+                    // Hash semantics).
+                    let mapped = match mapping {
+                        Some(mid) => g.vm.vm_hash_find(mid, &k)?
+                            .map(|p| g.vm.heap.hash(mid)[p].1.clone()),
+                        None => None,
+                    };
                     let new_key = match mapped {
                         Some(mv) => mv,
                         None => match g.vm.step_block1(block, k, pre_frames)? {
@@ -2311,17 +2324,11 @@ impl Vm {
                             BlockStep::Value(r) => r,
                         },
                     };
-                    // Last-wins collision: overwrite existing slot
-                    // if the new_key equals one already present;
-                    // otherwise append. Matches CRuby's iteration-
-                    // order semantics.
-                    let existing = g.vm.heap.hash(result_id).iter()
-                        .position(|(k2, _)| k2.ruby_eql(&new_key, &g.vm.heap));
-                    if let Some(p) = existing {
-                        g.vm.heap.hash_mut(result_id)[p] = (new_key, v);
-                    } else {
-                        g.vm.heap.hash_mut(result_id).push((new_key, v));
-                    }
+                    // Last-wins collision via `vm_hash_insert` (user
+                    // `hash`/`eql?` honored; existing key object kept,
+                    // value replaced — CRuby aset). Matches CRuby's
+                    // iteration-order semantics.
+                    g.vm.vm_hash_insert(result_id, new_key, v)?;
                 }
                 Some(early.unwrap_or(Value::Hash(result_id)))
             }
@@ -2368,15 +2375,28 @@ impl Vm {
                 let mut new_pairs: Vec<(Value, Value)> = Vec::with_capacity(snapshot.len());
                 let mut early = None;
                 for (k, v) in snapshot {
+                    if v.is_gc_heap_ref() { g.pin(v.clone()); }
                     let new_key = match g.vm.step_block1(block, k, pre_frames)? {
                         BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(r) => r,
                     };
-                    let existing = new_pairs.iter()
-                        .position(|(k2, _)| k2.ruby_eql(&new_key, &g.vm.heap));
+                    if new_key.is_gc_heap_ref() { g.pin(new_key.clone()); }
+                    // User-`eql?`-aware collision scan over the scratch
+                    // (`find_key_ruby`; plain keys keep the old ruby_eql
+                    // scan, no snapshot). On collision the FIRST key object
+                    // is kept and only the value replaced — CRuby aset
+                    // semantics.
+                    let existing = if g.vm.hash_key_needs_slow(&new_key) {
+                        let keys_so_far: Vec<Value> =
+                            new_pairs.iter().map(|(k2, _)| k2.clone()).collect();
+                        g.vm.find_key_ruby(&keys_so_far, &new_key)?
+                    } else {
+                        new_pairs.iter()
+                            .position(|(k2, _)| k2.ruby_eql(&new_key, &g.vm.heap))
+                    };
                     if let Some(p) = existing {
-                        new_pairs[p] = (new_key, v);
+                        new_pairs[p].1 = v;
                     } else {
                         new_pairs.push((new_key, v));
                     }
@@ -2435,21 +2455,38 @@ impl Vm {
                 g.pin(Value::Hash(other));
                 g.pin(Value::Block(block));
                 let extra: Vec<(Value, Value)> = g.vm.heap.hash(other).to_vec();
+                for (k, v) in &extra {
+                    if k.is_gc_heap_ref() { g.pin(k.clone()); }
+                    if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                }
+                let hash_sym = g.vm.interner.intern("hash");
+                let eql_sym = g.vm.interner.intern("eql?");
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for (k, v) in extra {
-                    let pos = g.vm.heap.hash(id).iter()
-                        .position(|(ek, _)| ek.ruby_eql(&k, &g.vm.heap));
+                    // One-hash-dispatch locate (user `hash`/`eql?` honored;
+                    // plain keys take the identity index). On conflict the
+                    // block sees the EXISTING key object (CRuby yields the
+                    // stored key, not the incoming one) and its result
+                    // replaces the value in place — key + position kept. A
+                    // miss appends, threading the located Ruby-hash into the
+                    // user-index bucket (no second dispatch).
+                    let (hv, pos) = g.vm.vm_hash_locate(id, &k, hash_sym, eql_sym)?;
                     if let Some(p) = pos {
-                        let old = g.vm.heap.hash(id)[p].1.clone();
-                        let resolved = match g.vm.step_block(block, vec![k.clone(), old, v], pre_frames)? {
+                        let (stored_key, old) = {
+                            let pair = &g.vm.heap.hash(id)[p];
+                            (pair.0.clone(), pair.1.clone())
+                        };
+                        let resolved = match g.vm.step_block(block, vec![stored_key, old, v], pre_frames)? {
                             BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
                             BlockStep::Break(r) => { early = Some(r); break; }
                             BlockStep::Value(r) => r,
                         };
-                        g.vm.heap.hash_mut(id)[p].1 = resolved;
+                        // Value-only write (positions untouched → both key
+                        // indexes stay valid).
+                        g.vm.heap.hash_obj_mut(id).pairs[p].1 = resolved;
                     } else {
-                        g.vm.heap.hash_mut(id).push((k, v));
+                        g.vm.vm_hash_append(id, k, v, hv);
                     }
                 }
                 match early {
@@ -2475,30 +2512,51 @@ impl Vm {
                 if let Some(bid) = default_block {
                     g.pin(Value::Block(bid));
                 }
-                let mut out: Vec<(Value, Value)> = g.vm.heap.hash(id).to_vec();
+                // CRuby merge = dup self + upsert each source pair: build
+                // the result Hash FIRST so the upserts honor a user
+                // `hash`/`eql?` on the keys (see the blockless arm in
+                // vm/hash.rs). On conflict the block sees the EXISTING key
+                // object; its result replaces the value in place. A
+                // compare_by_identity receiver keys by identity.
+                let out: Vec<(Value, Value)> = g.vm.heap.hash(id).to_vec();
                 let extra: Vec<(Value, Value)> = g.vm.heap.hash(other).to_vec();
+                for (k, v) in &extra {
+                    if k.is_gc_heap_ref() { g.pin(k.clone()); }
+                    if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                }
+                g.vm.maybe_gc();
+                g.vm.check_alloc()?;
+                let nid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(out)));
+                g.pin(Value::Hash(nid));
+                let hash_sym = g.vm.interner.intern("hash");
+                let eql_sym = g.vm.interner.intern("eql?");
+                let receiver_cbi = g.vm.hash_is_by_identity(id);
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for (k, v) in extra {
-                    let pos = out.iter().position(|(ek, _)| ek.ruby_eql(&k, &g.vm.heap));
+                    let (hv, pos) = if receiver_cbi {
+                        (None, g.vm.heap.hash_index_lookup(nid, &k))
+                    } else {
+                        g.vm.vm_hash_locate(nid, &k, hash_sym, eql_sym)?
+                    };
                     if let Some(p) = pos {
-                        let old = out[p].1.clone();
-                        let resolved = match g.vm.step_block(block, vec![k.clone(), old, v], pre_frames)? {
+                        let (stored_key, old) = {
+                            let pair = &g.vm.heap.hash(nid)[p];
+                            (pair.0.clone(), pair.1.clone())
+                        };
+                        let resolved = match g.vm.step_block(block, vec![stored_key, old, v], pre_frames)? {
                             BlockStep::MethodReturn => return Ok(Some(Value::Nil)),
                             BlockStep::Break(r) => { early = Some(r); break; }
                             BlockStep::Value(r) => r,
                         };
-                        out[p].1 = resolved;
+                        g.vm.heap.hash_obj_mut(nid).pairs[p].1 = resolved;
                     } else {
-                        out.push((k, v));
+                        g.vm.vm_hash_append(nid, k, v, hv);
                     }
                 }
                 if let Some(r) = early {
                     Some(r)
                 } else {
-                    g.vm.maybe_gc();
-                    g.vm.check_alloc()?;
-                    let nid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(out)));
                     if default_block.is_some() {
                         g.vm.heap.hash_set_default_block(nid, default_block);
                     }
@@ -2517,8 +2575,9 @@ impl Vm {
                 // 2-arg fetch + block combo (warns); we silently
                 // accept it (handled in non-block path too).
                 let id = *id;
-                let pos = self.heap.hash(id).iter()
-                    .position(|(key, _)| key.ruby_eql(k, &self.heap));
+                // `vm_hash_find` — user `hash`/`eql?` keys honored (plain
+                // keys keep the identity-index path).
+                let pos = self.vm_hash_find(id, k)?;
                 if let Some(p) = pos {
                     return Ok(Some(self.heap.hash(id)[p].1.clone()));
                 }
@@ -2555,8 +2614,9 @@ impl Vm {
                 let mut out: Vec<Value> = Vec::with_capacity(keys.len());
                 let mut early = None;
                 for key in &keys {
-                    let pos = g.vm.heap.hash(id).iter()
-                        .position(|(hk, _)| hk.ruby_eql(key, &g.vm.heap));
+                    // User-`hash`/`eql?`-aware lookup (plain keys keep the
+                    // identity path).
+                    let pos = g.vm.vm_hash_find(id, key)?;
                     match pos {
                         Some(p) => {
                             let v = g.vm.heap.hash(id)[p].1.clone();
@@ -4103,6 +4163,8 @@ impl Vm {
                 g.vm.check_alloc()?;
                 let result_id = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::new())));
                 g.pin(Value::Hash(result_id));
+                let gb_hash_sym = g.vm.interner.intern("hash");
+                let gb_eql_sym = g.vm.interner.intern("eql?");
                 let pre_frames = g.vm.frames.len();
                 let mut early = None;
                 for v in snapshot {
@@ -4124,9 +4186,15 @@ impl Vm {
                         BlockStep::Break(r) => { early = Some(r); break; }
                         BlockStep::Value(r) => r,
                     };
-                    // Find or create the bucket array for this key.
-                    let pos = g.vm.heap.hash(result_id).iter()
-                        .position(|(k, _)| k.ruby_eql(&key, &g.vm.heap));
+                    // Find or create the bucket array for this key. A group
+                    // key overriding `hash`/`eql?` buckets via Ruby dispatch
+                    // (`vm_hash_locate` — CRuby groups via st hash/eql?, so
+                    // eql?-equal user keys share ONE bucket); plain keys
+                    // keep the identity path. The locate pins the key across
+                    // its own dispatch window; the snapshot elements were
+                    // pinned above.
+                    let (hv, pos) =
+                        g.vm.vm_hash_locate(result_id, &key, gb_hash_sym, gb_eql_sym)?;
                     if let Some(p) = pos {
                         if let Value::Array(arr_id) = g.vm.heap.hash(result_id)[p].1 {
                             g.vm.heap.array_mut(arr_id).push(v);
@@ -4174,7 +4242,11 @@ impl Vm {
                         if pin_key { g.vm.pinned.pop(); }
                         g.vm.check_alloc()?;
                         let arr_id = g.vm.heap.alloc(HeapObj::Array(vec![v].into()));
-                        g.vm.heap.hash_mut(result_id).push((key, Value::Array(arr_id)));
+                        // Append via `vm_hash_append` — threads the located
+                        // Ruby-hash into the user-index bucket (no second
+                        // dispatch) and, unlike a `hash_mut` push, doesn't
+                        // clear the key indexes on every new group.
+                        g.vm.vm_hash_append(result_id, key, Value::Array(arr_id), hv);
                     }
                 }
                 if let Some(e) = early { return Ok(Some(e)); }
@@ -4960,7 +5032,17 @@ impl Vm {
                         BlockStep::Value(r) => r,
                     };
                     if group.is_gc_heap_ref() { g.pin(group.clone()); }
-                    let pos = buckets.iter().position(|(gk, _)| gk.ruby_eql(&group, &g.vm.heap));
+                    // A group key overriding `hash`/`eql?` matches its
+                    // bucket via Ruby dispatch (`find_key_ruby` — CRuby
+                    // groups eql?-equal keys into ONE bucket); plain keys
+                    // keep the native scan, snapshot-free.
+                    let pos = if g.vm.hash_key_needs_slow(&group) {
+                        let bucket_keys: Vec<Value> =
+                            buckets.iter().map(|(gk, _)| gk.clone()).collect();
+                        g.vm.find_key_ruby(&bucket_keys, &group)?
+                    } else {
+                        buckets.iter().position(|(gk, _)| gk.ruby_eql(&group, &g.vm.heap))
+                    };
                     match pos {
                         Some(p) => buckets[p].1.push(pair),
                         None => buckets.push((group, vec![pair])),

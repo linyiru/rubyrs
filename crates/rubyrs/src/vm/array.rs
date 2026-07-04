@@ -227,7 +227,10 @@ impl Vm {
                                     }
                                     let k = pair[0].clone();
                                     let v = pair[1].clone();
-                                    g.vm.heap.hash_insert(hid, k, v);
+                                    // User-`hash`/`eql?`-aware upsert (plain
+                                    // keys keep the identity heap insert) —
+                                    // CRuby dedups eql?-equal keys.
+                                    g.vm.vm_hash_insert(hid, k, v)?;
                                 }
                                 other => {
                                     return Err(g.vm.trap(crate::error::RubyError::TypeError {
@@ -1425,6 +1428,47 @@ impl Vm {
                     // order. Pure value-equality via `ruby_eq`.
                     ("tally", []) => {
                         let snapshot: Vec<Value> = self.heap.array(id).clone();
+                        // Elements overriding `hash`/`eql?` tally via Ruby
+                        // dispatch (CRuby counts eql?-equal instances into
+                        // ONE entry): build the result Hash up front and
+                        // locate/increment/append through the user-aware
+                        // helpers — one `hash` dispatch per element, `eql?`
+                        // only within a colliding bucket. Plain arrays keep
+                        // the native indexed path below unchanged.
+                        {
+                            let hash_sym = self.interner.intern("hash");
+                            let eql_sym = self.interner.intern("eql?");
+                            let has_user = snapshot
+                                .iter()
+                                .any(|v| self.key_needs_ruby_hash(v, hash_sym, eql_sym));
+                            if has_user {
+                                let mut g = crate::vm::PinGuard::new(self);
+                                g.pin(Value::Array(id));
+                                g.vm.maybe_gc();
+                                g.vm.check_alloc()?;
+                                let hid = g.vm.heap.alloc(HeapObj::Hash(
+                                    crate::heap::HashObj::with_pairs(Vec::new()),
+                                ));
+                                g.pin(Value::Hash(hid));
+                                for v in snapshot {
+                                    let (hv, pos) =
+                                        g.vm.vm_hash_locate(hid, &v, hash_sym, eql_sym)?;
+                                    match pos {
+                                        Some(p) => {
+                                            let slot =
+                                                &mut g.vm.heap.hash_obj_mut(hid).pairs[p].1;
+                                            if let Value::Int(n) = slot {
+                                                *slot = Value::Int(*n + 1);
+                                            }
+                                        }
+                                        None => {
+                                            g.vm.vm_hash_append(hid, v, Value::Int(1), hv);
+                                        }
+                                    }
+                                }
+                                return Ok(Some(Value::Hash(hid)));
+                            }
+                        }
                         let mut pairs: Vec<(Value, Value)> = Vec::new();
                         // `ruby_hash(key) -> positions in pairs` for O(1)-amortised
                         // lookup. The old linear `position` scan was O(n*distinct) —

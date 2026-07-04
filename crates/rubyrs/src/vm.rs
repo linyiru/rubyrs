@@ -4285,15 +4285,11 @@ impl Vm {
         match recv {
             Value::Hash(id) => {
                 let id = *id;
-                // Direct hit first.
-                {
-                    let h = self.heap.hash(id);
-                    if let Some(v) = h.iter()
-                        .find(|(k, _)| k.ruby_eql(key, &self.heap))
-                        .map(|(_, v)| v.clone())
-                    {
-                        return Ok(v);
-                    }
+                // Direct hit first — `vm_hash_find` so a key overriding
+                // `hash`/`eql?` digs like CRuby (plain keys keep the
+                // identity path).
+                if let Some(p) = self.vm_hash_find(id, key)? {
+                    return Ok(self.heap.hash(id)[p].1.clone());
                 }
                 // Missing key — CRuby's `Hash#dig` walks via `[]`
                 // per step, which consults default_value first, then

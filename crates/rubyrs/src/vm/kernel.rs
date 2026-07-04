@@ -6658,11 +6658,18 @@ impl MarshalReader<'_> {
                     .alloc(crate::heap::HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::new())));
                 self.objects.push(Value::Hash(id));
                 vm.pinned.push(Value::Hash(id));
-                let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(n.max(0) as usize);
                 for _ in 0..n.max(0) {
                     let k = self.read_value(vm)?;
                     let v = self.read_value(vm)?;
-                    pairs.push((k, v));
+                    // Insert-with-Hash-semantics, like CRuby's load (which
+                    // asets each pair): duplicate keys — plain OR
+                    // user-`hash`/`eql?` (whose `hash` IS dispatched during
+                    // load, matching CRuby) — collapse instead of leaking
+                    // raw duplicate pairs into the rebuilt table. Also
+                    // roots each pair immediately (the old scratch Vec was
+                    // unrooted across subsequent `read_value` allocations).
+                    vm.vm_hash_insert(id, k, v)
+                        .map_err(|_| "exception raised while hashing a key in Marshal.load".to_string())?;
                 }
                 let default = if with_default {
                     Some(self.read_value(vm)?)
@@ -6670,7 +6677,6 @@ impl MarshalReader<'_> {
                     None
                 };
                 if let crate::heap::HeapObj::Hash(h) = vm.heap.get_mut(id) {
-                    h.pairs = pairs.into();
                     if default.is_some() || h.extras().is_some() {
                         h.extras_mut().default_value = default;
                     }

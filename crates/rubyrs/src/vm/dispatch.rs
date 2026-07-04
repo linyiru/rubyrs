@@ -6556,6 +6556,14 @@ impl Vm {
                 msg: "odd number of arguments for Hash".into(),
             }));
         };
+        // Duplicate keys collapse like a hash literal — CRuby's
+        // `Hash[:a, 1, :a, 2]` is `{a: 2}` (first position, last
+        // value), with user `hash`/`eql?` keys honored via the shared
+        // `op_new_hash` dedup helper (which also fires CRuby's
+        // `key.hash` insert contract). Pre-fix this alloc'd the raw
+        // pair list, so both plain AND user duplicates leaked through.
+        let mut pairs: crate::heap::PairsBuf = pairs.into();
+        g.vm.hash_literal_dedup(&mut pairs)?;
         let hid = g.vm.heap.alloc(HeapObj::Hash(
             crate::heap::HashObj::with_pairs_tagged(pairs, class_tag),
         ));
@@ -14485,6 +14493,25 @@ impl Vm {
             };
             self.stack.push(Value::Bool(same));
             return Ok(());
+        }
+        // Hash-vs-Hash `==` / `!=` / `eql?` involving user-`hash`/`eql?`
+        // keys — VM-dispatched pairwise compare (CRuby's rb_hash_equal
+        // looks each key up with Hash semantics, so eql?-equal-but-
+        // distinct key OBJECTS still compare equal). Plain hashes fall
+        // through to the zero-dispatch `ruby_eq`/`ruby_eql` universal
+        // arms below, byte-for-byte. Sits ahead of the universal eql?
+        // fallback so both spellings agree.
+        if args.len() == 1
+            && matches!(&*name, "==" | "!=" | "eql?")
+            && let (Value::Hash(ha), Value::Hash(hb)) = (&recv, &args[0])
+        {
+            let (ha, hb) = (*ha, *hb);
+            if self.hash_has_user_keys(ha) || self.hash_has_user_keys(hb) {
+                let eq = self.vm_hash_eq(ha, hb, &*name == "eql?")?;
+                let result = if &*name == "!=" { !eq } else { eq };
+                self.stack.push(Value::Bool(result));
+                return Ok(());
+            }
         }
         // Universal `Object#eql?` fallback. Per-type type-strict
         // numeric overrides (`Integer#eql?`, `Float#eql?`,

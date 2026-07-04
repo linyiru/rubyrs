@@ -182,18 +182,21 @@ impl Vm {
         Ok(None)
     }
 
-    /// Find the index of `key` in Hash `id`, honoring a user-defined `hash`/
-    /// `eql?` on the key. Ordinary keys use the fast identity-based heap index
-    /// (zero overhead). User-hash keys use the bucketed `user_index` (Ruby
-    /// `#hash` → positions), so this is O(1)-amortized instead of an O(n)
-    /// `eql?` scan — RuboCop's `add_offense` dedup (`Set#add?` over Range keys)
-    /// was O(offenses²) without it. Used by `[]` / `fetch` / `key?` / `delete`
-    /// / `assoc` so a Hash with hash/eql-overriding keys matches CRuby.
-    pub(crate) fn vm_hash_find(&mut self, id: ObjId, key: &Value) -> Result<Option<usize>, Trap> {
-        let hash_sym = self.interner.intern("hash");
-        let eql_sym = self.interner.intern("eql?");
+    /// One-`key.hash`-dispatch locate: returns `(hv, pos)` where `hv` is the
+    /// key's Ruby `#hash` (`Some` only for user-`hash`/`eql?` keys — callers
+    /// thread it into `vm_hash_append` so a full upsert costs exactly ONE
+    /// hash dispatch, CRuby's per-op contract) and `pos` is the pair index
+    /// of the eql?-equal stored key, if any. Plain / `compare_by_identity`
+    /// keys take the identity-index path with `hv = None`.
+    pub(crate) fn vm_hash_locate(
+        &mut self,
+        id: ObjId,
+        key: &Value,
+        hash_sym: crate::intern::SymId,
+        eql_sym: crate::intern::SymId,
+    ) -> Result<(Option<i64>, Option<usize>), Trap> {
         if self.hash_is_by_identity(id) || !self.key_needs_ruby_hash(key, hash_sym, eql_sym) {
-            return Ok(self.heap.hash_index_lookup(id, key));
+            return Ok((None, self.heap.hash_index_lookup(id, key)));
         }
         // Pin the query key: `ensure_user_index`/`key_ruby_hash` dispatch user
         // `hash` methods that allocate → can GC, and the query key (freshly
@@ -204,14 +207,53 @@ impl Vm {
         pg.pin(key.clone());
         pg.vm.ensure_user_index(id, hash_sym, eql_sym)?;
         let hv = pg.vm.key_ruby_hash(key, hash_sym)?;
-        pg.vm.vm_hash_find_bucketed(id, key, hv, eql_sym)
+        let pos = pg.vm.vm_hash_find_bucketed(id, key, hv, eql_sym)?;
+        Ok((Some(hv), pos))
+    }
+
+    /// Append a NOT-PRESENT pair (caller established absence via
+    /// `vm_hash_locate`), maintaining whichever index tracks the key:
+    /// `hv = Some` threads the located user-index bucket (no second hash
+    /// dispatch); plain keys keep the identity index live. Append never
+    /// shifts existing positions, so both indexes stay valid.
+    pub(crate) fn vm_hash_append(&mut self, id: ObjId, key: Value, val: Value, hv: Option<i64>) {
+        match hv {
+            Some(hv) => {
+                let h = self.heap.hash_obj_mut(id);
+                let pos = h.pairs.len() as u32;
+                h.pairs.push((key, val));
+                if let Some(ui) = h.user_index_mut() {
+                    ui.entry(hv).or_default().push(pos);
+                }
+            }
+            None => self.heap.hash_append_new(id, key, val),
+        }
+    }
+
+    /// Find the index of `key` in Hash `id`, honoring a user-defined `hash`/
+    /// `eql?` on the key. Ordinary keys use the fast identity-based heap index
+    /// (zero overhead). User-hash keys use the bucketed `user_index` (Ruby
+    /// `#hash` → positions), so this is O(1)-amortized instead of an O(n)
+    /// `eql?` scan — RuboCop's `add_offense` dedup (`Set#add?` over Range keys)
+    /// was O(offenses²) without it. Used by `[]` / `fetch` / `key?` / `delete`
+    /// / `assoc` / `values_at` / `slice` / `dig` (and every other lookup-shaped
+    /// entry point) so a Hash with hash/eql-overriding keys matches CRuby.
+    pub(crate) fn vm_hash_find(&mut self, id: ObjId, key: &Value) -> Result<Option<usize>, Trap> {
+        let hash_sym = self.interner.intern("hash");
+        let eql_sym = self.interner.intern("eql?");
+        Ok(self.vm_hash_locate(id, key, hash_sym, eql_sym)?.1)
     }
 
     /// Insert `key`→`val`, honoring user-defined `hash`/`eql?`: calls `key.hash`
     /// (so a wrong-arity override raises, like CRuby) and finds an existing
     /// entry via `eql?`. Ordinary keys take the fast index-maintaining heap
     /// path. User keys are stored in the pairs Vec only (the identity index
-    /// can't hold them), found henceforth via `vm_hash_find`.
+    /// can't hold them), found henceforth via `vm_hash_find`. On update the
+    /// ORIGINAL key object keeps its position and only the value is replaced
+    /// (CRuby `rb_hash_aset`). Every inserting entry point funnels here —
+    /// `[]=` / `store` / merge family / `Hash[]` / `to_h` / `invert` /
+    /// `transform_keys` / Marshal load — so the dedup semantics stay in one
+    /// place.
     pub(crate) fn vm_hash_insert(
         &mut self,
         id: ObjId,
@@ -220,6 +262,19 @@ impl Vm {
     ) -> Result<Option<Value>, Trap> {
         let hash_sym = self.interner.intern("hash");
         let eql_sym = self.interner.intern("eql?");
+        self.vm_hash_insert_syms(id, key, val, hash_sym, eql_sym)
+    }
+
+    /// `vm_hash_insert` with the syms pre-interned — the loop form for the
+    /// merge family (one interner probe per call site, not per key).
+    pub(crate) fn vm_hash_insert_syms(
+        &mut self,
+        id: ObjId,
+        key: Value,
+        val: Value,
+        hash_sym: crate::intern::SymId,
+        eql_sym: crate::intern::SymId,
+    ) -> Result<Option<Value>, Trap> {
         if self.hash_is_by_identity(id) || !self.key_needs_ruby_hash(&key, hash_sym, eql_sym) {
             return Ok(self.heap.hash_insert(id, key, val));
         }
@@ -227,29 +282,158 @@ impl Vm {
         // insert within that bucket — O(1)-amortized, not an O(n) eql? scan.
         // Pin key + val: the index build / hash dispatch can GC, and the owned
         // `key`/`val` locals aren't GC roots until pushed into the (rooted)
-        // pairs (see the vm_hash_find note).
+        // pairs (see the vm_hash_locate note).
         let mut pg = PinGuard::new(self);
         pg.pin(key.clone());
         pg.pin(val.clone());
-        pg.vm.ensure_user_index(id, hash_sym, eql_sym)?;
-        let hv = pg.vm.key_ruby_hash(&key, hash_sym)?;
-        match pg.vm.vm_hash_find_bucketed(id, &key, hv, eql_sym)? {
+        let (hv, pos) = pg.vm.vm_hash_locate(id, &key, hash_sym, eql_sym)?;
+        match pos {
             Some(i) => {
                 let h = pg.vm.heap.hash_obj_mut(id);
                 Ok(Some(std::mem::replace(&mut h.pairs[i].1, val)))
             }
             None => {
-                let h = pg.vm.heap.hash_obj_mut(id);
-                let pos = h.pairs.len() as u32;
-                h.pairs.push((key, val));
-                // Maintain the bucket incrementally (append never shifts
-                // existing positions, so the index stays valid).
-                if let Some(ui) = h.user_index_mut() {
-                    ui.entry(hv).or_default().push(pos);
-                }
+                pg.vm.vm_hash_append(id, key, val, hv);
                 Ok(None)
             }
         }
+    }
+
+    /// True when Hash `id` holds at least one key that overrides
+    /// `hash`/`eql?` (and the Hash is not `compare_by_identity`) — the gate
+    /// for VM-dispatched Hash equality. Plain hashes keep the zero-dispatch
+    /// native `ruby_eq` path.
+    pub(crate) fn hash_has_user_keys(&mut self, id: ObjId) -> bool {
+        if self.hash_is_by_identity(id) {
+            return false;
+        }
+        let hash_sym = self.interner.intern("hash");
+        let eql_sym = self.interner.intern("eql?");
+        let h = self.heap.hash(id);
+        h.iter().any(|(k, _)| self.key_needs_ruby_hash(k, hash_sym, eql_sym))
+    }
+
+    /// VM-aware Hash equality for hashes involving user-`hash`/`eql?` keys —
+    /// CRuby's `rb_hash_equal`: same size, and every `[k, v]` of `a` found in
+    /// `b` by KEY (hash/eql? honored via `vm_hash_find`) with a matching
+    /// value (`==` semantics via `ruby_eq`; `eql?` semantics when `strict`).
+    /// Callers gate on `hash_has_user_keys` so plain hashes keep the native
+    /// `ruby_eq` compare byte-for-byte.
+    pub(crate) fn vm_hash_eq(&mut self, a: ObjId, b: ObjId, strict: bool) -> Result<bool, Trap> {
+        if a == b {
+            return Ok(true);
+        }
+        if self.heap.hash(a).len() != self.heap.hash(b).len() {
+            return Ok(false);
+        }
+        let pairs: Vec<(Value, Value)> = self.heap.hash(a).to_vec();
+        let mut g = PinGuard::new(self);
+        g.pin(Value::Hash(a));
+        g.pin(Value::Hash(b));
+        for (k, v) in pairs {
+            match g.vm.vm_hash_find(b, &k)? {
+                Some(pos) => {
+                    let ov = g.vm.heap.hash(b)[pos].1.clone();
+                    let eq = if strict {
+                        v.ruby_eql(&ov, &g.vm.heap)
+                    } else {
+                        v.ruby_eq(&ov, &g.vm.heap)
+                    };
+                    if !eq {
+                        return Ok(false);
+                    }
+                }
+                None => return Ok(false),
+            }
+        }
+        Ok(true)
+    }
+
+    /// Dedup a literal's key/value pair buffer in place — the CRuby aset
+    /// semantics shared by `{k => v, ...}` literals (`op_new_hash`) and the
+    /// `Hash[...]` constructor: FIRST key position kept, LAST value wins.
+    /// Keys overriding `hash`/`eql?` get CRuby's insert contract — `key.hash`
+    /// dispatched once per key (a wrong-arity override raises here), `eql?`
+    /// deciding the dedup. Plain pairs keep the zero-dispatch pairwise scan.
+    pub(crate) fn hash_literal_dedup(
+        &mut self,
+        pairs: &mut crate::heap::PairsBuf,
+    ) -> Result<(), Trap> {
+        let hash_sym = self.interner.intern("hash");
+        let eql_sym = self.interner.intern("eql?");
+        let has_user = pairs
+            .iter()
+            .any(|(k, _)| self.key_needs_ruby_hash(k, hash_sym, eql_sym));
+        if has_user {
+            // Pin the pairs across the dispatches (they may live only in
+            // this Rust-local buffer), then call each user key's `hash` and
+            // dedup with Ruby equality.
+            let mut g = PinGuard::new(self);
+            for (k, v) in pairs.iter() {
+                g.pin(k.clone());
+                g.pin(v.clone());
+            }
+            for i in 0..pairs.len() {
+                let k = pairs[i].0.clone();
+                if let Some(m) = g.vm.key_user_method(&k, hash_sym) {
+                    g.vm.call_resolved_method(m, k, vec![])?;
+                }
+            }
+            let mut i = 0;
+            while i < pairs.len() {
+                let mut j = i + 1;
+                while j < pairs.len() {
+                    let (ki, kj) = (pairs[i].0.clone(), pairs[j].0.clone());
+                    if g.vm.keys_ruby_eql(&ki, &kj, eql_sym)? {
+                        pairs[i].1 = pairs[j].1.clone();
+                        pairs.remove(j);
+                    } else {
+                        j += 1;
+                    }
+                }
+                i += 1;
+            }
+        } else {
+            let mut i = 0;
+            while i < pairs.len() {
+                let mut j = i + 1;
+                while j < pairs.len() {
+                    if pairs[j].0.ruby_eql(&pairs[i].0, &self.heap) {
+                        pairs[i].1 = pairs[j].1.clone();
+                        pairs.remove(j);
+                    } else {
+                        j += 1;
+                    }
+                }
+                i += 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// Position of the first key in `keys` equal to `key`, honoring user
+    /// `eql?` when `key` overrides `hash`/`eql?`. For result builders whose
+    /// accumulator is a scratch Vec, not a live Hash (`group_by` buckets,
+    /// `transform_keys!`). Linear; the plain path is the old `ruby_eql`
+    /// scan unchanged. Caller must keep `keys` values GC-rooted (pinned or
+    /// reachable) — the `eql?` dispatch can collect.
+    pub(crate) fn find_key_ruby(
+        &mut self,
+        keys: &[Value],
+        key: &Value,
+    ) -> Result<Option<usize>, Trap> {
+        let hash_sym = self.interner.intern("hash");
+        let eql_sym = self.interner.intern("eql?");
+        if !self.key_needs_ruby_hash(key, hash_sym, eql_sym) {
+            return Ok(keys.iter().position(|k| k.ruby_eql(key, &self.heap)));
+        }
+        for (i, k) in keys.iter().enumerate() {
+            let k = k.clone();
+            if self.keys_ruby_eql(key, &k, eql_sym)? {
+                return Ok(Some(i));
+            }
+        }
+        Ok(None)
     }
 
     /// Cheap gate for the Op-level Hash fast paths: a key overriding
@@ -574,9 +758,11 @@ impl Vm {
                         match self.vm_hash_find(id, k)? {
                             Some(p) => Some(self.heap.hash(id)[p].1.clone()),
                             None => {
+                                // VM-aware inspect — CRuby renders the key
+                                // via its (possibly user-defined) `inspect`.
+                                let shown = self.inspect_value(k)?;
                                 return Err(self.trap(RubyError::KeyError {
-                                    msg: format!("key not found: {}",
-                                        k.to_inspect(&self.heap, &self.interner)),
+                                    msg: format!("key not found: {shown}"),
                                 }));
                             }
                         }
@@ -702,40 +888,55 @@ impl Vm {
                     // miss yields the hash's scalar default, else nil — a
                     // default PROC is not fired here, a minor divergence).
                     ("values_at", keys) => {
-                        let pairs: Vec<(Value, Value)> = self.heap.hash(id)
-                            .iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                        // Key lookup via `vm_hash_find` — honors user
+                        // `hash`/`eql?` keys (plain keys keep the identity
+                        // path). Pin the receiver: the user `hash` dispatch
+                        // can GC and the receiver was popped off the stack.
                         let dflt = self.heap.hash_default_value(id);
-                        let out: Vec<Value> = keys.iter().map(|key| {
-                            pairs.iter()
-                                .find(|(hk, _)| hk.ruby_eql(key, &self.heap))
-                                .map(|(_, v)| v.clone())
-                                .or_else(|| dflt.clone())
-                                .unwrap_or(Value::Nil)
-                        }).collect();
-                        self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Array(out.into()));
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Hash(id));
+                        let mut out: Vec<Value> = Vec::with_capacity(keys.len());
+                        for key in keys {
+                            let v = match g.vm.vm_hash_find(id, key)? {
+                                Some(p) => g.vm.heap.hash(id)[p].1.clone(),
+                                None => dflt.clone().unwrap_or(Value::Nil),
+                            };
+                            if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                            out.push(v);
+                        }
+                        g.vm.maybe_gc();
+                        let nid = g.vm.heap.alloc(HeapObj::Array(out.into()));
                         Some(Value::Array(nid))
                     }
                     // `fetch_values(*keys)` — like `values_at` but raises
                     // KeyError on a missing key (no default fallback). rack
                     // Headers#fetch_values supers here with downcased keys.
                     ("fetch_values", keys) => {
-                        let pairs: Vec<(Value, Value)> = self.heap.hash(id)
-                            .iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                        // Same user-key-aware lookup as `values_at`, raising
+                        // KeyError on any miss (no default fallback).
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Hash(id));
                         let mut out: Vec<Value> = Vec::with_capacity(keys.len());
                         for key in keys {
-                            match pairs.iter().find(|(hk, _)| hk.ruby_eql(key, &self.heap)) {
-                                Some((_, v)) => out.push(v.clone()),
+                            match g.vm.vm_hash_find(id, key)? {
+                                Some(p) => {
+                                    let v = g.vm.heap.hash(id)[p].1.clone();
+                                    if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                                    out.push(v);
+                                }
                                 None => {
-                                    return Err(self.trap(RubyError::KeyError {
-                                        msg: format!("key not found: {}",
-                                            key.to_inspect(&self.heap, &self.interner)),
+                                    // VM-aware inspect: CRuby's KeyError
+                                    // message renders the key via its own
+                                    // (possibly user-defined) `inspect`.
+                                    let shown = g.vm.inspect_value(key)?;
+                                    return Err(g.vm.trap(RubyError::KeyError {
+                                        msg: format!("key not found: {shown}"),
                                     }));
                                 }
                             }
                         }
-                        self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Array(out.into()));
+                        g.vm.maybe_gc();
+                        let nid = g.vm.heap.alloc(HeapObj::Array(out.into()));
                         Some(Value::Array(nid))
                     }
                     // `compare_by_identity` flips the bit and returns
@@ -1064,7 +1265,6 @@ impl Vm {
                     ("transform_keys", [Value::Hash(mid)]) => {
                         let mid = *mid;
                         let snapshot: Vec<(Value, Value)> = self.heap.hash(id).to_vec();
-                        let mapping: Vec<(Value, Value)> = self.heap.hash(mid).to_vec();
                         let mut g = PinGuard::new(self);
                         g.pin(Value::Hash(id));
                         g.pin(Value::Hash(mid));
@@ -1075,17 +1275,18 @@ impl Vm {
                         ));
                         g.pin(Value::Hash(result_id));
                         for (k, v) in snapshot {
-                            let new_key = mapping.iter()
-                                .find(|(mk, _)| mk.ruby_eql(&k, &g.vm.heap))
-                                .map(|(_, mv)| mv.clone())
-                                .unwrap_or_else(|| k.clone());
-                            let existing = g.vm.heap.hash(result_id).iter()
-                                .position(|(k2, _)| k2.ruby_eql(&new_key, &g.vm.heap));
-                            if let Some(p) = existing {
-                                g.vm.heap.hash_mut(result_id)[p] = (new_key, v);
-                            } else {
-                                g.vm.heap.hash_mut(result_id).push((new_key, v));
-                            }
+                            if k.is_gc_heap_ref() { g.pin(k.clone()); }
+                            if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                            // Mapping lookup honors user `hash`/`eql?` on the
+                            // key (`vm_hash_find` on the live mapping Hash);
+                            // the result upsert goes through `vm_hash_insert`
+                            // so eql?-equal NEW keys collapse last-value-wins
+                            // with the FIRST key object kept (CRuby aset).
+                            let new_key = match g.vm.vm_hash_find(mid, &k)? {
+                                Some(p) => g.vm.heap.hash(mid)[p].1.clone(),
+                                None => k.clone(),
+                            };
+                            g.vm.vm_hash_insert(result_id, new_key, v)?;
                         }
                         Some(Value::Hash(result_id))
                     }
@@ -1573,23 +1774,44 @@ impl Vm {
                             };
                             sources.push(g.vm.heap.hash(hid).to_vec());
                         }
-                        let mut out: Vec<(Value, Value)> = g.vm.heap.hash(id).to_vec();
-                        for extra in sources {
-                            for (k, v) in extra {
-                                let pos = out.iter().position(|(ek, _)| ek.ruby_eql(&k, &g.vm.heap));
-                                if let Some(p) = pos {
-                                    out[p].1 = v;
-                                } else {
-                                    out.push((k, v));
-                                }
-                            }
-                        }
+                        // CRuby merge = dup self, then aset each source pair —
+                        // build the result Hash FIRST and upsert into it via
+                        // `vm_hash_insert_syms`, which honors a user
+                        // `hash`/`eql?` on the inserted key (existing key
+                        // object + position kept, value replaced). A
+                        // compare_by_identity RECEIVER keys by identity, so
+                        // its source pairs take the identity insert (the
+                        // fresh result doesn't carry the flag yet).
                         let default_block = g.vm.heap.hash_default_block(id);
                         if let Some(bid) = default_block {
                             g.pin(Value::Block(bid));
                         }
+                        let out: Vec<(Value, Value)> = g.vm.heap.hash(id).to_vec();
                         g.vm.maybe_gc();
                         let nid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(out)));
+                        g.pin(Value::Hash(nid));
+                        let hash_sym = g.vm.interner.intern("hash");
+                        let eql_sym = g.vm.interner.intern("eql?");
+                        let receiver_cbi = g.vm.hash_is_by_identity(id);
+                        // Pin the snapshotted source pairs: a user `hash`
+                        // dispatch inside the insert can GC, and an evil
+                        // override could unroot them from the (pinned)
+                        // source hashes mid-merge.
+                        for extra in &sources {
+                            for (k, v) in extra {
+                                if k.is_gc_heap_ref() { g.pin(k.clone()); }
+                                if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                            }
+                        }
+                        for extra in sources {
+                            for (k, v) in extra {
+                                if receiver_cbi {
+                                    g.vm.heap.hash_insert(nid, k, v);
+                                } else {
+                                    g.vm.vm_hash_insert_syms(nid, k, v, hash_sym, eql_sym)?;
+                                }
+                            }
+                        }
                         if default_block.is_some() {
                             g.vm.heap.hash_set_default_block(nid, default_block);
                         }
@@ -1608,15 +1830,27 @@ impl Vm {
                     // conflict-resolver lives in `collection_call_block`
                     // (vm/iter.rs); this is the blockless path.
                     ("merge!", [Value::Hash(other)]) | ("update", [Value::Hash(other)]) => {
-                        let extra: Vec<(Value, Value)> = self.heap.hash(*other).to_vec();
+                        // Per-pair `vm_hash_insert_syms`: honors a user
+                        // `hash`/`eql?` on the inserted key (CRuby updates the
+                        // existing entry in place — original key object +
+                        // position kept — instead of appending a duplicate);
+                        // plain keys route through the identity-index insert,
+                        // same semantics as the old linear scan. Pin the
+                        // receiver, source and snapshotted pairs — the user
+                        // `hash` dispatch can GC.
+                        let other = *other;
+                        let extra: Vec<(Value, Value)> = self.heap.hash(other).to_vec();
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Hash(id));
+                        g.pin(Value::Hash(other));
+                        for (k, v) in &extra {
+                            if k.is_gc_heap_ref() { g.pin(k.clone()); }
+                            if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                        }
+                        let hash_sym = g.vm.interner.intern("hash");
+                        let eql_sym = g.vm.interner.intern("eql?");
                         for (k, v) in extra {
-                            let pos = self.heap.hash(id).iter()
-                                .position(|(ek, _)| ek.ruby_eql(&k, &self.heap));
-                            if let Some(p) = pos {
-                                self.heap.hash_mut(id)[p].1 = v;
-                            } else {
-                                self.heap.hash_mut(id).push((k, v));
-                            }
+                            g.vm.vm_hash_insert_syms(id, k, v, hash_sym, eql_sym)?;
                         }
                         Some(Value::Hash(id))
                     }
@@ -1724,7 +1958,34 @@ impl Vm {
                             .collect();
                         // Later duplicates win for invert — same as CRuby:
                         // if two original values collide as inverted keys,
-                        // the last one through wins. Dedup keeping latest.
+                        // the last one through wins (first KEY object kept —
+                        // aset semantics). VALUES become keys here, so a
+                        // value overriding `hash`/`eql?` needs the
+                        // user-aware insert path; plain values keep the old
+                        // native dedup unchanged.
+                        let hash_sym = self.interner.intern("hash");
+                        let eql_sym = self.interner.intern("eql?");
+                        let has_user = pairs
+                            .iter()
+                            .any(|(k, _)| self.key_needs_ruby_hash(k, hash_sym, eql_sym));
+                        if has_user {
+                            let mut g = PinGuard::new(self);
+                            g.pin(Value::Hash(id));
+                            for (k, v) in &pairs {
+                                if k.is_gc_heap_ref() { g.pin(k.clone()); }
+                                if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                            }
+                            g.vm.maybe_gc();
+                            g.vm.check_alloc()?;
+                            let nid = g.vm.heap.alloc(HeapObj::Hash(
+                                crate::heap::HashObj::with_pairs(Vec::with_capacity(pairs.len())),
+                            ));
+                            g.pin(Value::Hash(nid));
+                            for (k, v) in pairs {
+                                g.vm.vm_hash_insert_syms(nid, k, v, hash_sym, eql_sym)?;
+                            }
+                            return Ok(Some(Value::Hash(nid)));
+                        }
                         let mut out: Vec<(Value, Value)> = Vec::with_capacity(pairs.len());
                         for (k, v) in pairs {
                             let pos = out.iter().position(|(ek, _)| ek.ruby_eql(&k, &self.heap));
@@ -1759,12 +2020,25 @@ impl Vm {
                     // listed keys removed. Non-mutating. Keys not
                     // present in the receiver are silently skipped.
                     ("except", keys) => {
-                        let pairs: Vec<(Value, Value)> = self.heap.hash(id).iter()
-                            .filter(|(k, _)| !keys.iter().any(|x| x.ruby_eql(k, &self.heap)))
-                            .cloned()
+                        // Resolve each argument key to its pair position via
+                        // `vm_hash_find` (user `hash`/`eql?` honored — CRuby
+                        // deletes each listed key from a dup), then filter by
+                        // position.
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Hash(id));
+                        let mut excluded: Vec<usize> = Vec::with_capacity(keys.len());
+                        for k in keys {
+                            if let Some(p) = g.vm.vm_hash_find(id, k)? {
+                                excluded.push(p);
+                            }
+                        }
+                        let pairs: Vec<(Value, Value)> = g.vm.heap.hash(id).iter()
+                            .enumerate()
+                            .filter(|(i, _)| !excluded.contains(i))
+                            .map(|(_, pair)| pair.clone())
                             .collect();
-                        self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
+                        g.vm.maybe_gc();
+                        let nid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
                         Some(Value::Hash(nid))
                     }
                     // `h.slice(*keys)` — return a new Hash with only
@@ -1772,15 +2046,26 @@ impl Vm {
                     // CRuby — `{a:1,c:3}.slice(:c, :a)` is
                     // `{c:3, a:1}`). Missing keys are silently skipped.
                     ("slice", keys) => {
+                        // `vm_hash_find` per argument key — user
+                        // `hash`/`eql?` honored; plain keys keep the
+                        // identity path.
+                        let mut g = PinGuard::new(self);
+                        g.pin(Value::Hash(id));
                         let mut pairs: Vec<(Value, Value)> = Vec::new();
+                        let mut taken: Vec<usize> = Vec::with_capacity(keys.len());
                         for k in keys {
-                            if let Some(pair) = self.heap.hash(id).iter()
-                                .find(|(hk, _)| hk.ruby_eql(k, &self.heap)) {
-                                pairs.push(pair.clone());
+                            if let Some(p) = g.vm.vm_hash_find(id, k)?
+                                && !taken.contains(&p)
+                            {
+                                taken.push(p);
+                                let pair = g.vm.heap.hash(id)[p].clone();
+                                if pair.0.is_gc_heap_ref() { g.pin(pair.0.clone()); }
+                                if pair.1.is_gc_heap_ref() { g.pin(pair.1.clone()); }
+                                pairs.push(pair);
                             }
                         }
-                        self.maybe_gc();
-                        let nid = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
+                        g.vm.maybe_gc();
+                        let nid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
                         Some(Value::Hash(nid))
                     }
                     _ => None,

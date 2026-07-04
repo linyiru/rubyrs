@@ -1140,6 +1140,20 @@ impl Heap {
             }
         }
     }
+    /// Append a pair the caller has already established is NOT present
+    /// (the push arm of `hash_insert`, for VM callers that did their own
+    /// lookup — `Vm::vm_hash_append`). Keeps the identity index live;
+    /// append never shifts existing positions.
+    pub(crate) fn hash_append_new(&mut self, id: ObjId, key: Value, val: Value) {
+        let kh = key.ruby_hash(self);
+        if let HeapObj::Hash(h) = self.get_mut(id) {
+            let new_i = h.pairs.len() as u32;
+            h.pairs.push((key, val));
+            if let Some(m) = h.extras.as_deref_mut().and_then(|e| e.index.as_mut()) {
+                m.entry(kh).or_default().push(new_i);
+            }
+        }
+    }
     /// Delete `key`, returning its value (or `None`). Removal shifts
     /// later positions, so the index is dropped and rebuilt lazily —
     /// delete is rare relative to insert/lookup, so an O(n) reindex on
