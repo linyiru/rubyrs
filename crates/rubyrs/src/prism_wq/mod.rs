@@ -47,7 +47,10 @@ mod materialize;
 /// The Ruby-side hook, injected by the `require` handler right after
 /// "prism/translation/parser" loads (see vm/kernel.rs): overrides
 /// `Prism::Translation::Parser#tokenize` with native-first + per-file
-/// fallback.
+/// fallback. wasi-gated with that handler: `require` raises LoadError
+/// on wasm32-wasi, so the injection site is cfg'd out there and the
+/// const would be dead code.
+#[cfg(not(target_os = "wasi"))]
 pub(crate) const HOOK_RB: &str = include_str!("wqtrans_hook.rb");
 
 use std::rc::Rc;

@@ -61,20 +61,15 @@ pub(crate) use vm_ptr::with_vm_ptr_set;
 // cext-invariant debug_assert.
 //
 // The native-accelerator host fns (_json_native / _yaml_native /
-// _liquid_native / _sqlite) read it too — they're listed here so a
-// `--no-default-features --features <accel>` build compiles. In that
-// configuration the ptr is never set (the with_vm_ptr_set wrap lives
-// on the cext dispatch path), so the host fns see null and decline
-// to their pure-Ruby fallbacks — degraded but correct.
-#[cfg(any(
-    all(feature = "cext", not(target_os = "wasi")),
-    feature = "_http_server",
-    feature = "_fiber",
-    feature = "_json_native",
-    feature = "_yaml_native",
-    feature = "_liquid_native",
-    feature = "_sqlite",
-))]
+// _liquid_native / _sqlite) read it too, as do the ALWAYS-compiled
+// ADR 0036 modules (prism_native's materialize path, prism_wq's
+// tokenize host fns, commdrv's walk driver). Because of those
+// always-on readers the re-export is unconditional — unlike
+// `with_vm_ptr_set` above, whose only callers are feature-gated.
+// In configurations where no feature enables the V1 dispatch wrap
+// (e.g. `--no-default-features`) the ptr is never set, so the host
+// fns see null and decline / error out of host-fn scope — degraded
+// but correct.
 pub(crate) use vm_ptr::current_vm_ptr;
 
 // `iter::BlockStep` is the result of `step_block`. The
@@ -1061,6 +1056,7 @@ pub(crate) const JFLAG_TIER2_LITE: u8 = 32;
 /// (`T2Proto::lite_blk_ptr`, ADR 0037 block-frame residue) — the block
 /// serve sites gate their frameless path on this dense byte before
 /// touching `t2_lite_blk_ptrs`.
+#[cfg(feature = "jit-native")]
 pub(crate) const JFLAG_TIER2_LITEBLK: u8 = 64;
 
 /// Tier-2 hotness threshold (ADR 0037 wave 2, compile-cost control): a
@@ -1351,11 +1347,14 @@ pub(crate) struct Vm {
     /// TEMPORARY census (stats-gated): rest-only-block (`|*a|`) invocation
     /// argc distribution — [argc 0..=4, 5+] — across the ib1 fast arm and
     /// the general binder.
+    #[cfg(feature = "jit-native")]
     pub(crate) restblk_census: [u64; 6],
     /// TEMPORARY census (stats-gated): rest-only-block invocations by proto.
+    #[cfg(feature = "jit-native")]
     pub(crate) restblk_census_by: crate::intern::FxHashMap<usize, u64>,
     /// Stats-gated: 1-arg `&:sym` sym-proc block invocations served as a
     /// direct `arg.sym()` dispatch (no rest Array / block frame).
+    #[cfg(feature = "jit-native")]
     pub(crate) symproc_serves: u64,
     /// `RUBYRS_JIT_TIER2_NOLITE`: disable wave-4 frame-lite compilation and
     /// serving (reproduces the wave-3/5 tier) for controlled A/B.
@@ -2477,6 +2476,7 @@ pub(crate) struct Vm {
     /// Env-gated (`RUBYRS_JIT_STATS`) counters for the rest-predicate
     /// serve: (served frame-free, declined-after-plan-match). Dumped
     /// with the JIT stats at exit.
+    #[cfg(feature = "jit-native")]
     pub(crate) rest_pred_stats: (u64, u64),
     /// Reopen-precedence early gate (same `method_gen`-revalidated
     /// pass): bit per primitive class whose OWN method table holds
@@ -3025,8 +3025,11 @@ impl Vm {
             jit_tier2_noliteblk: std::env::var_os("RUBYRS_JIT_TIER2_NOLITEBLK").is_some(),
             #[cfg(feature = "jit-native")]
             t2_lite_blk_stats: [0; 2],
+            #[cfg(feature = "jit-native")]
             restblk_census: [0; 6],
+            #[cfg(feature = "jit-native")]
             restblk_census_by: crate::intern::FxHashMap::default(),
+            #[cfg(feature = "jit-native")]
             symproc_serves: 0,
             #[cfg(feature = "jit-native")]
             jit_tier2_nolite: std::env::var_os("RUBYRS_JIT_TIER2_NOLITE").is_some(),
@@ -3364,6 +3367,7 @@ impl Vm {
             nfa_plans: Vec::new(),
             rest_preds: Vec::new(),
             rest_pred_deps_ok: false,
+            #[cfg(feature = "jit-native")]
             rest_pred_stats: (0, 0),
             any_undefs: false,
             prim_reopen_mask: 0,

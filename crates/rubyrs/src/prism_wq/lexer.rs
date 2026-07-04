@@ -729,6 +729,10 @@ fn strip_underscores(v: &[u8]) -> Vec<u8> {
 }
 
 /// `Integer(value) rescue 0`.
+///
+/// `ctx` is only touched on the `bignum` overflow arm — same shape
+/// as sprintf.rs's bignum formatter.
+#[cfg_attr(not(feature = "bignum"), allow(unused_variables))]
 fn parse_integer(ctx: &mut Ctx<'_>, v: &[u8]) -> CRes<Value> {
     let s = strip_underscores(v);
     let (neg, body) = match s.first() {

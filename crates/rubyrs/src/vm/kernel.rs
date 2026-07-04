@@ -3468,6 +3468,14 @@ impl Vm {
                     // (the gem supplies node/parse_result/serialize; we supply native parse)
                     // so `require "prism"` works + RuboCop's parser_prism engine runs.
                     // require-once via `loaded_stdlib_stubs`.
+                    //
+                    // wasi gate: on wasm32-wasi `require` always raises
+                    // LoadError (see the `target_os = "wasi"` arm below),
+                    // so neither injection can fire — and the machinery
+                    // they lean on (`loaded_stdlib_stubs`,
+                    // `compile_and_run_source`) is cfg'd out of the Vm on
+                    // wasi as dead code. Gate the whole block to match.
+                    #[cfg(not(target_os = "wasi"))]
                     {
                         let p = path.to_string_lossy();
                         if &*p == "prism/prism" {
@@ -3487,8 +3495,8 @@ impl Vm {
                         // (usually via the Translation::Parser33/34 autoload),
                         // layer the native-tokenize hook over it — the
                         // native-first-with-per-file-fallback seam for
-                        // RuboCop's prism engine. Inject-once.
-                        #[cfg(not(target_os = "wasi"))]
+                        // RuboCop's prism engine. Inject-once. (wasi-
+                        // gated by the enclosing block.)
                         if &*p == "prism/translation/parser"
                             && !self.loaded_stdlib_stubs.contains("<rubyrs:wqtrans-hook>")
                             && self.allow_filesystem_io

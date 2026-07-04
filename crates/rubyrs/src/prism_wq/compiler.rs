@@ -1401,6 +1401,10 @@ fn visit(ctx: &mut Ctx<'_>, fl: Fl, node: &PNode) -> CRes<Box<WqNode>> {
     }
 }
 
+// `ctx` is only touched on the `bignum` arm (`PInt::Big` doesn't
+// exist without the feature) — same shape as sprintf.rs's bignum
+// formatter.
+#[cfg_attr(not(feature = "bignum"), allow(unused_variables))]
 fn int_value_ref(ctx: &mut Ctx<'_>, i: &PInt) -> CRes<Value> {
     match i {
         PInt::Small(n) => Ok(Value::Int(*n)),

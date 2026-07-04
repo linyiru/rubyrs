@@ -865,6 +865,12 @@ impl Heap {
     /// getter-array / value-is-class primitives), where `try_class_of`'s refcount
     /// inc+drop per element is pure overhead (only the pointer identity is needed).
     /// `None` for a non-Object slot (same cases as `try_class_of`).
+    ///
+    /// jit-native-gated: every caller lives in `jit_native.rs` (the
+    /// obj-call / getter-array / value-is-class PIC guards). Lift the
+    /// gate if an interpreter-side consumer appears — the
+    /// `not(jit-native)` slab arm below is already written for it.
+    #[cfg(feature = "jit-native")]
     #[inline]
     pub(crate) fn class_ptr_of(&self, id: ObjId) -> Option<usize> {
         // ADR 0035 Phase 2 — dogfood the JIT class table: serve from it when it holds a
@@ -895,6 +901,7 @@ impl Heap {
     }
     /// The slab-walk class pointer (the pre-ADR-0035 implementation): `class_ptr_of`'s
     /// source of truth, kept as the fallback + the debug-assert oracle for the table.
+    #[cfg(feature = "jit-native")]
     fn class_ptr_of_slab(&self, id: ObjId) -> Option<usize> {
         match self.get(id) {
             HeapObj::Instance(i) => Some(match &i.singleton_class {

@@ -1127,6 +1127,9 @@ impl Class {
     /// per-object pair scan (24B stride over per-object memory) and a
     /// per-site cache probe (an extra cacheline of cache-vector
     /// traffic per op). Same SAFETY argument as `ivar_shape_name_at`.
+    /// jit-native-gated: every caller is a tier-2 per-op ivar helper
+    /// in `jit_tier2.rs`.
+    #[cfg(feature = "jit-native")]
     #[inline]
     pub(crate) fn ivar_slot_lookup_fast(&self, sym: SymId) -> Option<u32> {
         let shape = unsafe { &*self.ivar_shape.as_ptr() };

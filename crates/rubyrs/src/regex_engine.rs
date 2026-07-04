@@ -1075,39 +1075,13 @@ impl CompiledRegex {
         out
     }
 
-    /// Engine-agnostic capture iteration for `String#scan` (no-block).
-    /// Returns one entry per non-overlapping match; each entry holds the
-    /// capture groups `0..captures_len` as owned Strings (`None` for an
-    /// unmatched optional group). Group 0 is the whole match. Returning
-    /// owned data keeps the two engines' incompatible `Captures` types
-    /// out of the call site and avoids any heap alloc during iteration.
-    /// (fancy-regex's iterator is fallible — backtracker recursion can
-    /// fail on pathological input; `.flatten()` drops those Errs, the
-    /// same error-suppression the dual-engine `is_match` documents.)
-    pub(crate) fn scan_captures(&self, text: &str) -> Vec<Vec<Option<String>>> {
-        let mut out: Vec<Vec<Option<String>>> = Vec::new();
-        match self.engine() {
-            Engine::Native(r) => {
-                for caps in r.captures_iter(text) {
-                    out.push(
-                        (0..caps.len())
-                            .map(|i| caps.get(i).map(|m| m.as_str().to_string()))
-                            .collect(),
-                    );
-                }
-            }
-            Engine::Fancy(r) => {
-                for caps in r.captures_iter(text).flatten() {
-                    out.push(
-                        (0..caps.len())
-                            .map(|i| caps.get(i).map(|m| m.as_str().to_string()))
-                            .collect(),
-                    );
-                }
-            }
-        }
-        out
-    }
+    // `scan_captures` (the original no-block `String#scan` capture
+    // iterator) was REPLACED by `captures_iter_owned` above: the
+    // MatchRange rework needs `$~` built from the same match data as
+    // the returned Array, and propagates fancy-regex backtracker
+    // errors instead of `.flatten()`-dropping them. Removed rather
+    // than kept — its error-suppression semantics are exactly what
+    // the replacement deprecates.
 
     /// Engine label for diagnostic output. Currently consumed
     /// only by the `Debug` impl below; trap messages at the

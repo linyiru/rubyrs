@@ -424,6 +424,10 @@ pub(crate) fn fpconv_dtoa(d: f64, dest: &mut [u8; 32]) -> usize {
 }
 
 /// Append CRuby-`JSON.generate` bytes for a finite `f` to `out`.
+/// `_json_native`-gated: the native generator is its only caller —
+/// the always-on canon path goes through `json_float_to_string` (the
+/// `__rubyrs_json_float_repr` host fn) below instead.
+#[cfg(feature = "_json_native")]
 pub(crate) fn write_json_float(f: f64, out: &mut Vec<u8>) {
     let mut buf = [0u8; 32];
     let n = fpconv_dtoa(f, &mut buf);

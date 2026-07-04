@@ -15,6 +15,9 @@ use crate::value::Value;
 /// The pure-Ruby Prism backend rubyrs injects in place of the `prism/prism` C extension
 /// (ADR 0036). Defines `Prism.parse`/`parse_lex` over the host fns below + the gem's
 /// `Prism::Serialize`. The `require` handler runs this when "prism/prism" is required.
+/// wasi-gated with that handler: `require` raises LoadError on wasm32-wasi, so the
+/// injection site is cfg'd out there and the const would be dead code.
+#[cfg(not(target_os = "wasi"))]
 pub(crate) const BACKEND_RB: &str = include_str!("prism_native_backend.rb");
 
 /// Mirror of `pm_buffer_t` (include/prism/util/pm_buffer.h:22 —

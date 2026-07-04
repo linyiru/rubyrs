@@ -92,6 +92,12 @@ use crate::intern::{FxHashMap, SymId};
 use crate::value::{Class, Method, ObjId, Value, Visibility};
 use crate::vm::Vm;
 
+/// The Ruby-side hook, injected by the `require` handler right after the
+/// top-level `require "rubocop"` loads (see vm/kernel.rs): layers the
+/// native cop-walk driver over `Commissioner#walk`. wasi-gated with that
+/// handler: `require` raises LoadError on wasm32-wasi, so the injection
+/// site is cfg'd out there and the const would be dead code.
+#[cfg(not(target_os = "wasi"))]
 pub(crate) const HOOK_RB: &str = include_str!("commdrv_hook.rb");
 
 /// Decline result: `Err(Decline)` bubbles a reason string up to the
