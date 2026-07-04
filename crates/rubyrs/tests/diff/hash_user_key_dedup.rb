@@ -233,6 +233,14 @@ h = Hash.new { |hh, k| "p:#{k.inspect}" }
 h[K.new(37)] = :hit
 p h.values_at(K.new(37), K.new(38), :plain)
 
+# Marshal round-trips compare_by_identity: flag preserved AND
+# identity-duplicate (eql?-equal-but-distinct) keys survive the load
+h = {}.compare_by_identity
+h[K.new(39)] = 1
+h[K.new(39)] = 2
+m = Marshal.load(Marshal.dump(h))
+p [m.size, m.compare_by_identity?, m.values.sort]
+
 # dup/clone then dup-insert into the copy
 src = { K.new(34) => :a }
 d = src.dup

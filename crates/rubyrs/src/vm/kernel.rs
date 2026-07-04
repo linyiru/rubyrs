@@ -3150,6 +3150,7 @@ impl Vm {
                     symbols: Vec::new(),
                     objects: Vec::new(),
                     trap: None,
+                    next_hash_by_identity: false,
                 };
                 // Every container the reader allocates stays pinned
                 // until the WHOLE graph is wired (children are only
@@ -6388,6 +6389,11 @@ struct MarshalReader<'a> {
     /// rather than collapse it into the generic TypeError that a
     /// `Result<_, String>` error would become.
     trap: Option<Trap>,
+    /// Set by the `C :Hash` wrapper (CRuby's compare_by_identity Hash
+    /// encoding) so the inner `{`/`}` arm can flag the fresh Hash BEFORE
+    /// inserting its pairs — identity-duplicate keys must NOT collapse
+    /// through the eql?-aware insert.
+    next_hash_by_identity: bool,
 }
 
 impl MarshalReader<'_> {
@@ -6658,6 +6664,14 @@ impl MarshalReader<'_> {
                     .alloc(crate::heap::HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::new())));
                 self.objects.push(Value::Hash(id));
                 vm.pinned.push(Value::Hash(id));
+                // A `C :Hash` wrapper means compare_by_identity: flag the
+                // hash BEFORE the pair inserts so `vm_hash_insert` keys by
+                // identity (identity-duplicate keys survive, like CRuby).
+                if std::mem::take(&mut self.next_hash_by_identity)
+                    && let crate::heap::HeapObj::Hash(h) = vm.heap.get(id)
+                {
+                    h.by_identity.set(true);
+                }
                 for _ in 0..n.max(0) {
                     let k = self.read_value(vm)?;
                     let v = self.read_value(vm)?;
@@ -6697,7 +6711,15 @@ impl MarshalReader<'_> {
                     _ => return Err("subclass tag must be a symbol".into()),
                 };
                 let cls = Self::marshal_resolve_cname(vm, &cname)?;
+                // `C :Hash` (class IS the builtin) = compare_by_identity —
+                // arm the flag so the inner `{`/`}` arm applies it before
+                // inserting pairs. Cleared unconditionally after the read
+                // (a malformed non-Hash payload must not leak it).
+                if cname == "Hash" {
+                    self.next_hash_by_identity = true;
+                }
                 let inner = self.read_value(vm)?;
+                self.next_hash_by_identity = false;
                 match &inner {
                     Value::Array(aid) => {
                         if let crate::heap::HeapObj::Array(a) = vm.heap.get_mut(*aid) {
