@@ -767,6 +767,29 @@ fn int_fits_native(neg: bool, digits: &[u8]) -> bool {
     }
 }
 
+/// Cold arm of `visit_u64`: exact Bignum for the (i64::MAX,
+/// u64::MAX] span. Outlined so the ubiquitous small-int lane
+/// stays under the inline threshold (see the visit_u64 comment).
+#[cold]
+#[inline(never)]
+fn visit_u64_bignum<E: serde::de::Error>(
+    _ctx: &mut ParseCtx<'_>,
+    _n: u64,
+) -> Result<Value, E> {
+    #[cfg(feature = "bignum")]
+    {
+        let id = _ctx
+            .vm
+            .heap
+            .alloc(HeapObj::BigInt(num_bigint::BigInt::from(_n)));
+        Ok(Value::BigInt(id))
+    }
+    #[cfg(not(feature = "bignum"))]
+    {
+        Err(serde::de::Error::custom("bigint-range number"))
+    }
+}
+
 /// Exact Integer/Bignum from a (possibly signed) decimal literal.
 /// Fast path: fits i128 → fold natively; else num-bigint parse.
 #[cfg(feature = "bignum")]
@@ -909,6 +932,10 @@ impl ParseCtx<'_> {
     /// against the queue head (bit-identical expectation) and
     /// rebuild the exact value; any mismatch is a scan/serde
     /// tokenization disagreement → decline to the canon.
+    /// Outlined + cold: keeps `visit_f64`'s ordinary-float lane
+    /// tiny (suspicious values are rare across all parses).
+    #[cold]
+    #[inline(never)]
     fn exact_number(&mut self, n: f64) -> Result<Value, &'static str> {
         let Some(q) = self.exact.as_mut() else {
             self.retry = true;
@@ -1255,37 +1282,32 @@ impl<'de> serde::de::Visitor<'de> for VmVisitor<'_, '_> {
     fn visit_i64<E: serde::de::Error>(self, n: i64) -> Result<Value, E> {
         Ok(Value::Int(n))
     }
+    #[inline]
     fn visit_u64<E: serde::de::Error>(self, n: u64) -> Result<Value, E> {
         // serde parses positive integer literals up to u64::MAX
         // exactly — the (i64::MAX, u64::MAX] span becomes an exact
-        // Bignum right here (CRuby parses it as Integer), no retry
-        // pass needed. 19–20-digit snowflake IDs land in this arm.
+        // Bignum (CRuby parses it as Integer), no retry pass
+        // needed. 19–20-digit snowflake IDs land in that arm. The
+        // Bignum arm is outlined `#[cold]`: inlining its alloc
+        // path here fattened visit_u64 past serde's inline
+        // threshold and cost a measured ~14% on a 200-int array
+        // fixture (the ubiquitous small-int lane must stay tiny).
         if n <= i64::MAX as u64 {
             Ok(Value::Int(n as i64))
         } else {
-            #[cfg(feature = "bignum")]
-            {
-                let id = self
-                    .ctx
-                    .vm
-                    .heap
-                    .alloc(HeapObj::BigInt(num_bigint::BigInt::from(n)));
-                Ok(Value::BigInt(id))
-            }
-            #[cfg(not(feature = "bignum"))]
-            {
-                Err(serde::de::Error::custom("bigint-range number"))
-            }
+            visit_u64_bignum(self.ctx, n)
         }
     }
+    #[inline]
     fn visit_f64<E: serde::de::Error>(self, n: f64) -> Result<Value, E> {
         // Values past the integer-precision thresholds may be
         // silently-rounded bigint literals, and negative zero may
         // be the INTEGER literal "-0" (CRuby: Integer 0) — the
-        // f64 alone can't say. `ParseCtx::exact_number` resolves
-        // via the raw-text queue (retry pass) or requests the
-        // retry (primary pass). Ordinary floats — the fast path —
-        // pay three predictable compares.
+        // f64 alone can't say. `ParseCtx::exact_number` (outlined,
+        // cold on the primary pass) resolves via the raw-text
+        // queue (retry pass) or requests the retry (primary pass).
+        // Ordinary floats — the fast path — pay three predictable
+        // compares.
         if f64_needs_exact(n) {
             return self.ctx.exact_number(n).map_err(serde::de::Error::custom);
         }
