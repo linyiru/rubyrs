@@ -1,36 +1,42 @@
 # Subset semantics
 
 rubyrs targets CRuby 3.4 semantics on the surface it covers, and
-pins that surface with differential testing (585 fixtures whose
+pins that surface with differential testing (1,100+ fixtures whose
 oracle is CRuby itself — stdout compared byte-for-byte, including
-under GC stress). This document is the honest catalogue of where
-the boundary lies: what works, what diverges (every divergence
-documented with its trigger and trade-off), and what's absent.
+under GC stress; 1112 passing / 0 failed as of 2026-07). This
+document is the honest catalogue of where the boundary lies: what
+works, what diverges (every divergence documented with its
+trigger and trade-off), and what's absent.
 
-If you need Rails, real Thread concurrency, the Encoding system,
-or Marshal today — use CRuby.
+If you need Rails (ActiveRecord 7.0 loads, but no database
+adapter can run), OS-thread parallelism (Thread is a cooperative
+green-thread subset), or the full 100+-encoding registry
+(rubyrs ships ~20 encodings, with real transcoding behind
+`_encoding_full`) today — use CRuby.
 
 ## At a glance
 
 | Area | Status |
 |---|---|
 | **Syntax** | ~Complete: 149/150 Prism AST node kinds translate (incl. pattern matching `case/in`, refinements, `BEGIN/END`, anonymous arg forwarding, numbered/`it` params, flip-flops) |
-| **Core types** | Integer (i64 + BigInt), Float, String (bytes), Symbol, Array, Hash, Range, Regexp, Proc/Lambda/Method, Struct, Set, Time, Comparable/Enumerable/Enumerator (+ Lazy) |
+| **Core types** | Integer (i64 + BigInt), Float, String (bytes), Symbol, Array, Hash, Range, Regexp, Proc/Lambda/Method, Struct, Set, Time, Complex/Rational (constructors + arithmetic; `String#to_c`/`to_r` absent), Comparable/Enumerable/Enumerator (+ Lazy) |
 | **Metaprogramming** | `define_method`, `method_missing`, `send`, singleton classes, `instance_variable_*`, `const_*`, hooks (`inherited`/`included`/…), `alias`, `prepend`/`include`/`extend`, refinements |
 | **Exceptions** | Full begin/rescue/ensure/retry, custom hierarchies, `$!` dynamic scoping, catchable `SystemStackError` |
 | **Regexp** | Dual engine: linear-time `regex` (default, ReDoS-immune) + `fancy-regex` fallback for lookaround/backrefs; Onigmo ASCII classes (`\s\d\w\h`), Unicode `\b`; named captures, `$~` frame-local |
-| **stdlib** | ~35 vendored modules (`json`, `yaml`, `set`, `pathname`, `stringio`, `strscan`, `digest`, `logger`, `cgi`, `bigdecimal`, `active_support`-lite, …) behind `--features stdlib` |
-| **Real gems** | Jekyll 4.4.1 + rouge 4.7.0 + kramdown + Liquid build **byte-identical to CRuby**; msgpack/bcrypt via the C-ext ABI; parts of Sinatra |
+| **stdlib** | ~39 vendored modules (`json`, `yaml`, `set`, `pathname`, `stringio`, `strscan`, `digest`, `logger`, `cgi`, `bigdecimal`, `date`, `ipaddr`, `erb`, `optparse`, `psych`, `active_support`-lite, …) behind `--features stdlib` |
+| **Real gems** | Jekyll 4.4.1 + rouge 4.7.0 + kramdown + Liquid build **byte-identical to CRuby**; RuboCop 1.88.0 runs end-to-end (full default cop set, byte-identical offense output on probe files; a handful of documented cop-level gaps on wider corpora); Bridgetown 2.2.1 4-phase probe (require → configuration → `Site.new` → `site.process`) byte-identical (needs `_socket`/`_openssl`); ActiveModel 7.0.10 boots + validates, `require "active_record"` (7.0.10) loads — but no DB adapter can run; Rack 3.1.10 upstream specs at CRuby parity (2026-06 validation); Sinatra 4.2.1 at 17/24 core spec files parity (2026-06 validation); msgpack/bcrypt via the C-ext ABI |
 | **Accelerators** | `_json_native`, `_rouge_native`, `_kramdown_native`, `_yaml_native`, `_liquid_native` — Rust engines, byte-identical-or-decline contract |
 | **Embedding** | `Runtime` API: fuel/heap/frame caps, capability sandbox (FS/env gated), host fns, captured stdout, incremental eval, wasm32-wasip1 target |
-| **Concurrency** | Fiber subset (`_fiber` feature); Thread is a **stub** (no OS threads) |
-| **Encoding** | **Absent** — strings are bytes with UTF-8 assumptions; `force_encoding`/`encode` are stubs ([details](#string-encoding-stubs)) |
-| **Object model gaps** | `freeze` doesn't freeze; `private_constant` unenforced; eigenclass is a redirecting shell ([divergences](#divergences-from-cruby)) |
-| **Absent** | Marshal, Binding, ObjectSpace, Ractor, real `eval` caller-scope capture, Complex/Rational |
+| **Concurrency** | Fiber subset (`_fiber` feature); **cooperative Thread subset on green threads** — `Thread.new`/`join`/`value`/`alive?`/`kill`, thread-locals + thread-variables, `Mutex`, `Queue` (blocking pop), `ConditionVariable`, `Thread.pass` interleaving — no OS threads, no preemption (gaps listed in the [tier table](#deferred-to-outer-tiers)) |
+| **Marshal** | Real CRuby `\x04\x08` binary format for the common-tag subset — nil/bool/Integer/Bignum/Float/String/Symbol/Array/Hash/Range/Struct/user objects (+ ivars, links, `marshal_dump`/`marshal_load` hooks); `load(dump(x))` is a genuine deep copy; Proc raises CRuby's TypeError; registry-token fallback + framed IO ports for shapes outside the byte subset ([tier table](#deferred-to-outer-tiers)) |
+| **Encoding** | **Partial** — every build ships a ~20-encoding registry (26 `Encoding` constants: GB18030/Big5/GBK/EUC-JP/Shift_JIS/UTF-16/32 families, Latin-1/15, KOI8-R, …) with CRuby-exact `find`/`aliases`/`dummy?`/`ascii_compatible?`/`inspect`, per-string tags for UTF-8/US-ASCII/BINARY, `CompatibilityError`/`UndefinedConversionError`/`ConverterNotFoundError`; **real transcoding + registry-encoding string tags behind `_encoding_full`** (encoding_rs) ([details](#string-encoding)) |
+| **Object model gaps** | `Method#==` doesn't look through aliases; `defined?` on a private constant says `"constant"`; `include` into a singleton-class shell records ancestry but doesn't route dispatch ([divergences](#divergences-from-cruby)) |
+| **Absent** | Ractor; `ObjectSpace` beyond finalizers (`each_object`/`count_objects`/`_id2ref` missing); implicit `eval` caller-scope capture (explicit `eval(src, binding)` **does** capture locals/self/ivars); `Binding` reflection API (`local_variable_get`/`local_variables`/`receiver`) |
 
 Every "Status" cell above is expanded in the body of this document;
-the ~25 known behavioural divergences each get their own section
-under [Divergences from CRuby](#divergences-from-cruby).
+the 19 known behavioural divergences each get their own section
+under [Divergences from CRuby](#divergences-from-cruby) (21
+sections; 2 are struck through as since-FIXED).
 
 ## Tier framing — what this document defines
 
@@ -163,8 +169,8 @@ Regex patterns; both non-block and block forms — capture
 groups in the regex make `scan` return Array-of-captures
 per match, no groups → match-string), `tr(from, to)`,
 `sub` / `gsub` (see below), `to_i` / `to_f` / `to_sym`,
-`encode` / `force_encoding` (no-op stubs — the subset has no
-encoding tag semantics per ADR 0020 E1; see "String
+`encode` / `force_encoding` (real per-string tag semantics;
+transcoding behind `_encoding_full` — see "String
 encoding" below), `valid_encoding?`, `encoding`,
 `unpack(format)` (subset — see "Pack/Unpack"),
 interpolation `"... #{expr} ..."`.
@@ -465,12 +471,20 @@ Unsupported directives (`m`, `U`, `w`, `f` / `d` / `e` / `E`
 ships alongside for inspecting packed output without a
 `unpack("C*")` round-trip.
 
-### String encoding — ADR 0020 Phase E1 (tag semantics, no transcoding)
+### String encoding
 
-Every `RStr` carries an `EncodingTag` (UTF-8 / US-ASCII /
-ASCII-8BIT a.k.a. BINARY). Within that tag set, behaviour is
-pinned to CRuby 3.4 by the `string_encoding_e1` /
-`string_encoding_compat` diff fixtures:
+ADR 0020, phases E1–E3 shipped. Every `RStr` carries an
+`EncodingTag`; the default build's tag set is UTF-8 / US-ASCII /
+ASCII-8BIT a.k.a. BINARY, and the `_encoding_full` feature extends
+per-string tags (and `force_encoding`) to the full registry.
+Every build ships the registry *reflection* surface: 26
+`Encoding` constants naming ~20 encodings (GB18030 / Big5 / GBK /
+EUC-JP / Shift_JIS / ISO-2022-JP / UTF-16 / UTF-32 families,
+ISO-8859-1/-15, KOI8-R, Windows-1252/31J), `Encoding.list` /
+`find` / `aliases` / `name` / `names`, and CRuby-exact `dummy?` /
+`ascii_compatible?` / `inspect` answers. Within the default tag
+set, behaviour is pinned to CRuby 3.4 by the
+`string_encoding_e1` / `string_encoding_compat` diff fixtures:
 
 - `String#encoding` returns the real `Encoding` singleton
   (`#<Encoding:BINARY (ASCII-8BIT)>` dual-name inspect included);
@@ -486,12 +500,21 @@ pinned to CRuby 3.4 by the `string_encoding_e1` /
   upgrade the receiver's tag) and raise
   `Encoding::CompatibilityError` for non-ASCII mixes; `<=>`
   breaks byte-equal ties by encoding index.
-- `encode` covers the no-conversion subset (same encoding, or
-  ASCII-only bytes across encodings) and raises
+- `encode`: the default build covers the no-conversion subset
+  within its tag set (same encoding, or ASCII-only bytes across
+  UTF-8 / US-ASCII / BINARY) and raises
   `Encoding::UndefinedConversionError` (CRuby's class and message
-  shape) where real transcoding would be required — that is
-  Tier 2's `_encoding_full` (per the amended ADR 0020:
-  `encoding_rs` + CRuby differential probing).
+  shape) for ASCII-incompatible content, or
+  `Encoding::ConverterNotFoundError` for registry-encoding
+  targets. **Real transcoding shipped behind `_encoding_full`**
+  (`encoding_rs`, per the amended ADR 0020): probe-verified
+  byte-exact against CRuby for UTF-8 ↔ UTF-16LE / ISO-8859-1 /
+  Shift_JIS / EUC-JP round trips, with the same error classes for
+  unconvertible input and unknown targets. In the default build
+  `force_encoding` accepts only the three-tag set (registry names
+  raise `ArgumentError: unknown encoding name`); under
+  `_encoding_full` it accepts registry names and `Encoding`
+  objects.
 - Producers tag correctly: `String#b`, `Array#pack`,
   `Integer#chr` (US-ASCII < 0x80, BINARY above), `File.binread`
   (+ `binwrite`), cext `rb_str_new`, SQLite BLOBs;
@@ -832,37 +855,27 @@ h   # rubyrs: {a:1, b:2, c:3}; CRuby: {b:2, c:3, "a"=>1}
   one); `break` inside a `transform_*!` block is rare. No test
   pin; this entry is the contract.
 
-### `freeze` doesn't actually freeze — `frozen?` always false
+### ~~`freeze` doesn't actually freeze — `frozen?` always false~~ (FIXED)
 
 ```ruby
 EMPTY = [].freeze
-EMPTY << :x         # CRuby: FrozenError; rubyrs: silently mutates
-puts EMPTY.inspect  # rubyrs: [:x] — shared constant corrupted
-puts EMPTY.frozen?  # rubyrs: false (never tracked)
+EMPTY << :x         # both: FrozenError (was: rubyrs silently mutated)
+puts EMPTY.frozen?  # both: true       (was: rubyrs false)
 ```
 
-- CRuby tracks an immutability bit per object; `freeze` flips
-  it on, subsequent mutation methods raise `FrozenError`.
-  rubyrs doesn't model the bit at all.
-- `freeze` returns the receiver (so chainable patterns like
-  `EMPTY_HASH = {}.freeze` compile cleanly) and `frozen?`
-  returns `false`. Mutation methods (`<<`, `[]=`, `push`,
-  `delete`, ...) don't check.
-- Real risk: code that uses `EMPTY = [].freeze` as a shared
-  immutable sentinel will see that sentinel mutated by any
-  later mutation call. CRuby would have raised; rubyrs
-  silently corrupts.
-- Why we stub instead of implementing: real freeze tracking
-  needs an immutability bit on every heap-managed `HeapObj`
-  variant + a check in every mutator. Embeddable use cases
-  the host VM serves (template engines, config loaders,
-  short-lived scripts) generally don't rely on freeze as a
-  correctness mechanism; the stub unblocks common idioms
-  like `EMPTY_HASH = {}.freeze` without the per-mutator
-  enforcement cost.
-- Tests: `tilt_load_capabilities.rb` pins the chainable
-  return shape; the corruption divergence is NOT diff-pinned
-  (would lock in divergence) but is part of this contract.
+- FIXED — freeze is now real. Probe-verified against CRuby 3.4.1
+  (2026-07): `freeze` / `frozen?` on String / Array / Hash /
+  Object; mutation after freeze (`<<`, `[]=`, `push`, `delete`,
+  `sort!`, `instance_variable_set`) raises `FrozenError` with
+  CRuby's message shape (`can't modify frozen Array: []`);
+  Symbol / Integer / `nil` report always-frozen; bare String
+  literals report unfrozen; `dup` returns an unfrozen copy; the
+  `# frozen_string_literal: true` magic comment freezes literals
+  (and mutation of one raises).
+- Tests: `tilt_load_capabilities.rb` pins the chainable return
+  shape; frozen-receiver checks are exercised by fixtures like
+  `Hash#rehash`'s FrozenError arm and the `force_encoding`
+  frozen-receiver contract in the encoding fixtures.
 
 ### `ResourceExhausted` is host-only, not script-visible
 
@@ -918,33 +931,28 @@ Foo::OLD                       # CRuby: warns; rubyrs: 1 (no warning)
   (locks both forms — class-body and explicit-receiver — plus
   `respond_to?` parity).
 
-### `private_constant` / `public_constant` are accepted but not enforced
+### `private_constant` is enforced; `defined?` on a private constant diverges
 
 ```ruby
 class Foo
   BAR = 1
   private_constant :BAR
 end
-Foo::BAR                       # CRuby: NameError; rubyrs: 1
+Foo::BAR              # both: NameError "private constant Foo::BAR referenced"
+defined?(Foo::BAR)    # CRuby: nil; rubyrs: "constant"
 ```
 
-- `Module#private_constant` and `Module#public_constant` accept
-  Symbol / String args (or no args) and return the receiver,
-  matching CRuby's call-site contract. Internal references to the
-  named constants work in both runtimes.
-- External access to a private constant (`Klass::Foo` from outside
-  the class body) does NOT raise NameError in rubyrs — the
-  visibility flag isn't tracked on the per-class constants table.
-  CRuby raises.
-- Why: tilt's `lib/tilt/mapping.rb` calls
-  `private_constant :BaseMapping` from a class body; without the
-  call-shape acceptance, tilt fails to load. Enforcement on the
-  lookup side is a separable change that can land later without
-  breaking this contract.
-- Test: `crates/rubyrs/tests/diff/private_constant.rb` (locks the
-  call shapes and the receiver return value; the no-enforcement
-  divergence is documented here rather than encoded as a passing
-  diff).
+- Enforcement shipped (probe-verified against CRuby 3.4.1,
+  2026-07): external access to a private constant raises
+  CRuby's `NameError` ("private constant Foo::BAR referenced");
+  internal references keep working; `const_get` still returns
+  the value (CRuby parity — `const_get` bypasses privacy);
+  `public_constant` re-exposes the name.
+- Remaining divergence: `defined?(Foo::PRIVATE)` returns
+  `"constant"` where CRuby returns `nil` — the `defined?` walk
+  doesn't consult the visibility flag.
+- Test: `crates/rubyrs/tests/diff/private_constant.rb` (call
+  shapes and receiver return value).
 
 ### `Class#singleton_class` returns a redirecting eigenclass shell
 
@@ -978,29 +986,24 @@ Foo.shout   # => "HI"
   cached shell.
 - Cross-CRuby alignment: `X.singleton_class.name` now returns `nil`
   (CRuby shape); `to_s` / `inspect` render `"#<Class:X>"`.
-- **Remaining divergence** — reflection on the shell itself: methods
-  installed via the shell are visible through `X`'s singleton dispatch
-  (`X.method_name`) but the shell's own `instance_methods` /
-  `method_defined?` / `include?` / `include` / `prepend` operate on the
-  shell's empty tables, NOT on the redirected installs. Sinatra and
-  the mainstream `singleton_class.class_eval` idiom don't probe the
-  shell reflectively, so this is documented divergence rather than a
-  bug. A future PR can mirror writes into the shell's tables (or
-  proxy the reflection methods) without breaking the redirect.
-- **`Klass.extend(M)` dispatch works; metaclass ancestors don't
-  reflect `M`.** When a Module is extended into a Class via
-  `Klass.extend(M)`, `M`'s instance methods become class-level
-  methods of `Klass` (CRuby-correct) and `super` from inside one
-  of them resolves through `M` to the superclass's class-method
-  table (also correct). The divergence is reflective only:
-  `Klass.singleton_class.ancestors` does NOT include `M` in the
-  rendered list (real CRuby would render it between
-  `#<Class:Klass>` and `#<Class:Object>`). Dispatch consults the
-  `singleton_includes` chain at lookup time, so the methods
-  resolve regardless. Same shape as the "shell tables are empty"
-  divergence above — reflection lags dispatch.
-- `Object#singleton_class` for non-Class receivers is not implemented
-  in this arm and will raise NoMethodError.
+- ~~Reflection on the shell operates on empty tables~~ (FIXED) —
+  probe-verified (2026-07): methods installed through the shell
+  (both parsed `def` and `define_method`) are now visible to the
+  shell's own `instance_methods(false)` and `method_defined?`,
+  and `Klass.singleton_class.ancestors` includes modules
+  extended via `Klass.extend(M)` — reflection matches CRuby on
+  these probes.
+- **Remaining divergence — `include` INTO the shell doesn't route
+  dispatch.** `Klass.singleton_class.include(M)` records the
+  ancestry (`ancestors` / `include?` report `M`, matching CRuby)
+  but `Klass.some_method_from_M` still raises NoMethodError where
+  CRuby dispatches. The reverse of the old gap: reflection now
+  leads, dispatch lags — but only for this include-into-shell
+  direction (`Klass.extend(M)` dispatch is correct).
+- `Object#singleton_class` works for plain-object receivers too
+  (probe-verified: `class << obj` bodies, `def obj.name` installs,
+  and `obj.singleton_class.instance_methods(false)` reflection all
+  match CRuby).
 - `Runtime::reset()` drops the cached shell so any session-time
   installs disappear; the shell rebuilds lazily on the next call.
 - Tests:
@@ -1012,37 +1015,38 @@ Foo.shout   # => "HI"
     persistence in the sinatra `add_charset << x` shape, visibility
     leak fix, `alias_method`, the `nil` name pin).
 
-### `Kernel#eval` / `Class#class_eval(string)` skip caller scope
+### Implicit (binding-less) `eval` skips caller locals; explicit `binding` capture works
 
 ```ruby
 x = 99
-puts eval("x")                 # CRuby: 99; rubyrs: NameError
+puts eval("x")           # CRuby: 99; rubyrs: NoMethodError (no implicit caller scope)
+puts eval("x", binding)  # both: 99  (explicit binding captures locals)
 ```
 
 - `Kernel#eval(string)` parses, compiles, and runs the source at
   top level. Returns the final expression's value (matches CRuby).
 - `Kernel#eval` accepts up to 4 args matching CRuby's signature
-  (`eval(src, binding, file, line)`), but the `binding` arg is
-  silently ignored — rubyrs doesn't model `Binding`, so eval'd
-  code sees only top-level scope, not the caller's locals.
-  `file` is wired through to source registration so backtraces
-  and `Method#source_location` for methods defined inside the
-  eval'd source resolve.
+  (`eval(src, binding, file, line)`). An explicit `binding`
+  argument **is honoured** (probe-verified 2026-07): `Kernel#binding`
+  is a native builtin that captures the live frame's self, lexical
+  class, ivars AND locals, so `eval("local", some_binding)`
+  resolves method-scope locals, `@ivars`, and `self` exactly as
+  CRuby does (rack's `Builder.new_from_string` shape). What's
+  missing is the *implicit* capture: `eval("x")` WITHOUT a binding
+  runs at top level and can't see the caller's locals (CRuby's
+  binding-less eval can). `file` is wired through to source
+  registration so backtraces and `Method#source_location` for
+  methods defined inside the eval'd source resolve.
+- The `Binding` reflection API is absent: `Binding#local_variable_get`
+  / `local_variables` / `receiver` / `Binding#eval` all raise
+  NoMethodError — a `Binding` is only useful as an `eval` argument
+  today.
 - `Class#class_eval(string [, file, line])` (and `module_eval`
-  alias) does NOT switch to the receiver class's class-body
-  context. Bare `Foo.class_eval("def bar; end")` lands `bar` at
-  top level, not on `Foo`. The block-form
-  `Foo.class_eval { def bar; end }` continues to work as in
-  CRuby (intercepted separately and routed through the existing
-  `invoke_block_with_self` machinery — `bar` lands on `Foo`).
-- Why: completes the tilt full-render chain (tilt's
-  `eval_compiled_method` calls `Object.class_eval(method_source)`
-  where `method_source` is itself a `Tilt::TOPOBJECT.class_eval
-  do def ... end end` block, so the inner block-form handles the
-  actual class context switching — top-level eval is enough).
-  Implementing real class-body switching requires plumbing
-  `class_stack` and `class_visibility_stack` for the duration of
-  the eval; deferred until a non-self-wrapping consumer needs it.
+  alias) now DOES switch to the receiver class's class-body
+  context — `Foo.class_eval("def bar; :x; end")` lands `bar` on
+  `Foo` (probe-verified 2026-07; the earlier "lands at top level"
+  divergence is closed). The block form continues to work as in
+  CRuby.
 - Test: `crates/rubyrs/tests/diff/eval_basics.rb` (locks Kernel#eval
   shapes, the tilt-shape `class_eval(string)` with self-wrap,
   the file+line signature, and `module_eval` alias parity).
@@ -1390,16 +1394,16 @@ and *what's already in place* to make that future work tractable.
 | Feature | Target tier | Current Tier 1 state |
 |---------|-------------|----------------------|
 | Arbitrary-precision Integer arithmetic (`2**100`, true Bignum) | Tier 1 (`bignum` Cargo feature, default ON) | Phase A shipped: `Value::BigInt` + `HeapObj::BigInt`, integer-literal overflow promotes to BigInt at AST time, `+ - * / %` + comparisons + `to_s` / `inspect` / `class` work via `try_bigint_binop`, Float×BigInt coerces with Float-wins-on-mix. Build without `--no-default-features` to drop the `num-bigint` dep and fall back to wrapping i64 arithmetic. Phase B (`**`, bit ops, unary, `abs`) still on the bench. Earlier "i64 saturates at parser" wording belongs to the pre-Phase-A era and only applies under `--no-default-features`. |
-| `Rational`, `Complex`, `BigDecimal` | Tier 2 / Tier 3 | None. |
+| `Rational`, `Complex`, `BigDecimal` | Tier 2 / Tier 3 | `Rational` and `Complex` shipped in the always-on preamble (probe-verified 2026-07): `Rational()` / `Complex()` constructors, arithmetic with reduction (`Rational(4, 8)` → `(1/2)`), comparisons, `to_f`, `Complex#real` / `imaginary` / `abs`, `Integer#to_c`, `1 / Rational(3)` coercion. Still absent: `String#to_c` / `String#to_r`, imaginary literals (`3i`). `BigDecimal` is vendored behind `--features stdlib`. |
 | Real nested-module namespacing (`Foo::Bar` after `module Foo; class Bar; end; end`) | Tier 1 (shipped) | Class table now keyed by qualified SymId, so top-level `Bar` and `Foo::Bar` are independent `Class` objects with separate method / ivar / superclass tables (was a `class_qualified_separates` divergence, closed). Bare-name reads inside a class/module body walk a precomputed cref chain (`Op::LoadConstChain`) before falling back to the top-level bare slot — matches CRuby's "innermost-scope wins" behaviour. `Module.nesting` reflection API is still deferred (the cref chain exists at compile time but isn't exposed yet); two top-level modules that DON'T collide via the qualified-key story still don't get a real `Module` shape distinct from `Class` — see the `Module` semantics row below. |
 | `Time` class (`Time.now`, `#to_i`, `#nsec`, `Time.at(sec, nsec, …)`) | Tier 2 | None as a primitive value type. User classes carrying `(sec, nsec)` plus `register_type_internal` already round-trip Time-shaped ext-type frames byte-identical to MRI (see `tests/cext_msgpack_app_ext.rs`). |
-| `Fiber`, `Thread`, `Mutex`, `Ractor` | Tier 2 (`_fiber` / `_thread` / `_ractor` feature gates in ADR 0015) | None — single-threaded at the language level by design. |
+| `Fiber`, `Thread`, `Mutex`, `Ractor` | Tier 2 (`_fiber` / `_thread` / `_ractor` feature gates in ADR 0015) | The VM itself stays single-threaded by design — there is no OS-thread parallelism and no preemption. On top of that: `Fiber` subset behind `_fiber`; a **cooperative green-thread `Thread` subset** (~1,100-line preamble) is always on. Works (probe-verified 2026-07): `Thread.new` / `join` / `join(timeout)` / `value` / `alive?` / `status` / `kill`, exception propagation through `value`, thread-locals (`Thread#[]`) and `thread_variable_get/set` (correctly isolated per thread), `Thread.pass` interleaving, `sleep` in threads, `Mutex` (`lock` / `unlock` / `synchronize` / `owned?`), `Queue` incl. cross-thread blocking `pop`, `ConditionVariable`, `Thread.list`. Gaps (probed): `Thread.main`, `Thread#priority`, `abort_on_exception`, `SizedQueue` absent; `Thread.current` at top level returns the `Thread` class itself (not a main-Thread instance; inside spawned threads it is a real `Thread`); `Thread.stop` / `wakeup` raise; `Thread#raise` propagates into the calling thread; **`Thread.pass` inside a NATIVE iterator block (`3.times { … }`) truncates the loop** — use `while` loops in thread bodies that yield. `Ractor` absent. |
 | Full `Module` semantics (real Module type distinct from Class, `include` chain with method-lookup ordering matching CRuby exactly) | Tier 2 | PoC: `include Mod` works via method-table copy; ancestry walks via `class_is_a` + `includes` list. Strict CRuby `ancestors` compatibility deferred. |
-| `eval` (string form), `binding`, `ObjectSpace` | Tier 4 (`mri-compat`) | None — explicitly out of scope for Tier 1's sandbox guarantees. |
-| `require / load / autoload` from LOAD_PATH | Tier 1 (partial) | `require "/abs/path.rb"`, auto-`.rb`, cwd-relative, caller-source-dir + caller-source-parent hops, AND `$LOAD_PATH` walking all work (covered by `tests/diff/require_xpkg.rb`). CRuby's auto-populated stdlib/gem `$LOAD_PATH` entries are NOT pre-seeded — scripts opt in via `$LOAD_PATH.unshift(dir)`. `load` and `autoload` are still deferred. |
+| `eval` (string form), `binding`, `ObjectSpace` | Tier 4 (`mri-compat`) | `Kernel#eval(string)` shipped, and `eval(src, binding)` captures the binding's locals / self / ivars (see the [eval divergence section](#implicit-binding-less-eval-skips-caller-locals-explicit-binding-capture-works)); the `Binding` reflection API is still absent. `ObjectSpace` exists as a module with `define_finalizer` / `undefine_finalizer` only — `each_object` / `count_objects` / `_id2ref` / `garbage_collect` are absent (probe-verified 2026-07). |
+| `require / load / autoload` from LOAD_PATH | Tier 1 (partial) | `require "/abs/path.rb"`, auto-`.rb`, cwd-relative, caller-source-dir + caller-source-parent hops, AND `$LOAD_PATH` walking all work (covered by `tests/diff/require_xpkg.rb`). CRuby's auto-populated stdlib/gem `$LOAD_PATH` entries are NOT pre-seeded — scripts opt in via `$LOAD_PATH.unshift(dir)`. `load` and `autoload` shipped too (probe-verified 2026-07 for the basic forms; the Bridgetown 4-phase probe exercises the zeitwerk autoloader on top of them). |
 | Pure-Ruby stdlib subset (`Pathname`, … future names) | Tier 3 (`stdlib` Cargo feature) | Default Tier 1 build keeps the lenient stub "feature-absent surface": `require 'pathname'` materialises the constant shell, calls raise NoMethodError. With `--features stdlib` the same require path loads `crates/rubyrs/src/stdlib_vendor/<name>.rb` (deterministic, fs-free subset) and the module behaves CRuby-compatibly. Pilot: `Pathname` path-string manipulation methods, covered by `tests/diff/stdlib_pathname.rb` (the test is `#[cfg(feature = "stdlib")]`-gated). |
 | C extension API (CRuby ABI compatibility) | Tier 4 (`mri-compat`) per ADR 0015 | A working partial implementation lives in `crates/rubyrs-cext` as a spike, not as a covenant — see ADR 0015's "C-ext ABI stays out of v1 and v2" rule. Specifically the L3-J/K + A3/A4 work shipped msgpack-shaped FFI that's "real enough to round-trip the wire protocol" but doesn't promise full CRuby C-API equivalence. |
-| Refinements, full pattern matching, full encoding model, `Marshal`, `IO` beyond stdout | Tier 3 / Tier 4 | None. |
+| Refinements, full pattern matching, full encoding model, `Marshal`, `IO` beyond stdout | Tier 3 / Tier 4 | `Marshal` shipped for the common-tag subset (probe-verified 2026-07, byte-format `\x04\x08` matching CRuby): nil / bool / Integer / Bignum / Float / String (incl. non-ASCII) / Symbol / Array / Hash (nested) / Range / Struct subclasses / user objects with ivars, link-aware, honouring `marshal_dump` / `marshal_load` hooks; `load(dump(x))` is a genuine deep copy; `Marshal.dump(proc)` raises CRuby's `TypeError` ("no _dump_data is defined for class Proc"). Divergences: `Marshal.dump(STDOUT)` serialises a plain-object stand-in where CRuby raises "can't dump IO"; graphs outside the byte subset fall back to a same-process registry token (shallow, process-local, capped at 1024); dump-to-IO writes a rubyrs-only `RMF1` length frame, so IO-port streams are self-consistent but not CRuby-wire-compatible. Encoding model: partial, see [String encoding](#string-encoding). |
 | Inline cache for method dispatch | Tier 1 (shipped) | 5-way polymorphic per-call-site IC (`IC_WAYS = 5`, widened from 4 in PR #185 after PR #175 measured a cliff at 5 shapes) with round-robin eviction; each way carries `(class_ptr, method_gen, method)` and a `method_gen` bump invalidates every entry. Megamorphic case (> 5 distinct receiver classes at one call site) degenerates to the same uncached walk the original single-slot cache did — worst case unchanged, common polymorphic dispatch no longer thrashes. |
 
 ### What ships today: i64-range BigInt protocol
