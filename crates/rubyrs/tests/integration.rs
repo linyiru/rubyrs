@@ -78,6 +78,13 @@ fn run_error_fixture(name: &str) {
 }
 
 #[test] fn fizzbuzz() { run_fixture("fizzbuzz"); }
+// rubyrs-only golden (CRuby ships real converters and would succeed):
+// String#encode to a name-registered-but-converterless encoding
+// (default-build Encoding::GB18030 etc.) declines with CRuby's
+// ConverterNotFoundError shape. Gated off under `_encoding_full`,
+// where these conversions genuinely succeed.
+#[cfg(not(feature = "_encoding_full"))]
+#[test] fn encoding_named_no_converter() { run_fixture("encoding_named_no_converter"); }
 #[test] fn builtin_shadow() { run_fixture("builtin_shadow"); }
 #[test] fn class() { run_fixture("class"); }
 #[test] fn array_hash() { run_fixture("array_hash"); }

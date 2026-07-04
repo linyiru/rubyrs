@@ -1502,13 +1502,26 @@ impl Vm {
                     }));
                 }
                 let Some(tag) = self.resolve_encoding_arg(arg) else {
-                    let shown = match arg {
-                        Value::Str(s) => s.to_string_lossy(),
-                        other => other.type_name().to_string(),
+                    // CRuby raises TypeError for a non-String/
+                    // non-Encoding argument, ArgumentError "unknown
+                    // encoding name" for an unresolvable name. A
+                    // name-registered constant with no tag in this
+                    // build (default-build Encoding::GB18030) also
+                    // declines with the ArgumentError shape — CRuby
+                    // can't hit that case, so this is the closest
+                    // honest decline.
+                    let err = match self.encoding_arg_name(arg) {
+                        Some(shown) => RubyError::ArgumentError {
+                            msg: format!("unknown encoding name - {shown}"),
+                        },
+                        None => RubyError::TypeError {
+                            msg: format!(
+                                "no implicit conversion of {} into String",
+                                arg.type_name()
+                            ),
+                        },
                     };
-                    return Err(self.trap(RubyError::ArgumentError {
-                        msg: format!("unknown encoding name - {shown}"),
-                    }));
+                    return Err(self.trap(err));
                 };
                 rs.encoding.set(tag);
                 self.stack.push(recv.clone());
@@ -1543,12 +1556,43 @@ impl Vm {
                     Some(arg) => match self.resolve_encoding_arg(arg) {
                         Some(t) => t,
                         None => {
-                            let shown = match &args[0] {
-                                Value::Str(s) => s.to_string_lossy(),
-                                other => other.type_name().to_string(),
+                            // CRuby's String#encode NEVER raises
+                            // ArgumentError for a name it can't
+                            // convert to — it's ConverterNotFound-
+                            // Error "code converter not found (SRC
+                            // to DST)" (verified 3.4.1, incl. non-
+                            // UTF-8 receivers), or TypeError for a
+                            // non-String/non-Encoding argument.
+                            // Name-registered constants without a
+                            // tag in this build (default-build
+                            // Encoding::GB18030) take the same
+                            // ConverterNotFoundError decline: the
+                            // converter genuinely doesn't exist
+                            // here (`_encoding_full` supplies it).
+                            let Some(shown) = self.encoding_arg_name(&args[0]) else {
+                                return Err(self.trap(RubyError::TypeError {
+                                    msg: format!(
+                                        "no implicit conversion of {} into String",
+                                        args[0].type_name()
+                                    ),
+                                }));
                             };
-                            return Err(self.trap(RubyError::ArgumentError {
-                                msg: format!("unknown encoding name - {shown}"),
+                            let src = match rs.encoding.get() {
+                                EncodingTag::Utf8 => "UTF-8",
+                                EncodingTag::UsAscii => "US-ASCII",
+                                EncodingTag::Binary => "ASCII-8BIT",
+                                #[cfg(feature = "_encoding_full")]
+                                EncodingTag::Other(idx) => {
+                                    crate::encoding_full::name(idx).unwrap_or("OTHER")
+                                }
+                                #[cfg(not(feature = "_encoding_full"))]
+                                EncodingTag::Other(_) => "OTHER",
+                            };
+                            return Err(self.trap(RubyError::HostException {
+                                class_name: "Encoding::ConverterNotFoundError".to_string(),
+                                message: format!(
+                                    "code converter not found ({src} to {shown})"
+                                ),
                             }));
                         }
                     },
@@ -1726,6 +1770,31 @@ impl Vm {
     /// plumbing (E3) so the accepted-name set can't drift.
     pub(crate) fn encoding_tag_from_str(name: &str) -> Option<crate::value::EncodingTag> {
         encoding_tag_from_name(name)
+    }
+
+    /// The NAME an encoding-shaped argument carries, for error
+    /// messages when `resolve_encoding_arg` declines: `Some` for a
+    /// String (its content) or an `Encoding` instance (its `@name` —
+    /// e.g. a default-build `Encoding::GB18030`, name-registered but
+    /// with no tag/converter), `None` for anything else (the caller
+    /// raises CRuby's "no implicit conversion of X into String"
+    /// TypeError).
+    fn encoding_arg_name(&mut self, arg: &Value) -> Option<String> {
+        match arg {
+            Value::Str(s) => Some(s.to_string_lossy()),
+            Value::Object(id) => {
+                let inst = self.heap.instance(*id);
+                if inst.class.name != "Encoding" {
+                    return None;
+                }
+                let name_id = self.interner.intern("@name");
+                match inst.ivar_get(name_id) {
+                    Some(Value::Str(s)) => Some(s.to_string_lossy()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
     }
 
     /// `Integer#chr(encoding)` — CRuby widens the accepted range and

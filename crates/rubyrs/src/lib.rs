@@ -2985,32 +2985,63 @@ class Encoding
     # un-hyphenated form), but does fold "ASCII" → US-ASCII
     # and "BINARY" → ASCII-8BIT — verified empirically vs
     # CRuby 3.4.
+    ## The named-constant family resolves in EVERY build (the
+    ## constants are name-registered singletons below); actual
+    ## transcoding to/from the non-core encodings still needs
+    ## `_encoding_full`. Alias spellings verified against CRuby
+    ## 3.4.1 one by one — CRuby REJECTS "KOI8R", "SHIFT-JIS",
+    ## "UTF16LE"/"UTF16"/"UTF32…" (no un-hyphenated UTF forms),
+    ## so those stay unknown here too.
     case name.to_s.upcase
     when "UTF-8" then UTF_8
     when "US-ASCII", "ASCII" then US_ASCII
     when "ASCII-8BIT", "BINARY" then ASCII_8BIT
+    when "ISO-8859-1", "ISO8859-1" then ISO_8859_1
+    when "WINDOWS-1252", "CP1252" then Windows_1252
+    when "ISO-8859-15", "ISO8859-15" then ISO_8859_15
+    when "KOI8-R" then KOI8_R
+    when "WINDOWS-31J", "CP932", "SJIS" then Windows_31J
+    when "SHIFT_JIS" then Shift_JIS
+    when "ISO-2022-JP", "ISO2022-JP" then ISO_2022_JP
+    when "EUC-JP", "EUCJP" then EUC_JP
+    when "GBK", "CP936" then GBK
+    when "GB18030" then GB18030
+    when "BIG5" then Big5
+    when "UTF-16LE" then UTF_16LE
+    when "UTF-16BE" then UTF_16BE
+    when "UTF-16" then UTF_16
+    when "UTF-32LE" then UTF_32LE
+    when "UTF-32BE" then UTF_32BE
+    when "UTF-32" then UTF_32
     else raise ArgumentError, "unknown encoding name - " + name.to_s
     end
   end
 
-  ## Reflection trio (CRuby shapes, registry-sized): the core
-  ## build serves the three built-ins; `_encoding_full` layers
-  ## its eight registry encodings + their aliases on top (see
-  ## preamble/encoding_full.rb). The alias map is the COMMON
-  ## subset of CRuby's (which also carries locale/external/
-  ## filesystem pseudo-names and historical spellings) —
+  ## Reflection trio (CRuby shapes, registry-sized): every build
+  ## serves the three built-ins plus the name-registered family
+  ## (constants below). The list and alias map are a SUBSET of
+  ## CRuby's ~100-encoding registry (which also carries locale/
+  ## external/filesystem pseudo-names and historical spellings) —
   ## documented narrowing, asserted by intersection in the
   ## fixture.
   def self.list
-    [ASCII_8BIT, UTF_8, US_ASCII]
+    [ASCII_8BIT, UTF_8, US_ASCII,
+     ISO_8859_1, Windows_1252, ISO_8859_15, KOI8_R,
+     Windows_31J, EUC_JP, GBK, GB18030, Big5, UTF_16LE, UTF_16BE, UTF_16,
+     UTF_32LE, UTF_32BE, UTF_32, Shift_JIS, ISO_2022_JP]
   end
 
   def self.name_list
     list.map(&:name) + aliases.keys
   end
 
+  ## Alias pairs verified against CRuby 3.4.1's Encoding.aliases
+  ## (exact key => value spellings).
   def self.aliases
-    { "BINARY" => "ASCII-8BIT", "ASCII" => "US-ASCII" }
+    { "BINARY" => "ASCII-8BIT", "ASCII" => "US-ASCII",
+      "ISO8859-1" => "ISO-8859-1", "CP1252" => "Windows-1252",
+      "ISO8859-15" => "ISO-8859-15", "CP932" => "Windows-31J",
+      "SJIS" => "Windows-31J", "CP936" => "GBK" }
   end
 
   def initialize(name)
@@ -3035,23 +3066,36 @@ class Encoding
     # .to_s stay "ASCII-8BIT").
     if @name == 'ASCII-8BIT'
       '#<Encoding:BINARY (ASCII-8BIT)>'
+    elsif dummy?
+      # CRuby renders dummy encodings with a "(dummy)" suffix:
+      # #<Encoding:ISO-2022-JP (dummy)> — verified vs 3.4.1.
+      '#<Encoding:' + @name + ' (dummy)>'
     else
       '#<Encoding:' + @name + '>'
     end
   end
 
-  ## Always false in our subset — we don't model dummy encodings
-  ## (the ones CRuby uses for, e.g., UTF-16 where you must know
-  ## the byte order). Real codebases gate ASCII-safety checks on
-  ## this; returning false keeps the happy path.
+  ## Name-driven, CRuby-verified (3.4.1): among the registered
+  ## family, exactly ISO-2022-JP (stateful escape sequences) and
+  ## the byte-order-ambiguous BOM forms UTF-16/UTF-32 are dummy
+  ## encodings. The fixed-endianness UTF-16LE/BE, UTF-32LE/BE are
+  ## NOT dummy. ERB's compiler gates on `enc.dummy?` — String
+  ## encodings can never BE these in the core build, so the happy
+  ## path is unaffected.
   def dummy?
-    false
+    @name == 'ISO-2022-JP' || @name == 'UTF-16' || @name == 'UTF-32'
   end
 
-  ## Always true — UTF-8, US-ASCII, and ASCII-8BIT (the only
-  ## names we serve up) are all ASCII-compatible.
+  ## Name-driven, CRuby-verified (3.4.1): the whole UTF-16/UTF-32
+  ## family (code units wider than a byte) and ISO-2022-JP are NOT
+  ## ASCII-compatible; every other registered name is.
   def ascii_compatible?
-    true
+    case @name
+    when 'UTF-16LE', 'UTF-16BE', 'UTF-16', 'UTF-32LE', 'UTF-32BE', 'UTF-32', 'ISO-2022-JP'
+      false
+    else
+      true
+    end
   end
 end
 Encoding::UTF_8 = Encoding.new("UTF-8")
@@ -3072,6 +3116,33 @@ Encoding::BINARY = Encoding::ASCII_8BIT
 ## the always-on constant only needs to exist + be a usable hash key,
 ## which the core `Encoding.new` provides without the registry.
 Encoding::ISO_2022_JP = Encoding.new("ISO-2022-JP")
+## The common encoding family, name-registered in EVERY build (same
+## rationale as ISO_2022_JP above): gems reference these constants at
+## load time — activesupport's inflector/transliterate.rb puts
+## `Encoding::GB18030` in ALLOWED_ENCODINGS_FOR_TRANSLITERATE at class-
+## body load, so `require "active_model"` NameErrors without it. The
+## constant + name/inspect/find identity + `str.encoding == Encoding::X`
+## comparisons work everywhere; actual TRANSCODING to/from these
+## encodings still needs `_encoding_full` (String#encode declines with
+## CRuby's Encoding::ConverterNotFoundError shape in the default build).
+## Constant names/spellings match CRuby's canonical set exactly; the
+## registry indices in encoding_full.rs are independent of this order.
+Encoding::ISO_8859_1 = Encoding.new("ISO-8859-1")
+Encoding::Windows_1252 = Encoding.new("Windows-1252")
+Encoding::ISO_8859_15 = Encoding.new("ISO-8859-15")
+Encoding::KOI8_R = Encoding.new("KOI8-R")
+Encoding::Windows_31J = Encoding.new("Windows-31J")
+Encoding::EUC_JP = Encoding.new("EUC-JP")
+Encoding::GBK = Encoding.new("GBK")
+Encoding::GB18030 = Encoding.new("GB18030")
+Encoding::Big5 = Encoding.new("Big5")
+Encoding::UTF_16LE = Encoding.new("UTF-16LE")
+Encoding::UTF_16BE = Encoding.new("UTF-16BE")
+Encoding::UTF_16 = Encoding.new("UTF-16")
+Encoding::UTF_32LE = Encoding.new("UTF-32LE")
+Encoding::UTF_32BE = Encoding.new("UTF-32BE")
+Encoding::UTF_32 = Encoding.new("UTF-32")
+Encoding::Shift_JIS = Encoding.new("Shift_JIS")
 
 ## Version sentinels. Real codebases use `RUBY_VERSION >= '3'`
 ## (tilt does at template.rb:239) to pick between bind_call and
@@ -3288,16 +3359,14 @@ self.eval_inner(
             "<rubyrs:preamble:math>",
         )
             .expect("ICE: failed to load Math preamble");
-        // ADR 0020 Tier 2 (`_encoding_full`): registry constants +
-        // an Encoding.find extension layered over the core
-        // three-name resolver. Same load-tail position as the
-        // accelerator shims — everything it reopens exists by now.
-        #[cfg(feature = "_encoding_full")]
-        self.eval_inner(
-            include_str!("preamble/encoding_full.rb"),
-            "<rubyrs:preamble:encoding_full>",
-        )
-            .expect("ICE: failed to load encoding_full preamble");
+        // ADR 0020 Tier 2 (`_encoding_full`): no preamble segment
+        // anymore — the registry CONSTANTS + Encoding.find/list/
+        // aliases surface moved into the always-on core Encoding
+        // section above (activesupport references Encoding::GB18030
+        // at load time, so the names must exist in every build).
+        // The feature now contributes only the Rust transcoding
+        // backend (encoding_full.rs) consumed by String#encode /
+        // force_encoding / the E3 File-read plumbing.
     }
 
     /// Replace the `ARGV` constant with the host's argument vector.

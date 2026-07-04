@@ -661,8 +661,18 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn array_freeze() { run_diff("array_freeze"); }
 #[test] fn string_encoding_e1() { run_diff("string_encoding_e1"); }
 #[test] fn string_encoding_compat() { run_diff("string_encoding_compat"); }
-#[cfg(feature = "_encoding_full")]
+// The ISO-2022-JP constant + core-find resolution are always-on now
+// (the whole named-constant family lives in the core preamble).
 #[test] fn encoding_iso_2022_jp() { run_diff("encoding_iso_2022_jp"); }
+// The common encoding-constant family (GB18030/Big5/EUC-JP/GBK/
+// Windows-31J/KOI8-R/ISO-8859-1/15/Windows-1252/UTF-16/32 family/
+// Shift_JIS) is name-registered in EVERY build — activesupport's
+// transliterate.rb references Encoding::GB18030 at class-body load.
+#[test] fn encoding_constants_core() { run_diff("encoding_constants_core"); }
+// String#encode's CRuby error surface: ConverterNotFoundError for
+// unresolvable target names (NOT ArgumentError), TypeError for
+// non-String/non-Encoding args (encode + force_encoding).
+#[test] fn encoding_converter_not_found() { run_diff("encoding_converter_not_found"); }
 #[cfg(feature = "_encoding_full")]
 #[test] fn encoding_full_latin1() { run_diff("encoding_full_latin1"); }
 #[cfg(feature = "_encoding_full")]
@@ -1318,7 +1328,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn string_extend() { run_diff("string_extend"); }
 #[test] fn yaml_safe_load_file() { run_diff("yaml_safe_load_file"); }
 #[test] #[ignore = "known: Pathname#sub_ext not implemented"] fn pathname_sub_ext_filetests() { run_diff("pathname_sub_ext_filetests"); }
-#[test] #[ignore = "known: Encoding::GB18030 not implemented"] fn encoding_gb18030() { run_diff("encoding_gb18030"); }
+#[test] fn encoding_gb18030() { run_diff("encoding_gb18030"); }
 #[test] fn yaml_load_tags() { run_diff("yaml_load_tags"); }
 #[test] fn include_append_features_super() { run_diff("include_append_features_super"); }
 #[test] fn cvar_lexical_via_extend() { run_diff("cvar_lexical_via_extend"); }

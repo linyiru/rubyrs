@@ -1,0 +1,7 @@
+encode name: Encoding::ConverterNotFoundError: code converter not found (UTF-8 to GB18030)
+encode const: Encoding::ConverterNotFoundError: code converter not found (UTF-8 to GB18030)
+encode big5: Encoding::ConverterNotFoundError: code converter not found (UTF-8 to Big5)
+encode utf16: Encoding::ConverterNotFoundError: code converter not found (UTF-8 to UTF-16LE)
+encode!: Encoding::ConverterNotFoundError: code converter not found (UTF-8 to GB18030)
+force: ArgumentError: unknown encoding name - GB18030
+find works: ok "GB18030"
