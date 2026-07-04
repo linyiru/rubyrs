@@ -2219,6 +2219,11 @@ pub(crate) struct Vm {
     /// paying the full slow cascade).
     pub(crate) sym_drop: SymId,
     pub(crate) sym_fetch: SymId,
+    /// Pre-interned `hash` / `eql?` for the Hash user-key funnel gates
+    /// (`key_needs_ruby_hash` scans run per merge/insert — an interner
+    /// probe per call site showed up on the merge! micro).
+    pub(crate) sym_key_hash: SymId,
+    pub(crate) sym_key_eql: SymId,
     pub(crate) sym_freeze: SymId,
     pub(crate) sym_dup: SymId,
     pub(crate) sym_class_name: SymId,
@@ -2827,6 +2832,8 @@ impl Vm {
         let sym_to_sym = interner.intern("to_sym");
         let sym_drop = interner.intern("drop");
         let sym_fetch = interner.intern("fetch");
+        let sym_key_hash = interner.intern("hash");
+        let sym_key_eql = interner.intern("eql?");
         let sym_freeze = interner.intern("freeze");
         let sym_dup = interner.intern("dup");
         let sym_class_name = interner.intern("class");
@@ -3223,6 +3230,8 @@ impl Vm {
             sym_to_sym,
             sym_drop,
             sym_fetch,
+            sym_key_hash,
+            sym_key_eql,
             sym_freeze,
             sym_dup,
             sym_class_name,

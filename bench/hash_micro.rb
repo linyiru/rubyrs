@@ -72,6 +72,17 @@ bench("lookup str key hit", N, RUNS) { |n| n.times { H5S["c"] } }
 bench("lookup str key miss", N, RUNS) { |n| n.times { H5S["z"] } }
 bench("lookup sym key hit", N, RUNS) { |n| n.times { H5Y[:c] } }
 
+# -- merge / merge! (plain keys) — gates the merge-family bulk path
+#    (the user-key funnel must not tax plain option-hash merges) ----
+MSRC = { "m1" => 1, "m2" => 2, "m3" => 3 }
+bench("merge 5<-3 str", N, RUNS) do |n|
+  n.times { H5S.merge(MSRC) }
+end
+
+bench("merge! 2<-3 str", N, RUNS) do |n|
+  n.times { { "x" => 1, "y" => 2 }.merge!(MSRC) }
+end
+
 # -- Delete + reinsert cycle on a live 5-key hash ----------------
 HD = { "a" => 1, "b" => 2, "c" => 3, "d" => 4, "e" => 5 }
 bench("delete+reinsert str", N, RUNS) do |n|

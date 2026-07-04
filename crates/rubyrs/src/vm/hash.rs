@@ -313,6 +313,28 @@ impl Vm {
         h.iter().any(|(k, _)| self.key_needs_ruby_hash(k, hash_sym, eql_sym))
     }
 
+    /// Merge-family funnel gate: true when any INCOMING pair holds a key
+    /// that needs Ruby-dispatch semantics (and the receiver isn't
+    /// compare_by_identity). Stored-side user keys don't matter for a
+    /// plain incoming key — both paths compare it by identity against
+    /// them (cross-domain keys never match), so plain-key merges — the
+    /// overwhelmingly common shape — keep the base bulk path with zero
+    /// per-pair interning/pinning.
+    pub(crate) fn merge_needs_user_path(
+        &mut self,
+        id: ObjId,
+        extra: &[(Value, Value)],
+    ) -> bool {
+        if self.hash_is_by_identity(id) {
+            return false;
+        }
+        let hash_sym = self.sym_key_hash;
+        let eql_sym = self.sym_key_eql;
+        extra
+            .iter()
+            .any(|(k, _)| self.key_needs_ruby_hash(k, hash_sym, eql_sym))
+    }
+
     /// VM-aware Hash equality for hashes involving user-`hash`/`eql?` keys —
     /// CRuby's `rb_hash_equal`: same size, and every `[k, v]` of `a` found in
     /// `b` by KEY (hash/eql? honored via `vm_hash_find`) with a matching
@@ -1758,6 +1780,42 @@ impl Vm {
                         // — including one inside a re-entrant `to_hash` call — can't sweep
                         // them (or the pair ObjIds reachable only through them). Pin each
                         // coerced result too.
+                        //
+                        // Single-Hash-arg plain-key fast shape first: no
+                        // coercion, no PinGuard, one snapshot + one alloc —
+                        // the base bulk path (nothing here dispatches; the
+                        // single alloc happens after all reads).
+                        if let [Value::Hash(other)] = others {
+                            let other = *other;
+                            let extra: Vec<(Value, Value)> = self.heap.hash(other).to_vec();
+                            if !self.merge_needs_user_path(id, &extra) {
+                                let mut out: Vec<(Value, Value)> = self.heap.hash(id).to_vec();
+                                for (k, v) in extra {
+                                    let pos = out.iter().position(|(ek, _)| ek.ruby_eql(&k, &self.heap));
+                                    if let Some(p) = pos {
+                                        out[p].1 = v;
+                                    } else {
+                                        out.push((k, v));
+                                    }
+                                }
+                                let default_block = self.heap.hash_default_block(id);
+                                let mut g = PinGuard::new(self);
+                                g.pin(Value::Hash(id));
+                                g.pin(Value::Hash(other));
+                                if let Some(bid) = default_block {
+                                    g.pin(Value::Block(bid));
+                                }
+                                g.vm.maybe_gc();
+                                let nid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(out)));
+                                if default_block.is_some() {
+                                    g.vm.heap.hash_set_default_block(nid, default_block);
+                                }
+                                if let Some(tag) = g.vm.heap.hash_class_tag(id) {
+                                    g.vm.heap.hash_set_class_tag(nid, Some(tag));
+                                }
+                                return Ok(Some(Value::Hash(nid)));
+                            }
+                        }
                         let mut g = PinGuard::new(self);
                         g.pin(Value::Hash(id));
                         for ov in others {
@@ -1804,44 +1862,72 @@ impl Vm {
                             };
                             sources.push(g.vm.heap.hash(hid).to_vec());
                         }
-                        // CRuby merge = dup self, then aset each source pair —
-                        // build the result Hash FIRST and upsert into it via
-                        // `vm_hash_insert_syms`, which honors a user
-                        // `hash`/`eql?` on the inserted key (existing key
-                        // object + position kept, value replaced). A
-                        // compare_by_identity RECEIVER keys by identity, so
-                        // its source pairs take the identity insert (the
-                        // fresh result doesn't carry the flag yet).
+                        // CRuby merge = dup self, then aset each source pair.
+                        // USER-key merges (any incoming key overriding
+                        // `hash`/`eql?`) build the result Hash FIRST and
+                        // upsert via `vm_hash_insert_syms` (existing key
+                        // object + position kept, value replaced); PLAIN-key
+                        // merges — the hot option-hash shape — keep the base
+                        // bulk scan + single alloc. A compare_by_identity
+                        // receiver keys by identity (bulk path).
                         let default_block = g.vm.heap.hash_default_block(id);
                         if let Some(bid) = default_block {
                             g.pin(Value::Block(bid));
                         }
-                        let out: Vec<(Value, Value)> = g.vm.heap.hash(id).to_vec();
-                        g.vm.maybe_gc();
-                        let nid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(out)));
-                        g.pin(Value::Hash(nid));
-                        let hash_sym = g.vm.interner.intern("hash");
-                        let eql_sym = g.vm.interner.intern("eql?");
-                        let receiver_cbi = g.vm.hash_is_by_identity(id);
-                        // Pin the snapshotted source pairs: a user `hash`
-                        // dispatch inside the insert can GC, and an evil
-                        // override could unroot them from the (pinned)
-                        // source hashes mid-merge.
-                        for extra in &sources {
-                            for (k, v) in extra {
-                                if k.is_gc_heap_ref() { g.pin(k.clone()); }
-                                if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                        let mut has_user = false;
+                        for src in &sources {
+                            if g.vm.merge_needs_user_path(id, src) {
+                                has_user = true;
+                                break;
                             }
                         }
-                        for extra in sources {
-                            for (k, v) in extra {
-                                if receiver_cbi {
-                                    g.vm.heap.hash_insert(nid, k, v);
-                                } else {
+                        let nid = if has_user {
+                            let out: Vec<(Value, Value)> = g.vm.heap.hash(id).to_vec();
+                            // Carry over the receiver's ready user-key index
+                            // (positions align — the result starts as a
+                            // pairs clone), so the inserts below don't
+                            // re-dispatch `hash` on every stored key (CRuby
+                            // stores key hashes at insert).
+                            let ui = g.vm.heap.hash_obj_mut(id).user_index_mut().cloned();
+                            g.vm.maybe_gc();
+                            let nid = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(out)));
+                            if let Some(ui) = ui {
+                                g.vm.heap.hash_obj_mut(nid).extras_mut().user_index = Some(ui);
+                            }
+                            g.pin(Value::Hash(nid));
+                            let hash_sym = g.vm.interner.intern("hash");
+                            let eql_sym = g.vm.interner.intern("eql?");
+                            // Pin the snapshotted source pairs: a user `hash`
+                            // dispatch inside the insert can GC, and an evil
+                            // override could unroot them from the (pinned)
+                            // source hashes mid-merge.
+                            for extra in &sources {
+                                for (k, v) in extra {
+                                    if k.is_gc_heap_ref() { g.pin(k.clone()); }
+                                    if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                                }
+                            }
+                            for extra in sources {
+                                for (k, v) in extra {
                                     g.vm.vm_hash_insert_syms(nid, k, v, hash_sym, eql_sym)?;
                                 }
                             }
-                        }
+                            nid
+                        } else {
+                            let mut out: Vec<(Value, Value)> = g.vm.heap.hash(id).to_vec();
+                            for extra in sources {
+                                for (k, v) in extra {
+                                    let pos = out.iter().position(|(ek, _)| ek.ruby_eql(&k, &g.vm.heap));
+                                    if let Some(p) = pos {
+                                        out[p].1 = v;
+                                    } else {
+                                        out.push((k, v));
+                                    }
+                                }
+                            }
+                            g.vm.maybe_gc();
+                            g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(out)))
+                        };
                         if default_block.is_some() {
                             g.vm.heap.hash_set_default_block(nid, default_block);
                         }
@@ -1859,28 +1945,74 @@ impl Vm {
                     // self. `update` is CRuby's alias. The block-form
                     // conflict-resolver lives in `collection_call_block`
                     // (vm/iter.rs); this is the blockless path.
-                    ("merge!", [Value::Hash(other)]) | ("update", [Value::Hash(other)]) => {
-                        // Per-pair `vm_hash_insert_syms`: honors a user
-                        // `hash`/`eql?` on the inserted key (CRuby updates the
-                        // existing entry in place — original key object +
-                        // position kept — instead of appending a duplicate);
-                        // plain keys route through the identity-index insert,
-                        // same semantics as the old linear scan. Pin the
-                        // receiver, source and snapshotted pairs — the user
-                        // `hash` dispatch can GC.
-                        let other = *other;
-                        let extra: Vec<(Value, Value)> = self.heap.hash(other).to_vec();
+                    ("merge!" | "update", others) => {
+                        // CRuby 2.6+: merge!/update take ZERO OR MORE hash-
+                        // like args, applied left-to-right (each coerced via
+                        // `to_hash` — rb_to_hash_type, shared with the Hash
+                        // comparison operand resolver); no args is a no-op
+                        // returning self. Per source: keys overriding
+                        // `hash`/`eql?` route through `vm_hash_insert_syms`
+                        // (CRuby updates the existing entry in place —
+                        // original key object + position kept — instead of
+                        // appending a duplicate); PLAIN-key merges keep the
+                        // base bulk scan (no per-pair interning/pinning —
+                        // the hot option-hash shape).
+                        //
+                        // Single-Hash-arg plain-key fast shape: no coercion,
+                        // no PinGuard, no sources Vec — byte-for-byte the
+                        // base loop (nothing below can GC or dispatch).
+                        if let [Value::Hash(other)] = others {
+                            let other = *other;
+                            let extra: Vec<(Value, Value)> = self.heap.hash(other).to_vec();
+                            if !self.merge_needs_user_path(id, &extra) {
+                                for (k, v) in extra {
+                                    let pos = self.heap.hash(id).iter()
+                                        .position(|(ek, _)| ek.ruby_eql(&k, &self.heap));
+                                    if let Some(p) = pos {
+                                        self.heap.hash_mut(id)[p].1 = v;
+                                    } else {
+                                        self.heap.hash_mut(id).push((k, v));
+                                    }
+                                }
+                                return Ok(Some(Value::Hash(id)));
+                            }
+                        }
                         let mut g = PinGuard::new(self);
                         g.pin(Value::Hash(id));
-                        g.pin(Value::Hash(other));
-                        for (k, v) in &extra {
-                            if k.is_gc_heap_ref() { g.pin(k.clone()); }
-                            if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                        for ov in others {
+                            g.pin(ov.clone());
                         }
-                        let hash_sym = g.vm.interner.intern("hash");
-                        let eql_sym = g.vm.interner.intern("eql?");
-                        for (k, v) in extra {
-                            g.vm.vm_hash_insert_syms(id, k, v, hash_sym, eql_sym)?;
+                        let mut sources: Vec<Vec<(Value, Value)>> =
+                            Vec::with_capacity(others.len());
+                        for ov in others {
+                            let hid = g.vm.hash_cmp_operand(ov)?;
+                            g.pin(Value::Hash(hid));
+                            sources.push(g.vm.heap.hash(hid).to_vec());
+                        }
+                        for extra in sources {
+                            if g.vm.merge_needs_user_path(id, &extra) {
+                                // Pin the snapshotted pairs — the user
+                                // `hash` dispatch can GC.
+                                for (k, v) in &extra {
+                                    if k.is_gc_heap_ref() { g.pin(k.clone()); }
+                                    if v.is_gc_heap_ref() { g.pin(v.clone()); }
+                                }
+                                let hash_sym = g.vm.interner.intern("hash");
+                                let eql_sym = g.vm.interner.intern("eql?");
+                                for (k, v) in extra {
+                                    g.vm.vm_hash_insert_syms(id, k, v, hash_sym, eql_sym)?;
+                                }
+                            } else {
+                                for (k, v) in extra {
+                                    let pos = g.vm.heap.hash(id).iter()
+                                        .position(|(ek, _)| ek.ruby_eql(&k, &g.vm.heap));
+                                    if let Some(p) = pos {
+                                        g.vm.heap.hash_mut(id)[p].1 = v;
+                                    } else {
+                                        g.vm.heap.hash_mut(id).push((k, v));
+                                    }
+                                }
+                            }
                         }
                         Some(Value::Hash(id))
                     }
