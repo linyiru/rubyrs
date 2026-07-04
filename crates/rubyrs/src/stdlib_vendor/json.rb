@@ -128,12 +128,14 @@ module JSON
       rescue RuntimeError
         # ANY native decline or serde-side parse error falls
         # through to the pure canon, which is the single authority
-        # for both values (exact bigints, 1e999 overflow literals,
+        # for both values (>=10-digit-exponent overflow literals,
         # non-UTF-8 input, lone low surrogates) and error classes
         # + messages (strict number grammar, nesting rule, control
-        # characters in strings). A second parse is paid only on
-        # decline/error documents; the canon's own recursion is
-        # bounded by its nesting guard.
+        # characters in strings). Bigint-range integers and
+        # negative zero parse NATIVELY (exact-number retry pass,
+        # 2026-07) and no longer decline. A second parse is paid
+        # only on decline/error documents; the canon's own
+        # recursion is bounded by its nesting guard.
       end
     end
     raise ParserError, "input must be a String" unless str.is_a?(String)
@@ -570,11 +572,14 @@ module JSON
 
     # Strict JSON number grammar (CRuby probed: leading zeros,
     # bare '-', '1.', '1e', '1e+' all raise "invalid number") +
-    # CRuby's exponent-saturation quirks. The serde-backed native
-    # path DECLINES any document with a >=19-digit run to this
-    # parser, so the grammar here is what the default path
-    # enforces for bigint-range documents — it must not be laxer
-    # than CRuby.
+    # CRuby's exponent-overflow quirks. The serde-backed native
+    # path handles bigint-range integers and negative zero exactly
+    # itself (2026-07 exact-number pass) but DECLINES any document
+    # carrying a number-context exponent of >= 10 written digits
+    # to this parser — the saturation/overflow-shortcut regimes
+    # below are unrecoverable from a parsed f64. This parser stays
+    # the single value + error authority; its grammar must not be
+    # laxer than CRuby.
     def parse_number
       start = @pos
       neg = false
@@ -636,6 +641,18 @@ module JSON
           else
             return neg ? -0.0 : 0.0
           end
+        end
+        # Second overflow shortcut (json 2.20, probed 2026-07): below
+        # the literal-saturation rule, the ADJUSTED decimal exponent
+        # (written exponent minus fraction digits) is range-checked
+        # BEFORE the mantissa is considered — past INT32_MAX the
+        # result is ±Infinity by mantissa SIGN even for a ZERO
+        # mantissa: "0.0e2147483649" → Infinity, "0.00e2147483649"
+        # (adj 2147483647) → 0.0, "-0e2147483649" → -Infinity.
+        # Negative overflow needs no rule: it underflows to ±0.0,
+        # which the to_f below already produces.
+        if (exp_neg ? -abs_exp : abs_exp) - frac_digits > 2147483647
+          return neg ? -Float::INFINITY : Float::INFINITY
         end
         # Reassemble the slice. Avoid `Array#[start, len]` (not
         # supported on rubyrs); walk the indices.

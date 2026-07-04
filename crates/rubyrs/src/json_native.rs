@@ -131,21 +131,26 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
                 backtrace: vec![],
             });
         }
-        // Bignum guard: serde_json (without arbitrary_precision)
-        // parses integer literals past u64 range via visit_f64 —
-        // SILENT precision loss where CRuby produces an exact
-        // Integer/Bignum. Any document containing a ≥19-digit run
-        // declines to the pure canon (which folds digits with
-        // promoting Integer arithmetic). ≤18-digit integers always
-        // fit i64, so the fast path keeps exact semantics. False
-        // positives (long digit runs inside strings / float
-        // fractions) only cost speed, never correctness. The scan
-        // strides 19 bytes and only expands around digit hits —
-        // ~n/19 byte touches on non-numeric payloads.
-        if has_long_digit_run(&s.content.borrow()) {
+        // Exponent-quirk fence: CRuby's parser has two overflow
+        // shortcuts serde can't reproduce from the PARSED f64 alone
+        // (the value loses the written digit count / adjusted-exp
+        // information): exponent LITERALS of ≥20 digits (or value
+        // past i64) saturate, and an adjusted exponent past
+        // INT32_MAX overflows to ±Infinity even for a ZERO mantissa
+        // ("0.0e2147483649" → Infinity). Both need a written
+        // exponent of ≥10 digits, so any document containing a
+        // number-context `[eE][+-]?` followed by a ≥10-digit run
+        // declines whole to the pure canon, which implements the
+        // exact rules (single value+error authority, pathological
+        // literals only — real payloads never carry 10-digit
+        // exponents). Everything BELOW that fence (`1e999`,
+        // `1e-999999999`, …) agrees between Rust's correctly-
+        // rounded f64 parse and CRuby's, so no rule porting is
+        // needed on the fast path.
+        if has_exp_out_of_range(&s.content.borrow()) {
             return Err(Trap {
                 err: RubyError::RuntimeError {
-                    msg: "json_native: bigint-range number".to_string(),
+                    msg: "json_native: exponent-out-of-range literal".to_string(),
                 },
                 backtrace: vec![],
             });
@@ -166,10 +171,11 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
             });
         }
         // SAFETY: ptr is set by the dispatch site immediately
-        // before this closure runs; the &mut borrow lasts only
-        // for the deserialize call's synchronous duration and
-        // isn't stashed anywhere.
-        let vm = unsafe { &mut *ptr };
+        // before this closure runs; each `&mut` re-derived from it
+        // below lasts only for one synchronous deserialize pass and
+        // isn't stashed anywhere (the passes run strictly one after
+        // the other, never overlapping).
+        //
         // GC safe point: the interpreter's maybe_gc only lives at
         // ITS alloc sites, and a `loop { JSON.parse(s) }` allocs
         // almost nothing interpreter-side — the parse trees this
@@ -181,7 +187,7 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
         // The generate host fn deliberately does NOT do this — its
         // argument Value may only be rooted by the caller's frame,
         // and it allocates no GC-heap objects anyway.
-        vm.maybe_gc();
+        unsafe { &mut *ptr }.maybe_gc();
         // Borrow the input bytes directly (no copy). The `Ref`
         // lives across the visitor's `&mut vm` use — that's fine:
         // the RStr is Rc-owned by the caller's argument slot (not
@@ -189,7 +195,6 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
         // and `Heap::alloc` never collects, so nothing can mutate
         // or free the buffer mid-parse.
         let bytes = s.content.borrow();
-        let mut de = serde_json::Deserializer::from_slice(&bytes);
         let map_parse_err = |e: serde_json::Error| {
             // The visitor's own depth guard raises "nesting of N is
             // too deep"; serde wraps custom messages with a
@@ -207,19 +212,83 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
                 backtrace: vec![],
             }
         };
-        KEY_CACHE.with(|kc| {
+        // Pass 1 — the always-taken fast path. Numbers arrive
+        // through serde's native i64/u64/f64 lanes at full speed;
+        // the only additions over plain serde are (a) u64 values
+        // past i64::MAX becoming exact Bignums (CRuby Integer
+        // semantics — serde parses 19–20-digit ints exactly as
+        // u64) and (b) a three-compare suspicion check on every
+        // f64 (see `f64_needs_exact`) that flags values which MAY
+        // have lost integer precision or negative-zero identity
+        // inside serde. A flagged value aborts pass 1 and requests
+        // the exact retry below instead of declining to the
+        // ~200×-slower interpreted canon.
+        let (first, retry) = KEY_CACHE.with(|kc| {
             let mut kc = kc.borrow_mut();
             let mut ctx = ParseCtx {
-                vm,
+                vm: unsafe { &mut *ptr },
                 depth: 0,
                 keys: &mut kc,
+                exact: None,
+                retry: false,
             };
-            let visitor = VmVisitor { ctx: &mut ctx };
-            let result = serde::de::Deserializer::deserialize_any(&mut de, visitor)
-                .map_err(map_parse_err)?;
-            de.end().map_err(map_parse_err)?;
-            Ok(result)
-        })
+            let mut de = serde_json::Deserializer::from_slice(&bytes);
+            let result = serde::de::Deserializer::deserialize_any(&mut de, VmVisitor { ctx: &mut ctx })
+                .and_then(|v| de.end().map(|()| v));
+            (result, ctx.retry)
+        });
+        match first {
+            Ok(v) => Ok(v),
+            Err(e) if !retry => Err(map_parse_err(e)),
+            Err(_) => {
+                // Pass 2 — exact-number retry. A string-aware scan
+                // extracts every number-context literal that needs
+                // exact treatment (ints beyond ±u64/i64 range,
+                // negative zeros, huge floats) IN DOCUMENT ORDER,
+                // then the same serde parse re-runs consuming that
+                // queue: each suspicious f64 visit must pair with
+                // the queue head (bit-identical expected f64) and
+                // is replaced by the exact value re-derived from
+                // the literal's raw text. Any disagreement between
+                // the scan and serde's tokenization (malformed
+                // docs, scanner gaps) breaks the pairing and
+                // declines to the canon — wrong values cannot
+                // escape, only speed. Partially-built pass-1
+                // containers are unrooted garbage; the next GC
+                // safe point collects them.
+                let queue = scan_exact_literals(&bytes);
+                KEY_CACHE.with(|kc| {
+                    let mut kc = kc.borrow_mut();
+                    let mut ctx = ParseCtx {
+                        vm: unsafe { &mut *ptr },
+                        depth: 0,
+                        keys: &mut kc,
+                        exact: Some(ExactQueue { entries: queue, pos: 0 }),
+                        retry: false,
+                    };
+                    let mut de = serde_json::Deserializer::from_slice(&bytes);
+                    let result = serde::de::Deserializer::deserialize_any(
+                        &mut de,
+                        VmVisitor { ctx: &mut ctx },
+                    )
+                    .and_then(|v| de.end().map(|()| v))
+                    .map_err(map_parse_err)?;
+                    // Every queued literal must have been consumed —
+                    // leftovers mean the scan saw numbers serde
+                    // didn't (tokenization disagreement): decline.
+                    let q = ctx.exact.as_ref().expect("exact queue present on pass 2");
+                    if q.pos != q.entries.len() {
+                        return Err(Trap {
+                            err: RubyError::RuntimeError {
+                                msg: "json_native: exact-number pairing miss".to_string(),
+                            },
+                            backtrace: vec![],
+                        });
+                    }
+                    Ok(result)
+                })
+            }
+        }
     });
 }
 
@@ -426,97 +495,291 @@ fn str_decline() -> Trap {
     }
 }
 
-/// True when `bytes` contains a run of ≥19 consecutive ASCII
-/// digits (the shortest run that can overflow an i64 with a
-/// leading `-`) in NUMBER context — i.e. outside JSON string
-/// literals. Two tiers:
+/// Written-exponent length past which a number literal enters
+/// CRuby's overflow-shortcut regimes (adjusted exponent >
+/// INT32_MAX and, further out, the ≥20-digit/±i64 literal
+/// saturation) — behaviours that can't be recovered from the
+/// PARSED f64. Documents carrying one decline whole to the canon.
+/// A ≥10-digit exponent is the shortest that can push the
+/// adjusted exponent past INT32_MAX (2147483648 is 10 digits).
+const EXP_FENCE_DIGITS: usize = 10;
+
+/// True when `bytes` contains, in NUMBER context (outside JSON
+/// string literals), an exponent marker `e`/`E` followed by an
+/// optional sign and ≥[`EXP_FENCE_DIGITS`] digits. Two tiers:
 ///
-///   1. Cheap filter: a strided scan (a 19-byte window always
-///      contains exactly one position ≡ 18 mod 19, so checking
-///      every 19th byte and expanding around digit hits touches
-///      ~n/19 bytes) finds any ≥19-digit run REGARDLESS of
-///      context. No hit — the overwhelmingly common case — costs
-///      ~0.1 µs on a 3.4 KB payload and the parse proceeds.
-///   2. Precise pass, only on filter hit: a byte state machine
-///      tracks in-string state (escape-aware) and counts digit
-///      runs outside strings. Long IDs in string values
-///      ("sid":"1234567890123456789" — snowflake/Stripe-shaped
-///      payloads) no longer decline the whole document to the
-///      200×-slower canon (a measured 160× parse regression
-///      before this tier existed).
+///   1. Cheap filter: a strided scan (any ≥10-digit run contains
+///      a position probed by a stride-10 walk) finds digit runs,
+///      expands LEFT to the run start, and checks the 1–2 bytes
+///      before it for an exponent prefix. Benign payloads (short
+///      digit runs, or long runs preceded by quotes/colons — the
+///      snowflake-ID-in-string shape) cost ~n/10 probes plus a
+///      few bytes per digit hit and never reach tier 2. This
+///      replaced a 19-digit BIGINT pre-scan whose tier 2 walked
+///      the entire document on every ID-heavy payload (~3-4 µs on
+///      an 11 KB doc); bigint-range integers now parse natively
+///      via the exact-retry pass instead of declining.
+///   2. Precise pass, only on a tier-1 candidate (or a >40-digit
+///      run, where left-expansion is capped): a byte state
+///      machine tracks in-string state (escape-aware) and looks
+///      for the exponent shape outside strings.
 ///
-/// False positives from tier 2 (a genuine ≥19-digit run outside a
-/// string in a MALFORMED document) still just decline to the
-/// canon, whose strict number grammar raises like CRuby.
-fn has_long_digit_run(bytes: &[u8]) -> bool {
+/// False positives (an e-prefixed ≥10-digit run outside a string
+/// in a MALFORMED document) still just decline to the canon,
+/// whose strict number grammar raises like CRuby.
+fn has_exp_out_of_range(bytes: &[u8]) -> bool {
+    const STRIDE: usize = EXP_FENCE_DIGITS;
+    // Left-expansion cap: probes landing deep inside very long
+    // digit runs (>40 digits) hand the whole document to the
+    // precise tier instead of re-walking the run per probe
+    // (keeps the filter linear on digit-blob inputs).
+    const EXPAND_CAP: usize = 40;
     let n = bytes.len();
-    let mut i = 18usize;
-    let mut filter_hit = false;
+    let mut i = STRIDE - 1;
     while i < n {
-        if bytes[i].is_ascii_digit() {
-            let mut lo = i;
-            while lo > 0 && bytes[lo - 1].is_ascii_digit() {
-                lo -= 1;
+        if !bytes[i].is_ascii_digit() {
+            i += STRIDE;
+            continue;
+        }
+        // Expand left to the run start.
+        let mut lo = i;
+        let mut steps = 0usize;
+        loop {
+            if lo == 0 {
+                break;
             }
+            if !bytes[lo - 1].is_ascii_digit() {
+                break;
+            }
+            lo -= 1;
+            steps += 1;
+            if steps > EXPAND_CAP {
+                return has_exp_out_of_range_precise(bytes);
+            }
+        }
+        // Exponent prefix directly before the run?
+        let prefixed = (lo >= 1 && matches!(bytes[lo - 1], b'e' | b'E'))
+            || (lo >= 2
+                && matches!(bytes[lo - 1], b'+' | b'-')
+                && matches!(bytes[lo - 2], b'e' | b'E'));
+        if prefixed {
+            // Candidate: measure the run; ≥ fence → precise pass.
             let mut hi = i + 1;
             while hi < n && bytes[hi].is_ascii_digit() {
                 hi += 1;
             }
-            if hi - lo >= 19 {
-                filter_hit = true;
-                break;
+            if hi - lo >= EXP_FENCE_DIGITS {
+                return has_exp_out_of_range_precise(bytes);
             }
-            // Next possible 19-run starts after this run's end
-            // (bytes[hi] is a non-digit); its last byte is at
-            // hi + 19.
-            i = hi + 19;
+            i = hi + STRIDE;
         } else {
-            i += 19;
-        }
-    }
-    if !filter_hit {
-        return false;
-    }
-    // Tier 2: string-aware recount. Split into two tight inner
-    // loops (outside-string digit counting / inside-string skip)
-    // so the hot in-string path is a 3-way branch instead of a
-    // state-flag ladder — measured ~2× faster on string-heavy
-    // payloads.
-    let mut i = 0usize;
-    'outside: while i < n {
-        let mut run = 0usize;
-        while i < n {
-            let b = bytes[i];
-            if b.is_ascii_digit() {
-                run += 1;
-                if run >= 19 {
-                    return true;
-                }
-                i += 1;
-            } else if b == b'"' {
-                i += 1;
-                // inside a string literal: skip to the closing
-                // unescaped quote (backslash consumes 2 bytes —
-                // covers \\ and \" alike)
-                while i < n {
-                    let b = bytes[i];
-                    if b == b'\\' {
-                        i += 2;
-                    } else if b == b'"' {
-                        i += 1;
-                        continue 'outside;
-                    } else {
-                        i += 1;
-                    }
-                }
-                return false;
-            } else {
-                run = 0;
-                i += 1;
-            }
+            i += STRIDE;
         }
     }
     false
+}
+
+/// Tier 2 of [`has_exp_out_of_range`]: string-aware (escape-
+/// tracking) search for `[eE][+-]?\d{10,}` outside string
+/// literals. Runs only on tier-1 candidates — essentially never
+/// on real payloads.
+fn has_exp_out_of_range_precise(bytes: &[u8]) -> bool {
+    let n = bytes.len();
+    let mut i = 0usize;
+    while i < n {
+        match bytes[i] {
+            b'"' => {
+                i += 1;
+                while i < n {
+                    match bytes[i] {
+                        b'\\' => i += 2,
+                        b'"' => {
+                            i += 1;
+                            break;
+                        }
+                        _ => i += 1,
+                    }
+                }
+            }
+            b'e' | b'E' => {
+                let mut j = i + 1;
+                if j < n && matches!(bytes[j], b'+' | b'-') {
+                    j += 1;
+                }
+                let digits_start = j;
+                while j < n && bytes[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j - digits_start >= EXP_FENCE_DIGITS {
+                    return true;
+                }
+                i = j.max(i + 1);
+            }
+            _ => i += 1,
+        }
+    }
+    false
+}
+
+/// The f64 magnitudes at which a value arriving at `visit_f64`
+/// may be a silently-rounded INTEGER literal rather than a float
+/// literal: serde parses positive integers ≤ u64::MAX and
+/// negative integers ≥ i64::MIN exactly (visit_u64/visit_i64);
+/// everything beyond falls into f64 with these least magnitudes.
+const F64_SUSPECT_POS: f64 = 18_446_744_073_709_551_616.0; // 2^64
+const F64_SUSPECT_NEG: f64 = -9_223_372_036_854_775_808.0; // i64::MIN
+const NEG_ZERO_BITS: u64 = 0x8000_0000_0000_0000;
+
+/// True when an f64 arriving at `visit_f64` cannot be trusted as
+/// the CRuby parse result on its own:
+///   - |n| at/past the integer-precision-loss thresholds — the
+///     literal may have been an exact bigint (CRuby: Integer);
+///   - negative zero — the literal may have been `-0` (CRuby:
+///     Integer 0) or a float spelling (CRuby: Float -0.0).
+/// Three predictable compares; the fast-path cost replaces the
+/// old `n == 0.0 && n.is_sign_negative()` negative-zero decline.
+#[inline]
+fn f64_needs_exact(n: f64) -> bool {
+    n >= F64_SUSPECT_POS || n <= F64_SUSPECT_NEG || n.to_bits() == NEG_ZERO_BITS
+}
+
+/// One exact-retry queue entry: the f64 serde is expected to
+/// deliver for this literal (bit pattern) + how to rebuild the
+/// exact Ruby value from the raw text.
+enum Exact {
+    /// `-0` int spelling → Integer 0 (CRuby semantics).
+    Int0,
+    /// Float literal that trips the suspicion thresholds (huge
+    /// magnitude or float-spelled negative zero) → keep the f64.
+    Float,
+    /// Integer literal beyond ±u64/i64 range → exact Bignum from
+    /// the stored decimal text.
+    Big(Box<[u8]>),
+}
+
+struct ExactQueue {
+    entries: Vec<(u64, Exact)>,
+    pos: usize,
+}
+
+/// String-aware scan extracting, IN DOCUMENT ORDER, every number-
+/// context literal that needs exact treatment (see [`Exact`]).
+/// Runs only on the exact-retry pass. The scan is deliberately
+/// loose (maximal-munch over number bytes, no grammar check): a
+/// literal span either matches serde's tokenization exactly —
+/// JSON numbers are self-delimiting, and every byte this scan
+/// over-consumes would also make serde error out — or the retry
+/// pass breaks pairing / errors and declines to the canon. Wrong
+/// values cannot escape; disagreement only costs speed.
+fn scan_exact_literals(bytes: &[u8]) -> Vec<(u64, Exact)> {
+    let mut out = Vec::new();
+    let n = bytes.len();
+    let mut i = 0usize;
+    while i < n {
+        match bytes[i] {
+            b'"' => {
+                i += 1;
+                while i < n {
+                    match bytes[i] {
+                        b'\\' => i += 2,
+                        b'"' => {
+                            i += 1;
+                            break;
+                        }
+                        _ => i += 1,
+                    }
+                }
+            }
+            b'-' | b'0'..=b'9' => {
+                let start = i;
+                i += 1;
+                while i < n
+                    && matches!(bytes[i], b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-')
+                {
+                    i += 1;
+                }
+                classify_exact_literal(&bytes[start..i], &mut out);
+            }
+            _ => i += 1,
+        }
+    }
+    out
+}
+
+/// Queue-entry classification for one number-literal span. Skips
+/// literals the fast lanes already handle exactly (i64/u64-range
+/// ints, ordinary floats); junk spans (malformed docs) are skipped
+/// too — serde errors on them before pairing matters.
+fn classify_exact_literal(text: &[u8], out: &mut Vec<(u64, Exact)>) {
+    let is_float = text
+        .iter()
+        .any(|b| matches!(b, b'.' | b'e' | b'E'));
+    if is_float {
+        // Rust's from_str is correctly rounded (same shortest-
+        // round-trip semantics as serde's float_roundtrip parse
+        // and CRuby's strtod), so the expected-f64 pairing bits
+        // match serde's delivery exactly. Exponent-overflow
+        // quirk literals never reach here — the ≥10-digit
+        // exponent fence declined those documents up front.
+        let Ok(s) = std::str::from_utf8(text) else { return };
+        let Ok(f) = s.parse::<f64>() else { return };
+        if f64_needs_exact(f) {
+            out.push((f.to_bits(), Exact::Float));
+        }
+        return;
+    }
+    let neg = text[0] == b'-';
+    let digits: &[u8] = if neg { &text[1..] } else { text };
+    if digits.is_empty() {
+        return; // bare "-": serde errors first
+    }
+    if neg && digits.iter().all(|&b| b == b'0') {
+        // "-0": serde delivers f64 -0.0; CRuby parses Integer 0.
+        // (Invalid spellings like "-00" also land here — serde's
+        // leading-zero grammar error declines those docs first.)
+        out.push((NEG_ZERO_BITS, Exact::Int0));
+        return;
+    }
+    if int_fits_native(neg, digits) {
+        return; // arrives via visit_i64/visit_u64, exact already
+    }
+    let Ok(s) = std::str::from_utf8(text) else { return };
+    let Ok(f) = s.parse::<f64>() else { return };
+    out.push((f.to_bits(), Exact::Big(text.into())));
+}
+
+/// Whether an integer literal (sign stripped, `digits` nonempty)
+/// arrives exactly through serde's native lanes: negatives fit
+/// i64 (visit_i64), positives fit u64 (visit_u64 — the >i64::MAX
+/// span becomes an exact Bignum from the u64 value). Compares as
+/// strings to stay allocation-free; leading zeros are invalid
+/// JSON and error out in serde regardless of the answer here.
+fn int_fits_native(neg: bool, digits: &[u8]) -> bool {
+    let limit: &[u8] = if neg {
+        b"9223372036854775808" // -i64::MIN
+    } else {
+        b"18446744073709551615" // u64::MAX
+    };
+    match digits.len().cmp(&limit.len()) {
+        std::cmp::Ordering::Less => true,
+        std::cmp::Ordering::Greater => false,
+        std::cmp::Ordering::Equal => digits <= limit,
+    }
+}
+
+/// Exact Integer/Bignum from a (possibly signed) decimal literal.
+/// Fast path: fits i128 → fold natively; else num-bigint parse.
+#[cfg(feature = "bignum")]
+fn bigint_value_from_text(vm: &mut crate::vm::Vm, text: &[u8]) -> Option<Value> {
+    let b = num_bigint::BigInt::parse_bytes(text, 10)?;
+    // By construction the caller only passes literals outside
+    // i64 range, but normalize defensively — a Value::BigInt
+    // holding an i64-range value would break Integer identity
+    // assumptions elsewhere.
+    if let Ok(n) = i64::try_from(&b) {
+        return Some(Value::Int(n));
+    }
+    Some(Value::BigInt(vm.heap.alloc(HeapObj::BigInt(b))))
 }
 
 /// Write a signed integer as ASCII decimal directly into `out`.
@@ -609,10 +872,10 @@ fn write_escaped_bytes(s: &[u8], out: &mut Vec<u8>) {
 /// GC-heap objects; see `Value::is_gc_heap_ref`) across the
 /// visitor's `vm.heap.alloc` calls, so a collection could never
 /// free them even if one ran; and the `pairs` / `elems` Vecs that
-/// DO hold heap `ObjId`s are safe for the same reason they always
-/// were — `Heap::alloc` never collects (collections only run at
-/// interpreter safepoints, and no Ruby code runs inside the
-/// visitor).
+/// DO hold heap `ObjId`s (Array / Hash / BigInt alike) are safe
+/// for the same reason they always were — `Heap::alloc` never
+/// collects (collections only run at interpreter safepoints, and
+/// no Ruby code runs inside the visitor).
 struct ParseCtx<'a> {
     vm: &'a mut crate::vm::Vm,
     /// Container nesting depth. CRuby's parser (json 2.20,
@@ -630,6 +893,65 @@ struct ParseCtx<'a> {
     /// the wrong error text past 128).
     depth: u32,
     keys: &'a mut KeyCache,
+    /// `None` on the primary pass; `Some` on the exact-number
+    /// retry pass, holding the document-ordered literal queue
+    /// every suspicious `visit_f64` must pair against.
+    exact: Option<ExactQueue>,
+    /// Set by the primary pass when a suspicious f64 arrived —
+    /// the host fn re-parses with the exact queue instead of
+    /// declining to the interpreted canon.
+    retry: bool,
+}
+
+impl ParseCtx<'_> {
+    /// Handle a `visit_f64` value flagged by [`f64_needs_exact`].
+    /// Primary pass: request the exact retry. Retry pass: pair
+    /// against the queue head (bit-identical expectation) and
+    /// rebuild the exact value; any mismatch is a scan/serde
+    /// tokenization disagreement → decline to the canon.
+    fn exact_number(&mut self, n: f64) -> Result<Value, &'static str> {
+        let Some(q) = self.exact.as_mut() else {
+            self.retry = true;
+            return Err("exact-number retry");
+        };
+        // Extract an owned action first: the `Big` text must
+        // outlive the queue borrow because rebuilding it needs
+        // `&mut self.vm` (rare path; the clone is a short digit
+        // string).
+        enum Act {
+            Int0,
+            Float,
+            Big(Box<[u8]>),
+        }
+        let act = match q.entries.get(q.pos) {
+            Some((bits, _)) if *bits != n.to_bits() => {
+                return Err("exact-number pairing miss");
+            }
+            Some((_, Exact::Int0)) => Act::Int0,
+            Some((_, Exact::Float)) => Act::Float,
+            Some((_, Exact::Big(text))) => Act::Big(text.clone()),
+            None => return Err("exact-number pairing miss"),
+        };
+        q.pos += 1;
+        match act {
+            Act::Int0 => Ok(Value::Int(0)),
+            Act::Float => Ok(Value::Float(n)),
+            Act::Big(_text) => {
+                #[cfg(feature = "bignum")]
+                {
+                    return bigint_value_from_text(self.vm, &_text)
+                        .ok_or("exact-number bigint parse");
+                }
+                #[cfg(not(feature = "bignum"))]
+                {
+                    // No Bignum representation in this build — the
+                    // canon (whose Integer also can't promote here)
+                    // stays the authority for the shape.
+                    Err("bigint-range number")
+                }
+            }
+        }
+    }
 }
 
 /// fstring-equivalent object-key cache: fxhash(key bytes) → the
@@ -934,27 +1256,38 @@ impl<'de> serde::de::Visitor<'de> for VmVisitor<'_, '_> {
         Ok(Value::Int(n))
     }
     fn visit_u64<E: serde::de::Error>(self, n: u64) -> Result<Value, E> {
-        // The bigint pre-scan declines any document with a ≥19-digit
-        // run to the pure canon, so integer literals reaching serde
-        // always fit i64 (≤18 digits). Defensive: if a >i64::MAX
-        // value somehow arrives, decline rather than silently
-        // truncate or promote to Float (CRuby parses it as Integer).
+        // serde parses positive integer literals up to u64::MAX
+        // exactly — the (i64::MAX, u64::MAX] span becomes an exact
+        // Bignum right here (CRuby parses it as Integer), no retry
+        // pass needed. 19–20-digit snowflake IDs land in this arm.
         if n <= i64::MAX as u64 {
             Ok(Value::Int(n as i64))
         } else {
-            Err(serde::de::Error::custom("bigint-range number"))
+            #[cfg(feature = "bignum")]
+            {
+                let id = self
+                    .ctx
+                    .vm
+                    .heap
+                    .alloc(HeapObj::BigInt(num_bigint::BigInt::from(n)));
+                Ok(Value::BigInt(id))
+            }
+            #[cfg(not(feature = "bignum"))]
+            {
+                Err(serde::de::Error::custom("bigint-range number"))
+            }
         }
     }
     fn visit_f64<E: serde::de::Error>(self, n: f64) -> Result<Value, E> {
-        // serde_json parses the INTEGER literal "-0" as f64 -0.0
-        // (sign-preserving) — indistinguishable here from the
-        // float literals "-0.0" / "-0e5". CRuby's parser returns
-        // Integer 0 for "-0" and Float -0.0 for the float
-        // spellings, so negative zero declines to the canon,
-        // which re-reads the actual token text. Rare literal;
-        // costs nothing on the fast path.
-        if n == 0.0 && n.is_sign_negative() {
-            return Err(serde::de::Error::custom("negative-zero literal"));
+        // Values past the integer-precision thresholds may be
+        // silently-rounded bigint literals, and negative zero may
+        // be the INTEGER literal "-0" (CRuby: Integer 0) — the
+        // f64 alone can't say. `ParseCtx::exact_number` resolves
+        // via the raw-text queue (retry pass) or requests the
+        // retry (primary pass). Ordinary floats — the fast path —
+        // pay three predictable compares.
+        if f64_needs_exact(n) {
+            return self.ctx.exact_number(n).map_err(serde::de::Error::custom);
         }
         Ok(Value::Float(n))
     }
@@ -1036,3 +1369,221 @@ impl<'de> serde::de::Visitor<'de> for VmVisitor<'_, '_> {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- exponent fence -------------------------------------------------
+
+    #[test]
+    fn exp_fence_detection() {
+        // Below the fence: everything real payloads carry.
+        assert!(!has_exp_out_of_range(b"[1e9]"));
+        assert!(!has_exp_out_of_range(b"[1.5e+15,2e-300]"));
+        assert!(!has_exp_out_of_range(b"[1e999999999]")); // 9 digits
+        assert!(!has_exp_out_of_range(br#"{"score":1.5e15}"#));
+        // At/past the fence (>= 10 written exponent digits).
+        assert!(has_exp_out_of_range(b"[1e1234567890]"));
+        assert!(has_exp_out_of_range(b"[0.0e2147483649]"));
+        assert!(has_exp_out_of_range(b"[1e+9999999999]"));
+        assert!(has_exp_out_of_range(b"[1E-0000000009]"));
+        assert!(has_exp_out_of_range(b"1e1234567890")); // bare top-level
+        assert!(has_exp_out_of_range(b"[0.0e999999999999999999]"));
+        // Saturation-family literals (>= 19-20 exponent digits).
+        assert!(has_exp_out_of_range(b"[1e00000000000000000009]"));
+        assert!(has_exp_out_of_range(b"[-0.0e-00000000000000000009]"));
+        assert!(has_exp_out_of_range(b"[1.5e-9999999999999999999]"));
+        // Digit runs inside STRINGS never trip the fence.
+        assert!(!has_exp_out_of_range(br#"["e12345678901"]"#));
+        assert!(!has_exp_out_of_range(br#"{"sid":"1234567890123456789","n":1}"#));
+        assert!(!has_exp_out_of_range(br#"["1e99999999999999999999 in a string"]"#));
+        assert!(!has_exp_out_of_range(br#"["esc\"e12345678901234567890\" more"]"#));
+        // Long digit runs WITHOUT an exponent prefix pass (bigints
+        // are handled by the exact retry, not a decline) — includes
+        // the >40-digit left-expansion-cap path.
+        assert!(!has_exp_out_of_range(b"[12345678901234567890123456789]"));
+        let sixty = format!("[{}]", "9".repeat(60));
+        assert!(!has_exp_out_of_range(sixty.as_bytes()));
+        // e-prefixed run straddling the cap still detected.
+        let deep = format!("[1e{}]", "9".repeat(60));
+        assert!(has_exp_out_of_range(deep.as_bytes()));
+    }
+
+    // ---- exact-literal scan ---------------------------------------------
+
+    fn scan(doc: &[u8]) -> Vec<(u64, Exact)> {
+        scan_exact_literals(doc)
+    }
+
+    #[test]
+    fn exact_literal_scan_shapes() {
+        // Nothing to queue: i64/u64-range ints + ordinary floats.
+        assert!(scan(b"[1,-2,3.5,9223372036854775807,-9223372036854775808]").is_empty());
+        assert!(scan(b"[9223372036854775808,18446744073709551615]").is_empty()); // u64 lane
+        assert!(scan(br#"{"sid":"1234567890123456789","n":1}"#).is_empty()); // in-string
+        assert!(scan(br#"["a\"12345678901234567890123",1]"#).is_empty()); // escaped quote
+        // Bigints beyond the native lanes.
+        let q = scan(b"[18446744073709551616]");
+        assert_eq!(q.len(), 1);
+        assert_eq!(q[0].0, 18446744073709551616.0f64.to_bits());
+        assert!(matches!(&q[0].1, Exact::Big(t) if &**t == b"18446744073709551616"));
+        let q = scan(b"[-9223372036854775809]");
+        assert_eq!(q.len(), 1);
+        assert!(matches!(&q[0].1, Exact::Big(_)));
+        // Negative zero: int spelling -> Int0, float spellings -> Float.
+        let q = scan(b"[-0]");
+        assert_eq!(q.len(), 1);
+        assert_eq!(q[0].0, NEG_ZERO_BITS);
+        assert!(matches!(q[0].1, Exact::Int0));
+        let q = scan(b"[-0.0,-0e5,-1e-400]");
+        assert_eq!(q.len(), 3);
+        for (bits, e) in &q {
+            assert_eq!(*bits, NEG_ZERO_BITS);
+            assert!(matches!(e, Exact::Float));
+        }
+        // Huge float literals (suspicion range) queue as Float.
+        let q = scan(b"[1e20,-9.3e18]");
+        assert_eq!(q.len(), 2);
+        assert_eq!(q[0].0, 1e20f64.to_bits());
+        assert_eq!(q[1].0, (-9.3e18f64).to_bits());
+        // Document order is preserved across mixed shapes.
+        let q = scan(br#"{"a":-0,"b":[1e20,123456789012345678901234567890],"c":2}"#);
+        assert_eq!(q.len(), 3);
+        assert!(matches!(q[0].1, Exact::Int0));
+        assert!(matches!(q[1].1, Exact::Float));
+        assert!(matches!(q[2].1, Exact::Big(_)));
+    }
+
+    #[test]
+    fn int_native_boundaries() {
+        assert!(int_fits_native(false, b"18446744073709551615")); // u64::MAX
+        assert!(!int_fits_native(false, b"18446744073709551616"));
+        assert!(int_fits_native(true, b"9223372036854775808")); // i64::MIN
+        assert!(!int_fits_native(true, b"9223372036854775809"));
+        assert!(int_fits_native(false, b"1"));
+        assert!(!int_fits_native(false, b"999999999999999999999"));
+    }
+
+    // ---- serde <-> from_str f64 equivalence (pairing soundness) ---------
+
+    enum Num {
+        I(i64),
+        U(u64),
+        F(f64),
+    }
+
+    struct NumVisitor;
+    impl serde::de::Visitor<'_> for NumVisitor {
+        type Value = Num;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a JSON number")
+        }
+        fn visit_i64<E>(self, n: i64) -> Result<Num, E> {
+            Ok(Num::I(n))
+        }
+        fn visit_u64<E>(self, n: u64) -> Result<Num, E> {
+            Ok(Num::U(n))
+        }
+        fn visit_f64<E>(self, n: f64) -> Result<Num, E> {
+            Ok(Num::F(n))
+        }
+    }
+
+    fn serde_num(text: &str) -> Num {
+        let mut de = serde_json::Deserializer::from_slice(text.as_bytes());
+        let v = serde::de::Deserializer::deserialize_any(&mut de, NumVisitor)
+            .unwrap_or_else(|e| panic!("serde parse failed for {text:?}: {e}"));
+        de.end().unwrap();
+        v
+    }
+
+    /// xorshift64* — deterministic, no rand dep.
+    fn xorshift(state: &mut u64) -> u64 {
+        *state ^= *state >> 12;
+        *state ^= *state << 25;
+        *state ^= *state >> 27;
+        state.wrapping_mul(0x2545F4914F6CDD1D)
+    }
+
+    /// >=1M-sample equivalence: format a random finite f64 with the
+    /// canonical fpconv writer (`json_float`), reparse through BOTH
+    /// serde_json's visitor path and Rust's `str::parse::<f64>` —
+    /// all three bit-identical. This is the float half of the
+    /// exact-retry pairing contract: the retry scanner predicts
+    /// serde's f64 delivery via `from_str`, so any disagreement
+    /// would break bigint/negative-zero documents (they'd decline
+    /// to the canon — safe but slow) and this test would catch the
+    /// drift.
+    #[test]
+    fn serde_f64_matches_from_str_on_writer_output() {
+        let mut state: u64 = 0xDEADBEEFCAFED00D;
+        let mut buf: Vec<u8> = Vec::with_capacity(32);
+        let mut tested = 0u64;
+        while tested < 1_200_000 {
+            let bits = xorshift(&mut state);
+            let f = f64::from_bits(bits);
+            if f.is_nan() || f.is_infinite() {
+                continue;
+            }
+            buf.clear();
+            crate::json_float::write_json_float(f, &mut buf);
+            let text = std::str::from_utf8(&buf).expect("writer output is ASCII");
+            let direct: f64 = text.parse().expect("writer output parses");
+            assert_eq!(direct.to_bits(), f.to_bits(), "from_str drift on {text:?}");
+            match serde_num(text) {
+                Num::F(g) => assert_eq!(
+                    g.to_bits(),
+                    f.to_bits(),
+                    "serde drift on {text:?} (bits {bits:016x})"
+                ),
+                _ => panic!("writer output {text:?} did not parse as float"),
+            }
+            tested += 1;
+        }
+    }
+
+    /// Bigint-literal half of the pairing contract: for integer
+    /// literals beyond the native i64/u64 lanes, serde delivers a
+    /// silently-rounded f64 — the retry scanner must predict its
+    /// exact bit pattern with `from_str`. Sweeps random 20-40-digit
+    /// literals plus the boundary straddles.
+    #[test]
+    fn serde_f64_matches_from_str_on_bigint_literals() {
+        let check = |text: &str| {
+            let expected: f64 = text.parse().unwrap();
+            match serde_num(text) {
+                Num::F(g) => assert_eq!(
+                    g.to_bits(),
+                    expected.to_bits(),
+                    "serde/from_str disagree on {text:?}"
+                ),
+                Num::U(u) => assert!(
+                    u <= u64::MAX,
+                    "in-range literal {text:?} stays exact"
+                ),
+                Num::I(_) => {}
+            }
+        };
+        // Boundary straddles.
+        for k in 0..=64u128 {
+            check(&format!("{}", (1u128 << 64) + k));
+            check(&format!("{}", (1u128 << 64).wrapping_sub(k)));
+            check(&format!("-{}", (1u128 << 63) + k));
+        }
+        // Random 20-40-digit literals, both signs.
+        let mut state: u64 = 0x0123456789ABCDEF;
+        for i in 0..400_000u64 {
+            let len = 20 + (xorshift(&mut state) % 21) as usize;
+            let mut s = String::with_capacity(len + 1);
+            if i % 2 == 1 {
+                s.push('-');
+            }
+            s.push((b'1' + (xorshift(&mut state) % 9) as u8) as char);
+            for _ in 1..len {
+                s.push((b'0' + (xorshift(&mut state) % 10) as u8) as char);
+            }
+            check(&s);
+        }
+    }
+}
