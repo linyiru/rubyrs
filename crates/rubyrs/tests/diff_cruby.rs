@@ -1148,6 +1148,21 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn bignum_phase_b_digits() { run_diff("bignum_phase_b_digits"); }
 #[cfg(feature = "bignum")]
 #[test] fn bignum_phase_b_to_s_sprintf() { run_diff("bignum_phase_b_to_s_sprintf"); }
+// String→Integer family (shared str2int scanner — the i64-wrap fix):
+// exact BigInt promotion + probed CRuby semantics for `String#to_i`,
+// `Kernel#Integer` (incl. `exception:` + negative bases), the new
+// `String#hex`/`#oct`, sprintf's `%d`-family String coercion, and a
+// 53k-case deterministic differential fuzz battery.
+#[cfg(feature = "bignum")]
+#[test] fn string_to_i_bignum() { run_diff("string_to_i_bignum"); }
+#[cfg(feature = "bignum")]
+#[test] fn kernel_integer_bignum() { run_diff("kernel_integer_bignum"); }
+#[cfg(feature = "bignum")]
+#[test] fn string_hex_oct() { run_diff("string_hex_oct"); }
+#[cfg(feature = "bignum")]
+#[test] fn sprintf_string_int_args() { run_diff("sprintf_string_int_args"); }
+#[cfg(feature = "bignum")]
+#[test] fn str2int_fuzz_battery() { run_diff("str2int_fuzz_battery"); }
 #[test] fn file_io() { run_diff("file_io"); }
 #[test] fn range_extras() { run_diff("range_extras"); }
 #[test] fn tap_then() { run_diff("tap_then"); }
