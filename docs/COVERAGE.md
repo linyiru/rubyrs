@@ -26,7 +26,10 @@ anywhere from `77.0%` upward.
 # manual-sync copy for copy-pasteability.
 cargo install cargo-llvm-cov --locked --version 0.8.7
 
-# Measure
+# Measure. RUST_MIN_STACK matches the CI coverage job: the
+# debug+instrumented build's frames are 2-3x release and the
+# preamble-compile unit tests overflow default 2 MB test threads.
+RUST_MIN_STACK=16777216 \
 cargo llvm-cov --workspace --all-targets --lcov --output-path lcov.info
 
 # Check against baseline (same call CI makes)

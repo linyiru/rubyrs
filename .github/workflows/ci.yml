@@ -1288,6 +1288,18 @@ jobs:
         # (under tests/), which exercise embed-API surfaces the unit
         # tests miss. STRESS_GC stays OFF here — coverage doesn't care
         # about GC pressure, and the extra runtime cost is wasted.
+        #
+        # RUST_MIN_STACK: the debug+instrumented build's frames are
+        # 2-3x release (same inflation the vm/gc.rs dispatch-cap
+        # comment documents), and preamble_cache's unit tests drive
+        # the full LIVE preamble compile (deep plain-Rust recursion in
+        # the compiler — the debug dispatch cap can't bound it).
+        # Under the default 2 MB test-thread stack that reproducibly
+        # SIGABRTs (`preamble_cache::tests::stale_format_version_
+        # rejected` overflows); 16 MB test threads run it clean.
+        # Scoped to this step only — release test jobs don't need it.
+        env:
+          RUST_MIN_STACK: "16777216"
         run: cargo llvm-cov --workspace --all-targets --locked --lcov --output-path lcov.info
 
       - name: Ratchet per-file coverage
