@@ -649,9 +649,20 @@ module JSON
         # result is ±Infinity by mantissa SIGN even for a ZERO
         # mantissa: "0.0e2147483649" → Infinity, "0.00e2147483649"
         # (adj 2147483647) → 0.0, "-0e2147483649" → -Infinity.
-        # Negative overflow needs no rule: it underflows to ±0.0,
-        # which the to_f below already produces.
-        if (exp_neg ? -abs_exp : abs_exp) - frac_digits > 2147483647
+        # NEGATIVE overflow has one wrap edge (probed 10/10 vs CRuby
+        # 3.4.1): parser.c computes the adjusted exponent in C i64,
+        # so when -abs_exp - frac_digits underflows past i64::MIN it
+        # WRAPS to a huge positive, fires the same INT32_MAX check,
+        # and yields ±Infinity by mantissa sign — e.g.
+        # "1.55e-9223372036854775807" → Infinity while
+        # "1.5e-9223372036854775807" (sum lands exactly ON 2**63,
+        # -(2**63) == i64::MIN, representable) → 0.0. Everything
+        # below that edge underflows to ±0.0 via the to_f below.
+        if exp_neg
+          if abs_exp + frac_digits > 9223372036854775808
+            return neg ? -Float::INFINITY : Float::INFINITY
+          end
+        elsif abs_exp - frac_digits > 2147483647
           return neg ? -Float::INFINITY : Float::INFINITY
         end
         # Reassemble the slice. Avoid `Array#[start, len]` (not

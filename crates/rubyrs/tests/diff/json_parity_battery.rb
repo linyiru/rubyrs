@@ -367,6 +367,25 @@ puts "== exponent overflow shortcut (adjusted exp > INT32_MAX) =="
   try("adj #{s}") { JSON.parse("[#{s}]")[0] }
 end
 
+puts "== negative-exponent i64 wrap edge (adversarial round, probed 10/10) =="
+# parser.c computes written_exp - frac_digits in C i64; when
+# -abs_exp - frac_digits underflows past i64::MIN it WRAPS positive
+# and fires the INT32_MAX shortcut => mantissa-sign Infinity. The
+# boundary is exact: abs_exp + frac_digits == 2**63 lands ON
+# i64::MIN (representable, no wrap) => plain underflow to 0.0.
+["1.55e-9223372036854775807",
+ "1.5e-9223372036854775807",
+ "2.1234e-9223372036854775805",
+ "2.123e-9223372036854775805",
+ "-1.55e-9223372036854775807",
+ "-1.5e-9223372036854775807",
+ "0.12e-9223372036854775807",
+ "1e-9223372036854775807",
+ "9.999e-9223372036854775806",
+ "9.99e-9223372036854775806"].each do |s|
+  try("negwrap #{s}") { JSON.parse("[#{s}]")[0] }
+end
+
 puts "== long-fraction floats (25+ digits, bit fidelity) =="
 ["3.14159265358979323846264338327950288",
  "0.1234567890123456789012345678901234567890",
