@@ -2387,6 +2387,7 @@ impl Runtime {
                         &self.vm, &dir, key, pre_interner_len, pre_protos_len, &steps,
                     );
                 }
+                self.register_encoding_constants();
                 self.cache_fiber_class();
                 self.cache_default_rtm_stub();
                 self.startup_prof_report(_t_total);
@@ -2394,6 +2395,7 @@ impl Runtime {
             }
         }
         self.load_preamble_inner();
+        self.register_encoding_constants();
         self.cache_fiber_class();
         self.cache_default_rtm_stub();
         self.startup_prof_report(_t_total);
@@ -2412,6 +2414,116 @@ impl Runtime {
             .classes
             .get(&object_id)
             .and_then(|c| c.methods.borrow().get(&self.vm.sym_respond_to_missing).cloned());
+    }
+
+    /// Install the always-on `Encoding` constant family natively:
+    /// UTF_8 / US_ASCII / ASCII / ASCII_8BIT / BINARY / ISO_2022_JP
+    /// plus the 16 name-registered common encodings (ISO-8859-1 …
+    /// Shift_JIS). Builds the exact objects the preamble's
+    /// `Encoding::X = Encoding.new("...")` statements used to build —
+    /// ordinary Instances of the preamble's `class Encoding` carrying
+    /// `@name` — and writes them straight into the global
+    /// qualified-constant table (the same table `Op::StoreConst` and
+    /// the dispatch.rs `const_set` arm write), so `Encoding::X` reads,
+    /// `Encoding.constants` reflection, `Encoding.find` identity, and
+    /// dispatch.rs's `try_push_string_encoding` flat lookup are
+    /// indistinguishable from the interpreted path (pinned by the
+    /// encoding_constants_core / encoding_gb18030 fixtures).
+    ///
+    /// Why native: each interpreted top-level statement in the boot
+    /// preamble costs ~19µs (measured 2026-07), and even batched into
+    /// ONE `%w[...].each { const_set }` statement the family's 16
+    /// iterations measured +0.08–0.10ms = +1.4–1.8% of hello-world
+    /// startup — over the 0.3% perf bar for the startup-bound
+    /// rubocop-single-file workload. Native registration removes the
+    /// interpreted execution entirely. Called from `load_preamble` on
+    /// BOTH the preamble-cache hit and miss paths, AFTER the preamble
+    /// (class tables exist; nothing in the preamble reads these
+    /// constants at load time — only method bodies reference them)
+    /// and before any user code. Deliberately NOT part of the cached
+    /// replay plan: the constants never enter the snapshot, so hit
+    /// and miss boots intern + allocate identically.
+    ///
+    /// Why the family is always-on (not `_encoding_full`): rack
+    /// references `Encoding::ISO_2022_JP` (multipart/parser.rb) and
+    /// activesupport's inflector/transliterate.rb references
+    /// `Encoding::GB18030`, both at class-body load time, so the
+    /// names must resolve in EVERY build or `require "rack"` /
+    /// `require "active_model"` NameError. The constants are
+    /// name-registered singletons: name / inspect / find identity /
+    /// `str.encoding == Encoding::X` work everywhere; actual
+    /// TRANSCODING to/from the non-core encodings still needs
+    /// `_encoding_full` (String#encode declines with CRuby's
+    /// Encoding::ConverterNotFoundError shape in the default build).
+    fn register_encoding_constants(&mut self) {
+        // Canonical CRuby names, in the order the preamble used to
+        // assign them. Constant spelling is CRuby's: the canonical
+        // name with '-' → '_' (ISO-8859-1 → ISO_8859_1;
+        // Shift_JIS / GB18030 / Big5 / GBK are fixed points).
+        const NAMES: [&str; 20] = [
+            "UTF-8", "US-ASCII", "ASCII-8BIT", "ISO-2022-JP",
+            "ISO-8859-1", "Windows-1252", "ISO-8859-15", "KOI8-R",
+            "Windows-31J", "EUC-JP", "GBK", "GB18030", "Big5",
+            "UTF-16LE", "UTF-16BE", "UTF-16", "UTF-32LE", "UTF-32BE",
+            "UTF-32", "Shift_JIS",
+        ];
+        let enc_sym = self.vm.interner.intern("Encoding");
+        let enc_cls = self
+            .vm
+            .classes
+            .get(&enc_sym)
+            .cloned()
+            .expect("ICE: Encoding class missing after preamble load");
+        let name_ivar = self.vm.interner.intern("@name");
+        self.vm.maybe_gc();
+        for name in NAMES {
+            // Same allocation + cap accounting the interpreted
+            // `Encoding.new(name)` performed. GC-rooting: each
+            // Instance lands in `constants` (a mark root) before the
+            // next iteration, `Heap::alloc` never collects on its
+            // own, and the `@name` String is Rc-backed (not a heap
+            // slot) — so no pinning is needed even under STRESS_GC.
+            self.vm
+                .check_alloc()
+                .expect("ICE: heap cap exceeded registering Encoding constants");
+            let id = self.vm.heap.alloc(heap::HeapObj::Instance(value::Instance {
+                class: enc_cls.clone(),
+                ivars: value::IvarTable::default(),
+                singleton_class: None,
+                frozen: std::cell::Cell::new(false),
+            }));
+            self.vm
+                .heap
+                .instance_mut(id)
+                .ivar_set(name_ivar, Value::new_str(name));
+            let key = self
+                .vm
+                .interner
+                .intern(&format!("Encoding::{}", name.replace('-', "_")));
+            self.vm.constants.insert(key, Value::Object(id));
+        }
+        // CRuby's alias constants are the SAME object as their
+        // target — `Encoding::ASCII.equal?(Encoding::US_ASCII)` is
+        // true (minitest's encoding-diff test forces via
+        // Encoding::ASCII), and `Encoding::BINARY` is the canonical
+        // CRuby alias for ASCII_8BIT.
+        for (alias, target) in [
+            ("Encoding::ASCII", "Encoding::US_ASCII"),
+            ("Encoding::BINARY", "Encoding::ASCII_8BIT"),
+        ] {
+            let t = self.vm.interner.intern(target);
+            let v = self
+                .vm
+                .constants
+                .get(&t)
+                .cloned()
+                .expect("ICE: Encoding alias target missing");
+            let a = self.vm.interner.intern(alias);
+            self.vm.constants.insert(a, v);
+        }
+        // Same constant-IC invalidation contract as Op::StoreConst /
+        // the const_set arm.
+        self.vm.bump_const_gen();
     }
 
     /// Cache the `Fiber` class on the heap so class_of / real_class_of
@@ -3098,52 +3210,21 @@ class Encoding
     end
   end
 end
-Encoding::UTF_8 = Encoding.new("UTF-8")
-Encoding::US_ASCII = Encoding.new("US-ASCII")
-## CRuby aliases the bare-ASCII constant family to US-ASCII
-## (Encoding::ASCII.equal?(Encoding::US_ASCII) is true) —
-## minitest's encoding-diff test forces via Encoding::ASCII.
-Encoding::ASCII = Encoding::US_ASCII
-Encoding::ASCII_8BIT = Encoding.new("ASCII-8BIT")
-Encoding::BINARY = Encoding::ASCII_8BIT
-## ISO-2022-JP is a "dummy encoding" that CRuby ships ALWAYS-ON, and
-## rack (a ubiquitous gem) references `Encoding::ISO_2022_JP` at
-## class-body load time (multipart/parser.rb's REENCODE_DUMMY_ENCODINGS).
-## So the bare constant must exist in EVERY build, not just behind
-## `_encoding_full` — otherwise `require "rack"` (hence Sinatra, Rails,
-## any web stack) NameErrors on a default-features rubyrs. The full
-## transcoding for ISO-2022-JP input still requires `_encoding_full`;
-## the always-on constant only needs to exist + be a usable hash key,
-## which the core `Encoding.new` provides without the registry.
-Encoding::ISO_2022_JP = Encoding.new("ISO-2022-JP")
-## The common encoding family, name-registered in EVERY build (same
-## rationale as ISO_2022_JP above): gems reference these constants at
-## load time — activesupport's inflector/transliterate.rb puts
-## `Encoding::GB18030` in ALLOWED_ENCODINGS_FOR_TRANSLITERATE at class-
-## body load, so `require "active_model"` NameErrors without it. The
-## constant + name/inspect/find identity + `str.encoding == Encoding::X`
-## comparisons work everywhere; actual TRANSCODING to/from these
-## encodings still needs `_encoding_full` (String#encode declines with
-## CRuby's Encoding::ConverterNotFoundError shape in the default build).
-## Constant names/spellings match CRuby's canonical set exactly; the
-## registry indices in encoding_full.rs are independent of this order.
-##
-## BATCHED into one top-level statement deliberately: each additional
-## top-level statement in this mega-chunk costs ~19µs of boot time
-## (measured 2026-07 — 16 individual `Encoding::X = ...` lines added
-## ~+0.3ms/+5% to hello-world startup; the same 16 constants through
-## one each/const_set statement are boot-neutral). `const_set` on a
-## named class writes the same global qualified-constant table as a
-## top-level `Encoding::X = ...` assignment, so reads (`Encoding::X`,
-## `Encoding.constants`, dispatch.rs's `try_push_string_encoding`
-## flat lookup) are indistinguishable. `tr("-", "_")` maps each
-## canonical name to CRuby's constant spelling (ISO-8859-1 →
-## ISO_8859_1; Shift_JIS/GB18030/Big5/GBK are fixed points).
-%w[ISO-8859-1 Windows-1252 ISO-8859-15 KOI8-R Windows-31J EUC-JP GBK
-   GB18030 Big5 UTF-16LE UTF-16BE UTF-16 UTF-32LE UTF-32BE UTF-32
-   Shift_JIS].each do |n|
-  Encoding.const_set(n.tr("-", "_"), Encoding.new(n))
-end
+## The Encoding constant FAMILY (UTF_8 / US_ASCII / ASCII /
+## ASCII_8BIT / BINARY / ISO_2022_JP + the 16 name-registered common
+## encodings ISO-8859-1 … Shift_JIS) is installed NATIVELY at boot by
+## `Runtime::register_encoding_constants` (lib.rs, called from
+## `load_preamble` on both the preamble-cache hit and miss paths) —
+## zero interpreted statements. The full rationale — why the family
+## is always-on in every build (rack references Encoding::ISO_2022_JP,
+## activesupport references Encoding::GB18030 at class-body load
+## time) and why registration is native (each interpreted top-level
+## preamble statement costs ~19µs of boot; even batched into one
+## statement the family measured +1.4-1.8% of hello-world startup) —
+## lives on that function's doc comment. The objects are ordinary
+## instances of the `class Encoding` above (same @name ivar the
+## interpreted `Encoding.new` would set), so every method here works
+## on them unchanged.
 
 ## Version sentinels. Real codebases use `RUBY_VERSION >= '3'`
 ## (tilt does at template.rb:239) to pick between bind_call and
