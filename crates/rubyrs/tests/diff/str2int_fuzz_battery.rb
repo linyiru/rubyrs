@@ -90,8 +90,18 @@ TO_I_BASES    = [0, 2, 8, 10, 16, 36].freeze
 INT_BASES     = [0, -1, 2, 8, 10, 16, -16, 36, -36].freeze
 INVALID_BASES = [1, 37, -37, 99].freeze
 
+# Under STRESS_GC (GC on every allocation) the full 50k-case sweep
+# costs minutes of wall; scale down but keep the shape — the PRNG
+# stays deterministic and BOTH sides (CRuby oracle included) see
+# the same env var, so outputs still match byte-for-byte. The
+# boundary matrix below always runs in full (those are the
+# BigInt-alloc edges STRESS_GC is for).
+STRESS = !ENV["STRESS_GC"].to_s.empty?
+MAIN_CASES = STRESS ? 3_000 : 50_500
+EXC_CASES  = STRESS ? 300 : 2_000
+
 lines = 0
-50_500.times do |i|
+MAIN_CASES.times do |i|
   s = gen_case
   b  = (rnd % 5 == 0) ? pick(INVALID_BASES) : (rnd % 3 == 0 ? 2 + rnd % 35 : pick(TO_I_BASES))
   ib = (rnd % 6 == 0) ? pick(INVALID_BASES) : (rnd % 3 == 0 ? 2 + rnd % 35 : pick(INT_BASES))
@@ -130,7 +140,7 @@ end
 end
 
 # --- exception: false sweep over every case shape once more ---
-2_000.times do |i|
+EXC_CASES.times do |i|
   s = gen_case
   ib = pick(INT_BASES)
   puts "exc #{i} #{s.inspect} #{try { Integer(s, exception: false) }} #{try { Integer(s, ib, exception: false) }}"
