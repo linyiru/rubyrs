@@ -309,6 +309,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // no-stored-rehash call-pattern pins.
 #[test] fn hash_inconsistent_user_keys() { run_diff("hash_inconsistent_user_keys"); }
 #[test] fn hash_user_key_call_patterns2() { run_diff("hash_user_key_call_patterns2"); }
+// compare_by_identity flip invalidates the (eql?-semantics) key indexes
+// — a user-key pair merged in beforehand must stay visible after.
+#[test] fn hash_cbi_flip_index() { run_diff("hash_cbi_flip_index"); }
 #[test] fn hash_compare_by_identity() { run_diff("hash_compare_by_identity"); }
 #[test] fn index_fast_path() { run_diff("index_fast_path"); }
 #[test] fn hash_key_fast_path() { run_diff("hash_key_fast_path"); }

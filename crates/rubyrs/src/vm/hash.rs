@@ -1004,8 +1004,15 @@ impl Vm {
                     // (`@map = {}; @map.compare_by_identity`), keyed by
                     // Module objects.
                     ("compare_by_identity", []) => {
-                        if let HeapObj::Hash(h) = self.heap.get(id) {
+                        if let HeapObj::Hash(h) = self.heap.get_mut(id) {
                             h.by_identity.set(true);
+                            // The flip changes lookup semantics: both key
+                            // indexes were built under eql? semantics (and
+                            // pairs inserted through the user-index path
+                            // are ABSENT from the identity index), so a
+                            // stale index would make them invisible to
+                            // post-flip lookups. Drop both; rebuilt lazily.
+                            h.clear_indexes();
                         }
                         Some(Value::Hash(id))
                     }
