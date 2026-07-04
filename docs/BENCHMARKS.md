@@ -360,9 +360,17 @@ mimalloc understate the CLI by **2–19%** depending on allocation
 intensity: hello −2.1%, warm preamble-cache HIT phases −19% (decode
 0.460 → 0.326 ms), require-200-class −12.4%, hash_micro alloc rows
 −20~26%, JSON parse −17.4%, gc churn −18.6%, RuboCop end-to-end
-−3.3%. Peak RSS is now *lower* with mimalloc on all measured
+−3.3%. Peak RSS is **platform-split** (2026-07-04 two-box survey):
+on macOS arm64 it is now *lower* with mimalloc on all measured
 workloads (−0.65~−2.36% — v3 retired the old segment-cache RSS
-cost); the price is binary size (+0.94%, `__text` +1.24%).
+cost); on Linux/glibc x86_64 the same v3.3.2 roughly *doubles*
+peak RSS (hello 11.4 → 23.6 MB, gc churn 19.4 → 38.2 MB — 1 GiB
+`arena_reserve` + eager commit) while keeping the wall wins (hello
+−10%, require-200-class −28%, JSON up to −21%).
+`MIMALLOC_ARENA_RESERVE=0` recovers about half the Linux RSS but
+forfeits the wall win — Linux container-quota deployments should
+measure their trade explicitly. The other price is binary size
+(+0.94%, `__text` +1.24% on macOS; `.text` +215 KB on Linux).
 
 **Gotcha — the allocator is bin-only.** `#[global_allocator]` lives
 in `crates/rubyrs/src/main.rs`, not the library crate. In-process

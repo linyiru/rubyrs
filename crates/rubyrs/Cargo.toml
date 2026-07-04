@@ -64,12 +64,19 @@ preamble-cache = ["dep:serde", "dep:postcard"]
 # Runtimes under container memory quotas may prefer this trade.
 # HISTORICAL CAVEAT (2026-07-04): those numbers were taken against
 # segment-cache-era mimalloc; the "mimalloc costs RSS" posture is
-# stale. Re-measured with mimalloc v3.3.2 (crate 0.1.52), peak RSS
-# is now LOWER than the system allocator on all measured workloads
-# (−0.65~−2.36% on hello/require-200-class/gc-churn), alongside the
-# wall wins — see docs/BENCHMARKS.md "Standard measurement feature
-# set". The jemalloc-vs-mimalloc-v2 delta above is retained as
-# history; re-measure before choosing jemalloc for RSS reasons.
+# stale — but the replacement story is PLATFORM-SPLIT. mimalloc
+# v3.3.2 (crate 0.1.52) re-measure: on macOS arm64 peak RSS is now
+# LOWER than the system allocator (−0.65~−2.36% on hello /
+# require-200-class / gc-churn) alongside the wall wins; on
+# Linux/glibc 2.43 x86_64 the SAME version DOUBLES peak RSS
+# (hello 11.4→23.6 MB, churn 19.4→38.2 MB; 1 GiB arena_reserve +
+# eager commit) while keeping the wall wins (hello −10%, require
+# −28%). MIMALLOC_ARENA_RESERVE=0 recovers ~half the Linux RSS but
+# forfeits the wall win. Linux container-quota deployments should
+# measure before enabling. See docs/BENCHMARKS.md "Standard
+# measurement feature set". The jemalloc-vs-mimalloc-v2 delta
+# above is retained as history; re-measure before choosing
+# jemalloc for RSS reasons.
 # Mutually exclusive with `mimalloc` at the global_allocator
 # level (mimalloc wins if both are enabled).
 jemalloc = ["dep:tikv-jemallocator"]
