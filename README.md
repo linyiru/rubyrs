@@ -188,6 +188,11 @@ cargo build --release
 ./target/release/rubyrs your_script.rb
 ```
 
+For CLI use, prefer `cargo build --release -p rubyrs --features
+cli-defaults` — the full batteries bundle (stdlib, sqlite, http
+server, sass) plus the mimalloc allocator, which alone is worth
+2–19% wall over the plain build depending on workload.
+
 For the full Jekyll-capable build (accelerators + stdlib + sass +
 mimalloc — what the benchmark table at the top measures):
 

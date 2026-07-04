@@ -233,10 +233,15 @@ crates/rubyrs/tests/fixtures/fizzbuzz.rb	9700	0	tiny script; wall is sub-100ms n
 # 8236 KB (cap 8200; +0.4%) after the Frame slimming (f2033e5b:
 # the four inline Vecs moved behind Option<Box<FrameAux>>). The
 # frames Vec's per-element footprint SHRANK (328 → 240 B), but the
-# allocator's page mix shifted (mimalloc size-class change for the
-# frames backing buffer + per-aux boxes where begin/rescue runs) —
-# a ~36 KB page-boundary effect, not a leak. Joins fizzbuzz /
-# hash_mutate at the 8400 tier (same 2026-06-10 rhythm).
+# allocator's page mix shifted (size-class change for the frames
+# backing buffer + per-aux boxes where begin/rescue runs) — a
+# ~36 KB page-boundary effect, not a leak. 2026-07-04 note: the
+# original attribution said "mimalloc size-class change", which is
+# suspect — the CI perf-budget build is a plain default-feature
+# `cargo build --release -p rubyrs` and runs the SYSTEM allocator
+# (glibc malloc on ubuntu-latest), not mimalloc. The page-mix
+# mechanism stands; the allocator named didn't build here. Joins
+# fizzbuzz / hash_mutate at the 8400 tier (same 2026-06-10 rhythm).
 crates/rubyrs/examples/metaprog_bench/mm_bench.rb	9700	1550	2M method_missing dispatch
 # dm_bench RSS bumped 6500 → 6700 on 2026-05-27 — the
 # define_method dispatch benchmark crossed 6500 KB at PR #175
