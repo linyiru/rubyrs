@@ -83,7 +83,14 @@ threads.each(&:join)
 
 p results
 p counts.sum
-p counts.all? { |c| c >= 1 } # dynamic distribution reached every worker
+# NOTE: no per-worker distribution assert here (e.g. "every worker got
+# >= 1 job") — that property is scheduling-DEPENDENT and flakes under
+# host load on both engines (a supervisor whose child replies slowly
+# can legally end with 0 jobs while the others drain the counter).
+# It flaked twice on 2026-07-04 (Linux gate + CI framework-parity)
+# before being removed — exactly what this file's header warned about.
+# Only scheduling-order-independent facts are printed.
+p counts.length
 
 # Exit statuses were collected per worker (Process.wait in each
 # supervisor); a fresh wait has no child left.
