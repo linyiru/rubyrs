@@ -36,6 +36,21 @@ output **byte-identical to CRuby's**, and faster:
 | Peak RSS (layout build)          | **69 MB**  | 70 MB |
 | Output                           | byte-identical | (reference) |
 
+Jekyll is no longer alone. The same bar — real, unmodified gem
+sources — now covers:
+
+- **RuboCop** lints real codebases end-to-end (the full default cop
+  set runs; single-cop output is byte-identical to CRuby, with a
+  handful of documented cop-level gaps remaining).
+- **Bridgetown 2.2**'s whole pipeline — require → configure →
+  `Site.new` → full site build — produces output byte-identical to
+  CRuby's, and boots slightly faster.
+- **ActiveModel 7.0** boots and runs validations (boot ~1.4× faster
+  than CRuby); `require "active_record"` loads end-to-end.
+- **Rack 3.1**'s full upstream spec suite passes at exact CRuby
+  parity; most of Sinatra's core spec files (17/24) match CRuby
+  failure-for-failure.
+
 ```ruby
 class Greeter
   def initialize(name)
@@ -57,39 +72,46 @@ Hello, Rust!
 Hello, Prism!
 ```
 
-**Honesty up front**: rubyrs is not a complete Ruby. There is no
-Encoding system (strings are bytes + UTF-8 assumptions), `freeze`
-doesn't freeze, Thread is a stub, and ~25 documented divergences
-remain — see [docs/SUBSET.md](docs/SUBSET.md) for the precise
-boundary, starting with its at-a-glance table. The claim we *do*
-make is narrower and verifiable: **for the surface rubyrs covers,
-behaviour is pinned to CRuby 3.4 by 585 differential fixtures**
-(every fixture runs on both engines; stdout must match exactly,
-including under GC stress), and that surface is now wide enough to
-run one of Ruby's most-used real-world applications byte-for-byte.
+**Honesty up front**: rubyrs is not a complete Ruby. Threads are
+cooperative (no OS-thread parallelism or preemption), the Encoding
+system is partial (constants and per-string tags everywhere;
+real transcoding for the common families is opt-in via
+`_encoding_full`; the rest declines loudly), Ractor and Binding
+don't exist, and the documented divergences in
+[docs/SUBSET.md](docs/SUBSET.md) remain the precise boundary —
+start with its at-a-glance table. The claim we *do* make is
+narrower and verifiable: **for the surface rubyrs covers,
+behaviour is pinned to CRuby 3.4 by 1,144 differential fixtures**
+(every fixture runs on both engines across four interpreter/JIT
+configurations; stdout must match exactly, including under GC
+stress), and that surface is now wide enough to run several of
+Ruby's most-used real-world applications byte-for-byte.
 
 ## Positioning
 
 **vs CRuby** — CRuby is the reference implementation and rubyrs
 treats it as ground truth: the test suite's oracle IS CRuby
-(`tests/diff/`, 585 fixtures, stdout compared byte-for-byte). Where
-rubyrs covers a feature, it aims for exact parity — divergences are
-bugs or documented trade-offs, never silent. Where it doesn't
-(Encoding, real threads, Marshal, `ObjectSpace`, …), it says so in
-[docs/SUBSET.md](docs/SUBSET.md). On performance: rubyrs wins on
-real Jekyll builds (table above) thanks to native accelerator
-batteries (rouge/kramdown/YAML/Liquid/JSON engines in Rust behind a
-"byte-identical or decline to pure Ruby" contract); rubyrs
-also retires 8–11% fewer CPU instructions end-to-end since the
-O(n log n) sort + dispatch fast-path work; on pure VM-dispatch
-microbenchmarks CRuby is still ~1.4-3× faster — both numbers live
+(`tests/diff/`, 1,144 fixtures, stdout compared byte-for-byte).
+Where rubyrs covers a feature, it aims for exact parity —
+divergences are bugs or documented trade-offs, never silent. Where
+it doesn't (OS-thread parallelism, full Encoding transcoding,
+Ractor, …), it says so in [docs/SUBSET.md](docs/SUBSET.md). On
+performance: rubyrs wins on real Jekyll builds (table above) thanks
+to native accelerator batteries (rouge/kramdown/YAML/Liquid/JSON
+engines in Rust behind a "byte-identical or decline to pure Ruby"
+contract) — the JSON battery beats CRuby's C extension on parse,
+generate, and round-trip; rubyrs also retires 8–11% fewer CPU
+instructions end-to-end on Jekyll since the O(n log n) sort +
+dispatch fast-path work; on pure VM-dispatch microbenchmarks CRuby
+is still ~2-5× faster (an opt-in Cranelift JIT, `jit-native`,
+closes and often reverses that gap on hot loops) — the numbers live
 in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 **vs mruby** — mruby trades the CRuby gem ecosystem away for
 embeddability (its own mrbgems world, no rubygems compatibility).
 rubyrs makes the opposite bet: keep the ecosystem — `require` loads
-real gem sources from a `$LOAD_PATH` (Jekyll, rouge, kramdown,
-Liquid, and parts of Sinatra run today), and a CRuby-shaped C
+real gem sources from a `$LOAD_PATH` (Jekyll, RuboCop, Bridgetown,
+ActiveModel, Sinatra/Rack run today), and a CRuby-shaped C
 extension ABI hosts real native gems (msgpack, bcrypt) — while
 still being a small, memory-safe, embeddable Rust crate with
 capability sandboxing, per-run resource caps, and a
@@ -97,38 +119,47 @@ WebAssembly target.
 
 | | CRuby | mruby | rubyrs |
 |---|---|---|---|
-| Real rubygems sources | ✅ all | ❌ (mrbgems) | ✅ growing (Jekyll-class today) |
+| Real rubygems sources | ✅ all | ❌ (mrbgems) | ✅ growing (Jekyll/RuboCop-class today) |
 | Embedding | C API | C, mature | Rust crate; caps, sandbox, WASM |
 | Memory safety | C | C | Rust; linear-time regex by default (ReDoS-immune) |
-| Encoding / threads | full | reduced | not yet (documented) |
+| Encoding / threads | full | reduced | partial (documented) |
 | Jekyll 1k-post build | 0.66 s | — | **0.51 s, byte-identical** |
 
-Where the cold-start + footprint profile matters (CLI tools, DSL
-hosts, sandboxed script execution), rubyrs starts ~25× faster than
-CRuby (~17× even against `ruby --disable=gems`) at about a third of
-the RSS (3.7 MB vs 10.2 MB on `puts 1+2`). The CLI caches the
-preamble's compiled bytecode under `~/.cache/rubyrs` (the
-`preamble-cache` feature) — the very first run after a (re)build
-pays a one-time ~6.5 ms to populate it:
+Where the cold-start profile matters (CLI tools, DSL hosts,
+sandboxed script execution), rubyrs starts ~8× faster than stock
+CRuby (~1.9× vs `ruby --disable=gems`) at a comparable memory
+footprint (6.4 MB vs 5.7 MB peak on `puts 1+2`). The CLI caches
+the preamble's compiled bytecode under `~/.cache/rubyrs` (the
+`preamble-cache` feature; format v5 is a raw-image blob decoded in
+~0.5 ms) — the very first run after a (re)build pays a one-time
+~10 ms to populate it. Re-measured 2026-07-04:
 
-| Cold start | rubyrs (native) | CRuby 3.4 | CRuby `--disable=gems` |
-|------------|----------------|-----------|------------------------|
-| `puts 1+2` | **3.0 ms** | 74.3 ms | 51.1 ms |
+| Cold start, `puts 1+2` | rubyrs (native) | CRuby 3.4 | CRuby `--disable=gems` |
+|------------------------|----------------|-----------|------------------------|
+| Apple M2 Max (macOS)   | **4.1 ms** | 33.8 ms | 7.7 ms |
+| Ryzen 7 8745HS (Linux x86_64) | **3.7 ms** | 26.6 ms | 5.9 ms |
 
-| End-to-end DSL hosting (Brewfile, ~50 lines) | rubyrs | CRuby 3.4 |
+| End-to-end DSL hosting (Brewfile, ~50 lines, embedded `Runtime`) | rubyrs | CRuby 3.4 |
 |----------------------------------------------|--------|-----------|
-| Time | **5.7 ms** | 73.7 ms |
+| Time | **10.0 ms** | 33.6 ms |
+
+(The embedded-`Runtime` row pays a live preamble compile — library
+runtimes never touch the filesystem, so the CLI's bytecode cache
+doesn't apply there by design.)
 
 ### What works with `require`
 
 `require` resolves real gem sources: point `$LOAD_PATH` at unpacked
 gem `lib/` directories (what Bundler does under the hood) and the
 require chain loads them — Jekyll's full chain (jekyll → kramdown →
-liquid → rouge → pathutil → addressable → …) loads and runs today.
-Alongside that:
+liquid → rouge → pathutil → addressable → …) loads and runs today,
+and so do RuboCop's (rubocop → prism/parser → rainbow → …),
+Bridgetown's (bridgetown-core → zeitwerk → activesupport-shaped
+foundation → …), and ActiveModel's (activemodel → activesupport →
+concurrent-ruby → i18n → tzinfo → …). Alongside that:
 
 - `require "json"` / `yaml` / `set` / `pathname` / `stringio` /
-  `strscan` / `digest` / `logger` / `cgi` / `bigdecimal` / ~25 more
+  `strscan` / `digest` / `logger` / `cgi` / `bigdecimal` / ~30 more
   resolve to **vendored stdlib implementations** (with
   `--features stdlib`), behaviour pinned by the same differential
   fixtures.
@@ -145,8 +176,11 @@ Alongside that:
   starts empty by design (embedders/scripts populate it — CRuby
   auto-fills stdlib + gem paths, rubyrs does not).
 
-What does NOT work yet: anything needing the Encoding system, real
-Thread concurrency, Marshal, or the other gaps catalogued in
+What does NOT work yet: anything needing OS-thread parallelism
+(Thread is a cooperative green-thread subset), Ractor, transcoding
+beyond the common encoding families, C extensions outside the
+supported ABI surface (e.g. sqlite3 — which is what stops
+ActiveRecord's adapter today), or the other gaps catalogued in
 [docs/SUBSET.md](docs/SUBSET.md). Gems relying on those will fail —
 loudly, not silently wrong.
 
@@ -167,7 +201,7 @@ History note: rubyrs's first crates.io entries (`rubyrs@0.1.0`,
 `rubyrs-cext@0.1.0`, published 2026-05-25) were name-registration
 placeholders from before the Jekyll-era work, and the
 [`v0.1.0` git tag](https://github.com/linyiru/rubyrs/releases/tag/v0.1.0)
-predates them too (263 fixtures vs today's 585).
+predates them too (263 fixtures vs today's 1,144).
 [`v0.2.0`](https://github.com/linyiru/rubyrs/releases/tag/v0.2.0)
 (2026-06-14) is the first real published artifact — pin
 `rubyrs = "0.2"` for a stable release, or depend on git `master`
