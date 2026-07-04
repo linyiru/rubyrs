@@ -409,6 +409,14 @@ v = JSON.parse('[-0,-1e-400,18446744073709551616,1.8446744073709552e19,-0.0]')
 puts "#{v.inspect} #{v.map(&:class).inspect}"
 p JSON.parse('{"big":98765432109876543210987654321,"huge":-4.5e19,"z":-0,"s":"-0"}')
 
+puts "== exact-number corner shapes =="
+p JSON.parse('{"a":-0,"a":18446744073709551616}')          # dup key, both suspicious
+p JSON.parse('{"a":1e20,"b":{"a":-0.0},"a":-0}')           # dup key + nesting
+p JSON.parse("[123456789012345678901234567890]   ")         # trailing ws after bigint
+deep = "[" * 98 + "123456789012345678901234567890" + "]" * 98
+p JSON.parse(deep).flatten(97)[0] == 123456789012345678901234567890
+try("deepover") { JSON.parse("[" * 101 + "123456789012345678901234567890" + "]" * 101) && "ok" }
+
 puts "== digit runs in strings stay plain =="
 p JSON.parse('{"sid":"123456789012345678901234567890","n":42}')
 p JSON.parse('["e12345678901234567890123","1e999 in a string"]')
