@@ -378,6 +378,15 @@ accelerator bundle, wasm builds) keep their own documented sets —
 the constant across all of them is mimalloc on any native binary
 being timed.
 
+Verify a binary before timing it with
+`perf/alloc_fingerprint.sh path/to/rubyrs` — it fingerprints the
+allocator (mi_ symbols / mimalloc strings, macOS + Linux) and exits
+non-zero on a system-allocator binary. Same discipline as
+`perf/jekyll_guard.sh` for the accelerator bundle; the classic
+failure it defends against is a stray default-feature
+`cargo build`/`cargo test --release` clobbering the measurement
+binary between builds.
+
 ## Reproducing
 
 The "1M fizzbuzz" benchmark is checked in at

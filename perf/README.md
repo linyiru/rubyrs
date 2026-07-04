@@ -117,3 +117,14 @@ binary, and measurements against it are garbage (the classic symptom:
 `Set#include?` NoMethodError aborts the build in ~0.06s and looks like
 a miraculous speedup). The guard probes each feature's fingerprint
 (host fns / stdlib Set) and fails loudly with the rebuild command.
+
+## Allocator fingerprint (`alloc_fingerprint.sh`)
+
+The same clobber trap applies to the allocator alone: a binary built
+without `mimalloc` runs the system allocator, which no shipped CLI
+does and which understates it by 2–19% depending on allocation
+intensity (see docs/BENCHMARKS.md "Standard measurement feature
+set"). `perf/alloc_fingerprint.sh [BIN]` verifies mimalloc is linked
+(nm mi_ symbols, strings fallback for stripped binaries; macOS +
+Linux) and exits non-zero with the rebuild command if not. Run it
+before timing any binary that isn't covered by `jekyll_guard.sh`.
