@@ -24,8 +24,14 @@
 module SecureRandom
   # Hidden Random — class variable so subclasses (rare) share
   # the same default. Single mutable slot reseeded by
-  # `SecureRandom.seed =`.
-  @@rng = Random.new(0)
+  # `SecureRandom.seed =`. Initialised LAZILY on first use (the
+  # `||=` in `random_bytes`): the pure-Ruby MT19937 624-word
+  # seeding costs ~360us, which was paid at every boot for a
+  # module most scripts never touch. Outputs are identical to the
+  # old eager `@@rng = Random.new(0)` — same seed, same stream,
+  # just deferred; an explicit `SecureRandom.seed = n` before
+  # first use still wins (`||=` sees the non-nil slot).
+  @@rng = nil
 
   def self.seed=(n)
     @@rng = Random.new(n)
@@ -35,7 +41,7 @@ module SecureRandom
   # `n` raw bytes. CRuby returns a binary `String`; we do too
   # (`Random#bytes` is the underlying primitive).
   def self.random_bytes(n = 16)
-    @@rng.bytes(n)
+    (@@rng ||= Random.new(0)).bytes(n)
   end
 
   # `n` random bytes formatted as 2n lowercase hex chars. CRuby

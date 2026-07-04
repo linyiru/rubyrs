@@ -116,6 +116,59 @@ fn secure_random_seed_setter_makes_output_deterministic() {
 }
 
 #[test]
+fn secure_random_default_seed_stream_golden() {
+    // The hidden default rng is seeded 0 (ADR 0017 row 131 — the
+    // determinism trade means the DEFAULT stream is identical in
+    // every process; ticketed as a known Tier-1 security quirk) and,
+    // since the boot-perf lazy-init change, constructed on FIRST use
+    // rather than at preamble load. This golden pins the exact
+    // default-stream values the eager `@@rng = Random.new(0)`
+    // produced, so the deferral (or any future rng plumbing change)
+    // can never silently skew outputs. Values captured from the
+    // pre-lazy-init binary.
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    let script = r#"
+        puts SecureRandom.hex(16)
+        puts SecureRandom.uuid
+        puts SecureRandom.random_bytes(8).bytes.inspect
+        puts SecureRandom.alphanumeric(12)
+        puts SecureRandom.hex(4)
+        SecureRandom.seed = 42
+        puts SecureRandom.hex(8)
+    "#;
+    rt.eval(script, "sr_default_golden.rb").expect("eval");
+    assert_eq!(
+        buf.snapshot(),
+        "ac0a7f8c2faac49775a616b7c0cc21d8\n\
+         43b34e9a-fb52-42db-8376-7d8b677de5d8\n\
+         [9, 164, 116, 108, 211, 222, 161, 159]\n\
+         ljrFUsEAAX5O\n\
+         573a2b4c\n\
+         66dce15fb33deacb\n"
+    );
+}
+
+#[test]
+fn secure_random_seed_before_first_use_wins_over_lazy_default() {
+    // Lazy-init edge: `SecureRandom.seed = n` BEFORE the first
+    // consuming call must fully own the stream — the deferred
+    // `||= Random.new(0)` default must see the non-nil slot and
+    // never fire. Golden captured from the pre-lazy-init binary
+    // (where seed= simply overwrote the eagerly-built default).
+    let buf = SharedBuf::new();
+    let mut rt = rubyrs::Runtime::new();
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "SecureRandom.seed = 7\nputs SecureRandom.hex(8)",
+        "sr_seed_first.rb",
+    )
+    .expect("eval");
+    assert_eq!(buf.snapshot(), "aff08813c4e4323a\n");
+}
+
+#[test]
 fn time_now_default_raises_without_capability_injection() {
     // ADR 0017 Rule 1: by default `Time.now` must NOT reach for
     // the host wall clock. With no `Config::time_now` injection,
