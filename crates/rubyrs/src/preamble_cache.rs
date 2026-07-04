@@ -11,19 +11,31 @@
 //! host `Config` capabilities) still happens live on every
 //! construction; only compilation is cached.
 //!
-//! ## Why the cache can never serve stale bytecode
+//! ## What binds a blob to the binary that wrote it
 //!
-//! The cache key hashes the current executable's identity (length +
-//! mtime, via `std::env::current_exe`) plus the crate version plus
-//! the PRE-preamble interner contents (which vary with
-//! `Config::load_paths` seeding — see `cache_key`). Preamble
+//! The cache key hashes the crate version, the current executable's
+//! identity — length + mtime + a content sample (first and last
+//! 64 KB of the exe file, so a same-length mtime-preserved but
+//! DIFFERENT binary — a `cp -p` deploy, a `SOURCE_DATE_EPOCH`
+//! reproducible rebuild — still changes the key) — plus the
+//! PRE-preamble interner contents (which vary with
+//! `Config::load_paths` seeding — see `cache_key`). The header's
+//! key field is additionally folded into the body checksum as its
+//! seed, so a blob body cannot be re-keyed: patching the stored key
+//! (and filename) to match a different binary invalidates the
+//! checksum instead of serving that binary a foreign body. Preamble
 //! sources are `include_str!`-baked into the executable, and the
 //! bytecode format is whatever this build's `Op`/`Proto` layout
-//! is — both are covered by the exe identity, so a blob is only
-//! ever decoded by the exact binary that encoded it. Any mismatch
-//! (different build, different pre-state, corrupt file, partial
-//! write) falls back to the live compile path silently: the cache
-//! is a pure fast-path, never a correctness dependency.
+//! is — both are covered by the exe identity above.
+//!
+//! None of this is cryptographic (FxHash-style key and checksum):
+//! what is enforced is that every ACCIDENTAL stale/foreign/corrupt
+//! blob shape misses — a deliberately engineered collision can still
+//! defeat it, which is acceptable because the cache directory is
+//! host-trusted (ADR 0017: providing it is the host's consent). Any
+//! mismatch (different build, different pre-state, corrupt file,
+//! partial write) falls back to the live compile path silently: the
+//! cache is a pure fast-path, never a correctness dependency.
 //!
 //! ## Blob format (v5): checksummed hybrid POD-region body
 //!
@@ -97,7 +109,13 @@ const HEADER_LEN: usize = 24;
 /// the cache directory is host-trusted (ADR 0017: providing it is
 /// the host's consent), so the threat model is media corruption,
 /// not malice.
-fn body_checksum(bytes: &[u8]) -> u64 {
+///
+/// `seed` is the header's cache key: folding it in binds the body
+/// to the key, so a foreign blob whose header key (and filename)
+/// were patched to match this binary fails HERE instead of having
+/// its raw-POD body decoded (the encoding binary's `Op` layout may
+/// differ — see [`RawPod`]).
+fn body_checksum(seed: u64, bytes: &[u8]) -> u64 {
     const K: u64 = 0x517c_c1b7_2722_0a95; // FxHash's multiplier
     #[inline]
     fn mix(h: u64, v: u64) -> u64 {
@@ -116,7 +134,7 @@ fn body_checksum(bytes: &[u8]) -> u64 {
             *lane = mix(*lane, u64::from_le_bytes(c[i * 8..i * 8 + 8].try_into().unwrap()));
         }
     }
-    let mut h = lanes[0];
+    let mut h = mix(seed, lanes[0]);
     h = mix(h, lanes[1]);
     h = mix(h, lanes[2]);
     h = mix(h, lanes[3]);
@@ -135,12 +153,16 @@ fn body_checksum(bytes: &[u8]) -> u64 {
 /// Implementors are stored/restored by RAW MEMORY COPY. This is
 /// sound only under ALL of:
 ///
-/// 1. **Same-binary**: the blob is decoded by the exact executable
-///    that encoded it. Guaranteed by `cache_key` hashing exe
-///    length+mtime+crate version — a different build (different
-///    rustc, features, or source) produces a different key and
-///    therefore a different cache file name. Same layout, same
-///    enum discriminants, same cfg-variant set, same endianness.
+/// 1. **Same-binary**: the blob is decoded by the same executable
+///    build that encoded it. Enforced (non-cryptographically — see
+///    the module doc's binding section) by `cache_key` hashing
+///    crate version + exe length + mtime + a first/last-64KB
+///    content sample — a different build (different rustc,
+///    features, or source) produces a different key and therefore
+///    a different cache file name — plus the header key seeding
+///    the body checksum, so a key-patched foreign body fails
+///    verification. Same layout, same enum discriminants, same
+///    cfg-variant set, same endianness.
 /// 2. **Bit-identical bytes**: the body checksum (verified before
 ///    any decode) makes the decoded bytes bit-identical to bytes
 ///    produced by reading real, live values of `Self` at encode
@@ -156,11 +178,14 @@ fn body_checksum(bytes: &[u8]) -> u64 {
 /// niche/padding bytes) the encode-side `&[u8]` view reads
 /// uninitialized padding, which the Rust abstract machine does not
 /// bless even when the concrete bytes are stable — the same
-/// technique abomonation uses. Miri would flag it (miri does not run
-/// in this repo's CI); on real targets the copy is a plain memcpy of
-/// stable heap bytes. The alternative (per-variant tag+payload
-/// encode over ~110 `Op` variants) was rejected as strictly worse to
-/// maintain for ~0.05 ms of difference.
+/// technique abomonation uses. Miri would flag it, but this repo's
+/// CI Miri smoke job does not cover this module — and cannot: these
+/// paths only run under a full Prism-backed `Runtime`, and Prism's
+/// vendored C is outside what Miri can execute. On real targets the
+/// copy is a plain memcpy of stable heap bytes. The alternative
+/// (per-variant tag+payload encode over ~110 `Op` variants) was
+/// rejected as strictly worse to maintain for ~0.05 ms of
+/// difference.
 unsafe trait RawPod: Copy + 'static {}
 
 // SAFETY: `Op` payloads are i64/f64/SymId(u32)/u32/u16/u8 only — no
@@ -301,7 +326,11 @@ const _: () = assert!(std::mem::size_of::<ProtoHot>() == 10 * 4 + 10 * 2);
 /// Stored SPARSELY (see `SnapshotCold::protos_cold`): only ~200 of
 /// ~1050 preamble protos have ANY of these fields non-empty, so the
 /// dense encoding was mostly serde dispatch over empty vecs.
+/// (`Serialize` is test-only: the corruption battery re-encodes a
+/// structurally mutated tail; production encode uses the borrow
+/// twin.)
 #[derive(Default, serde::Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize))]
 struct ProtoCold {
     kw_param_defaults: Vec<Option<Value>>,
     kw_has_computed_default: Vec<bool>,
@@ -330,8 +359,10 @@ impl ProtoColdRef<'_> {
 }
 
 /// Owned (deserialize) shape of the postcard tail. Borrow twin
-/// `SnapshotColdRef` below is the encode-time shape.
+/// `SnapshotColdRef` below is the encode-time shape. (`Serialize`
+/// is test-only, for the corruption battery's tail re-encode.)
 #[derive(serde::Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize))]
 struct SnapshotCold {
     /// `vm.interner.len()` at `load_preamble` entry when the blob
     /// was stored. Restore verifies the live prefix matches
@@ -506,6 +537,18 @@ fn decode_body(body: &[u8]) -> Option<Decoded<'_>> {
     {
         return None;
     }
+    // Every replay step must be either the builtin-install sentinel
+    // or a valid proto index. Replay (`Runtime::load_preamble`)
+    // indexes `vm.protos` with these unchecked — an out-of-range
+    // step would panic there (checksum-collision territory, but the
+    // decode layer's contract is that NO body shape reaches replay
+    // structurally inconsistent).
+    if !steps
+        .iter()
+        .all(|&s| s == STEP_INSTALL_BUILTINS || (s as usize) < n_protos)
+    {
+        return None;
+    }
 
     // SAFETY: checksum-verified copies of `pod_bytes` output from
     // this same binary (see `RawPod`); region lengths were carved as
@@ -521,6 +564,28 @@ fn decode_body(body: &[u8]) -> Option<Decoded<'_>> {
     let sum_lex: u64 = hot.iter().map(|h| h.lexical_scope_len as u64).sum();
     if sum_ops != total_ops as u64 || sum_spans != total_spans as u64 || sum_lex != total_lex as u64
     {
+        return None;
+    }
+    // The string region must tile exactly too: each proto consumes
+    // 1 (name) + params_len + local_names_len + one per flag-gated
+    // optional entry from `str_lens` (the emission-order contract on
+    // `ProtoHot`). Checked BEFORE the reconstruction loop: its
+    // `Vec::with_capacity(params_len)` reservations would otherwise
+    // trust a lying u32 (~100 GB request) before the string cursor
+    // could catch it. Passing this bounds every per-proto length by
+    // `n_str_lens`, which the cursor carve already bounded by the
+    // actual file size.
+    let sum_strs: u64 = hot
+        .iter()
+        .map(|h| {
+            1 + h.params_len as u64
+                + h.local_names_len as u64
+                + (h.flags & F_HAS_REST_PARAM != 0) as u64
+                + (h.flags & F_HAS_KW_REST_PARAM != 0) as u64
+                + (h.flags & F_HAS_BLOCK_PARAM != 0) as u64
+        })
+        .sum();
+    if sum_strs != n_str_lens as u64 {
         return None;
     }
 
@@ -670,6 +735,8 @@ fn fx_hash_bytes(h: &mut crate::intern::FxHasher, bytes: &[u8]) {
 /// unavailable on the platform).
 pub(crate) fn cache_key(vm: &Vm) -> Option<u64> {
     use std::hash::Hasher;
+    let prof = std::env::var_os("RUBYRS_STARTUP_PROF").is_some();
+    let t_key = prof.then(std::time::Instant::now);
     let exe = std::env::current_exe().ok()?;
     let meta = std::fs::metadata(&exe).ok()?;
     let mtime = meta
@@ -682,6 +749,37 @@ pub(crate) fn cache_key(vm: &Vm) -> Option<u64> {
     h.write_u64(meta.len());
     h.write_u64(mtime.as_secs());
     h.write_u32(mtime.subsec_nanos());
+    // Exe CONTENT sample: first + last 64 KB of the executable file.
+    // Length+mtime alone are spoofable without malice — a `cp -p`
+    // deploy or a SOURCE_DATE_EPOCH-reproducible rebuild can produce
+    // a same-length same-mtime DIFFERENT binary — and v5's raw-POD
+    // body makes decoding a foreign binary's blob undefined behavior
+    // (foreign `Op` discriminants), not v4's graceful postcard
+    // failure, so the key must depend on content. Hashing the whole
+    // exe would cost milliseconds; the head+tail sample is two
+    // bounded page-cache reads, and any realistic rebuild perturbs
+    // one end — code/rodata lands early, linker metadata/build-id/
+    // signatures land late. Each sample is digested through the
+    // 4-lane `body_checksum` and the digest folded into the key
+    // hasher: `FxHasher::write` is a BYTE-serial multiply chain
+    // (measured ~0.24 ms over the 128 KB — it blew the ≤0.1 ms
+    // budget), the 4-lane digest does the same work in ~0.01 ms.
+    // Distinct seeds keep head/tail order-sensitive. Measured added
+    // warm-HIT key cost: ~0.04 ms, only paid when the host enabled
+    // the cache.
+    {
+        use std::io::{Read, Seek, SeekFrom};
+        const SAMPLE: u64 = 64 * 1024;
+        let mut f = std::fs::File::open(&exe).ok()?;
+        let mut buf = vec![0u8; SAMPLE.min(meta.len()) as usize];
+        f.read_exact(&mut buf).ok()?;
+        h.write_u64(body_checksum(1, &buf));
+        if meta.len() > SAMPLE {
+            f.seek(SeekFrom::End(-(buf.len() as i64))).ok()?;
+            f.read_exact(&mut buf).ok()?;
+            h.write_u64(body_checksum(2, &buf));
+        }
+    }
     // Pre-preamble interner contents: `Vm::new`'s pre-interned
     // symbols plus whatever `Config::load_paths` seeding interned
     // (`$LOAD_PATH`). Two Runtimes with different pre-state get
@@ -690,6 +788,12 @@ pub(crate) fn cache_key(vm: &Vm) -> Option<u64> {
     h.write_usize(vm.interner.len());
     for i in 0..vm.interner.len() {
         fx_hash_bytes(&mut h, vm.interner.resolve(SymId(i as u32)).as_bytes());
+    }
+    if let Some(t) = t_key {
+        eprintln!(
+            "startup-prof: preamble-cache key={:.3}ms",
+            t.elapsed().as_nanos() as f64 / 1e6,
+        );
     }
     Some(h.finish())
 }
@@ -736,10 +840,12 @@ pub(crate) fn try_load(vm: &mut Vm, dir: &Path, key: u64) -> Option<ReplayPlan> 
     // / torn writes fall back to live compile here instead of
     // reaching the decoder (the pre-v5 "blob body unchecksummed"
     // hole), and the raw POD restore below is entitled to assume
-    // bit-identical bytes (RawPod invariant 2).
+    // bit-identical bytes (RawPod invariant 2). Seeded with the key
+    // so a key-patched foreign blob also dies here (fix rationale on
+    // `body_checksum`).
     let t_sum = prof.then(std::time::Instant::now);
     let stored_sum = u64::from_le_bytes(bytes[16..24].try_into().ok()?);
-    if body_checksum(&bytes[HEADER_LEN..]) != stored_sum {
+    if body_checksum(key, &bytes[HEADER_LEN..]) != stored_sum {
         dbg_miss("checksum");
         return None;
     }
@@ -818,6 +924,13 @@ pub(crate) fn try_load(vm: &mut Vm, dir: &Path, key: u64) -> Option<ReplayPlan> 
 /// Serialize the post-preamble compile state. Best-effort: any IO
 /// or encode failure is swallowed (the cache is an optimisation,
 /// and the next construction simply compiles live again).
+///
+/// Miss-path cost has TWO components, profiled separately (do not
+/// quote either alone as "the store cost"): encode ≈ 0.3 ms +
+/// write/rename ≈ 0.4 ms, ≈ 0.7 ms together (release CLI, warm
+/// page cache — see the `RUBYRS_STARTUP_PROF` store line). Both are
+/// off the warm-HIT path entirely.
+///
 /// `key` MUST be the pre-preamble key computed at `load_preamble`
 /// entry — `cache_key` hashes the interner contents, which by
 /// store time include every preamble symbol; recomputing here
@@ -1034,7 +1147,7 @@ pub(crate) fn store(
     body.extend_from_slice(&interner_region);
     body.extend_from_slice(&cold_bytes);
 
-    let sum = body_checksum(&body);
+    let sum = body_checksum(key, &body);
     let mut bytes = Vec::with_capacity(HEADER_LEN + body.len());
     bytes.extend_from_slice(MAGIC);
     bytes.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
@@ -1218,9 +1331,10 @@ mod tests {
             samples[samples.len() / 2]
         }
 
+        let key = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
         let body = &bytes[super::HEADER_LEN..];
         let t_sum = median_ns(|| {
-            std::hint::black_box(super::body_checksum(body));
+            std::hint::black_box(super::body_checksum(key, body));
         });
         let t_decode = median_ns(|| {
             std::hint::black_box(super::decode_body(body).unwrap());
@@ -1290,6 +1404,75 @@ mod tests {
         extended.extend_from_slice(b"\x00garbage");
         cases.push(("extend".into(), extended));
 
+        // Crafted structural shapes: mutate a section's CONTENT and
+        // recompute the (key-seeded) checksum, so only decode_body's
+        // structural validation stands between the blob and replay.
+        // These are the shapes the adversarial review's checksum-
+        // collision simulation reached: an out-of-range replay step
+        // (pre-fix: decode succeeded, replay panicked indexing
+        // `vm.protos`) and a lying ProtoHot string count (pre-fix: a
+        // ~100 GB `Vec::with_capacity` request before the string
+        // cursor could object).
+        let key = u64::from_le_bytes(original[8..16].try_into().unwrap());
+        let body = &original[super::HEADER_LEN..];
+        let hdr_u32 =
+            |i: usize| u32::from_le_bytes(body[i * 4..i * 4 + 4].try_into().unwrap()) as usize;
+        let n_protos = hdr_u32(0);
+        // Offset of the postcard tail = fixed header (8×u32) + the
+        // seven fixed-size/length-prefixed regions, mirroring
+        // decode_body's carve order.
+        let tail_off = 32
+            + n_protos * std::mem::size_of::<super::ProtoHot>()
+            + hdr_u32(1) * std::mem::size_of::<super::Op>()
+            + hdr_u32(2) * std::mem::size_of::<super::Span>()
+            + hdr_u32(3) * std::mem::size_of::<super::SymId>()
+            + hdr_u32(4) * 4
+            + hdr_u32(6) * 4
+            + hdr_u32(5)
+            + hdr_u32(7);
+        let reseal = |new_body: Vec<u8>| -> Vec<u8> {
+            let mut b = original[..super::HEADER_LEN].to_vec();
+            let sum = super::body_checksum(key, &new_body);
+            b[16..24].copy_from_slice(&sum.to_le_bytes());
+            b.extend_from_slice(&new_body);
+            b
+        };
+        // (a) a steps entry pushed out of proto range, via decode +
+        // re-encode of the postcard tail (varint surgery is fragile).
+        {
+            let mut cold: super::SnapshotCold =
+                postcard::from_bytes(&body[tail_off..]).expect("tail decodes");
+            let i = cold
+                .steps
+                .iter()
+                .position(|&s| s != super::STEP_INSTALL_BUILTINS)
+                .expect("battery blob has proto-index steps");
+            cold.steps[i] = n_protos as u32 + 1000;
+            let mut nb = body[..tail_off].to_vec();
+            nb.extend_from_slice(&postcard::to_allocvec(&cold).unwrap());
+            cases.push(("steps-index-out-of-range".into(), reseal(nb)));
+        }
+        // (b) lying ProtoHot string-count u32s on proto 0.
+        for (name, field_off) in [
+            ("lying-params-len", std::mem::offset_of!(super::ProtoHot, params_len)),
+            ("lying-local-names-len", std::mem::offset_of!(super::ProtoHot, local_names_len)),
+        ] {
+            let mut nb = body.to_vec();
+            let at = 32 + field_off;
+            nb[at..at + 4].copy_from_slice(&0x4000_0000u32.to_le_bytes());
+            cases.push((name.into(), reseal(nb)));
+        }
+        // (c) key-unbound body: the stored checksum recomputed under
+        // a DIFFERENT seed — the shape a key-patched foreign blob
+        // arrives in (its checksum was seeded by the ENCODING
+        // binary's key). If the seed were ignored, this would HIT.
+        {
+            let mut b = original.clone();
+            let sum = super::body_checksum(key ^ 0xdead_beef, body);
+            b[16..24].copy_from_slice(&sum.to_le_bytes());
+            cases.push(("key-unbound-checksum".into(), b));
+        }
+
         for (label, mutated) in cases {
             std::fs::write(&path, &mutated).unwrap();
             let mut rt = mk(&dir);
@@ -1307,6 +1490,25 @@ mod tests {
         let rt = mk(&dir);
         assert!(rt.preamble_cache_hit(), "pristine blob should hit again");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Manual cross-check harness for saved fuzz-evidence blobs:
+    /// decodes the body of the blob at `$RUBYRS_PC_EVIDENCE` and
+    /// asserts `decode_body` structurally rejects it (bypassing the
+    /// key/checksum gates, which would already reject a foreign
+    /// blob). Sound for the saved evidence shapes because all
+    /// structural validation (steps range, region tiling) runs
+    /// BEFORE any `Op` bytes are conjured.
+    #[test]
+    #[ignore = "manual harness: set RUBYRS_PC_EVIDENCE to a blob path"]
+    fn evidence_blob_misses() {
+        let path = std::env::var("RUBYRS_PC_EVIDENCE").expect("set RUBYRS_PC_EVIDENCE");
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.len() > super::HEADER_LEN, "evidence blob too short");
+        assert!(
+            super::decode_body(&bytes[super::HEADER_LEN..]).is_none(),
+            "evidence blob must be structurally rejected by decode_body"
+        );
     }
 
     /// A stale blob from the previous format version must be
