@@ -641,12 +641,27 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // LITE-BLOCK battery (frameless block bodies, ADR 0037): capture writes
 // land in the original cells, break/next/nlr/$~/redo parity, escaped
 // procs, re-entrant recursion, mixed-tag bails.
-#[test] fn tier2_liteblock_battery() { run_diff("tier2_liteblock_battery"); }
+//
+// The `cfg_attr(debug_assertions, ignore)` on this and the three other
+// deep-recursion fixtures (tier2_restblock_lite, jit_each_obj_walk,
+// jit_each_cop_walk): debug builds deliberately cap re-entrant
+// `dispatch_until` depth at 5 (DEFAULT_MAX_DISPATCH_DEPTH in vm/gc.rs,
+// b291d8c3 — the CI Coverage job's debug+instrumented frames blow the
+// 2 MB test-thread stack near ~80 pushes). These fixtures exercise
+// real block-driven recursion depths (tree walks of depth 7+), which
+// that cap structurally forbids, so they can only run under release
+// optimisation — where CI's `test` job (plain + `--features
+// jit-native`) still runs them on every push.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "needs release: recursion deeper than the debug dispatch-depth cap (vm/gc.rs)")]
+fn tier2_liteblock_battery() { run_diff("tier2_liteblock_battery"); }
 // LITE REST-BLOCKS (ADR 0037 tail): frameless `|*a|` entries — splat
 // identity/freshness, no auto-splat, next/break, capture-writes, lambda
 // arity, 0/2-arg yields through the general binder, STRESS_GC rooting of
 // the serve-site-allocated rest Array, re-entrant recursion.
-#[test] fn tier2_restblock_lite() { run_diff("tier2_restblock_lite"); }
+#[test]
+#[cfg_attr(debug_assertions, ignore = "needs release: recursion deeper than the debug dispatch-depth cap (vm/gc.rs)")]
+fn tier2_restblock_lite() { run_diff("tier2_restblock_lite"); }
 // Tier-2 const serves (ADR 0037 tail): framed IC-hit LoadConst/Chain +
 // lite flat/chain reads + the shared LoadConstStr push — redefinition /
 // removal / private_constant / autoload-pending invalidation exactness,
@@ -1284,8 +1299,14 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn jit_ivar_array_index() { run_diff("jit_ivar_array_index"); }
 #[test] fn jit_obj_array_walk() { run_diff("jit_obj_array_walk"); }
 #[test] fn jit_obj_tree_walk() { run_diff("jit_obj_tree_walk"); }
-#[test] fn jit_each_obj_walk() { run_diff("jit_each_obj_walk"); }
-#[test] fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
+// See tier2_liteblock_battery's comment: deep block-recursion fixtures
+// can't run under the debug dispatch-depth cap; release CI still runs them.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "needs release: recursion deeper than the debug dispatch-depth cap (vm/gc.rs)")]
+fn jit_each_obj_walk() { run_diff("jit_each_obj_walk"); }
+#[test]
+#[cfg_attr(debug_assertions, ignore = "needs release: recursion deeper than the debug dispatch-depth cap (vm/gc.rs)")]
+fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 #[test] fn jit_hash_ivar_default_proc() { run_diff("jit_hash_ivar_default_proc"); }
 #[test] fn jit_inline_objcall_guard() { run_diff("jit_inline_objcall_guard"); }
 #[test] fn jit_inline_ivar_read() { run_diff("jit_inline_ivar_read"); }
