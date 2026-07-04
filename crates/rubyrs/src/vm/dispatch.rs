@@ -6514,7 +6514,11 @@ impl Vm {
         for a in &args { g.pin(a.clone()); }
         g.vm.maybe_gc();
         g.vm.check_alloc()?;
-        let pairs: Vec<(Value, Value)> = if args.len() == 1 {
+        // `Hash[{…}]` copies an existing Hash whose pairs are already
+        // deduped (Hash invariant) — skip the literal dedup for that
+        // form only.
+        let already_deduped = args.len() == 1 && matches!(&args[0], Value::Hash(_));
+        let mut pairs: crate::heap::PairsBuf = if args.len() == 1 {
             match &args[0] {
                 Value::Array(aid) => {
                     // `Hash[[[k, v], ...]]`. Each element must be
@@ -6525,7 +6529,7 @@ impl Vm {
                     // with TypeError. Stay strict only on the
                     // outer Array shape.
                     let outer = g.vm.heap.array(*aid).clone();
-                    let mut out = Vec::with_capacity(outer.len());
+                    let mut out = crate::heap::PairsBuf::with_capacity(outer.len());
                     for elem in outer {
                         if let Value::Array(pair_id) = elem {
                             let pair = g.vm.heap.array(pair_id);
@@ -6544,7 +6548,7 @@ impl Vm {
                     }
                     out
                 }
-                Value::Hash(hid) => g.vm.heap.hash(*hid).to_vec(),
+                Value::Hash(hid) => g.vm.heap.hash(*hid).iter().cloned().collect(),
                 _ => return Err(g.vm.trap(RubyError::ArgumentError {
                     msg: "odd number of arguments for Hash".into(),
                 })),
@@ -6562,8 +6566,9 @@ impl Vm {
         // `op_new_hash` dedup helper (which also fires CRuby's
         // `key.hash` insert contract). Pre-fix this alloc'd the raw
         // pair list, so both plain AND user duplicates leaked through.
-        let mut pairs: crate::heap::PairsBuf = pairs.into();
-        g.vm.hash_literal_dedup(&mut pairs)?;
+        if !already_deduped {
+            g.vm.hash_literal_dedup(&mut pairs)?;
+        }
         let hid = g.vm.heap.alloc(HeapObj::Hash(
             crate::heap::HashObj::with_pairs_tagged(pairs, class_tag),
         ));

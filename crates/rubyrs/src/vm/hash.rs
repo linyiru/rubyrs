@@ -401,13 +401,24 @@ impl Vm {
                 i += 1;
             }
         } else {
+            // Hash-prefiltered pairwise dedup: `ruby_hash` is consistent
+            // with `ruby_eql` (equal keys hash equal), so keys with
+            // different hashes skip the (comparatively costly) content
+            // `ruby_eql` — the all-distinct literal (the overwhelmingly
+            // common shape) does n hashes + cheap u64 compares and zero
+            // eql calls.
+            let mut hashes: smallvec::SmallVec<[u64; crate::heap::HASH_INLINE_PAIRS]> =
+                pairs.iter().map(|(k, _)| k.ruby_hash(&self.heap)).collect();
             let mut i = 0;
             while i < pairs.len() {
                 let mut j = i + 1;
                 while j < pairs.len() {
-                    if pairs[j].0.ruby_eql(&pairs[i].0, &self.heap) {
+                    if hashes[j] == hashes[i]
+                        && pairs[j].0.ruby_eql(&pairs[i].0, &self.heap)
+                    {
                         pairs[i].1 = pairs[j].1.clone();
                         pairs.remove(j);
+                        hashes.remove(j);
                     } else {
                         j += 1;
                     }
