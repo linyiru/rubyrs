@@ -294,6 +294,11 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn hash_small_representation() { run_diff("hash_small_representation"); }
 #[test] fn hash_rehash() { run_diff("hash_rehash"); }
 #[test] fn hash_instrumented_key_calls() { run_diff("hash_instrumented_key_calls"); }
+// Duplicate-user-key dedup across every inserting/lookup entry point
+// (merge family, Hash[], to_h, invert, transform_keys, group_by, tally,
+// values_at/slice/except/dig/fetch, ==, Marshal) — the 2026-07
+// user-index dup-insertion finding.
+#[test] fn hash_user_key_dedup() { run_diff("hash_user_key_dedup"); }
 #[test] fn hash_compare_by_identity() { run_diff("hash_compare_by_identity"); }
 #[test] fn index_fast_path() { run_diff("index_fast_path"); }
 #[test] fn hash_key_fast_path() { run_diff("hash_key_fast_path"); }
