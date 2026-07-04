@@ -3127,22 +3127,23 @@ Encoding::ISO_2022_JP = Encoding.new("ISO-2022-JP")
 ## CRuby's Encoding::ConverterNotFoundError shape in the default build).
 ## Constant names/spellings match CRuby's canonical set exactly; the
 ## registry indices in encoding_full.rs are independent of this order.
-Encoding::ISO_8859_1 = Encoding.new("ISO-8859-1")
-Encoding::Windows_1252 = Encoding.new("Windows-1252")
-Encoding::ISO_8859_15 = Encoding.new("ISO-8859-15")
-Encoding::KOI8_R = Encoding.new("KOI8-R")
-Encoding::Windows_31J = Encoding.new("Windows-31J")
-Encoding::EUC_JP = Encoding.new("EUC-JP")
-Encoding::GBK = Encoding.new("GBK")
-Encoding::GB18030 = Encoding.new("GB18030")
-Encoding::Big5 = Encoding.new("Big5")
-Encoding::UTF_16LE = Encoding.new("UTF-16LE")
-Encoding::UTF_16BE = Encoding.new("UTF-16BE")
-Encoding::UTF_16 = Encoding.new("UTF-16")
-Encoding::UTF_32LE = Encoding.new("UTF-32LE")
-Encoding::UTF_32BE = Encoding.new("UTF-32BE")
-Encoding::UTF_32 = Encoding.new("UTF-32")
-Encoding::Shift_JIS = Encoding.new("Shift_JIS")
+##
+## BATCHED into one top-level statement deliberately: each additional
+## top-level statement in this mega-chunk costs ~19µs of boot time
+## (measured 2026-07 — 16 individual `Encoding::X = ...` lines added
+## ~+0.3ms/+5% to hello-world startup; the same 16 constants through
+## one each/const_set statement are boot-neutral). `const_set` on a
+## named class writes the same global qualified-constant table as a
+## top-level `Encoding::X = ...` assignment, so reads (`Encoding::X`,
+## `Encoding.constants`, dispatch.rs's `try_push_string_encoding`
+## flat lookup) are indistinguishable. `tr("-", "_")` maps each
+## canonical name to CRuby's constant spelling (ISO-8859-1 →
+## ISO_8859_1; Shift_JIS/GB18030/Big5/GBK are fixed points).
+%w[ISO-8859-1 Windows-1252 ISO-8859-15 KOI8-R Windows-31J EUC-JP GBK
+   GB18030 Big5 UTF-16LE UTF-16BE UTF-16 UTF-32LE UTF-32BE UTF-32
+   Shift_JIS].each do |n|
+  Encoding.const_set(n.tr("-", "_"), Encoding.new(n))
+end
 
 ## Version sentinels. Real codebases use `RUBY_VERSION >= '3'`
 ## (tilt does at template.rb:239) to pick between bind_call and
