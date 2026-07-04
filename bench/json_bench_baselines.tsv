@@ -57,6 +57,21 @@ round_trip         60    2026-07 ratchet — local ~19.3 µs ARM mac (was 150; p
 # keys_* rows are new with the campaign: keys_repeated = 200 records x 5
 # keys (spilled-pairs shape, local ~53 µs), keys_unique = one 1000-key
 # hash (lazy-index win, local ~39 µs — rubyrs beats CRuby's ~65 here).
-parse_sids         95    2026-07 small-hash ratchet — local ~31.6 µs ARM mac (CRuby ~19.9), 3× CI headroom
+# 2026-07 exact-number round: the 19-digit bigint pre-scan (string-aware
+# tier 2 walked the whole 11KB sid doc) became a memchr2-gated >=10-digit
+# EXPONENT fence; sid docs have no `e` at all, so the fence is one SIMD
+# sweep. parse_sids local 31.6->~29.6; ratchet 95->90 keeps ~3x headroom.
+parse_sids         90    2026-07 exact-number ratchet — local ~29.6 µs ARM mac (CRuby ~21), 3× CI headroom
 keys_repeated      160   2026-07 initial — local ~53 µs ARM mac (CRuby ~38), 3× CI headroom
 keys_unique        120   2026-07 initial — local ~39 µs ARM mac (CRuby ~65; the lazy-index WIN this row guards), 3× CI headroom
+# 2026-07 exact-number round, new rows: parse_ints / parse_floats are the
+# TAX SURFACE any raw-number scheme would regress (a serde_json
+# arbitrary_precision flip measured +20 ns/number on both — rejected);
+# they pin the zero-tax fast path. parse_bigints = 200 records with bare
+# 25-digit integer literals: previously the whole doc declined to the
+# ~200x interpreted canon (~8.8 ms/iter); the exact-number retry parses
+# it natively (~72 µs local, CRuby ~48). Budgets at the usual ~3x
+# CI-runner headroom over quiet ARM-mac locals.
+parse_ints         12    2026-07 initial — local ~3.6 µs ARM mac (CRuby ~2.0), 3× CI headroom
+parse_floats       16    2026-07 initial — local ~4.9 µs ARM mac (CRuby ~3.0), 3× CI headroom
+parse_bigints      220   2026-07 initial — local ~72 µs ARM mac (CRuby ~48; was ~8800 via canon decline), 3× CI headroom

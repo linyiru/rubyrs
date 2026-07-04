@@ -35,12 +35,17 @@ Honest-notes ledger:
   NATIVE_AVAILABLE lookup, and the host fn signals decline by
   returning nil so the hot path carries no begin/rescue frame —
   ~54 ns/call off the fixed cost).
-- **Bare ≥19-digit INTEGER literals** (unquoted snowflake docs,
-  `{"id":1234567890123456789}` shapes) still decline the whole
-  document to the pure canon: values stay EXACT but at canon
-  speed (~1.5 ms vs CRuby ~5 µs on a 200-record doc). Future
-  work: fold bigint-range integers natively instead of declining.
-  Long IDs in STRING values are unaffected (string-aware scan).
+- **Bare ≥19-digit INTEGER literals: RESOLVED** (2026-07
+  exact-number round). These previously declined the whole
+  document to the pure canon (exact values at ~200× speed —
+  ~8.8 ms/iter on the 200-record 25-digit `parse_bigints`
+  fixture); they now parse natively via the ordered-literal
+  retry pass (~72 µs, ~1.5× CRuby's ~48 µs — CRuby pays Bignum
+  allocation here too). `-0` (CRuby Integer 0) and float-spelled
+  negative zeros also resolve natively instead of declining.
+  See "2026-07 exact-number round" below for the design and the
+  serde_json `arbitrary_precision` evaluation that rejected the
+  obvious alternative.
 - **Parse-error columns are byte-based** (probed CRuby json 2.20
   semantics): multibyte characters before the offending token
   advance the column by their byte length, and the 32-unit
@@ -64,6 +69,97 @@ Differential micro-fixtures (µs/iter, rubyrs vs CRuby):
 | parse keys_repeated (5×200) | 43.0 | 32.0 | was 64.6; residual gap is Hash-alloc/GC-side |
 | parse keys_unique (1000)    | 40.9 | 60.6 | win extended (was 58.7) |
 | gen 3.4 KB / 1 MB | 3.3 / 755 | 3.3 / 834 | large payloads at or ahead of parity |
+
+## 2026-07 exact-number round (bigint decline elimination)
+
+Replaced the whole-document bigint pre-scan + decline with exact
+native number handling. Two candidate designs were evaluated:
+
+**serde_json `arbitrary_precision` (REJECTED on measurement).**
+STEP-0 probes (serde_json 1.0.150 source + a standalone probe crate,
+ARM macOS): with the feature on, numbers are scanned into a fresh
+`String` per literal and `buf.parse::<u64>/<i64>()` is tried first —
+so i64/u64-range integers still arrive via `visit_i64/u64` (including
+`-0` → `visit_i64(0)`), and only floats + >u64 integers take the
+"magic map" (`$serde_json::private::Number` key borrowed `&'static`;
+value an owned MOVED `String` — no second alloc, but the internal
+alloc + reparse taxes EVERY number: 200-int array 2.63→6.56 µs/iter
+(+19.7 ns/number), 200-float 3.30→7.36 (+20.3 ns/number), mixed
+3.4 KB payload +2.5 µs vs ~0.15 µs of scan savings there. Grammar
+enforcement and `end()` are unchanged by the feature. The flip
+arithmetic: parse would land ~1.5-2.3 µs ABOVE CRuby and the number
+fixtures 2.2-2.5× — fails the perf gates. The feature is also global
+to serde_json across the workspace (carmine / gapscan / rouge tables
+share the crate; no `untagged`/`flatten` users, so behaviour-safe,
+but the tax is not scopeable without vendoring a renamed copy).
+
+**Ordered-literal retry (SHIPPED — zero fast-path tax, no new deps).**
+Same serde_json build; three pieces:
+1. `visit_u64` in `(i64::MAX, u64::MAX]` → exact Bignum straight
+   from the u64 (serde parses 19-20-digit ints exactly): snowflake
+   IDs never even retry.
+2. `visit_f64` suspicion check (3 predictable compares): |n| at/past
+   2^64 / i64::MIN (a possibly-rounded >u64 integer literal) or
+   negative zero (possibly the integer literal `-0`, CRuby Integer
+   0). Primary pass aborts → a string-aware scan extracts the exact
+   literals IN DOCUMENT ORDER (int spellings beyond native lanes →
+   Bignum-from-text; `-0` → Integer 0; huge/negative-zero float
+   spellings → their f64) → the same parse re-runs consuming that
+   queue, each suspicious visit pairing BIT-IDENTICALLY with the
+   queue head (expected f64 precomputed via `from_str`; two in-file
+   property tests pin `from_str` ≡ serde's f64 delivery over 1.6M+
+   samples incl. the fpconv writer corpus and random 20-40-digit
+   literals). Any scan/serde tokenization disagreement breaks the
+   pairing → decline to the canon: wrong values cannot escape.
+3. The 19-digit pre-scan became a memchr2(e,E)-gated ≥10-digit
+   EXPONENT fence: CRuby's two exponent-overflow regimes (literal
+   saturation at ≥20 written digits / |exp| > i64::MAX, and the
+   adjusted-exponent > INT32_MAX shortcut — `0.0e2147483649` →
+   Infinity even with a ZERO mantissa, a LATENT canon+native
+   divergence this round found and fixed in the canon) are
+   unrecoverable from a parsed f64 and both need ≥10 written
+   exponent digits. Such documents (pathological only) decline
+   whole to the canon, the single value+error authority. e-free
+   payloads (number arrays, sid docs) pay ONE SIMD sweep.
+
+Interleaved best-of-4-rounds vs the pre-change build (`old`) and
+CRuby 3.4.1 + json 2.20, mimalloc gate builds, ITERS=3000 RUNS=5:
+
+| Fixture | old | new | CRuby | new/old | new/CRuby |
+|---|---:|---:|---:|---:|---:|
+| `parse` (3.4 KB mixed) | 14.77 µs | 15.30 µs | 13.93 µs | 1.04× (see note) | 1.10× |
+| `generate` | 5.94 | 6.09 | 5.95 | 1.03× (untouched code) | 1.02× |
+| `round_trip` | 20.67 | 21.56 | 20.85 | 1.04× | 1.03× |
+| `parse_sids` (11 KB, IDs in strings) | 32.41 | **29.23** | 20.44 | **0.90×** | 1.43× |
+| `parse_ints` (200 ints) | 3.64 | **3.55** | 1.95 | **0.97×** | 1.82× |
+| `parse_floats` (200 floats) | 5.74 | **4.67** | 2.91 | **0.81×** | 1.60× |
+| `parse_bigints` (200×25-digit) | **8700.6** | **67.4** | 48.7 | **0.008× (129×)** | 1.38× |
+| `keys_repeated` | 60.10 | 60.56 | 37.32 | 1.01× | 1.62× |
+| `keys_unique` | 41.65 | 42.72 | 65.54 | 1.03× | 0.65× (win kept) |
+
+Noise note (honest): `generate` runs byte-identical UNCHANGED code
+yet reads +3% in this table, and `new` always ran LAST within each
+interleaved round on a thermally-drifting box — treat ±3-4% as this
+run's noise floor. Quieter same-day runs put parse at 14.65-14.93
+vs old 14.55-14.77 (≈ +1%), consistent with the one real new cost
+on e-containing payloads: the fence stride tightened 19→10 bytes
+(a 10-digit exponent run must never be missed — the price of the
+newly-CORRECT adjusted-exp overflow family; the old scan was
+silently WRONG there, `0.0e999999999999999999` parsed as 0.0 vs
+CRuby's Infinity). An intermediate version also regressed
+parse_ints +14% via inline-threshold spill of the fattened
+visit_u64 — fixed by outlining the cold Bignum/exact-number arms;
+the number-visit lanes are inline-budget-critical.
+
+Correctness riders: the parity battery gained bigint straddles
+(i64/u64 boundaries ±1, 30/100/320-digit), zero-spelling sweeps,
+the exponent saturation + adjusted-exp-overflow regimes, exact-
+pairing order (huge floats & bigints interleaved, float-vs-int
+spellings of one f64, both negative-zero spellings in one doc),
+and sid payloads — three-way byte-identical (CRuby == native ==
+RUBYRS_JSON_NO_NATIVE canon) under default / TIER2+THRESHOLD /
+STRESS_GC. RSS stays bounded on bigint-doc parse loops (the retry
+allocates two trees per parse; 5000 parses peak ~22 MB).
 
 ## 2026-07 small-hash representation (record-shape campaign)
 

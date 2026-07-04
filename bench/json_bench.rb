@@ -71,9 +71,11 @@ end
 OBJ = build_payload
 JSON_BYTES = JSON.generate(OBJ)
 # Snowflake/Stripe-ID shaped payload: long digit runs INSIDE string
-# values. Guards the bigint pre-scan's string-awareness — a context-
-# blind scan declined these documents to the ~200x-slower pure canon
-# (a measured 160x parse regression, fixed 2026-07).
+# values. Historically guarded the bigint pre-scan's string-awareness
+# (a context-blind scan declined these documents to the ~200x-slower
+# pure canon — a measured 160x parse regression); since the 2026-07
+# exact-number round it guards the exponent-fence scan's cost on
+# ID-heavy payloads (no tier-2 pass, no decline).
 SID_BYTES = JSON.generate((1..200).map { |i| { "sid" => (1234567890123456789 + i).to_s, "n" => i } })
 # Record-shape Hash-allocation metrics (2026-07 small-hash campaign):
 # keys_repeated = many small records sharing one key set (the shape the
@@ -84,6 +86,15 @@ KEYS_REPEATED_BYTES = JSON.generate((1..200).map { |i|
   { "alpha" => i, "beta" => "v#{i}", "gamma" => i.even?, "delta" => i * 1.5, "epsilon" => nil }
 })
 KEYS_UNIQUE_BYTES = JSON.generate((1..1000).map { |i| ["key_#{i}", i] }.to_h)
+# Number-dense fixtures (2026-07 exact-number round): ints/floats are the
+# tax surface any raw-text number scheme would regress (a serde_json
+# arbitrary_precision flip measured +20 ns/number here — rejected); they
+# guard the zero-tax fast path. bigints (200 records with bare 25-digit
+# integer literals) used to decline the WHOLE document to the ~200x
+# interpreted canon; the exact-number retry parses it natively.
+INTS_BYTES = JSON.generate((1..200).map { |i| i * 7919 + 13 })
+FLOATS_BYTES = JSON.generate((1..200).map { |i| i * 1.5 + 0.0625 })
+BIGINTS_BYTES = JSON.generate((1..200).map { |i| { "id" => 10**24 * 3 + i, "n" => i } })
 
 runtime_label = if defined?(JSON::NATIVE_AVAILABLE)
   JSON::NATIVE_AVAILABLE ? "rubyrs (_json_native)" : "rubyrs (pure canon)"
@@ -127,6 +138,9 @@ bench("round_trip",       RUNS, ITERS) { JSON.generate(JSON.parse(JSON_BYTES)) }
 bench("parse_sids",       RUNS, ITERS) { JSON.parse(SID_BYTES) }
 bench("keys_repeated",    RUNS, ITERS) { JSON.parse(KEYS_REPEATED_BYTES) }
 bench("keys_unique",      RUNS, ITERS) { JSON.parse(KEYS_UNIQUE_BYTES) }
+bench("parse_ints",       RUNS, ITERS) { JSON.parse(INTS_BYTES) }
+bench("parse_floats",     RUNS, ITERS) { JSON.parse(FLOATS_BYTES) }
+bench("parse_bigints",    RUNS, ITERS) { JSON.parse(BIGINTS_BYTES) }
 
 if HAVE_OJ
   puts ""
