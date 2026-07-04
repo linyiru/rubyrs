@@ -1152,14 +1152,35 @@ pub(crate) struct ConstLoc {
     pub(crate) file: std::rc::Rc<str>,
     pub(crate) source: std::rc::Rc<str>,
     pub(crate) byte_offset: u32,
+    /// Memoized offset→line answer, filled by the first `line()`
+    /// query so repeat queries are O(1) instead of re-scanning
+    /// `source`. Sound because the ingredients are immutable: the
+    /// `source` Rc is pinned at stamp time, and `remove_const` +
+    /// redefine stamps a FRESH `ConstLoc` (fresh empty cell), so a
+    /// stamped entry's answer can never change. NOTE: call `line()`
+    /// through the MAP ENTRY (`const_source_locations.get(..)`),
+    /// not a clone — `Cell` is copied by value, so memoizing into a
+    /// temporary clone is discarded with it.
+    line: std::cell::Cell<Option<u32>>,
 }
 
 impl ConstLoc {
+    pub(crate) fn new(file: std::rc::Rc<str>, source: std::rc::Rc<str>, byte_offset: u32) -> Self {
+        ConstLoc { file, source, byte_offset, line: std::cell::Cell::new(None) }
+    }
+
     /// 1-based line of the defining op — the value the old eager
-    /// stamp stored. Scans `source` up to `byte_offset` (identical
-    /// arithmetic to the eager path via `error::line_col`).
+    /// stamp stored. The first call scans `source` up to
+    /// `byte_offset` (identical arithmetic to the eager path via
+    /// `error::line_col`) and memoizes; later calls return the
+    /// cached line.
     pub(crate) fn line(&self) -> u32 {
-        crate::error::line_col(&self.source, self.byte_offset).0
+        if let Some(l) = self.line.get() {
+            return l;
+        }
+        let l = crate::error::line_col(&self.source, self.byte_offset).0;
+        self.line.set(Some(l));
+        l
     }
 }
 
@@ -1573,11 +1594,24 @@ pub(crate) struct Vm {
     /// Definition location of each user-defined class/module/value
     /// constant, keyed by the same qualified-name `SymId` the
     /// `classes` / `constants` tables use. Recorded at
-    /// `Op::DefClass` / `Op::DefModule` / `Op::StoreConst` (first
-    /// definition wins, matching CRuby — reopens don't move it).
-    /// Read by `Module#const_source_location`. `Rc<str>` filename is
-    /// not a GC object, so no rooting. Snapshot/reset-managed like
-    /// `constants` so embed resets don't leak user entries.
+    /// `Op::DefClass` / `Op::DefModule` / `Op::StoreConst` with a
+    /// FIRST-definition-wins rule for every shape. For class/module
+    /// reopens that matches CRuby (reopens don't move the location);
+    /// for value-constant REASSIGNMENT CRuby moves the location to
+    /// the reassigning write (alongside the "already initialized
+    /// constant" warning) while rubyrs keeps the first — a
+    /// pre-existing, deliberate divergence (`remove_const` +
+    /// redefine does re-stamp). Read by `Module#const_source_location`.
+    /// `Rc<str>` filename is not a GC object, so no rooting.
+    /// Snapshot/reset-managed like `constants` so embed resets don't
+    /// leak user entries.
+    ///
+    /// Rc-pinning trade (deliberate): each `ConstLoc` pins the
+    /// source-text version its define executed against, so an
+    /// embedder that hot-re-`load`s the same path accumulates the
+    /// old versions for as long as their constants stay stamped —
+    /// the cost of keeping every already-stamped answer stable
+    /// after a re-load overwrites `vm.sources`.
     ///
     /// Stores the RAW location ingredients (filename + captured
     /// source text + byte offset), NOT a resolved line: resolving a

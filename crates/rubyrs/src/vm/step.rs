@@ -584,11 +584,11 @@ impl Vm {
         let op_idx = f.ip.checked_sub(1)?;
         let span = proto.op_spans.get(op_idx).copied()?;
         let src = self.sources.get(proto.filename.as_ref())?;
-        Some(crate::vm::ConstLoc {
-            file: proto.filename.clone(),
-            source: src.clone(),
-            byte_offset: span.byte_offset,
-        })
+        Some(crate::vm::ConstLoc::new(
+            proto.filename.clone(),
+            src.clone(),
+            span.byte_offset,
+        ))
     }
 
     /// Lazily materialise the `$LOADED_FEATURES` / `$"` Array — the
@@ -2016,9 +2016,14 @@ impl Vm {
                     scope.consts.borrow_mut().insert(short_id, v.clone());
                 }
                 self.constants.insert(name_id, v);
-                // Stamp the assignment location (first write wins, so a
-                // `class Foo; end`'s DefClass location is preserved over
-                // the nested-scope StoreConst the compiler also emits).
+                // Stamp the assignment location on the FIRST write only:
+                // (a) a `class Foo; end`'s DefClass location is preserved
+                // over the nested-scope StoreConst the compiler also
+                // emits, and (b) a value-constant REASSIGNMENT keeps the
+                // original location — CRuby moves it to the reassigning
+                // write (alongside its "already initialized constant"
+                // warning); rubyrs deliberately keeps the first (see the
+                // `const_source_locations` field doc).
                 if !self.const_source_locations.contains_key(&name_id)
                     && let Some(loc) = self.current_op_location()
                 {

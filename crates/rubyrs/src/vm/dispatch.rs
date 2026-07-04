@@ -12113,19 +12113,29 @@ impl Vm {
             // "C-defined core", so a preamble-located constant maps to
             // the empty-Array form.
             let short_key = self.interner.intern(&const_name);
-            let result: Value = if let Some(loc) = self.const_source_locations.get(&key).cloned() {
-                if loc.file.starts_with("<rubyrs:preamble") {
-                    let id = self.heap.alloc(HeapObj::Array(Vec::new().into()));
-                    Value::Array(id)
-                } else {
-                    // Lazy line resolution — the stamp stores raw
-                    // ingredients; the offset→line scan happens only
-                    // here, per query (see ConstLoc).
-                    let line = loc.line();
-                    let arr = vec![Value::new_str(loc.file.to_string()), Value::Int(line as i64)];
+            // Lazy line resolution — the stamp stores raw ingredients;
+            // the offset→line scan happens here, on the FIRST query
+            // only: `loc.line()` is called through the map ENTRY (not
+            // a clone) so the answer memoizes in place and repeat
+            // queries are O(1) (see ConstLoc). The inner Option is
+            // `None` for a preamble-located constant (→ [] below).
+            let loc_hit: Option<Option<(std::rc::Rc<str>, u32)>> =
+                self.const_source_locations.get(&key).map(|loc| {
+                    if loc.file.starts_with("<rubyrs:preamble") {
+                        None
+                    } else {
+                        Some((loc.file.clone(), loc.line()))
+                    }
+                });
+            let result: Value = if let Some(hit) = loc_hit {
+                if let Some((file, line)) = hit {
+                    let arr = vec![Value::new_str(file.to_string()), Value::Int(line as i64)];
                     self.maybe_gc();
                     self.check_alloc()?;
                     let id = self.heap.alloc(HeapObj::Array(arr.into()));
+                    Value::Array(id)
+                } else {
+                    let id = self.heap.alloc(HeapObj::Array(Vec::new().into()));
                     Value::Array(id)
                 }
             } else if self.classes.contains_key(&key)

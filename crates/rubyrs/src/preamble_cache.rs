@@ -164,9 +164,12 @@ fn dbg_miss(stage: &str) {
 /// and leaves `vm` untouched, so the caller falls back to the live
 /// compile path.
 pub(crate) fn try_load(vm: &mut Vm, dir: &Path, key: u64) -> Option<ReplayPlan> {
-    let t_read = std::time::Instant::now();
+    // Stage timing is prof-gated: clock reads + ns math are dead
+    // cost on every boot otherwise.
+    let prof = std::env::var_os("RUBYRS_STARTUP_PROF").is_some();
+    let t_read = prof.then(std::time::Instant::now);
     let Ok(bytes) = std::fs::read(cache_file(dir, key)) else { dbg_miss("read"); return None };
-    let read_ns = t_read.elapsed().as_nanos() as u64;
+    let read_ns = t_read.map_or(0, |t| t.elapsed().as_nanos() as u64);
     if bytes.len() < 16 || &bytes[0..4] != MAGIC {
         return None;
     }
@@ -176,13 +179,13 @@ pub(crate) fn try_load(vm: &mut Vm, dir: &Path, key: u64) -> Option<ReplayPlan> 
     if u64::from_le_bytes(bytes[8..16].try_into().ok()?) != key {
         return None;
     }
-    let t_decode = std::time::Instant::now();
+    let t_decode = prof.then(std::time::Instant::now);
     let snap: Snapshot = match postcard::from_bytes(&bytes[16..]) {
         Ok(s) => s,
         Err(e) => { dbg_miss(&format!("decode: {e}")); return None }
     };
-    let decode_ns = t_decode.elapsed().as_nanos() as u64;
-    let t_apply = std::time::Instant::now();
+    let decode_ns = t_decode.map_or(0, |t| t.elapsed().as_nanos() as u64);
+    let t_apply = prof.then(std::time::Instant::now);
     // Verify the pre-preamble state matches what the blob was
     // stored against. The key already hashes all of this; the
     // explicit re-check is belt-and-braces against hash collision
@@ -230,7 +233,7 @@ pub(crate) fn try_load(vm: &mut Vm, dir: &Path, key: u64) -> Option<ReplayPlan> 
     for (f, src) in snap.sources {
         vm.sources.insert(Rc::from(f.as_str()), Rc::from(src.as_str()));
     }
-    if std::env::var_os("RUBYRS_STARTUP_PROF").is_some() {
+    if let Some(t_apply) = t_apply {
         eprintln!(
             "startup-prof: preamble-cache blob={}B read={:.3}ms decode={:.3}ms verify+apply={:.3}ms",
             bytes.len(),
