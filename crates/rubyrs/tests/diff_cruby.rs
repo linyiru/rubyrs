@@ -1986,6 +1986,15 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // `Bridgetown::Refinements` (includes the refine-holding modules).
 #[test] fn using_refinement_via_include() { run_diff("using_refinement_via_include"); }
 
+// `alias_method`/`alias` inside `refine Target do … end` resolves the
+// source from the refinement module itself FIRST (a sibling `def` in the
+// same block), then falls back to Target. Surfaced by
+// bridgetown-foundation-2.2.1's `alias_method :camelize, :camelize_upper`
+// inside `refine ::String`. Also pins the other refine-block shapes that
+// gem uses (sibling implicit-self call, refined call on a dup'd object,
+// sibling call from inside a block, define_method sibling).
+#[test] fn refine_alias_sibling() { run_diff("refine_alias_sibling"); }
+
 // Reopening `module X`/`class X` with a pending autoload fires the
 // autoload first (CRuby semantics). Surfaced by bridgetown-foundation's
 // zeitwerk-autoloaded `RefineExt` namespace.

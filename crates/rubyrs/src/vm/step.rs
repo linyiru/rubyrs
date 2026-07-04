@@ -4300,8 +4300,16 @@ impl Vm {
                         .get(&(std::rc::Rc::as_ptr(cls) as usize))
                         .cloned()
                     {
-                        // `refine Target do alias … end`: resolve from Target.
-                        self.lookup_method_uncached(&t, old_id)
+                        // `refine Target do alias … end`: CRuby's refinement
+                        // module has Target as an ancestor, so the source
+                        // resolves from the refinement module itself FIRST
+                        // (a sibling `def` in the same refine block), then
+                        // falls back to Target. bridgetown-foundation's
+                        // `def camelize_upper = …; alias_method :camelize,
+                        // :camelize_upper` inside `refine ::String` needs
+                        // the holder-first leg.
+                        self.lookup_method_uncached(cls, old_id)
+                            .or_else(|| self.lookup_method_uncached(&t, old_id))
                     } else {
                         self.lookup_method_uncached(cls, old_id)
                     }
