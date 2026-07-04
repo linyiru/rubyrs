@@ -321,7 +321,11 @@ _http_server = [
 
 [dependencies]
 ruby-prism.workspace = true
-rubyrs-jit = { path = "../rubyrs-jit" }
+# `version` alongside `path`: rubyrs is publishable, so a version-less
+# path dep is a `*` requirement — rejected by deny.toml's
+# `[bans] wildcards = "deny"` and unpublishable anyway. Keep in sync
+# with the workspace version.
+rubyrs-jit = { path = "../rubyrs-jit", version = "0.2.0" }
 cranelift-jit = { version = "0.133", optional = true }
 cranelift-codegen = { version = "0.133", optional = true }
 cranelift-frontend = { version = "0.133", optional = true }

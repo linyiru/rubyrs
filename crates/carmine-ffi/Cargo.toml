@@ -15,5 +15,10 @@ name = "carmine_ffi"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-carmine = { path = "../carmine" }
+# `version` alongside `path`: cargo uses the in-tree path for builds and
+# the version requirement on publish. carmine-ffi is publishable (no
+# `publish = false`), so deny.toml's `[bans] wildcards = "deny"` treats a
+# version-less path dep here as a `*` requirement — keep this in sync
+# with ../carmine's `version`.
+carmine = { path = "../carmine", version = "0.3.0" }
 serde_json.workspace = true
