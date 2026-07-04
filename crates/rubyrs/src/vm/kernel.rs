@@ -6143,43 +6143,71 @@ impl Vm {
     ///      never suppressed (probed: `Integer("10", 99,
     ///      exception: false)` still raises).
     ///
-    /// rubyrs flattens kwargs into a trailing positional Hash (same
-    /// shape as `Kernel#warn`), so a trailing all-Symbol-keyed Hash
-    /// whose keys are all `exception` is peeled as keywords. A
-    /// positional `Integer({exception: false})` is therefore
-    /// indistinguishable from the kwarg form — accepted divergence,
-    /// same as `warn`'s. Known gaps kept as-is (out of this
-    /// change's scope): no `to_int`/`to_str`/`to_i` coercion for
-    /// arbitrary objects (CRuby coerces; we TypeError), and big
-    /// finite Floats saturate at i64 rather than promoting.
+    /// rubyrs flattens kwargs into a trailing positional Hash, but
+    /// `Vm::trailing_hash_positional` (set by plain `Op::Call`,
+    /// cleared by the `CallKw`/splat/`super`/block routes) records
+    /// HOW that hash was passed — the same signal the user-method
+    /// keyword binder consumes at bind time (dispatch.rs). Gating
+    /// the peel on it keeps `Integer("42", {exception: false})`
+    /// (literal brace hash → positional → radix TypeError, as
+    /// CRuby) distinct from `Integer("42", exception: false)` (real
+    /// keywords). Once kwargs syntax is established, non-`exception`
+    /// keys raise CRuby's `unknown keyword: <key.inspect>` (probed:
+    /// Symbol AND non-Symbol keys — `Integer("42", **{"a" => 1})` →
+    /// `unknown keyword: "a"`). Read-only (no `mem::take`): the
+    /// builtin completes the call here, and the plain-`Op::Call`
+    /// arm resets the flag itself after `do_call` returns — taking
+    /// it would blind a nested re-dispatch (`send(:Integer, ...)`)
+    /// that relies on the outer call's flag. Known gaps kept as-is
+    /// (out of this change's scope): no `to_int`/`to_str`/`to_i`
+    /// coercion for arbitrary objects (CRuby coerces; we
+    /// TypeError), and big finite Floats saturate at i64 rather
+    /// than promoting.
     fn kernel_integer(&mut self, args: &[Value]) -> Result<Value, Trap> {
         use crate::vm::str2int::{self, ParsedInt};
-        // ---- 1. keywords ----
+        // ---- 1. keywords (only when passed WITH kwargs syntax) ----
         let mut positional = args;
         let mut exception = true;
-        if let Some(Value::Hash(hid)) = args.last() {
+        if !self.trailing_hash_positional
+            && let Some(Value::Hash(hid)) = args.last()
+        {
             let pairs = self.heap.hash(*hid).to_vec();
-            let is_kwargs = !pairs.is_empty()
-                && pairs.iter().all(|(k, _)| {
-                    matches!(k, Value::Sym(s)
-                        if &**self.interner.resolve(*s) == "exception")
-                });
-            if is_kwargs {
+            if !pairs.is_empty() {
                 positional = &args[..args.len() - 1];
-                // Last-wins on duplicate keys, matching Hash
-                // construction order.
-                for (_, v) in &pairs {
-                    match v {
-                        Value::Bool(b) => exception = *b,
+                // CRuby order: unknown keywords first, then the
+                // `exception:` true/false type check. Last-wins on
+                // duplicate keys, matching Hash construction order.
+                let mut unknown: Vec<String> = Vec::new();
+                let mut exc_val: Option<Value> = None;
+                for (k, v) in &pairs {
+                    match k {
+                        Value::Sym(s) if &**self.interner.resolve(*s) == "exception" => {
+                            exc_val = Some(v.clone());
+                        }
                         other => {
-                            return Err(self.trap(RubyError::ArgumentError {
-                                msg: format!(
-                                    "expected true or false as exception: {}",
-                                    other.to_inspect(&self.heap, &self.interner),
-                                ),
-                            }));
+                            unknown.push(other.to_inspect(&self.heap, &self.interner));
                         }
                     }
+                }
+                if !unknown.is_empty() {
+                    let msg = if unknown.len() == 1 {
+                        format!("unknown keyword: {}", unknown[0])
+                    } else {
+                        format!("unknown keywords: {}", unknown.join(", "))
+                    };
+                    return Err(self.trap(RubyError::ArgumentError { msg }));
+                }
+                match exc_val {
+                    Some(Value::Bool(b)) => exception = b,
+                    Some(other) => {
+                        return Err(self.trap(RubyError::ArgumentError {
+                            msg: format!(
+                                "expected true or false as exception: {}",
+                                other.to_inspect(&self.heap, &self.interner),
+                            ),
+                        }));
+                    }
+                    None => {}
                 }
             }
         }

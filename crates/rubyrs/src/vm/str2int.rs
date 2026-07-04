@@ -52,8 +52,14 @@
 //! `ParsedInt::Big`. The i64::MIN edge (`"-9223372036854775808"`)
 //! stays `Small`. With the `bignum` feature OFF the fold falls back
 //! to the historical two's-complement wrapping (bit-identical to the
-//! old per-site folds), matching the feature's documented contract
-//! ("arithmetic falls back to wrapping").
+//! old per-site `String#to_i` / `Integer()` folds), matching the
+//! feature's documented contract ("arithmetic falls back to
+//! wrapping"). One INTENTIONAL no-bignum behavior change rides
+//! along: sprintf's `%d`-family String coercion previously used
+//! `parse::<i64>().unwrap_or(0)` (overflow → `"0"`, not a wrap);
+//! routing it through this fold means no-bignum overflow strings
+//! now render the wrapped value — consistent with the rest of the
+//! no-bignum family instead of the old silent `"0"`.
 
 use crate::error::RubyError;
 
@@ -93,6 +99,16 @@ fn is_ruby_space(b: u8) -> bool {
 /// to a chunk-folded BigUint on overflow. Non-`bignum`: u64 with
 /// wrapping ops — the low 64 bits are two's-complement-identical to
 /// the historical signed `wrapping_mul`/`wrapping_add` fold.
+///
+/// Complexity note (future work): the chunked left-to-right fold is
+/// O(n²) in the digit count — each `mag * scale + chunk` flush is
+/// O(limbs) and there are n/~19 flushes — where CRuby's
+/// `rb_cstr_parse_inum` uses divide-and-conquer multiplication for
+/// huge inputs. Measured: exact and fine through ~100k digits
+/// (~17 ms); at 1M digits ~1.7 s vs CRuby's ~0.02 s. If a workload
+/// ever feeds million-digit strings to `to_i`, port a
+/// split-in-half recursive combine (or num-bigint's radix parse,
+/// which shares the same shape but is a constant factor better).
 #[cfg(feature = "bignum")]
 enum Acc {
     Small(u64),

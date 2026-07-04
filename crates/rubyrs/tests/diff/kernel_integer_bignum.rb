@@ -50,13 +50,40 @@ try { Integer("abc", exception: false) }
 try { Integer("18446744073709551616", exception: false) }
 try { Integer("abc", 16, exception: false) }   # "abc" IS hex
 try { Integer("zz", 16, exception: false) }
+try { Integer("zz", 36, exception: false) }    # valid base-36 parse WITH kwarg
 try { Integer(nil, exception: false) }
 try { Integer(:sym, exception: false) }
 try { Integer(Float::NAN, exception: false) }
+try { Integer(42, exception: false) }          # Int identity WITH kwarg
 try { Integer(42, 10, exception: false) }      # base-for-non-string → nil
 try { Integer("10", 99, exception: false) }    # invalid radix STILL raises
 try { Integer("abc", exception: nil) }         # must be literal true/false
 try { Integer("42", exception: "x") }          # raises even when parseable
+
+# --- kwargs syntax vs positional literal brace-hash ---
+# The VM records how a trailing Hash was passed
+# (`trailing_hash_positional`, the same signal the user-method
+# keyword binder consumes), so a literal `{...}` in a positional
+# slot is NOT peeled as keywords: it's a (bad) radix / value / third
+# positional, exactly as CRuby treats it.
+try { Integer("42", {exception: false}) }        # TypeError (Hash radix)
+try { Integer("42", {exception: "x"}) }          # TypeError (Hash radix)
+try { Integer({exception: false}) }              # TypeError (Hash value)
+try { Integer("ff", 16, {exception: false}) }    # arity (given 3)
+try { Integer("42", {"exception" => false}) }    # TypeError (Hash radix)
+h = {exception: false}
+try { Integer("abc", h) }                        # positional var → TypeError
+try { Integer("abc", **h) }                      # kwargs splat → nil
+try { Integer("42", **{}) }                      # empty splat → plain call
+try { send(:Integer, "42", {exception: false}) } # positional through send
+try { send(:Integer, "abc", exception: false) }  # kwargs through send
+
+# --- unknown keywords (kwargs syntax established → CRuby messages,
+# key.inspect for Symbol and non-Symbol keys alike) ---
+try { Integer("42", bogus: false) }
+try { Integer("42", bogus: 1, extra: 2) }
+try { Integer("42", exception: false, bogus: 1) }
+try { s = {"a" => 1}; Integer("42", **s) }
 
 # --- message formatting uses String#inspect ---
 try { Integer("4\n2") }
