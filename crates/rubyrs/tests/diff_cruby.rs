@@ -88,8 +88,20 @@ fn run_diff_env(name: &str, envs: &[(&str, &str)]) {
     // (with a local/utc FLAVOUR bit matching TZ=UTC CRuby), so a
     // host-local CRuby would render different zone suffixes and make
     // time fixtures host-dependent.
+    //
+    // LC_ALL pinned to C.UTF-8 on BOTH sides (same pattern as TZ):
+    // with an empty/absent LANG (bare ssh, systemd units, containers)
+    // CRuby's Encoding.default_external falls back to US-ASCII, which
+    // escapes non-ASCII in `inspect` output AND rejects non-ASCII
+    // source literals as "invalid multibyte character" — ~28 fixtures
+    // diverged in the first Linux x86 survey. C.UTF-8 yields UTF-8 on
+    // both glibc (survey: 2.43/ruby 3.4.8) and macOS (verified: ruby
+    // 3.4.1). rubyrs is Tier-1 UTF-8 regardless; pinned for symmetry.
     let mut ours_cmd = Command::new(rubyrs_bin());
-    ours_cmd.current_dir(manifest_dir()).env("TZ", "UTC");
+    ours_cmd
+        .current_dir(manifest_dir())
+        .env("TZ", "UTC")
+        .env("LC_ALL", "C.UTF-8");
     for (k, v) in envs {
         ours_cmd.env(k, v);
     }
@@ -101,6 +113,7 @@ fn run_diff_env(name: &str, envs: &[(&str, &str)]) {
         .arg("--disable=gems")
         .current_dir(manifest_dir())
         .env("TZ", "UTC")
+        .env("LC_ALL", "C.UTF-8")
         .arg(&rb_rel)
         .output()
         .expect("failed to spawn ruby");
@@ -189,8 +202,10 @@ fn run_diff_json_battery(envs: &[(&str, &str)]) {
     let rb_abs = manifest_dir().join(&rb_rel);
     assert!(rb_abs.exists(), "missing diff fixture: {}", rb_abs.display());
 
+    // LC_ALL pinned on both sides for the same reason as `run_diff_env`
+    // (empty-LANG hosts fall back to US-ASCII default_external).
     let mut ours_cmd = Command::new(rubyrs_bin());
-    ours_cmd.current_dir(manifest_dir());
+    ours_cmd.current_dir(manifest_dir()).env("LC_ALL", "C.UTF-8");
     for (k, v) in envs {
         ours_cmd.env(k, v);
     }
@@ -202,6 +217,7 @@ fn run_diff_json_battery(envs: &[(&str, &str)]) {
     // oracle side (the bundled default gem is the older 2.9 format).
     let theirs = Command::new("ruby")
         .current_dir(manifest_dir())
+        .env("LC_ALL", "C.UTF-8")
         .arg(&rb_rel)
         .output()
         .expect("failed to spawn ruby");
@@ -248,14 +264,18 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
     let rb_abs = dir.join(format!("{name}.rb"));
     assert!(rb_abs.exists(), "missing diff fixture: {}", rb_abs.display());
 
+    // LC_ALL pinned on both sides for the same reason as `run_diff_env`
+    // (empty-LANG hosts fall back to US-ASCII default_external).
     let ours = Command::new(rubyrs_bin())
         .current_dir(manifest_dir())
+        .env("LC_ALL", "C.UTF-8")
         .arg(&rb_rel)
         .output()
         .expect("failed to spawn rubyrs");
     // No `--disable=gems`: the real gem must load on the oracle side.
     let theirs = Command::new("ruby")
         .current_dir(manifest_dir())
+        .env("LC_ALL", "C.UTF-8")
         .arg(&rb_rel)
         .output()
         .expect("failed to spawn ruby");
