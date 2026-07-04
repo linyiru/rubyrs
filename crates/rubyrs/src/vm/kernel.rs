@@ -1346,112 +1346,18 @@ impl Vm {
             // The canonical Ruby idiom for "convert or fail loudly",
             // typically wrapped in an inline rescue:
             //   port = Integer(ENV['PORT']) rescue 8080
-            "Integer" => {
-                // Accept 1 or 2 args. The 2-arg form `Integer(str,
-                // radix)` is the strict counterpart to
-                // `String#to_i(radix)` — any garbage tail raises
-                // ArgumentError where `to_i` would silently
-                // accept a prefix and stop. Radix 0 means
-                // "auto-detect via 0x/0o/0b/0d prefix"; 2..=36 is
-                // the explicit form; anything else raises
-                // ArgumentError.
-                if args.is_empty() || args.len() > 2 {
-                    return Some(Err(self.trap(RubyError::ArgumentError {
-                        msg: format!(
-                            "wrong number of arguments (given {}, expected 1..2)",
-                            args.len(),
-                        ),
-                    })));
-                }
-                let radix_arg: Option<i64> = if args.len() == 2 {
-                    match &args[1] {
-                        Value::Int(r) => Some(*r),
-                        other => {
-                            return Some(Err(self.trap(RubyError::TypeError {
-                                msg: format!(
-                                    "no implicit conversion of {} into Integer",
-                                    other.type_name(),
-                                ),
-                            })));
-                        }
-                    }
-                } else { None };
-                // Validate the radix early — `Integer(non-str, 16)`
-                // is a TypeError on the receiver and never reaches
-                // the parse path, but `Integer("ff", 1)` is an
-                // ArgumentError on the radix.
-                if let Some(r) = radix_arg
-                    && r != 0
-                    && !(2..=36).contains(&r)
-                {
-                    return Some(Err(self.trap(RubyError::ArgumentError {
-                        msg: format!("invalid radix {}", r),
-                    })));
-                }
-                let result = match (&args[0], radix_arg) {
-                    // 1-arg form: receiver-shape dispatch, same
-                    // as before. The 2-arg form REQUIRES a String
-                    // (or Symbol — but CRuby doesn't accept those
-                    // here either, so we don't).
-                    (Value::Int(n), None) => Ok(Value::Int(*n)),
-                    (Value::Float(f), None) => {
-                        // CRuby raises FloatDomainError (a RangeError
-                        // subclass) for NaN / ±Infinity here, matching
-                        // `Float#to_i`'s shape — same message label so
-                        // `Integer(Float::NAN)` and `Float::NAN.to_i`
-                        // emit the same exception class, not divergent
-                        // ones.
-                        if !f.is_finite() {
-                            Err(RubyError::FloatDomainError {
-                                msg: crate::vm::numeric::float_domain_label(*f).to_string(),
-                            })
-                        } else { Ok(Value::Int(*f as i64)) }
-                    }
-                    (Value::Str(s), None) => {
-                        // Auto-detect base (radix 0): handles the
-                        // `0x`/`0b`/`0o`/`0d` prefixes, leading-`0`
-                        // octal, underscore separators, and sign —
-                        // same strict parser as the 2-arg form, where
-                        // plain `parse::<i64>()` accepted only bare
-                        // decimal.
-                        let raw = s.to_string_lossy();
-                        match strict_parse_integer(&raw, 0) {
-                            Some(n) => Ok(Value::Int(n)),
-                            None => Err(RubyError::ArgumentError {
-                                msg: format!("invalid value for Integer(): \"{}\"", raw),
-                            }),
-                        }
-                    }
-                    (Value::Nil, None) => Err(RubyError::TypeError {
-                        msg: "can't convert nil into Integer".into(),
-                    }),
-                    (other, None) => Err(RubyError::TypeError {
-                        msg: format!("can't convert {} into Integer", other.type_name()),
-                    }),
-                    // 2-arg form: only String accepted as the value.
-                    (Value::Str(s), Some(radix)) => {
-                        let raw = s.to_string_lossy();
-                        match strict_parse_integer(&raw, radix) {
-                            Some(n) => Ok(Value::Int(n)),
-                            None => Err(RubyError::ArgumentError {
-                                msg: format!("invalid value for Integer(): \"{}\"", raw),
-                            }),
-                        }
-                    }
-                    (_other, Some(_)) => Err(RubyError::ArgumentError {
-                        // CRuby's exact message for the
-                        // `Integer(non_string, radix)` case is
-                        // `"base specified for non string value"` —
-                        // it's an ArgumentError, NOT a TypeError,
-                        // because the radix only makes sense paired
-                        // with a String to parse. Mirror the class
-                        // so `rescue ArgumentError` catches both
-                        // rubyrs and CRuby alike.
-                        msg: "base specified for non string value".into(),
-                    }),
-                };
-                Some(result.map_err(|e| self.trap(e)))
-            }
+            // `Integer(x [, base] [, exception: true/false])` —
+            // strict conversion. The String path routes through the
+            // shared `str2int` scanner (strict mode): whole-string
+            // match, `0x/0b/0o/0d` + leading-0-octal prefixes,
+            // single `_` between digits, ASCII whitespace at the
+            // edges, and EXACT BigInt promotion past i64 range
+            // (`Integer("18446744073709551616")` is the precise
+            // 2^64, not a wrapped 0). Negative bases are CRuby's
+            // "prefix-driven with default |base|" form
+            // (`Integer("10", -16)` → 16, `Integer("042", -16)` →
+            // octal 34).
+            "Integer" => Some(self.kernel_integer(args)),
             "Float" => {
                 if args.len() != 1 {
                     return Some(Err(self.trap(RubyError::ArgumentError {
@@ -6214,90 +6120,155 @@ fn snake_to_camel_case(input: &str) -> String {
     out
 }
 
-/// Strict base-aware integer parser used by `Kernel#Integer(str,
-/// radix)`. CRuby semantics:
-///
-///   - Strip leading + trailing whitespace.
-///   - Optional `+` / `-` sign.
-///   - `radix == 0` consults the source's `0x` / `0o` / `0b` /
-///     `0d` prefix to pick the radix (default `10` if no
-///     prefix). `2..=36` is an explicit radix; if the source
-///     carries a MATCHING prefix it's consumed, otherwise the
-///     parse starts at the first non-sign char.
-///   - `_` is allowed BETWEEN digits but not adjacent to the
-///     sign / prefix / endpoints (CRuby's strict literal shape).
-///   - Every remaining char must be a valid digit in the chosen
-///     radix — otherwise the parse fails (unlike `String#to_i`'s
-///     lenient "stop at first non-digit" rule).
-///
-/// Returns `Some(n)` on a successful parse, `None` otherwise.
-/// Wrapping arithmetic on the accumulator matches the existing
-/// `String#to_i` semantics; i64 overflow is silently wrapped at
-/// the parse step (BigInt promotion at the Kernel level is a
-/// follow-up).
-fn strict_parse_integer(raw: &str, radix: i64) -> Option<i64> {
-    let s = raw.trim();
-    if s.is_empty() {
-        return None;
-    }
-    let (sign, mut body) = match s.as_bytes().first() {
-        Some(b'-') => (-1i64, &s[1..]),
-        Some(b'+') => (1i64, &s[1..]),
-        _ => (1i64, s),
-    };
-    if body.is_empty() {
-        return None;
-    }
-    let mut effective_r: u32 = if radix == 0 { 10 } else { radix as u32 };
-    let body_bytes = body.as_bytes();
-    if body_bytes.len() >= 2 && body_bytes[0] == b'0' {
-        let prefix_r: u32 = match body_bytes[1] {
-            b'x' | b'X' => 16,
-            b'b' | b'B' => 2,
-            b'o' | b'O' => 8,
-            b'd' | b'D' => 10,
-            _ => 0,
-        };
-        if prefix_r != 0 && (radix == 0 || radix as u32 == prefix_r) {
-            effective_r = prefix_r;
-            body = &body[2..];
-        } else if radix == 0 {
-            // Leading `0` with no explicit base prefix → OCTAL in
-            // auto-detect mode (CRuby `Integer("010")` == 8). Keep the
-            // `0` as a digit so the underscore/digit loop below
-            // validates octal-ness (`"08"` → error) and a following
-            // underscore stays legal (`"0_10"` == 8). An explicit
-            // radix (`Integer("010", 10)`) skips this — the `0` is a
-            // plain base-10 digit there.
-            effective_r = 8;
-        }
-    }
-    // After all prefix handling, the body must have at least one
-    // digit. Leading `_` is rejected (CRuby refuses `_` adjacent
-    // to the sign / prefix boundary).
-    if body.is_empty() || body.starts_with('_') || body.ends_with('_') {
-        return None;
-    }
-    let mut n: i64 = 0;
-    let mut prev_was_underscore = false;
-    for c in body.chars() {
-        if c == '_' {
-            // Two underscores in a row, or right after the
-            // boundary, isn't legal in a Ruby integer literal.
-            if prev_was_underscore { return None; }
-            prev_was_underscore = true;
-            continue;
-        }
-        prev_was_underscore = false;
-        match c.to_digit(effective_r) {
-            Some(d) => {
-                n = n.wrapping_mul(effective_r as i64)
-                    .wrapping_add(d as i64);
+impl Vm {
+    /// `Kernel#Integer(x [, base] [, exception: true/false])`.
+    ///
+    /// The String path is the shared strict `str2int` scanner —
+    /// see that module's docs for the probed CRuby 3.4 semantics
+    /// (prefixes, underscores, whitespace, negative bases, BigInt
+    /// promotion). This wrapper owns the CRuby argument protocol,
+    /// in CRuby's check order:
+    ///
+    ///   1. keywords: `exception:` must be literal true/false
+    ///      (`expected true or false as exception: <inspect>`) —
+    ///      raises even when the value would parse fine, and is
+    ///      NEVER suppressed;
+    ///   2. arity (1..2 positionals);
+    ///   3. the conversion itself — its ArgumentError / TypeError /
+    ///      FloatDomainError all become `nil` under
+    ///      `exception: false`, EXCEPT the invalid-radix
+    ///      ArgumentError, which the scan raises lazily (CRuby's
+    ///      bignum.c order — a prefix-resolved base skips
+    ///      validation; `Integer("0x10", -99)` parses) and which is
+    ///      never suppressed (probed: `Integer("10", 99,
+    ///      exception: false)` still raises).
+    ///
+    /// rubyrs flattens kwargs into a trailing positional Hash (same
+    /// shape as `Kernel#warn`), so a trailing all-Symbol-keyed Hash
+    /// whose keys are all `exception` is peeled as keywords. A
+    /// positional `Integer({exception: false})` is therefore
+    /// indistinguishable from the kwarg form — accepted divergence,
+    /// same as `warn`'s. Known gaps kept as-is (out of this
+    /// change's scope): no `to_int`/`to_str`/`to_i` coercion for
+    /// arbitrary objects (CRuby coerces; we TypeError), and big
+    /// finite Floats saturate at i64 rather than promoting.
+    fn kernel_integer(&mut self, args: &[Value]) -> Result<Value, Trap> {
+        use crate::vm::str2int::{self, ParsedInt};
+        // ---- 1. keywords ----
+        let mut positional = args;
+        let mut exception = true;
+        if let Some(Value::Hash(hid)) = args.last() {
+            let pairs = self.heap.hash(*hid).to_vec();
+            let is_kwargs = !pairs.is_empty()
+                && pairs.iter().all(|(k, _)| {
+                    matches!(k, Value::Sym(s)
+                        if &**self.interner.resolve(*s) == "exception")
+                });
+            if is_kwargs {
+                positional = &args[..args.len() - 1];
+                // Last-wins on duplicate keys, matching Hash
+                // construction order.
+                for (_, v) in &pairs {
+                    match v {
+                        Value::Bool(b) => exception = *b,
+                        other => {
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: format!(
+                                    "expected true or false as exception: {}",
+                                    other.to_inspect(&self.heap, &self.interner),
+                                ),
+                            }));
+                        }
+                    }
+                }
             }
-            None => return None, // any non-digit tail is a hard error
+        }
+        // ---- 2. arity ----
+        if positional.is_empty() || positional.len() > 2 {
+            return Err(self.trap(RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 1..2)",
+                    positional.len(),
+                ),
+            }));
+        }
+        // ---- 3. radix shape (validation itself is LAZY — inside
+        // the scan, per CRuby's bignum.c order; see str2int) ----
+        let radix_arg: Option<i64> = match positional.get(1) {
+            None => None,
+            Some(Value::Int(r)) => Some(*r),
+            Some(other) => {
+                return Err(self.trap(RubyError::TypeError {
+                    msg: format!(
+                        "no implicit conversion of {} into Integer",
+                        other.type_name(),
+                    ),
+                }));
+            }
+        };
+        // ---- 4. conversion ----
+        let err = match (&positional[0], radix_arg) {
+            (Value::Int(n), None) => return Ok(Value::Int(*n)),
+            // Integer identity holds for the Bignum span too:
+            // `Integer(2**100)` is the value itself, not a
+            // TypeError (this is also what makes
+            // `Integer(Integer(big_str))` idempotent).
+            #[cfg(feature = "bignum")]
+            (v @ Value::BigInt(_), None) => return Ok(v.clone()),
+            (Value::Float(f), None) => {
+                // CRuby raises FloatDomainError (a RangeError
+                // subclass) for NaN / ±Infinity here, matching
+                // `Float#to_i`'s shape — same message label so
+                // `Integer(Float::NAN)` and `Float::NAN.to_i`
+                // emit the same exception class, not divergent
+                // ones.
+                if f.is_finite() {
+                    return Ok(Value::Int(*f as i64));
+                }
+                RubyError::FloatDomainError {
+                    msg: crate::vm::numeric::float_domain_label(*f).to_string(),
+                }
+            }
+            (Value::Str(s), r) => {
+                match str2int::strict(&s.borrow(), r.unwrap_or(0)) {
+                    Ok(Some(ParsedInt::Small(n))) => return Ok(Value::Int(n)),
+                    #[cfg(feature = "bignum")]
+                    Ok(Some(ParsedInt::Big(b))) => return self.bigint_to_value(b),
+                    // Invalid radix — probed: NOT suppressed by
+                    // `exception: false` (unlike the invalid-value
+                    // ArgumentError below).
+                    Err(e) => return Err(self.trap(e)),
+                    // CRuby's message embeds the receiver's INSPECT
+                    // form (`Integer("4\n2")` → `... "4\n2"` with a
+                    // literal backslash-n), not the raw bytes.
+                    Ok(None) => RubyError::ArgumentError {
+                        msg: format!(
+                            "invalid value for Integer(): {}",
+                            crate::heap::rstr_inspect(s),
+                        ),
+                    },
+                }
+            }
+            (Value::Nil, None) => RubyError::TypeError {
+                msg: "can't convert nil into Integer".into(),
+            },
+            (other, None) => RubyError::TypeError {
+                msg: format!("can't convert {} into Integer", other.type_name()),
+            },
+            // CRuby's exact message for `Integer(non_string, radix)`
+            // is `"base specified for non string value"` — an
+            // ArgumentError, NOT a TypeError, because the radix only
+            // makes sense paired with a String to parse.
+            (_other, Some(_)) => RubyError::ArgumentError {
+                msg: "base specified for non string value".into(),
+            },
+        };
+        if exception {
+            Err(self.trap(err))
+        } else {
+            Ok(Value::Nil)
         }
     }
-    Some(sign.wrapping_mul(n))
 }
 
 /// ADR 0025 Phase 0.5b: shared exit-status parser used by

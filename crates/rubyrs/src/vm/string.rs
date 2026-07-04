@@ -1735,87 +1735,59 @@ pub(crate) fn string_call(
                 None => Some(Value::Nil),
             }
         }
+        // `String#to_i(base = 10)` / `#hex` / `#oct` — CRuby's
+        // famously lenient parse (leading ASCII whitespace, optional
+        // sign, `_` between digits, stop at the first invalid char,
+        // 0 on no digits) via the shared `str2int` scanner. Radix 0
+        // auto-detects from a `0x`/`0o`/`0b`/`0d` prefix (bare
+        // leading `0` → octal); explicit radices consume ONLY a
+        // matching prefix. `hex` ≡ `to_i(16)`; `oct` is prefix-
+        // driven with default 8 (str2int's negative-base form).
+        //
+        // Values past i64 range return `Ok(None)` here — this
+        // stateless table can't allocate the heap-slot-backed
+        // `Value::BigInt`, so the dispatch chain falls through to
+        // `Vm::str_to_int_promote` (string_collection_call & the
+        // do_call_block / super hooks), which re-runs the same
+        // scanner WITH heap access. The fast path (fits-i64) stays
+        // allocation-free right here.
         (Value::Str(a), "to_i", []) => {
-            // CRuby's `String#to_i` is famously lenient: leading
-            // whitespace, optional sign, then as many digits as it
-            // can read; non-numeric tail (or empty input) gives 0.
-            let a_ref = a.to_string_lossy();
-            let s = a_ref.trim_start();
-            let (sign, rest) = match s.as_bytes().first() {
-                Some(b'-') => (-1i64, &s[1..]),
-                Some(b'+') => (1i64, &s[1..]),
-                _ => (1i64, s),
-            };
-            let mut n: i64 = 0;
-            let mut saw_digit = false;
-            for c in rest.chars() {
-                if let Some(d) = c.to_digit(10) {
-                    saw_digit = true;
-                    n = n.wrapping_mul(10).wrapping_add(d as i64);
-                } else { break; }
+            match crate::vm::str2int::lenient(&a.borrow(), 10)? {
+                crate::vm::str2int::ParsedInt::Small(n) => Some(Value::Int(n)),
+                #[cfg(feature = "bignum")]
+                crate::vm::str2int::ParsedInt::Big(_) => return Ok(None),
             }
-            Some(Value::Int(if saw_digit { sign.wrapping_mul(n) } else { 0 }))
         }
-        // `String#to_i(radix)` — same lenient parse as the no-arg
-        // form but reading digits in the given base. Radix 0 means
-        // "auto-detect" from a `0x`/`0o`/`0b`/`0d` prefix (CRuby).
-        // Radix 2..=36 parses with that exact base (lowercase or
-        // uppercase digits). Out-of-range raises ArgumentError to
-        // match `Integer#to_s`'s shape. Mirrors the `Integer#to_s
-        // (radix)` arm in `numeric.rs` so `to_s(r).to_i(r)` round-
-        // trips for the supported range.
         (Value::Str(a), "to_i", [Value::Int(radix)]) => {
-            let r = *radix;
-            // CRuby accepts 0 (auto-detect) and 2..=36; anything
-            // else raises ArgumentError.
-            if r != 0 && !(2..=36).contains(&r) {
+            // CRuby's `string.c` rejects a NEGATIVE base up front
+            // (raw value in the message); a positive out-of-range
+            // base is validated LAZILY inside the scan — after the
+            // whitespace/sign bail — so `"  ".to_i(99)` is 0 while
+            // `"z".to_i(99)` raises. See `str2int::parse_int_radix`.
+            if *radix < 0 {
                 return Err(RubyError::ArgumentError {
-                    msg: format!("invalid radix {}", r),
+                    msg: format!("invalid radix {radix}"),
                 });
             }
-            let a_ref = a.to_string_lossy();
-            let s = a_ref.trim_start();
-            let (sign, mut rest) = match s.as_bytes().first() {
-                Some(b'-') => (-1i64, &s[1..]),
-                Some(b'+') => (1i64, &s[1..]),
-                _ => (1i64, s),
-            };
-            // Resolve the actual radix. Radix 0 inspects the
-            // optional CRuby prefix; explicit radices skip the
-            // prefix unless it matches (e.g. `to_i(16)` accepts
-            // `"0xff"`, `to_i(2)` accepts `"0b1010"`).
-            let mut effective_r: u32 = if r == 0 { 10 } else { r as u32 };
-            let bytes = rest.as_bytes();
-            if bytes.len() >= 2 && bytes[0] == b'0' {
-                let (prefix_r, prefix_len) = match bytes[1] {
-                    b'x' | b'X' => (16u32, 2),
-                    b'b' | b'B' => (2u32, 2),
-                    b'o' | b'O' => (8u32, 2),
-                    b'd' | b'D' => (10u32, 2),
-                    _ => (0u32, 0),
-                };
-                if prefix_r != 0 && (r == 0 || r as u32 == prefix_r) {
-                    effective_r = prefix_r;
-                    rest = &rest[prefix_len..];
-                }
+            match crate::vm::str2int::lenient(&a.borrow(), *radix)? {
+                crate::vm::str2int::ParsedInt::Small(n) => Some(Value::Int(n)),
+                #[cfg(feature = "bignum")]
+                crate::vm::str2int::ParsedInt::Big(_) => return Ok(None),
             }
-            let mut n: i64 = 0;
-            let mut saw_digit = false;
-            for c in rest.chars() {
-                if let Some(d) = c.to_digit(effective_r) {
-                    saw_digit = true;
-                    n = n.wrapping_mul(effective_r as i64)
-                         .wrapping_add(d as i64);
-                } else if c == '_' && saw_digit {
-                    // CRuby tolerates `_` as a digit separator
-                    // INSIDE a numeric literal (e.g. `"1_000".to_i`
-                    // → 1000). Leading `_` is treated as garbage.
-                    continue;
-                } else {
-                    break;
-                }
+        }
+        (Value::Str(a), "hex", []) => {
+            match crate::vm::str2int::lenient(&a.borrow(), 16)? {
+                crate::vm::str2int::ParsedInt::Small(n) => Some(Value::Int(n)),
+                #[cfg(feature = "bignum")]
+                crate::vm::str2int::ParsedInt::Big(_) => return Ok(None),
             }
-            Some(Value::Int(if saw_digit { sign.wrapping_mul(n) } else { 0 }))
+        }
+        (Value::Str(a), "oct", []) => {
+            match crate::vm::str2int::lenient(&a.borrow(), -8)? {
+                crate::vm::str2int::ParsedInt::Small(n) => Some(Value::Int(n)),
+                #[cfg(feature = "bignum")]
+                crate::vm::str2int::ParsedInt::Big(_) => return Ok(None),
+            }
         }
         (Value::Str(a), "to_f", []) => {
             // CRuby's leniency: trim leading whitespace, parse what
@@ -2091,6 +2063,52 @@ impl Vm {
         }
     }
 
+    /// The heap-capable half of the Str→Integer family: re-runs the
+    /// same `str2int` scan as `string_call`'s stateless `to_i` /
+    /// `hex` / `oct` arms, but can lift a past-i64 result into a
+    /// `Value::BigInt` via `bigint_to_value` (demote-on-fit +
+    /// maybe_gc + alloc-cap). `string_call` returns `Ok(None)` for
+    /// those inputs precisely so the dispatch chain reaches this —
+    /// hooked from `string_collection_call` (the `do_call` route),
+    /// `do_call_block`'s post-primitive fallback, and the
+    /// str-singleton `super` arm in `lookup.rs`. Small values are
+    /// answered correctly here too, so the helper has no ordering
+    /// dependency on `string_call` having run first.
+    #[cfg(feature = "bignum")]
+    pub(crate) fn str_to_int_promote(
+        &mut self,
+        s: &Rc<RStr>,
+        name: &str,
+        args: &[Value],
+    ) -> Result<Option<Value>, Trap> {
+        use crate::vm::str2int::{self, ParsedInt};
+        let parsed = match (name, args) {
+            ("to_i", []) => str2int::lenient(&s.borrow(), 10),
+            ("to_i", [Value::Int(radix)]) => {
+                // Mirror string_call's arm: negative base rejected
+                // up front (CRuby `string.c`), positive validated
+                // lazily inside the scan.
+                if *radix < 0 {
+                    return Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("invalid radix {radix}"),
+                    }));
+                }
+                str2int::lenient(&s.borrow(), *radix)
+            }
+            ("hex", []) => str2int::lenient(&s.borrow(), 16),
+            ("oct", []) => str2int::lenient(&s.borrow(), -8),
+            _ => return Ok(None),
+        };
+        let parsed = match parsed {
+            Ok(p) => p,
+            Err(e) => return Err(self.trap(e)),
+        };
+        Ok(Some(match parsed {
+            ParsedInt::Small(n) => Value::Int(n),
+            ParsedInt::Big(b) => self.bigint_to_value(b)?,
+        }))
+    }
+
     /// String methods that need heap access — slice, scan, []=,
     /// %, freeze / frozen? / dup, and all the in-place
     /// mutators. Mirrors the heap-aware half of CRuby's
@@ -2102,6 +2120,16 @@ impl Vm {
         name: &str,
         args: &[Value],
     ) -> Result<Option<Value>, Trap> {
+        // Str→Integer promote hook (see `str_to_int_promote`): the
+        // stateless `string_call` table already served every
+        // fits-i64 parse; only past-i64 inputs (BigInt results)
+        // reach here. Bignum-gated — without the feature the
+        // stateless arms wrap (documented no-bignum contract) and
+        // never fall through.
+        #[cfg(feature = "bignum")]
+        if let Some(v) = self.str_to_int_promote(&s, name, args)? {
+            return Ok(Some(v));
+        }
         Ok({
                 let s = s.clone();
                 // In-place mutation methods. All return the

@@ -1315,6 +1315,8 @@ impl Vm {
                 | "delete_prefix!"
                 | "delete_suffix!"
                 | "to_i"
+                | "hex"
+                | "oct"
                 | "to_f"
                 | "chars"
                 | "split"
@@ -3875,6 +3877,21 @@ impl Vm {
                                 self.max_value_bytes,
                             )
                             .map_err(|e| self.trap(e))?
+                            {
+                                self.stack.push(v);
+                                return Ok(());
+                            }
+                            // Str→Integer promote twin: the
+                            // stateless `to_i`/`hex`/`oct` arms in
+                            // primitive_call fall through for
+                            // past-i64 values (they can't allocate
+                            // the heap-backed BigInt); serve them
+                            // here so `super` from a str-singleton
+                            // `to_i` override stays exact.
+                            #[cfg(feature = "bignum")]
+                            if let Value::Str(rs) = &sv
+                                && let Some(v) =
+                                    self.str_to_int_promote(rs, &nm, &args)?
                             {
                                 self.stack.push(v);
                                 return Ok(());

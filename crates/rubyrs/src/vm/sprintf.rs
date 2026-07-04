@@ -284,16 +284,28 @@ pub(crate) fn ruby_sprintf(
         };
         let mut body = match spec {
             'd' | 'i' => {
-                // BigInt fast path: render the decimal directly via
-                // num_bigint's Display so `'%d' % (2**100)` works.
-                // Base specifiers (%x/X/o/b/B) now route through
-                // `format_radix_any` which has its own BigInt arm
-                // — see those format-spec match arms below.
-                #[cfg(feature = "bignum")]
-                let big_decimal: Option<String> = match arg {
-                    Value::BigInt(id) => {
-                        // Same pre-allocation cap rationale as
-                        // `format_radix_any`: `to_string()` on a
+                // One shared coercion for the i64 fast lane, BigInt
+                // args AND past-i64 String args (`'%d' %
+                // "18446744073709551616"` renders the exact decimal
+                // — see `coerce_int_any`). Base specifiers
+                // (%x/X/o/b/B) route through `format_radix_any`,
+                // which has the same two lanes.
+                let mut body = match coerce_int_any(arg, heap)? {
+                    CoercedInt::Small(n) => {
+                        if n < 0 {
+                            format!("-{}", n.unsigned_abs())
+                        } else if flag_plus {
+                            format!("+{n}")
+                        } else if flag_space {
+                            format!(" {n}")
+                        } else {
+                            n.to_string()
+                        }
+                    }
+                    #[cfg(feature = "bignum")]
+                    CoercedInt::Big(b) => {
+                        // Pre-allocation cap rationale (same as
+                        // `format_radix_any`): `to_string()` on a
                         // 10M-bit BigInt allocates ~3 MB before the
                         // post-format `out.len() > max` check in
                         // kernel.rs / string.rs can fire — host can
@@ -303,7 +315,6 @@ pub(crate) fn ruby_sprintf(
                         // arms. `sign_byte` accounts for the `-` /
                         // `+` / ` ` byte the formatting below may
                         // prepend (radix=10 has no `0x`/`0b` prefix).
-                        let b = heap.bigint(*id);
                         let digits_est = super::bignum::bignum_digits_upper_bound(b.bits(), 10);
                         let sign_byte: u64 = if b.sign() == num_bigint::Sign::Minus
                             || flag_plus
@@ -316,33 +327,17 @@ pub(crate) fn ruby_sprintf(
                                 msg: format!("sprintf value size ~{} bytes > cap {}", est, cap),
                             });
                         }
-                        Some(b.to_string())
-                    },
-                    _ => None,
-                };
-                #[cfg(not(feature = "bignum"))]
-                let big_decimal: Option<String> = None;
-                let mut body = if let Some(s) = big_decimal {
-                    let abs_digits = s.strip_prefix('-').unwrap_or(&s);
-                    if s.starts_with('-') {
-                        format!("-{abs_digits}")
-                    } else if flag_plus {
-                        format!("+{abs_digits}")
-                    } else if flag_space {
-                        format!(" {abs_digits}")
-                    } else {
-                        abs_digits.to_string()
-                    }
-                } else {
-                    let n = coerce_int(arg)?;
-                    if n < 0 {
-                        format!("-{}", n.unsigned_abs())
-                    } else if flag_plus {
-                        format!("+{n}")
-                    } else if flag_space {
-                        format!(" {n}")
-                    } else {
-                        n.to_string()
+                        let s = b.to_string();
+                        let abs_digits = s.strip_prefix('-').unwrap_or(&s);
+                        if s.starts_with('-') {
+                            format!("-{abs_digits}")
+                        } else if flag_plus {
+                            format!("+{abs_digits}")
+                        } else if flag_space {
+                            format!(" {abs_digits}")
+                        } else {
+                            abs_digits.to_string()
+                        }
                     }
                 };
                 if let Some(p) = precision {
@@ -509,28 +504,64 @@ pub(crate) fn ruby_sprintf(
     Ok(out)
 }
 
-fn coerce_int(v: &Value) -> Result<i64, RubyError> {
+/// Integer coercion result for the `%d`/`%x`/`%o`/`%b` directives:
+/// the i64 fast lane plus an exact big lane. Strings past i64 range
+/// and `Value::BigInt` args both surface as `Big` — sprintf renders
+/// them as text directly (no heap slot needed), so this stays
+/// allocation-free of the VM.
+enum CoercedInt {
+    Small(i64),
+    #[cfg(feature = "bignum")]
+    Big(num_bigint::BigInt),
+}
+
+/// CRuby coerces String args to the integer directives with
+/// `Kernel#Integer(str, 0)` STRICT semantics: prefixes honored
+/// (`'%d' % "0x10"` → 16, `"010"` → 8), underscores between digits,
+/// garbage raises `ArgumentError: invalid value for Integer(): ...`,
+/// and past-i64 values are the exact Integer
+/// (`'%d' % "18446744073709551616"` → that exact decimal — the old
+/// `parse::<i64>().unwrap_or(0)` silently rendered `0` for BOTH
+/// garbage and overflow). nil/other raise CRuby's
+/// `can't convert ... into Integer` TypeError shape.
+#[cfg_attr(not(feature = "bignum"), allow(unused_variables))]
+fn coerce_int_any(v: &Value, heap: &Heap) -> Result<CoercedInt, RubyError> {
     match v {
-        Value::Int(n) => Ok(*n),
+        Value::Int(n) => Ok(CoercedInt::Small(*n)),
+        #[cfg(feature = "bignum")]
+        Value::BigInt(id) => Ok(CoercedInt::Big(heap.bigint(*id).clone())),
         // CRuby raises `FloatDomainError: NaN/Infinity` for
         // `sprintf("%d", Float::NAN)` etc. — matches the
-        // `Float#to_i` / `Kernel#Integer` traps wired in this
-        // PR so the helper's "every Float→Integer trap site"
-        // docstring actually holds. Finite Float still casts
-        // via `as i64` (CRuby's `%d` truncates toward zero
-        // for finite operands).
+        // `Float#to_i` / `Kernel#Integer` traps so every
+        // Float→Integer trap site agrees. Finite Float still casts
+        // via `as i64` (CRuby's `%d` truncates toward zero for
+        // finite operands; past-i64 Floats saturate — same known
+        // gap as `Float#to_i`, out of the string-path fix's scope).
         Value::Float(f) if f.is_nan() || f.is_infinite() => {
             Err(RubyError::FloatDomainError {
                 msg: crate::vm::numeric::float_domain_label(*f).to_string(),
             })
         }
-        Value::Float(f) => Ok(*f as i64),
-        Value::Str(s) => Ok(s.to_string_lossy().trim().parse::<i64>().unwrap_or(0)),
+        Value::Float(f) => Ok(CoercedInt::Small(*f as i64)),
+        // Base 0 always resolves to a valid radix, so the scan's
+        // invalid-radix `Err` lane is unreachable here (`?` keeps
+        // the plumbing honest anyway).
+        Value::Str(s) => match crate::vm::str2int::strict(&s.borrow(), 0)? {
+            Some(crate::vm::str2int::ParsedInt::Small(n)) => Ok(CoercedInt::Small(n)),
+            #[cfg(feature = "bignum")]
+            Some(crate::vm::str2int::ParsedInt::Big(b)) => Ok(CoercedInt::Big(b)),
+            None => Err(RubyError::ArgumentError {
+                msg: format!(
+                    "invalid value for Integer(): {}",
+                    crate::heap::rstr_inspect(s),
+                ),
+            }),
+        },
         Value::Nil => Err(RubyError::TypeError {
-            msg: "no implicit conversion from nil to Integer".into(),
+            msg: "can't convert nil into Integer".into(),
         }),
         _ => Err(RubyError::TypeError {
-            msg: format!("no implicit conversion of {} to Integer", v.type_name()),
+            msg: format!("can't convert {} into Integer", v.type_name()),
         }),
     }
 }
@@ -710,9 +741,25 @@ fn format_radix_any(
     alt: bool,
     max_value_bytes: Option<usize>,
 ) -> Result<String, RubyError> {
+    match coerce_int_any(arg, heap)? {
+        CoercedInt::Small(n) => Ok(format_radix_int(n, radix, upper, alt)),
+        // BigInt args and past-i64 String args share the exact
+        // big-render lane (`'%x' % "18446744073709551616"` →
+        // `"10000000000000000"`).
+        CoercedInt::Big(b) => format_radix_big(&b, radix, upper, alt, max_value_bytes),
+    }
+}
+
+#[cfg(feature = "bignum")]
+fn format_radix_big(
+    b: &num_bigint::BigInt,
+    radix: u32,
+    upper: bool,
+    alt: bool,
+    max_value_bytes: Option<usize>,
+) -> Result<String, RubyError> {
     use num_bigint::Sign;
-    if let Value::BigInt(id) = arg {
-        let b = heap.bigint(*id);
+    {
         // CRuby suppresses the alt-form prefix for zero values:
         // `'%#x' % 0`, `'%#o' % 0`, `'%#b' % 0` all render as
         // just `"0"`, not `"0x0"` / `"00"` / `"0b0"`. Match that
@@ -777,21 +824,21 @@ fn format_radix_any(
         if upper { mag.make_ascii_uppercase(); }
         if !prefix.is_empty() { mag.insert_str(0, prefix); }
         if b.sign() == Sign::Minus { mag.insert(0, '-'); }
-        return Ok(mag);
+        Ok(mag)
     }
-    Ok(format_radix_int(coerce_int(arg)?, radix, upper, alt))
 }
 
 #[cfg(not(feature = "bignum"))]
 fn format_radix_any(
     arg: &Value,
-    _heap: &Heap,
+    heap: &Heap,
     radix: u32,
     upper: bool,
     alt: bool,
     _max_value_bytes: Option<usize>,
 ) -> Result<String, RubyError> {
-    Ok(format_radix_int(coerce_int(arg)?, radix, upper, alt))
+    let CoercedInt::Small(n) = coerce_int_any(arg, heap)?;
+    Ok(format_radix_int(n, radix, upper, alt))
 }
 
 fn format_radix_int(n: i64, radix: u32, upper: bool, alt: bool) -> String {

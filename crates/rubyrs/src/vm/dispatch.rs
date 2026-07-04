@@ -25624,6 +25624,20 @@ impl Vm {
             self.stack.push(v);
             return Ok(());
         }
+        // Str→Integer promote hook: `"1846…".to_i { }` (block
+        // ignored, as CRuby does). string_call's stateless arms in
+        // `primitive_call` above served every fits-i64 parse and
+        // fell through (`Ok(None)`) for past-i64 values — this
+        // heap-capable twin allocates the exact BigInt. The
+        // no-block route reaches the same helper via
+        // `string_collection_call`.
+        #[cfg(feature = "bignum")]
+        if let Value::Str(rs) = &recv
+            && let Some(v) = self.str_to_int_promote(rs, &name, &args)?
+        {
+            self.stack.push(v);
+            return Ok(());
+        }
         // Block-form `def self.foo` dispatch. Mirrors `do_call`'s
         // `Value::Class` arm at vm/dispatch.rs:1226 — without this,
         // `Foo.bar(args) { … }` where `Foo` carries a user singleton
