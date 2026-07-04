@@ -1976,6 +1976,7 @@ dependencies = [
  "libloading",
  "liquidus",
  "lru",
+ "memchr",
  "mimalloc",
  "num-bigint",
  "num-integer",
