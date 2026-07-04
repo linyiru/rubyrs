@@ -12113,12 +12113,16 @@ impl Vm {
             // "C-defined core", so a preamble-located constant maps to
             // the empty-Array form.
             let short_key = self.interner.intern(&const_name);
-            let result: Value = if let Some((file, line)) = self.const_source_locations.get(&key).cloned() {
-                if file.starts_with("<rubyrs:preamble") {
+            let result: Value = if let Some(loc) = self.const_source_locations.get(&key).cloned() {
+                if loc.file.starts_with("<rubyrs:preamble") {
                     let id = self.heap.alloc(HeapObj::Array(Vec::new().into()));
                     Value::Array(id)
                 } else {
-                    let arr = vec![Value::new_str(file.to_string()), Value::Int(line as i64)];
+                    // Lazy line resolution — the stamp stores raw
+                    // ingredients; the offset→line scan happens only
+                    // here, per query (see ConstLoc).
+                    let line = loc.line();
+                    let arr = vec![Value::new_str(loc.file.to_string()), Value::Int(line as i64)];
                     self.maybe_gc();
                     self.check_alloc()?;
                     let id = self.heap.alloc(HeapObj::Array(arr.into()));

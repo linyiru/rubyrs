@@ -1053,7 +1053,7 @@ struct PostPreambleSnapshot {
     /// `vm.const_source_locations` as of preamble completion.
     /// `reset()` clones and replaces so user class/const definition
     /// locations don't leak across embed resets.
-    const_source_locations: crate::intern::FxHashMap<intern::SymId, (std::rc::Rc<str>, u32)>,
+    const_source_locations: crate::intern::FxHashMap<intern::SymId, vm::ConstLoc>,
     /// `vm.toplevel_methods` as of preamble completion.
     /// Restored by clone-and-replace so a user `def foo; ...` —
     /// or a redefinition of a preamble-supplied toplevel method —

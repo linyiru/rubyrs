@@ -568,19 +568,27 @@ impl Vm {
         Ok(id)
     }
 
-    /// Location (`file`, `line`) of the op CURRENTLY executing in the
-    /// top frame — the dispatch loop already advanced `ip` past it, so
-    /// the live op is `ip - 1`. Used by `Op::DefClass` / `DefModule` /
-    /// `StoreConst` to stamp `const_source_locations`. `None` when the
-    /// source text isn't tracked (no line resolvable).
-    pub(crate) fn current_op_location(&self) -> Option<(std::rc::Rc<str>, u32)> {
+    /// Location ingredients (file, source, byte offset) of the op
+    /// CURRENTLY executing in the top frame — the dispatch loop
+    /// already advanced `ip` past it, so the live op is `ip - 1`.
+    /// Used by `Op::DefClass` / `DefModule` / `StoreConst` to stamp
+    /// `const_source_locations`. `None` when the source text isn't
+    /// tracked (no line resolvable). Deliberately does NOT resolve
+    /// the line here: `error::line_col` scans the source from byte
+    /// 0, which made per-define stamping quadratic per file (see
+    /// the `const_source_locations` field doc) — the line is
+    /// resolved lazily by `ConstLoc::line` at query time instead.
+    pub(crate) fn current_op_location(&self) -> Option<crate::vm::ConstLoc> {
         let f = self.frames.last()?;
         let proto = &self.protos[f.proto_idx];
         let op_idx = f.ip.checked_sub(1)?;
         let span = proto.op_spans.get(op_idx).copied()?;
         let src = self.sources.get(proto.filename.as_ref())?;
-        let line = crate::error::line_col(src, span.byte_offset).0;
-        Some((proto.filename.clone(), line))
+        Some(crate::vm::ConstLoc {
+            file: proto.filename.clone(),
+            source: src.clone(),
+            byte_offset: span.byte_offset,
+        })
     }
 
     /// Lazily materialise the `$LOADED_FEATURES` / `$"` Array — the

@@ -1140,6 +1140,29 @@ pub(crate) struct T2LitePending {
     pub(crate) ps: usize,
 }
 
+/// Raw ingredients of a constant's definition location, resolved to
+/// a (file, line) pair only when `Module#const_source_location` is
+/// queried. `source` is the exact text the defining op executed
+/// against (captured at stamp time so a later `load` of the same
+/// path can't skew the answer); `byte_offset` is the defining op's
+/// span offset. See the `Vm::const_source_locations` field doc for
+/// why the line is NOT resolved eagerly at define time.
+#[derive(Clone)]
+pub(crate) struct ConstLoc {
+    pub(crate) file: std::rc::Rc<str>,
+    pub(crate) source: std::rc::Rc<str>,
+    pub(crate) byte_offset: u32,
+}
+
+impl ConstLoc {
+    /// 1-based line of the defining op — the value the old eager
+    /// stamp stored. Scans `source` up to `byte_offset` (identical
+    /// arithmetic to the eager path via `error::line_col`).
+    pub(crate) fn line(&self) -> u32 {
+        crate::error::line_col(&self.source, self.byte_offset).0
+    }
+}
+
 pub(crate) struct Vm {
     pub(crate) protos: Vec<Proto>,
     #[cfg(feature = "jit-native")]
@@ -1547,15 +1570,28 @@ pub(crate) struct Vm {
     /// emit "already initialized constant" and reassign). If you
     /// need to shadow a class with a constant, pick a different name.
     pub(crate) constants: FxHashMap<SymId, Value>,
-    /// Definition location (`file`, `line`) of each user-defined
-    /// class/module/value constant, keyed by the same qualified-name
-    /// `SymId` the `classes` / `constants` tables use. Recorded at
+    /// Definition location of each user-defined class/module/value
+    /// constant, keyed by the same qualified-name `SymId` the
+    /// `classes` / `constants` tables use. Recorded at
     /// `Op::DefClass` / `Op::DefModule` / `Op::StoreConst` (first
     /// definition wins, matching CRuby — reopens don't move it).
     /// Read by `Module#const_source_location`. `Rc<str>` filename is
     /// not a GC object, so no rooting. Snapshot/reset-managed like
     /// `constants` so embed resets don't leak user entries.
-    pub(crate) const_source_locations: FxHashMap<SymId, (std::rc::Rc<str>, u32)>,
+    ///
+    /// Stores the RAW location ingredients (filename + captured
+    /// source text + byte offset), NOT a resolved line: resolving a
+    /// byte offset to a line via `error::line_col` scans the source
+    /// from byte 0, so eager define-time stamping was
+    /// O(defines × offset) — quadratic per file, ~65-70% of
+    /// preamble-replay execution and the same tax again on every
+    /// user file load. Definition-time stamping is now O(1);
+    /// `Module#const_source_location` (the only value reader)
+    /// resolves the line lazily per query against the captured
+    /// source Rc, which pins the exact text the eager stamp would
+    /// have scanned even if `vm.sources` is later overwritten by a
+    /// re-`load` of the same path.
+    pub(crate) const_source_locations: FxHashMap<SymId, ConstLoc>,
     /// Files already loaded via `require_relative` — keyed by
     /// canonical path. Suppresses re-loading on subsequent calls
     /// the same way CRuby's `$LOADED_FEATURES` does. The Set

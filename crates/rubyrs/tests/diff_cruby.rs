@@ -332,6 +332,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn method_over_builtin() { run_diff("method_over_builtin"); }
 #[test] fn remove_const_pending_autoload() { run_diff("remove_const_pending_autoload"); }
 #[test] fn const_source_location() { run_diff("const_source_location"); }
+#[test] fn const_source_location_deep_offset() { run_diff("const_source_location_deep_offset"); }
+#[test] fn error_location_deep_offset() { run_diff("error_location_deep_offset"); }
 #[cfg(feature = "stdlib")]
 #[test] fn minitest_substrate_extras() { run_diff("minitest_substrate_extras"); }
 #[test] fn string_to_s_passthrough() { run_diff("string_to_s_passthrough"); }
