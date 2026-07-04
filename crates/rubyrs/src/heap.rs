@@ -2326,6 +2326,28 @@ impl Value {
             Value::Rational(_) => "Rational",
         }
     }
+    /// The value-name CRuby prints in "no implicit conversion of X
+    /// into Y" TypeError messages (rb_builtin_class_name): the nil /
+    /// true / false singletons render as their LITERAL spelling
+    /// ("no implicit conversion of nil into String"), not their
+    /// class name — verified vs CRuby 3.4.1. Everything else is the
+    /// plain `type_name()`.
+    ///
+    /// Adopted so far only by the String#encode / #force_encoding
+    /// argument path (dispatch.rs `try_string_encoding_ops`); the
+    /// other ~85 inline "no implicit conversion" format sites still
+    /// print `type_name()` and mis-spell the three singletons
+    /// (NilClass / Boolean). Migrating them is ticketed follow-up
+    /// work: each site's fixture has to be re-diffed against CRuby
+    /// rather than batch-edited blind.
+    pub(crate) fn conv_type_name(&self) -> &'static str {
+        match self {
+            Value::Nil => "nil",
+            Value::Bool(true) => "true",
+            Value::Bool(false) => "false",
+            _ => self.type_name(),
+        }
+    }
     pub(crate) fn to_display(&self, heap: &Heap, interner: &Interner) -> String {
         match self {
             Value::Int(i) => i.to_string(),

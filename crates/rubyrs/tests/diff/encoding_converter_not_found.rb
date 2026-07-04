@@ -30,6 +30,16 @@ t("fe unknown") { "x".dup.force_encoding("NOPE-ENC") }
 t("fe int")     { "x".dup.force_encoding(123) }
 t("fe sym")     { "x".dup.force_encoding(:nope) }
 
+# The nil/true/false singletons spell their LITERAL name in this
+# message ("no implicit conversion of nil into String"), not their
+# class name — CRuby's rb_builtin_class_name, verified 3.4.1.
+t("encode nil")   { "x".encode(nil) }
+t("encode true")  { "x".encode(true) }
+t("encode false") { "x".encode(false) }
+t("fe nil")       { "x".dup.force_encoding(nil) }
+t("fe true")      { "x".dup.force_encoding(true) }
+t("fe false")     { "x".dup.force_encoding(false) }
+
 # The error class is rescuable under its CRuby ancestry
 # (EncodingError < StandardError).
 begin

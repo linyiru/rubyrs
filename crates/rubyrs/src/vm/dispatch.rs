@@ -1515,9 +1515,12 @@ impl Vm {
                             msg: format!("unknown encoding name - {shown}"),
                         },
                         None => RubyError::TypeError {
+                            // conv_type_name, not type_name: CRuby
+                            // spells the nil/true/false singletons
+                            // literally in this message.
                             msg: format!(
                                 "no implicit conversion of {} into String",
-                                arg.type_name()
+                                arg.conv_type_name()
                             ),
                         },
                     };
@@ -1571,9 +1574,12 @@ impl Vm {
                             // here (`_encoding_full` supplies it).
                             let Some(shown) = self.encoding_arg_name(&args[0]) else {
                                 return Err(self.trap(RubyError::TypeError {
+                                    // conv_type_name, not type_name:
+                                    // CRuby spells the nil/true/false
+                                    // singletons literally here.
                                     msg: format!(
                                         "no implicit conversion of {} into String",
-                                        args[0].type_name()
+                                        args[0].conv_type_name()
                                     ),
                                 }));
                             };

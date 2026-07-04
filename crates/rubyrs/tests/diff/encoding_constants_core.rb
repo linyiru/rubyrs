@@ -37,12 +37,19 @@ CONSTS.each do |want, enc|
        "find_identity=#{Encoding.find(want).equal?(enc)}"
 end
 
-# inspect is pinned for the DUMMY encodings only: CRuby 3.4 renders
-# not-yet-loaded encodings as "#<Encoding:GB18030 (autoload)>" (a lazy-
-# registry artifact rubyrs deliberately doesn't model — its constants
-# are always loaded), but dummy encodings render their stable
-# "(dummy)" form either way.
+# Dummy encodings render their stable "(dummy)" form loaded or not.
 p [Encoding::UTF_16.inspect, Encoding::UTF_32.inspect, Encoding::ISO_2022_JP.inspect]
+
+# Non-dummy inspect, pinned AFTER the Encoding.find calls above: CRuby
+# 3.4 renders a not-yet-LOADED registry encoding as
+# "#<Encoding:GB18030 (autoload)>" (a lazy-registry artifact rubyrs
+# deliberately doesn't model — its constants are always loaded), and
+# find() is what loads one; by here every family member has been
+# found, so both engines render the plain "#<Encoding:NAME>" form.
+p [Encoding::GB18030.inspect, Encoding::Big5.inspect,
+   Encoding::EUC_JP.inspect, Encoding::UTF_16LE.inspect,
+   Encoding::UTF_32BE.inspect, Encoding::Shift_JIS.inspect,
+   Encoding::ISO_8859_1.inspect, Encoding::Windows_31J.inspect]
 
 # --- Encoding.constants inclusion (subset check — CRuby has ~180) ---
 want_syms = %i[ISO_8859_1 Windows_1252 ISO_8859_15 KOI8_R Windows_31J
