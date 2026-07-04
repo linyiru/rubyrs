@@ -178,6 +178,20 @@ end
 ## (`Config::allow_filesystem_io: false`) raises this when
 ## load-class methods are gated off (see vm/gc.rs::check_load_allowed).
 class LoadError < ScriptError
+  ## CRuby stores the FAILED FEATURE NAME on require-raised
+  ## LoadErrors (`e.path` — nil on manually-constructed ones).
+  ## ActiveRecord's adapter resolution branches on it
+  ## (connection_handler.rb:272 `e.path == path_to_adapter`).
+  ## rubyrs's require machinery always phrases the message
+  ## "cannot load such file -- NAME" (kernel.rs), so recover the
+  ## path from the message instead of plumbing a new field through
+  ## the trap machinery. Documented narrowing: a HAND-raised
+  ## LoadError whose message happens to match the require phrasing
+  ## reports that suffix where CRuby would report nil.
+  def path
+    m = message
+    m[25..] if m.start_with?("cannot load such file -- ")
+  end
 end
 ## IOError — CRuby's exception for File / IO failures.
 ## `rescue IOError` is the idiomatic catch for FS errors;

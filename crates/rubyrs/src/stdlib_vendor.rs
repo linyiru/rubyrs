@@ -49,6 +49,15 @@ pub(crate) fn always_on_stub_extras(name: &str) -> Option<&'static str> {
         "uri" | "uri/generic" | "uri/common" => {
             Some(include_str!("stdlib_vendor/uri_parser_shim.rb"))
         }
+        // `openssl`: ActiveRecord 7's encryption module references
+        // `OpenSSL::Cipher::CipherError` in a class-body rescue list
+        // (encryptor.rb:70), so `require "active_record"` NameErrors
+        // on the bare module shell. Constant shells with CRuby's
+        // hierarchy; a no-op (defined? guards) when the `_openssl`
+        // battery already installed the real classes at boot.
+        "openssl" => {
+            Some(include_str!("stdlib_vendor/openssl_shim.rb"))
+        }
         // `tilt`: Sinatra 4 `require`s tilt at module-load time but
         // only calls `Tilt.default_mapping.extensions_for(engine)`
         // from inside the view-rendering path. A minimal shim with

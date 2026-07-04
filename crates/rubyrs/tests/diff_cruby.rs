@@ -1407,6 +1407,12 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn backreference_globals() { run_diff("backreference_globals"); }
 #[test] fn class_path_nested() { run_diff("class_path_nested"); }
 #[test] fn encoding_stub() { run_diff("encoding_stub"); }
+// LoadError#path (require-raised feature name; nil when hand-built) —
+// ActiveRecord's adapter resolution branches on it.
+#[test] fn load_error_path() { run_diff("load_error_path"); }
+// OpenSSL::Cipher::CipherError constant shell with CRuby's hierarchy —
+// ActiveRecord 7's encryptor builds a rescue list from it at load time.
+#[test] fn openssl_cipher_error_shell() { run_diff("openssl_cipher_error_shell"); }
 #[cfg(feature = "stdlib")]
 #[test] fn stdlib_strscan() { run_diff("stdlib_strscan"); }
 #[cfg(feature = "stdlib")]
