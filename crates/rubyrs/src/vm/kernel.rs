@@ -7201,11 +7201,14 @@ impl MarshalWriter {
                     };
                     self.out.push(b'C');
                     self.write_symbol(vm, csym);
-                } else if by_id {
+                }
+                if by_id {
                     // compare_by_identity — CRuby dumps it as `C :Hash {…}`
                     // (probed 3.4: `Marshal.dump({}.compare_by_identity)`
                     // is "\x04\bC:\tHash{\x00"); the loader restores the
-                    // flag from the class-being-plain-Hash shape.
+                    // flag from the class-being-plain-Hash shape. A cbi
+                    // SUBCLASS nests both wrappers: `C :Sub C :Hash {…}`
+                    // (probed).
                     let csym = vm.interner.intern("Hash");
                     self.out.push(b'C');
                     self.write_symbol(vm, csym);

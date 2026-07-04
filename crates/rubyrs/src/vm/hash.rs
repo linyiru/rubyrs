@@ -313,6 +313,53 @@ impl Vm {
         h.iter().any(|(k, _)| self.key_needs_ruby_hash(k, hash_sym, eql_sym))
     }
 
+    /// True when any VALUE of Hash `id` overrides `==`/`eql?` — such
+    /// values need VM-dispatched comparison in Hash equality (CRuby's
+    /// rb_equal per pair). Plain-value hashes keep the native path.
+    pub(crate) fn hash_has_user_eq_values(&mut self, id: ObjId) -> bool {
+        let eq_sym = self.interner.intern("==");
+        let eql_sym = self.sym_key_eql;
+        let h = self.heap.hash(id);
+        h.iter().any(|(_, v)| {
+            matches!(v, Value::Object(_) | Value::Class(_))
+                && (self.key_user_method(v, eq_sym).is_some()
+                    || self.key_user_method(v, eql_sym).is_some())
+        })
+    }
+
+    /// Ruby-level VALUE equality for Hash comparison — CRuby's rb_equal
+    /// per pair: pointer-identical objects short-circuit true WITHOUT a
+    /// dispatch (rb_equal's first check), then a user `==` (`eql?` when
+    /// strict) dispatches on the LHS value; native compare otherwise.
+    pub(crate) fn values_ruby_eq(
+        &mut self,
+        a: &Value,
+        b: &Value,
+        strict: bool,
+    ) -> Result<bool, Trap> {
+        match (a, b) {
+            (Value::Object(x), Value::Object(y)) if x == y => return Ok(true),
+            (Value::Class(x), Value::Class(y)) if std::rc::Rc::ptr_eq(x, y) => {
+                return Ok(true)
+            }
+            _ => {}
+        }
+        let sym = if strict {
+            self.sym_key_eql
+        } else {
+            self.interner.intern("==")
+        };
+        if let Some(m) = self.key_user_method(a, sym) {
+            let r = self.call_resolved_method(m, a.clone(), vec![b.clone()])?;
+            return Ok(!matches!(r, Value::Nil | Value::Bool(false)));
+        }
+        Ok(if strict {
+            a.ruby_eql(b, &self.heap)
+        } else {
+            a.ruby_eq(b, &self.heap)
+        })
+    }
+
     /// Merge-family funnel gate: true when any INCOMING pair holds a key
     /// that needs Ruby-dispatch semantics (and the receiver isn't
     /// compare_by_identity). Stored-side user keys don't matter for a
@@ -363,12 +410,10 @@ impl Vm {
             match g.vm.vm_hash_find(b, &k)? {
                 Some(pos) => {
                     let ov = g.vm.heap.hash(b)[pos].1.clone();
-                    let eq = if strict {
-                        v.ruby_eql(&ov, &g.vm.heap)
-                    } else {
-                        v.ruby_eq(&ov, &g.vm.heap)
-                    };
-                    if !eq {
+                    // rb_equal / rb_eql per pair — user `==`/`eql?` on the
+                    // LHS value dispatches (probed: {k => VV} == {k => VV}
+                    // is true in CRuby when VV defines ==).
+                    if !g.vm.values_ruby_eq(&v, &ov, strict)? {
                         return Ok(false);
                     }
                 }

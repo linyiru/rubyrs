@@ -241,6 +241,53 @@ h[K.new(39)] = 2
 m = Marshal.load(Marshal.dump(h))
 p [m.size, m.compare_by_identity?, m.values.sort]
 
+# -- 12. adversarial round 2 -------------------------------------------
+# merge!/update accept ZERO or MULTIPLE hash-like args (CRuby 2.6+),
+# applied left-to-right with to_hash coercion
+h = { K.new(40) => :a }
+h.merge!({ K.new(40) => :b }, { K.new(40) => :c }, { :extra => 1 })
+puts "merge!-multi:  size=#{h.size} #{h.inspect}"
+h.update
+puts "update-zero:   size=#{h.size}"
+class ToH
+  def to_hash = { K.new(40) => :coerced }
+end
+h.update(ToH.new)
+puts "update-coerce: #{h[K.new(40)].inspect}"
+begin
+  h.merge!(42)
+rescue TypeError => e
+  puts "merge!-type:   #{e.message}"
+end
+
+# Hash[cbi_source] rebuilds through dedup: eql?-equal-but-distinct
+# keys in a compare_by_identity source collapse (result is plain)
+cbi = {}.compare_by_identity
+cbi[K.new(41)] = 1
+cbi[K.new(41)] = 2
+hc = Hash[cbi]
+puts "Hash[cbi]:     size=#{hc.size} cbi=#{hc.compare_by_identity?}"
+
+# Marshal round-trips a compare_by_identity Hash SUBCLASS (nested
+# C :Sub C :Hash wrappers — probed)
+class HS < Hash; end
+hs = HS.new.compare_by_identity
+hs[:x] = 1
+ms = Marshal.load(Marshal.dump(hs))
+puts "marshal-sub:   #{[ms.class, ms.compare_by_identity?, ms.size].inspect}"
+
+# Hash equality dispatches user == on VALUES (rb_equal per pair);
+# eql? uses value eql? (identity here — VV defines only ==)
+class VV
+  def initialize(v) = @v = v
+  def ==(o) = o.is_a?(VV) && o.instance_variable_get(:@v) == @v
+end
+p({ k: VV.new(1) } == { k: VV.new(1) })
+p({ k: VV.new(1) }.eql?({ k: VV.new(1) }))
+p({ K.new(42) => VV.new(1) } == { K.new(42) => VV.new(1) })
+vv = VV.new(2)
+p({ k: vv }.eql?({ k: vv }))
+
 # dup/clone then dup-insert into the copy
 src = { K.new(34) => :a }
 d = src.dup

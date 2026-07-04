@@ -14519,7 +14519,11 @@ impl Vm {
             && let (Value::Hash(ha), Value::Hash(hb)) = (&recv, &args[0])
         {
             let (ha, hb) = (*ha, *hb);
-            if self.hash_has_user_keys(ha) || self.hash_has_user_keys(hb) {
+            if self.hash_has_user_keys(ha)
+                || self.hash_has_user_keys(hb)
+                || self.hash_has_user_eq_values(ha)
+                || self.hash_has_user_eq_values(hb)
+            {
                 let eq = self.vm_hash_eq(ha, hb, &*name == "eql?")?;
                 let result = if &*name == "!=" { !eq } else { eq };
                 self.stack.push(Value::Bool(result));
