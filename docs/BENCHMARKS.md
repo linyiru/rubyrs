@@ -341,6 +341,43 @@ Includes the vendored Prism parser. There is no separate runtime to ship.
 For comparison, ruby.wasm 3.4 `wasi-minimal` is 24.1 MB raw — see the
 "P2-A pivot" section above for the same-shape comparison.
 
+## Standard measurement feature set
+
+Unless a table says otherwise, perf measurements should be taken on a
+release build with:
+
+```bash
+cargo build --release -p rubyrs \
+  --features stdlib,jit-native,_fiber,_json_native,mimalloc
+```
+
+The load-bearing member is **`mimalloc`**: it is the allocator the
+shipped CLI actually runs (`cli-defaults` has carried it since
+2026-06-07, ADR 0019 v3), so a benchmark on the system allocator is
+measuring a binary no user gets. Re-measured 2026-07-04 (mimalloc
+v3.3.2, crate 0.1.52) on the campaign set, benchmarks WITHOUT
+mimalloc understate the CLI by **2–19%** depending on allocation
+intensity: hello −2.1%, warm preamble-cache HIT phases −19% (decode
+0.460 → 0.326 ms), require-200-class −12.4%, hash_micro alloc rows
+−20~26%, JSON parse −17.4%, gc churn −18.6%, RuboCop end-to-end
+−3.3%. Peak RSS is now *lower* with mimalloc on all measured
+workloads (−0.65~−2.36% — v3 retired the old segment-cache RSS
+cost); the price is binary size (+0.94%, `__text` +1.24%).
+
+**Gotcha — the allocator is bin-only.** `#[global_allocator]` lives
+in `crates/rubyrs/src/main.rs`, not the library crate. In-process
+`cargo test` units (and library embedders that don't set their own
+global allocator) never exercise mimalloc no matter which features
+they build with; only harnesses that spawn the built *binary* as a
+subprocess do (diff_cruby via `CARGO_BIN_EXE`, hyperfine, the perf
+budget scripts). So "the test suite is green with mimalloc" means
+the feature *links*; timing claims need the subprocess shape.
+
+Feature-set variations used elsewhere in this file (the Jekyll
+accelerator bundle, wasm builds) keep their own documented sets —
+the constant across all of them is mimalloc on any native binary
+being timed.
+
 ## Reproducing
 
 The "1M fizzbuzz" benchmark is checked in at
