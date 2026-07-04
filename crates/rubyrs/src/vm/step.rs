@@ -6610,10 +6610,16 @@ impl Vm {
         // Ruby-level handling — CRuby calls `key.hash` on insert (so a
         // wrong-arity `hash` raises here) and `key.eql?` for collisions.
         // The helper pins the drained pairs across those dispatches.
-        self.hash_literal_dedup(&mut pairs)?;
+        let user_index = self.hash_literal_dedup(&mut pairs)?;
         let id = self
             .heap
             .alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
+        // Stash the ready-made user-key index (hashes were dispatched
+        // during dedup) so post-literal lookups/merges don't re-hash
+        // the stored keys.
+        if let Some(ui) = user_index {
+            self.heap.hash_obj_mut(id).extras_mut().user_index = Some(ui);
+        }
         self.stack.push(Value::Hash(id));
         Ok(())
     }

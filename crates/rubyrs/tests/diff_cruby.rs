@@ -303,6 +303,12 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // exception catchably (the reader's trap-stash pattern), not a generic
 // uncatchable TypeError.
 #[test] fn hash_marshal_user_key_raise() { run_diff("hash_marshal_user_key_raise"); }
+// Inconsistent user keys (eql? true / hash different) duplicate at every
+// entry point — the dedup scanners bucket by Ruby #hash and never
+// eql?-compare hash-distinct keys; plus the eql?-orientation +
+// no-stored-rehash call-pattern pins.
+#[test] fn hash_inconsistent_user_keys() { run_diff("hash_inconsistent_user_keys"); }
+#[test] fn hash_user_key_call_patterns2() { run_diff("hash_user_key_call_patterns2"); }
 #[test] fn hash_compare_by_identity() { run_diff("hash_compare_by_identity"); }
 #[test] fn index_fast_path() { run_diff("index_fast_path"); }
 #[test] fn hash_key_fast_path() { run_diff("hash_key_fast_path"); }

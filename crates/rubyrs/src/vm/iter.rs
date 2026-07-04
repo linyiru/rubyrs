@@ -2373,8 +2373,18 @@ impl Vm {
                 g.pin(Value::Hash(id));
                 g.pin(Value::Block(block));
                 let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).to_vec();
+                let tk_hash_sym = g.vm.interner.intern("hash");
+                let tk_eql_sym = g.vm.interner.intern("eql?");
                 let pre_frames = g.vm.frames.len();
                 let mut new_pairs: Vec<(Value, Value)> = Vec::with_capacity(snapshot.len());
+                // User-key bucket map over the scratch (Ruby #hash →
+                // positions): ONE hash dispatch per user key, eql? only
+                // within the key's own bucket — vm_hash_locate's
+                // discipline, so inconsistent keys (eql? true / hash
+                // different) never compare (CRuby) and 2k distinct user
+                // keys stay O(n), not O(n²) dispatches.
+                let mut ubuckets: crate::intern::FxHashMap<i64, Vec<u32>> =
+                    crate::intern::FxHashMap::default();
                 let mut early = None;
                 for (k, v) in snapshot {
                     if v.is_gc_heap_ref() { g.pin(v.clone()); }
@@ -2384,23 +2394,36 @@ impl Vm {
                         BlockStep::Value(r) => r,
                     };
                     if new_key.is_gc_heap_ref() { g.pin(new_key.clone()); }
-                    // User-`eql?`-aware collision scan over the scratch
-                    // (`find_key_ruby`; plain keys keep the old ruby_eql
-                    // scan, no snapshot). On collision the FIRST key object
-                    // is kept and only the value replaced — CRuby aset
-                    // semantics.
-                    let existing = if g.vm.hash_key_needs_slow(&new_key) {
-                        let keys_so_far: Vec<Value> =
-                            new_pairs.iter().map(|(k2, _)| k2.clone()).collect();
-                        g.vm.find_key_ruby(&keys_so_far, &new_key)?
+                    // On collision the FIRST key object is kept and only
+                    // the value replaced — CRuby aset semantics.
+                    if g.vm.key_needs_ruby_hash(&new_key, tk_hash_sym, tk_eql_sym) {
+                        let hv = g.vm.key_ruby_hash(&new_key, tk_hash_sym)?;
+                        let mut found = None;
+                        if let Some(bucket) = ubuckets.get(&hv) {
+                            for &bi in bucket.clone().iter() {
+                                let cand = new_pairs[bi as usize].0.clone();
+                                if g.vm.keys_ruby_eql(&new_key, &cand, tk_eql_sym)? {
+                                    found = Some(bi as usize);
+                                    break;
+                                }
+                            }
+                        }
+                        match found {
+                            Some(p) => new_pairs[p].1 = v,
+                            None => {
+                                let pos = new_pairs.len() as u32;
+                                new_pairs.push((new_key, v));
+                                ubuckets.entry(hv).or_default().push(pos);
+                            }
+                        }
                     } else {
-                        new_pairs.iter()
-                            .position(|(k2, _)| k2.ruby_eql(&new_key, &g.vm.heap))
-                    };
-                    if let Some(p) = existing {
-                        new_pairs[p].1 = v;
-                    } else {
-                        new_pairs.push((new_key, v));
+                        let existing = new_pairs.iter()
+                            .position(|(k2, _)| k2.ruby_eql(&new_key, &g.vm.heap));
+                        if let Some(p) = existing {
+                            new_pairs[p].1 = v;
+                        } else {
+                            new_pairs.push((new_key, v));
+                        }
                     }
                 }
                 match early {
@@ -5007,6 +5030,12 @@ impl Vm {
                 // and pin each new ObjId as it's created.
                 let pairs_in: Vec<(Value, Value)> = self.heap.hash(*id).to_vec();
                 let mut buckets: Vec<(Value, Vec<Value>)> = Vec::new();
+                // User-group-key bucket map (Ruby #hash → bucket indices)
+                // — see the loop body.
+                let mut gbh_ubuckets: crate::intern::FxHashMap<i64, Vec<u32>> =
+                    crate::intern::FxHashMap::default();
+                let gbh_hash_sym = self.interner.intern("hash");
+                let gbh_eql_sym = self.interner.intern("eql?");
                 let mut early: Option<Value> = None;
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Hash(*id));
@@ -5035,19 +5064,38 @@ impl Vm {
                     };
                     if group.is_gc_heap_ref() { g.pin(group.clone()); }
                     // A group key overriding `hash`/`eql?` matches its
-                    // bucket via Ruby dispatch (`find_key_ruby` — CRuby
-                    // groups eql?-equal keys into ONE bucket); plain keys
-                    // keep the native scan, snapshot-free.
-                    let pos = if g.vm.hash_key_needs_slow(&group) {
-                        let bucket_keys: Vec<Value> =
-                            buckets.iter().map(|(gk, _)| gk.clone()).collect();
-                        g.vm.find_key_ruby(&bucket_keys, &group)?
+                    // bucket via ONE hash dispatch + eql? within its own
+                    // hash bucket (vm_hash_locate's discipline — CRuby
+                    // groups eql?-equal keys into ONE bucket and never
+                    // compares hash-distinct ones); plain keys keep the
+                    // native scan, snapshot-free.
+                    if g.vm.key_needs_ruby_hash(&group, gbh_hash_sym, gbh_eql_sym) {
+                        let hv = g.vm.key_ruby_hash(&group, gbh_hash_sym)?;
+                        let mut found = None;
+                        if let Some(bucket) = gbh_ubuckets.get(&hv) {
+                            for &bi in bucket.clone().iter() {
+                                let cand = buckets[bi as usize].0.clone();
+                                if g.vm.keys_ruby_eql(&group, &cand, gbh_eql_sym)? {
+                                    found = Some(bi as usize);
+                                    break;
+                                }
+                            }
+                        }
+                        match found {
+                            Some(p) => buckets[p].1.push(pair),
+                            None => {
+                                let pos = buckets.len() as u32;
+                                buckets.push((group, vec![pair]));
+                                gbh_ubuckets.entry(hv).or_default().push(pos);
+                            }
+                        }
                     } else {
-                        buckets.iter().position(|(gk, _)| gk.ruby_eql(&group, &g.vm.heap))
-                    };
-                    match pos {
-                        Some(p) => buckets[p].1.push(pair),
-                        None => buckets.push((group, vec![pair])),
+                        let pos = buckets.iter()
+                            .position(|(gk, _)| gk.ruby_eql(&group, &g.vm.heap));
+                        match pos {
+                            Some(p) => buckets[p].1.push(pair),
+                            None => buckets.push((group, vec![pair])),
+                        }
                     }
                 }
                 if let Some(e) = early { return Ok(Some(e)); }

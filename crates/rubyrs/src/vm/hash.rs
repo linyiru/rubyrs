@@ -109,7 +109,7 @@ impl Vm {
     /// within a bucket — just less selective for those rare keys). Also serves
     /// CRuby's arity-raise on a bad `hash` override. Caller guarantees `key`
     /// has a user `hash` method (checked via `key_needs_ruby_hash`).
-    fn key_ruby_hash(&mut self, key: &Value, hash_sym: crate::intern::SymId) -> Result<i64, Trap> {
+    pub(crate) fn key_ruby_hash(&mut self, key: &Value, hash_sym: crate::intern::SymId) -> Result<i64, Trap> {
         if let Some(m) = self.key_user_method(key, hash_sym) {
             let r = self.call_resolved_method(m, key.clone(), vec![])?;
             return Ok(match r { Value::Int(n) => n, _ => 0 });
@@ -365,7 +365,7 @@ impl Vm {
     pub(crate) fn hash_literal_dedup(
         &mut self,
         pairs: &mut crate::heap::PairsBuf,
-    ) -> Result<(), Trap> {
+    ) -> Result<Option<crate::intern::FxHashMap<i64, Vec<u32>>>, Trap> {
         let hash_sym = self.interner.intern("hash");
         let eql_sym = self.interner.intern("eql?");
         let has_user = pairs
@@ -373,34 +373,63 @@ impl Vm {
             .any(|(k, _)| self.key_needs_ruby_hash(k, hash_sym, eql_sym));
         if has_user {
             // Pin the pairs across the dispatches (they may live only in
-            // this Rust-local buffer), then call each user key's `hash` and
-            // dedup with Ruby equality.
+            // this Rust-local buffer), then compute each key's DOMAIN-
+            // TAGGED hash — user keys via ONE `key.hash` dispatch (also
+            // CRuby's arity-raise), plain keys via the native ruby_hash —
+            // and dedup with `eql?` ONLY within equal-hash pairs (CRuby
+            // never compares hash-distinct keys, so inconsistent keys —
+            // eql? true, hash different — legitimately duplicate). The
+            // eql? receiver is the LATER (incoming) key, the argument the
+            // stored one (probed on 3.4). Cross-domain keys never compare,
+            // matching the funnel's split identity/user indexes.
             let mut g = PinGuard::new(self);
             for (k, v) in pairs.iter() {
                 g.pin(k.clone());
                 g.pin(v.clone());
             }
+            let mut tags: Vec<(bool, i64)> = Vec::with_capacity(pairs.len());
             for i in 0..pairs.len() {
                 let k = pairs[i].0.clone();
-                if let Some(m) = g.vm.key_user_method(&k, hash_sym) {
-                    g.vm.call_resolved_method(m, k, vec![])?;
+                if g.vm.key_needs_ruby_hash(&k, hash_sym, eql_sym) {
+                    let hv = g.vm.key_ruby_hash(&k, hash_sym)?;
+                    tags.push((true, hv));
+                } else {
+                    tags.push((false, k.ruby_hash(&g.vm.heap) as i64));
                 }
             }
             let mut i = 0;
             while i < pairs.len() {
                 let mut j = i + 1;
                 while j < pairs.len() {
-                    let (ki, kj) = (pairs[i].0.clone(), pairs[j].0.clone());
-                    if g.vm.keys_ruby_eql(&ki, &kj, eql_sym)? {
-                        pairs[i].1 = pairs[j].1.clone();
-                        pairs.remove(j);
-                    } else {
-                        j += 1;
+                    if tags[j] == tags[i] {
+                        let (ki, kj) = (pairs[i].0.clone(), pairs[j].0.clone());
+                        if g.vm.keys_ruby_eql(&kj, &ki, eql_sym)? {
+                            pairs[i].1 = pairs[j].1.clone();
+                            pairs.remove(j);
+                            tags.remove(j);
+                            continue;
+                        }
                     }
+                    j += 1;
                 }
                 i += 1;
             }
-        } else {
+            // Hand the caller a ready user-key index (Ruby #hash →
+            // positions): stored-key hashes were just computed, and
+            // stashing them means the FIRST post-literal lookup/merge!
+            // doesn't re-dispatch `hash` on every stored key (CRuby
+            // stores hashes at insert; probed — merge! into a literal
+            // hash only hashes the incoming key).
+            let mut ui: crate::intern::FxHashMap<i64, Vec<u32>> =
+                crate::intern::FxHashMap::default();
+            for (i, (is_user, hv)) in tags.iter().enumerate() {
+                if *is_user {
+                    ui.entry(*hv).or_default().push(i as u32);
+                }
+            }
+            return Ok(Some(ui));
+        }
+        {
             // Hash-prefiltered pairwise dedup: `ruby_hash` is consistent
             // with `ruby_eql` (equal keys hash equal), so keys with
             // different hashes skip the (comparatively costly) content
@@ -424,31 +453,6 @@ impl Vm {
                     }
                 }
                 i += 1;
-            }
-        }
-        Ok(())
-    }
-
-    /// Position of the first key in `keys` equal to `key`, honoring user
-    /// `eql?` when `key` overrides `hash`/`eql?`. For result builders whose
-    /// accumulator is a scratch Vec, not a live Hash (`group_by` buckets,
-    /// `transform_keys!`). Linear; the plain path is the old `ruby_eql`
-    /// scan unchanged. Caller must keep `keys` values GC-rooted (pinned or
-    /// reachable) — the `eql?` dispatch can collect.
-    pub(crate) fn find_key_ruby(
-        &mut self,
-        keys: &[Value],
-        key: &Value,
-    ) -> Result<Option<usize>, Trap> {
-        let hash_sym = self.interner.intern("hash");
-        let eql_sym = self.interner.intern("eql?");
-        if !self.key_needs_ruby_hash(key, hash_sym, eql_sym) {
-            return Ok(keys.iter().position(|k| k.ruby_eql(key, &self.heap)));
-        }
-        for (i, k) in keys.iter().enumerate() {
-            let k = k.clone();
-            if self.keys_ruby_eql(key, &k, eql_sym)? {
-                return Ok(Some(i));
             }
         }
         Ok(None)

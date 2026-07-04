@@ -6516,8 +6516,11 @@ impl Vm {
         g.vm.check_alloc()?;
         // `Hash[{…}]` copies an existing Hash whose pairs are already
         // deduped (Hash invariant) — skip the literal dedup for that
-        // form only.
-        let already_deduped = args.len() == 1 && matches!(&args[0], Value::Hash(_));
+        // form only. A compare_by_identity source is EXEMPT: its pairs
+        // may hold eql?-equal-but-distinct keys which CRuby's rebuild
+        // (aset per pair into a plain result) collapses.
+        let already_deduped = args.len() == 1
+            && matches!(&args[0], Value::Hash(hid) if !g.vm.hash_is_by_identity(*hid));
         let mut pairs: crate::heap::PairsBuf = if args.len() == 1 {
             match &args[0] {
                 Value::Array(aid) => {
@@ -6566,12 +6569,17 @@ impl Vm {
         // `op_new_hash` dedup helper (which also fires CRuby's
         // `key.hash` insert contract). Pre-fix this alloc'd the raw
         // pair list, so both plain AND user duplicates leaked through.
-        if !already_deduped {
-            g.vm.hash_literal_dedup(&mut pairs)?;
-        }
+        let user_index = if already_deduped {
+            None
+        } else {
+            g.vm.hash_literal_dedup(&mut pairs)?
+        };
         let hid = g.vm.heap.alloc(HeapObj::Hash(
             crate::heap::HashObj::with_pairs_tagged(pairs, class_tag),
         ));
+        if let Some(ui) = user_index {
+            g.vm.heap.hash_obj_mut(hid).extras_mut().user_index = Some(ui);
+        }
         g.vm.stack.push(Value::Hash(hid));
         return Ok(ClassOutcome::Handled);
     }
