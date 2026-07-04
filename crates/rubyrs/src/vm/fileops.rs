@@ -1536,8 +1536,17 @@ impl Vm {
             }
             // `Dir.entries(path)` — names in the directory, INCLUDING
             // "." and ".." (CRuby). `Dir.children(path)` — same but
-            // without "." / "..".
-            ("entries", [p]) | ("children", [p]) => {
+            // without "." / "..". The optional `encoding:` kwarg
+            // (arriving as a trailing Hash) is accepted and ignored —
+            // rubyrs strings are Tier-1 UTF-8 — matching the ignored
+            // flags arg on `glob`. fileutils.rb's `Entry_#entries`
+            // calls `Dir.children(path, encoding: path.encoding)`;
+            // without this arm the miss fell through to NoMethodError
+            // and `FileUtils.rm_rf` silently removed NOTHING (rm_rf
+            // swallows errors), leaving bridgetown-core's Marshal
+            // cache stale across interpreters.
+            ("entries", [p]) | ("entries", [p, _])
+            | ("children", [p]) | ("children", [p, _]) => {
                 self.check_filesystem_io_allowed("Dir.entries", None)?;
                 let path = str_arg(p)?;
                 self.check_filesystem_io_allowed("Dir.entries", Some(Path::new(&path)))?;

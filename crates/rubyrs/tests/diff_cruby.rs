@@ -1995,6 +1995,12 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // sibling call from inside a block, define_method sibling).
 #[test] fn refine_alias_sibling() { run_diff("refine_alias_sibling"); }
 
+// `Dir.children`/`Dir.entries` accept the optional `encoding:` kwarg.
+// Surfaced by the real stdlib fileutils.rb (`Entry_#entries` passes
+// `encoding: path.encoding`); the miss made `FileUtils.rm_rf` a silent
+// no-op, leaving bridgetown-core's Marshal cache stale.
+#[test] fn dir_children_encoding() { run_diff("dir_children_encoding"); }
+
 // Reopening `module X`/`class X` with a pending autoload fires the
 // autoload first (CRuby semantics). Surfaced by bridgetown-foundation's
 // zeitwerk-autoloaded `RefineExt` namespace.
