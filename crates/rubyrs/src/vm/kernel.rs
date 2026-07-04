@@ -6682,8 +6682,15 @@ impl MarshalReader<'_> {
                     // raw duplicate pairs into the rebuilt table. Also
                     // roots each pair immediately (the old scratch Vec was
                     // unrooted across subsequent `read_value` allocations).
-                    vm.vm_hash_insert(id, k, v)
-                        .map_err(|_| "exception raised while hashing a key in Marshal.load".to_string())?;
+                    if let Err(t) = vm.vm_hash_insert(id, k, v) {
+                        // Stash the Trap so the load entry point re-raises
+                        // the USER's exception (catchable, like CRuby) —
+                        // the reader's `_load` / `marshal_load` pattern.
+                        // A String error here would collapse it into an
+                        // uncatchable generic TypeError.
+                        self.trap = Some(t);
+                        return Err("hash key raised in Marshal.load".into());
+                    }
                 }
                 let default = if with_default {
                     Some(self.read_value(vm)?)

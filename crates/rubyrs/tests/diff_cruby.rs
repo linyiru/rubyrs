@@ -299,6 +299,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // values_at/slice/except/dig/fetch, ==, Marshal) — the 2026-07
 // user-index dup-insertion finding.
 #[test] fn hash_user_key_dedup() { run_diff("hash_user_key_dedup"); }
+// A user key.hash raising during Marshal.load must surface the USER's
+// exception catchably (the reader's trap-stash pattern), not a generic
+// uncatchable TypeError.
+#[test] fn hash_marshal_user_key_raise() { run_diff("hash_marshal_user_key_raise"); }
 #[test] fn hash_compare_by_identity() { run_diff("hash_compare_by_identity"); }
 #[test] fn index_fast_path() { run_diff("index_fast_path"); }
 #[test] fn hash_key_fast_path() { run_diff("hash_key_fast_path"); }
