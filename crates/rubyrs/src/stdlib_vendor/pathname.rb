@@ -191,8 +191,22 @@ class Pathname
     !absolute?
   end
 
+  # `Pathname#empty?` is a FILESYSTEM probe, not string emptiness
+  # (CRuby: `Dir.empty?` for directories, `FileTest.empty?` otherwise).
+  # CRuby 3.4.1 matrix: true for a zero-length file or an empty
+  # directory (symlinks are followed, so a link to either is also
+  # true); false for non-empty files/dirs, missing paths, dangling
+  # symlinks, and the degenerate `Pathname.new("")`; an unreadable
+  # (chmod 000) directory raises Errno::EACCES. rubyrs has no
+  # `Dir.empty?` host fn, so compose `Dir.children` — it raises the
+  # same Errno when the directory can't be listed. Discovery: first
+  # Linux x86 survey flagged the old `@path.empty?` string check.
   def empty?
-    @path.empty?
+    if File.directory?(@path)
+      Dir.children(@path).empty?
+    else
+      File.empty?(@path)
+    end
   end
 
   # Yield `self` then each ancestor, stripping one trailing path
