@@ -41,6 +41,14 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 - **Generational mark-sweep GC** — young/old regions with minor/major
   collections and a write barrier, replacing the flat mark-sweep
   (substantially less collection churn on object-heavy workloads).
+- **Battery preambles load through the preamble bytecode cache** — the
+  `_sqlite` / `_socket` / `_openssl` / `_bcrypt` / `_oj` Ruby surfaces
+  (~1,050 lines) are now compiled as cached preamble chunks at `Runtime`
+  construction instead of being re-parsed by `register_*_host_fns` on
+  every boot (measured −12% warm-boot wall on a `_socket,_openssl`
+  build). The classes now exist in every build carrying the feature —
+  registration only wires the host-fn backend — and survive
+  `Runtime::reset()` as part of the post-preamble baseline.
 
 ### Internal
 
