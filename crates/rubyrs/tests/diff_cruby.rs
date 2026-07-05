@@ -530,6 +530,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // String#succ!/next! (Tilt compiled-method-name generation).
 #[test] fn string_succ_bang() { run_diff("string_succ_bang"); }
 // File.rename(old, new) — atomic rename.
+#[cfg(feature = "stdlib")] // needs vendored stdlib (un-quarantined 63f5768b; bare-default lacks it)
 #[test] fn file_rename() { run_diff("file_rename"); }
 // foo(**empty, &blk) drops the empty kwsplat even with a block-pass
 // (Tilt fixed-locals compiled_method.bind_call(scope, **locals, &block)).
@@ -1378,6 +1379,7 @@ fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 #[test] fn str_subclass_method_missing() { run_diff("str_subclass_method_missing"); }
 #[test] fn string_extend() { run_diff("string_extend"); }
 #[test] fn yaml_safe_load_file() { run_diff("yaml_safe_load_file"); }
+#[cfg(feature = "stdlib")] // needs vendored stdlib (un-quarantined 63f5768b; bare-default lacks it)
 #[test] fn pathname_sub_ext_filetests() { run_diff("pathname_sub_ext_filetests"); }
 #[test] fn encoding_gb18030() { run_diff("encoding_gb18030"); }
 #[test] fn yaml_load_tags() { run_diff("yaml_load_tags"); }
@@ -2228,6 +2230,7 @@ fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 
 // `Set#filter_map`. Surfaced by bridgetown-core's
 // `configure_component_paths`.
+#[cfg(feature = "stdlib")] // needs vendored stdlib (un-quarantined 63f5768b; bare-default lacks it)
 #[test] fn set_filter_map() { run_diff("set_filter_map"); }
 
 // `File.path(obj)` — path-string of a path-like object. Surfaced by the
@@ -2244,6 +2247,7 @@ fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 #[test] fn class_subclasses() { run_diff("class_subclasses"); }
 
 // `Pathname#join`. Surfaced by bridgetown-core/collection.rb#relative_path.
+#[cfg(feature = "stdlib")] // needs vendored stdlib (un-quarantined 63f5768b; bare-default lacks it)
 #[test] fn pathname_join() { run_diff("pathname_join"); }
 #[cfg(feature = "stdlib")]
 #[test] fn pathname_realpath() { run_diff("pathname_realpath"); }
@@ -2258,6 +2262,7 @@ fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 
 // Kernel#Pathname() + Pathname#{expand_path, basename(suffix), fnmatch?}
 // — the vendored Pathname surface Bridgetown's Site read path uses.
+#[cfg(feature = "stdlib")] // needs vendored stdlib (un-quarantined 63f5768b; bare-default lacks it)
 #[test] fn pathname_read_path_methods() { run_diff("pathname_read_path_methods"); }
 
 // `Numeric#nonzero?` (self / nil). Surfaced by signalize's `_dispose`.
@@ -2290,10 +2295,12 @@ fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 #[test] fn struct_keyword_init() { run_diff("struct_keyword_init"); }
 
 // `Pathname#each_filename`. Surfaced by bridgetown's resource write path.
+#[cfg(feature = "stdlib")] // needs vendored stdlib (un-quarantined 63f5768b; bare-default lacks it)
 #[test] fn pathname_each_filename() { run_diff("pathname_each_filename"); }
 
 // `File.utime(atime, mtime, *paths)` (Integer/Time args). Surfaced by
 // bridgetown's `StaticFile#write`.
+#[cfg(feature = "stdlib")] // needs vendored stdlib (un-quarantined 63f5768b; bare-default lacks it)
 #[test] fn file_utime() { run_diff("file_utime"); }
 
 // A lexically-scoped autoloaded constant wins over a same-named toplevel
@@ -2302,6 +2309,7 @@ fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 #[test] fn lexical_autoload_over_toplevel() { run_diff("lexical_autoload_over_toplevel"); }
 #[test] fn const_added_scoped_class() { run_diff("const_added_scoped_class"); }
 #[test] fn const_added_assignment() { run_diff("const_added_assignment"); }
+#[cfg(feature = "stdlib")] // needs vendored stdlib (un-quarantined 63f5768b; bare-default lacks it)
 #[test] fn require_to_path() { run_diff("require_to_path"); }
 #[test] fn private_constant() { run_diff("private_constant"); }
 #[test] fn constants_includes_autoload() { run_diff("constants_includes_autoload"); }
