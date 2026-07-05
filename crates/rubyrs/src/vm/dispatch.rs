@@ -12924,6 +12924,26 @@ impl Vm {
                 let is_include = &*name == "include";
                 let target_cls = target.clone();
                 let mut fire_hooks: Vec<std::rc::Rc<crate::value::Class>> = Vec::new();
+                // Eigenclass-shell receiver (`C.singleton_class
+                // .include(M)` / `.prepend(M)`): the shell's own
+                // `includes`/`prepends` chains are NEVER consulted by
+                // dispatch — class-method lookup walks the REAL
+                // class's `singleton_includes`/`singleton_prepends`
+                // (`lookup_class_singleton_method`). Redirect the
+                // chain write there, exactly like the no-receiver
+                // `do_module_inclusion` arm's include-redirect (and
+                // like `extend`, which is CRuby-equivalent to
+                // `singleton_class.include`). Pre-fix, M landed in
+                // the shell's own `includes`: `C.singleton_class
+                // .ancestors` showed M but `C.m_method`
+                // NoMethodError'd. `extend` on a shell keeps
+                // eigenclass-object semantics (methods callable ON
+                // the shell value itself).
+                let shell_real = target_cls
+                    .singleton_target
+                    .borrow()
+                    .as_ref()
+                    .and_then(std::rc::Weak::upgrade);
                 // Same right-to-left iteration as the no-receiver
                 // arm — see that comment for rationale. All three
                 // keywords (include / prepend / extend) reverse.
@@ -12962,13 +12982,21 @@ impl Vm {
                     // MultiRoute` shape, where the gem expects
                     // `Klass.get` to resolve to MultiRoute's override.
                     let is_extend = !is_include && !is_prepend;
+                    // include/prepend on an eigenclass-shell redirect
+                    // into the real class's singleton chains (see
+                    // `shell_real` above). Feature overrides are
+                    // skipped for the redirect, mirroring
+                    // do_module_inclusion's include-redirect.
+                    let chain_redirect = !is_extend && shell_real.is_some();
                     // Route through a user `append_features`/`prepend_features`
                     // override (ActiveSupport::Concern) — same as the
                     // no-receiver path in do_module_inclusion. Needed for
                     // nested Concern dependencies, where Concern's own
                     // append_features does `base.include(dep)` (this
                     // explicit-receiver form) for each dependency.
-                    let feature_override = if !is_extend {
+                    let feature_override = if chain_redirect {
+                        None
+                    } else if !is_extend {
                         let fs = self.interner.intern(
                             if is_prepend { "prepend_features" } else { "append_features" },
                         );
@@ -12989,13 +13017,28 @@ impl Vm {
                         fire_hooks.push(src);
                         continue;
                     }
-                    let already_reachable = if is_extend {
+                    let already_reachable = if chain_redirect {
+                        let real = shell_real.as_ref().unwrap();
+                        let chain = if is_prepend {
+                            real.singleton_prepends.borrow()
+                        } else {
+                            real.singleton_includes.borrow()
+                        };
+                        chain.iter().any(|m| Rc::ptr_eq(m, &src))
+                    } else if is_extend {
                         target_cls.singleton_includes.borrow().iter().any(|m| Rc::ptr_eq(m, &src))
                     } else {
                         super::class_reaches_via_chain(&target_cls, &src, is_prepend)
                     };
                     if !already_reachable {
-                        let mut chain = if is_prepend {
+                        let mut chain = if chain_redirect {
+                            let real = shell_real.as_ref().unwrap();
+                            if is_prepend {
+                                real.singleton_prepends.borrow_mut()
+                            } else {
+                                real.singleton_includes.borrow_mut()
+                            }
+                        } else if is_prepend {
                             target_cls.prepends.borrow_mut()
                         } else if is_extend {
                             target_cls.singleton_includes.borrow_mut()
@@ -13271,6 +13314,17 @@ impl Vm {
                         }
                     }
                     if !include_inherited { break; }
+                    // Modules extended into this class's singleton
+                    // (`Klass.extend M` / `Klass.singleton_class
+                    // .include M`) — same position as the dispatch
+                    // walk in `lookup_class_singleton_method`:
+                    // after the class's own singleton_methods,
+                    // before the superclass step. CRuby lists their
+                    // instance methods in `Klass.methods` but NOT in
+                    // the own-only `Klass.methods(false)` listing.
+                    for inc in current.singleton_includes.borrow().iter() {
+                        walk_mod(inc, &mut names, &mut mod_visited);
+                    }
                     let parent = current.superclass.borrow().clone();
                     match parent {
                         Some(p) => current = p,
@@ -27777,14 +27831,19 @@ impl Vm {
         // Eigenclass-shell (real `class << M` body, self = the
         // metaclass): `include Mod` makes Mod's instance methods M's
         // SINGLETON methods — i.e. M.singleton_includes (the same chain
-        // `M.extend Mod` feeds). `extend`/`prepend` on a shell keep
-        // their own eigenclass-object semantics.
+        // `M.extend Mod` feeds) — and `prepend Mod` fronts them, i.e.
+        // M.singleton_prepends (the chain `class << self; prepend Mod`
+        // feeds via Op::SingletonChainPrepend). The shell's OWN
+        // includes/prepends chains are never consulted by dispatch, so
+        // writing there (pre-fix behavior for prepend) recorded
+        // ancestry without routing any calls. `extend` on a shell
+        // keeps eigenclass-object semantics.
         let shell_real = target_cls
             .singleton_target
             .borrow()
             .as_ref()
             .and_then(std::rc::Weak::upgrade);
-        let include_redirect = is_include && shell_real.is_some();
+        let chain_redirect = (is_include || is_prepend) && shell_real.is_some();
         for idx in 0..n_args {
             let a = if reverse_args { &args[n_args - 1 - idx] } else { &args[idx] };
             let src = match a {
@@ -27808,7 +27867,7 @@ impl Vm {
             // native insert arm); CRuby still fires `included` afterwards, so
             // fall through to the shared hook push. Skipped for `extend`
             // (extend_object) and the eigenclass-shell include-redirect.
-            let feature_override = if !is_extend && !include_redirect {
+            let feature_override = if !is_extend && !chain_redirect {
                 let fs = self
                     .interner
                     .intern(if is_prepend { "prepend_features" } else { "append_features" });
@@ -27825,18 +27884,27 @@ impl Vm {
                 fire_hooks.push(src);
                 continue;
             }
-            let already_reachable = if include_redirect {
-                shell_real.as_ref().unwrap()
-                    .singleton_includes.borrow().iter()
-                    .any(|m| std::rc::Rc::ptr_eq(m, &src))
+            let already_reachable = if chain_redirect {
+                let real = shell_real.as_ref().unwrap();
+                let chain = if is_prepend {
+                    real.singleton_prepends.borrow()
+                } else {
+                    real.singleton_includes.borrow()
+                };
+                chain.iter().any(|m| std::rc::Rc::ptr_eq(m, &src))
             } else if is_extend {
                 target_cls.singleton_includes.borrow().iter().any(|m| std::rc::Rc::ptr_eq(m, &src))
             } else {
                 super::class_reaches_via_chain(&target_cls, &src, is_prepend)
             };
             if !already_reachable {
-                let mut chain = if include_redirect {
-                    shell_real.as_ref().unwrap().singleton_includes.borrow_mut()
+                let mut chain = if chain_redirect {
+                    let real = shell_real.as_ref().unwrap();
+                    if is_prepend {
+                        real.singleton_prepends.borrow_mut()
+                    } else {
+                        real.singleton_includes.borrow_mut()
+                    }
                 } else if is_prepend {
                     target_cls.prepends.borrow_mut()
                 } else if is_extend {

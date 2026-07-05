@@ -394,6 +394,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn singleton_alias_method() { run_diff("singleton_alias_method"); }
 #[test] fn singleton_class_body_more() { run_diff("singleton_class_body_more"); }
 #[test] fn singleton_class_conditional_def() { run_diff("singleton_class_conditional_def"); }
+#[test] fn singleton_class_include() { run_diff("singleton_class_include"); }
 #[test] fn singleton_class_bare_call() { run_diff("singleton_class_bare_call"); }
 #[test] fn singleton_class_real_body() { run_diff("singleton_class_real_body"); }
 #[test] fn singleton_alias_kernel_builtin() { run_diff("singleton_alias_kernel_builtin"); }
