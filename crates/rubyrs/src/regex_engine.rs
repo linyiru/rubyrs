@@ -115,12 +115,21 @@ impl RegexOpError {
     /// True for the deferred-BUILD failure (raise `RegexpError`).
     /// The few call sites that deliberately swallow MATCH-time
     /// errors (partition/rpartition/start_with?) branch on this.
+    #[inline]
     pub(crate) fn is_build(&self) -> bool {
         matches!(&*self.0, RegexOpErrorKind::Build(_))
     }
 
     /// Convert to the conventional Ruby-level error, given the
     /// regexp's BARE source (`CompiledRegex::as_str()`).
+    ///
+    /// `#[cold]` + never-inline: this sits on the raising path of
+    /// ~25 hot dispatch arms (`string_call`'s match?-family, sub/
+    /// gsub, split, …) — letting LLVM inline the two `format!`
+    /// bodies into each arm bloats the giant dispatch functions
+    /// (icache/layout tax measured in the paired A/B).
+    #[cold]
+    #[inline(never)]
     pub(crate) fn to_ruby_error(&self, source: &str) -> crate::error::RubyError {
         match &*self.0 {
             RegexOpErrorKind::Build(msg) => crate::error::RubyError::HostException {
@@ -1048,6 +1057,7 @@ impl CompiledRegex {
     /// to dispatch through the enum from the start.
     /// `Err` = the deferred build failed (raise `RegexpError`);
     /// `Ok(None)` = fancy engine (no native regex to borrow).
+    #[inline]
     pub(crate) fn as_native(&self) -> Result<Option<&regex::Regex>, RegexOpError> {
         Ok(match self.engine()? {
             Engine::Native(r) => Some(r),
@@ -1057,6 +1067,7 @@ impl CompiledRegex {
 
     /// Number of capture groups + 1 (group 0 = whole match), across
     /// both engines. `Err` = the deferred build failed.
+    #[inline]
     pub(crate) fn captures_len(&self) -> Result<usize, RegexOpError> {
         Ok(match self.engine()? {
             Engine::Native(r) => r.captures_len(),
@@ -1075,6 +1086,7 @@ impl CompiledRegex {
     /// PATTERN (independent of any match), so an unknown name is
     /// CRuby's `IndexError: undefined group name reference: <name>`.
     /// Outer `Err` = the deferred build failed (raise `RegexpError`).
+    #[inline]
     pub(crate) fn capture_name_index(&self, name: &str) -> Result<Option<usize>, RegexOpError> {
         Ok(match self.engine()? {
             Engine::Native(r) => r.capture_names().position(|n| n == Some(name)),
@@ -1449,6 +1461,7 @@ impl CompiledRegex {
     /// `$N` convention. Returns `Cow::Borrowed` when there's
     /// no match — rubyrs's `sub!` path uses that as the
     /// no-match signal. `Err` = the deferred build failed.
+    #[inline]
     pub(crate) fn replace<'h>(
         &self,
         haystack: &'h str,
@@ -1462,6 +1475,7 @@ impl CompiledRegex {
 
     /// `String#gsub` — replace all. Same Cow discipline as
     /// `replace`. `Err` = the deferred build failed.
+    #[inline]
     pub(crate) fn replace_all<'h>(
         &self,
         haystack: &'h str,

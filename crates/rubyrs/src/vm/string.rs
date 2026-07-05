@@ -4680,6 +4680,7 @@ fn wants_byte_faithful(s: &crate::value::RStr) -> bool {
 /// `Some(Err(..))` when the deferred engine build failed (caller
 /// raises RegexpError).
 #[cfg(feature = "regex")]
+#[inline]
 fn is_match_at_char_pos(
     s: &crate::value::RStr,
     pos: i64,
