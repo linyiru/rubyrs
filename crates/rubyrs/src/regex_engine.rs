@@ -333,8 +333,17 @@ pub(crate) fn compile_with_flags(
         // (a cheap syntax-only parse) accepts them — that keeps the
         // construction-time RegexpError for malformed patterns; only
         // a pattern that parses but fails the full NFA build (resource
-        // limits) shifts its error to first match, the same tradeoff
-        // the linear path and the large-pattern branch already made.
+        // limits, or class shapes parse_tree accepts but the build
+        // rejects — `[a-#b c dz]`, fuzz find 2026-07) shifts its
+        // error to first match, the same tradeoff the linear path and
+        // the large-pattern branch already made. The shifted error is
+        // the SAME RegexpError, surfaced via `RegexOpError::Build`
+        // (it used to be a panic). The gate is deliberately NOT
+        // tightened further: the only exact "would the build
+        // succeed?" precheck IS the deferred build itself, and an
+        // Expr-tree fancy-construct walk risks eagerly rebuilding
+        // exactly the InclusiveLanguage pathology this arm exists
+        // to avoid.
         Err(_) if prepared.len() > LAZY_FANCY_THRESHOLD
             || fancy_regex::Expr::parse_tree(&prepared).is_ok() => {
             if std::env::var_os("RUBYRS_REGEX_STATS").is_some_and(|v| v == "2") {
