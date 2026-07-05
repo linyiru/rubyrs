@@ -953,13 +953,33 @@ fn reset_rewinds_generational_gc_young_state() {
 /// from cross-input state the reset failed to rewind (the
 /// 2026-06-30..07-04 nightly-fuzz reds: stale generational-GC
 /// young slots, free-list-recycled zombie objects, dangling
-/// `main_obj`).
+/// `main_obj`; the 2026-07-05 red: stale autoload-registry
+/// SymIds resolved after the interner truncation).
 ///
-/// Runs the corpus in sorted order for determinism. Kept as a
-/// regular (non-#[ignore]) test: one pass over ~1k fixtures under
-/// a 50k-op fuel cap is seconds, and it's the only in-repo
-/// coverage of the cached-Runtime + reset() usage pattern the
-/// fuzz harness and per-request embedders rely on.
+/// TWO passes over the corpus, one per ordering:
+///
+///   - path-sorted (deterministic baseline), and
+///   - size-ascending with path tie-break — the order libfuzzer
+///     executes a seed corpus in, i.e. the order the nightly Fuzz
+///     workflow actually replays these same fixtures. The
+///     intern.rs OOB (run 28730999054) only manifested in this
+///     ordering: the planting fixture (an `autoload`
+///     registration) must run before the walking fixture (a
+///     `Module#constants` call) on the same cached Runtime.
+///
+/// Failure detection: `Runtime::eval` converts a host-side Rust
+/// panic it catches into an `Err(Trap)` whose RuntimeError
+/// message starts with "host-side panic during eval:". Under
+/// cargo-fuzz that same panic aborts the process (crash finding);
+/// under the test harness it would sail through a bare
+/// `let _ = rt.eval(...)` invisibly — which is exactly how the
+/// 2026-07-05 nightly red stayed green in this soak. Assert on
+/// the marker so the soak sees what the fuzzer sees.
+///
+/// Kept as a regular (non-#[ignore]) test: two passes over ~1.3k
+/// fixtures under a 50k-op fuel cap is seconds, and it's the only
+/// in-repo coverage of the cached-Runtime + reset() usage pattern
+/// the fuzz harness and per-request embedders rely on.
 #[test]
 fn reset_survives_fixture_corpus_soak_under_tight_caps() {
     fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
@@ -973,22 +993,6 @@ fn reset_survives_fixture_corpus_soak_under_tight_caps() {
             }
         }
     }
-    // Caps::tight() from crates/rubyrs/fuzz/src/lib.rs.
-    let mut rt = Runtime::with_config(Config {
-        fuel: Some(50_000),
-        max_frames: Some(64),
-        max_heap_objects: Some(1024),
-        max_value_bytes: Some(1 << 16),
-        max_symbols: Some(1 << 14),
-        deadline: Some(std::time::Duration::from_millis(500)),
-        // Honour the repo's STRESS_GC=1 rerun convention: the
-        // stressed pass is the one that surfaces reset()-missed
-        // dangling heap references deterministically (a collection
-        // fires on every allocation, so a stale root can't hide
-        // behind GC timing).
-        stress_gc: std::env::var_os("STRESS_GC").is_some_and(|v| v == "1"),
-        ..Default::default()
-    });
     let mut files = Vec::new();
     walk(std::path::Path::new("tests/diff"), &mut files);
     walk(std::path::Path::new("tests/fixtures"), &mut files);
@@ -998,13 +1002,172 @@ fn reset_survives_fixture_corpus_soak_under_tight_caps() {
         "fixture corpus went missing? found {} .rb files",
         files.len(),
     );
-    for f in &files {
-        let src = std::fs::read_to_string(f).expect("fixture readable");
-        rt.reset();
-        // Traps are correct VM behaviour under the tight caps;
-        // only a Rust panic (which aborts the test) is a failure.
-        let _ = rt.eval(&src, "fuzz.rb");
+    let mut by_size = files.clone();
+    // Stable sort → path order is preserved within a size class,
+    // keeping the pass fully deterministic.
+    by_size.sort_by_key(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0));
+
+    for (order, pass) in [("path", &files), ("size", &by_size)] {
+        // Caps::tight() from crates/rubyrs/fuzz/src/lib.rs. A fresh
+        // Runtime per pass so the two orderings can't launder state
+        // into each other — each models one fuzz process.
+        let mut rt = Runtime::with_config(Config {
+            fuel: Some(50_000),
+            max_frames: Some(64),
+            max_heap_objects: Some(1024),
+            max_value_bytes: Some(1 << 16),
+            max_symbols: Some(1 << 14),
+            deadline: Some(std::time::Duration::from_millis(500)),
+            // Honour the repo's STRESS_GC=1 rerun convention: the
+            // stressed pass is the one that surfaces reset()-missed
+            // dangling heap references deterministically (a collection
+            // fires on every allocation, so a stale root can't hide
+            // behind GC timing).
+            stress_gc: std::env::var_os("STRESS_GC").is_some_and(|v| v == "1"),
+            ..Default::default()
+        });
+        for f in pass {
+            let src = std::fs::read_to_string(f).expect("fixture readable");
+            rt.reset();
+            // Traps are correct VM behaviour under the tight caps —
+            // EXCEPT the panic-conversion marker, which is a caught
+            // Rust panic and exactly the crash the fuzzer aborts on.
+            if let Err(trap) = rt.eval(&src, "fuzz.rb")
+                && let RubyError::RuntimeError { msg } = &trap.err
+                && msg.starts_with("host-side panic during eval:")
+            {
+                panic!(
+                    "host-side panic ({order} order) in {}: {msg}",
+                    f.display(),
+                );
+            }
+        }
     }
+}
+
+/// Fuzz run 28730999054 (2026-07-05), minimized: pending-autoload
+/// registries survived `reset()` with SymId keys the interner
+/// truncation freed for re-minting. Eval A arms autoloads (the
+/// first user-minted SymIds); reset truncates the interner back to
+/// the post-preamble baseline but left `autoloads_toplevel` /
+/// `autoloads_scoped` populated; eval B's `Module#constants` walk
+/// resolves the stale keys → `intern.rs:94` index-out-of-bounds
+/// (both fuzz targets, crash file byte-identical to
+/// tests/diff/absolute_module_def.rb). Fixed by capturing the
+/// autoload registries (+ `private_consts`) in
+/// `PostPreambleSnapshot` and restoring them on reset.
+#[test]
+fn reset_drops_pending_autoloads_and_private_consts() {
+    let mut rt = Runtime::new();
+    rt.eval(
+        r#"
+        module MzA
+          Y = 1
+          autoload :Z, File.expand_path("nonexistent_z.rb", __dir__)
+        end
+        Object.autoload(:TopAutoA, File.expand_path("nope.rb", __dir__))
+        module MzB
+          SECRET = 1
+          private_constant :SECRET
+        end
+        "#,
+        "plant.rb",
+    )
+    .expect("plant eval must succeed");
+    rt.reset();
+    // The intern.rs:94 shape: a fresh eval defines a module and
+    // walks `constants` — the walk iterates the autoload
+    // registries' keys and resolves each SymId.
+    let out = rt
+        .eval(
+            r#"
+            module Fresh
+              A = 1
+            end
+            Fresh.constants.sort.inspect
+            "#,
+            "walk.rb",
+        )
+        .expect("post-reset constants walk must not ICE");
+    assert!(
+        matches!(&out, rubyrs::Value::Str(s) if &*s.borrow() == b"[:A]"),
+        "Fresh.constants must list only its own constant, got {:?}",
+        out,
+    );
+    // The armed autoloads themselves are gone.
+    let gone = rt
+        .eval("Object.constants.include?(:TopAutoA)", "gone.rb")
+        .expect("autoload probe must succeed");
+    assert!(
+        matches!(gone, rubyrs::Value::Bool(false)),
+        "prior eval's Object.autoload must not survive reset, got {:?}",
+        gone,
+    );
+}
+
+/// Second fuzz-soak family, minimized (locals_arena OOB /
+/// "CreateBlock in a Locals::Stack frame" ICEs): TWO independent
+/// reset gaps had to line up —
+///
+///   1. `main_obj` survived reset whenever its heap slot sat below
+///      the post-preamble high-water mark, carrying eval A's
+///      `self.extend Mod` on its eigenclass into eval B. The
+///      module's method table is keyed by SymIds the interner
+///      truncation freed, so eval B's re-minted `f2` SymId
+///      "found" eval A's 1-param method → a frame was pushed
+///      with the stale method's locals reservation over a
+///      recycled proto index now holding different code.
+///   2. `nfa_plans` / `rest_preds` (arg-binding plans indexed by
+///      proto_idx, "immutable once compiled") weren't truncated
+///      alongside `protos`, so a recycled index served the
+///      previous eval's plan for a new method's param shape.
+///
+/// Eval A needs the interpolated-string body so its proto/SymId
+/// layout aligns with eval B's the way the fuzz corpus aligned
+/// them; eval B needs two optional-arg defs with a call to the
+/// second. Behaviour assertions pin CRuby semantics: nothing from
+/// eval A is visible, and eval B binds its own defaults.
+#[test]
+fn reset_drops_main_extend_and_proto_plans() {
+    let mut rt = Runtime::new();
+    rt.eval(
+        r#"
+        module Greeter
+          def greet(n); "hi #{n}"; end
+        end
+        self.extend(Greeter)
+        greet("rake")
+        "#,
+        "plant.rb",
+    )
+    .expect("plant eval must succeed");
+    rt.reset();
+    // Extend accumulation on main is user state: gone after reset.
+    let gone = rt
+        .eval("defined?(greet).inspect", "gone.rb")
+        .expect("defined? probe must succeed");
+    assert!(
+        matches!(&gone, rubyrs::Value::Str(s) if &*s.borrow() == b"nil"),
+        "main's extend must not survive reset, got {:?}",
+        gone,
+    );
+    rt.reset();
+    let out = rt
+        .eval(
+            r#"
+            def f1(a, b = 42); [a, b]; end
+            EMPTY = []
+            def f2(a, b = EMPTY); [a, b]; end
+            f2(:x).inspect
+            "#,
+            "trigger.rb",
+        )
+        .expect("post-reset optional-arg call must not ICE");
+    assert!(
+        matches!(&out, rubyrs::Value::Str(s) if &*s.borrow() == b"[:x, []]"),
+        "f2 must bind ITS OWN default, got {:?}",
+        out,
+    );
 }
 
 // --- helpers ---

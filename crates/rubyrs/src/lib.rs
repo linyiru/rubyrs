@@ -1125,6 +1125,35 @@ struct PostPreambleSnapshot {
     /// `Rc<str>` so the clone is a cheap reference-count bump,
     /// not a string copy.
     sources: std::collections::HashMap<std::rc::Rc<str>, std::rc::Rc<str>>,
+    /// The four pending-autoload registries + the
+    /// `private_constant` marker set as of preamble completion.
+    /// All five are keyed by (or contain) SymIds, survive evals
+    /// BY DESIGN (an armed autoload waits indefinitely for its
+    /// constant to be referenced), and were invisible to
+    /// `reset()` from their introduction (issue #224 Phases 1/2,
+    /// commits 6cb0d0f8 / a0d89d2c — both postdate reset()'s
+    /// ce130354). The leak was found by the 2026-07-04 nightly
+    /// fuzz run: a user eval arms `autoload :Z, "..."` (SymId ≥
+    /// post-preamble interner length), reset() truncates the
+    /// interner, and the next eval's `Module#constants` walks
+    /// `autoloads_scoped.keys()` → `interner.resolve(stale)` →
+    /// index-out-of-bounds ICE (intern.rs:94, "len is 1610 but
+    /// the index is 1610"). Worse than the panic: once the next
+    /// eval interns ANY new symbol, the stale ids silently ALIAS
+    /// fresh names — `constants` lists ghosts and
+    /// `private_consts` hides the wrong constant.
+    ///
+    /// Snapshot-and-restore (not wholesale clear) because the
+    /// baseline is not guaranteed empty: the preamble marks
+    /// `Logger::Severity::LEVELS` (and friends) via
+    /// `private_constant`, and a preamble-cache image restore
+    /// (snapshot.rs) can seed the autoload tables before
+    /// `PostPreambleSnapshot::capture` runs.
+    autoloads_toplevel: std::collections::HashMap<intern::SymId, String>,
+    autoloads_scoped: std::collections::HashMap<intern::SymId, String>,
+    consumed_autoloads: std::collections::HashSet<intern::SymId>,
+    autoload_paths: std::collections::HashMap<std::path::PathBuf, Vec<intern::SymId>>,
+    private_consts: std::collections::HashSet<intern::SymId>,
 }
 
 /// Per-Class snapshot covering every `RefCell` field on `Class`
@@ -2058,6 +2087,11 @@ impl PostPreambleSnapshot {
             toplevel_methods: rt.vm.toplevel_methods.clone(),
             class_states,
             sources: rt.vm.sources.clone(),
+            autoloads_toplevel: rt.vm.autoloads_toplevel.clone(),
+            autoloads_scoped: rt.vm.autoloads_scoped.clone(),
+            consumed_autoloads: rt.vm.consumed_autoloads.clone(),
+            autoload_paths: rt.vm.autoload_paths.clone(),
+            private_consts: rt.vm.private_consts.clone(),
         }
     }
 
@@ -2084,6 +2118,15 @@ impl PostPreambleSnapshot {
         vm.const_source_locations.clone_from(&self.const_source_locations);
         vm.toplevel_methods.clone_from(&self.toplevel_methods);
         vm.sources.clone_from(&self.sources);
+        // Pending-autoload registries + private_constant marks —
+        // SymId-keyed cross-eval state; see the field docs on the
+        // snapshot struct for the fuzz-found interner-truncation
+        // ICE this restoration closes.
+        vm.autoloads_toplevel.clone_from(&self.autoloads_toplevel);
+        vm.autoloads_scoped.clone_from(&self.autoloads_scoped);
+        vm.consumed_autoloads.clone_from(&self.consumed_autoloads);
+        vm.autoload_paths.clone_from(&self.autoload_paths);
+        vm.private_consts.clone_from(&self.private_consts);
         // Per-class RefCells — see `PostPreambleSnapshot::class_states`
         // for the field set rationale. Iterates live `vm.classes`
         // (its keyset matches the snapshot's, just clone_from'd above).
@@ -2544,7 +2587,14 @@ impl Runtime {
     ///   String; def foo; ...; end; end` does NOT leak into the
     ///   next eval).
     /// - Globals (`$gvars`), toplevel cvars (`@@x`), `$~` /
-    ///   `last_match`, lazily-built `ENV` hash, `loaded_features`.
+    ///   `last_match`, lazily-built `ENV` hash, `loaded_features`
+    ///   (+ `completed_features`).
+    /// - Pending `autoload` registrations and `private_constant`
+    ///   marks (restored to the post-preamble baseline — their
+    ///   SymId keys would dangle past the interner truncation).
+    /// - `at_exit` handlers left queued by a panicked eval, and
+    ///   the Marshal anchor registry (both GC roots into the
+    ///   truncated heap region).
     /// - Control-flow signals from a possibly-trapped prior eval:
     ///   `break_signaled`, `method_return`, `pending_loop_transfer`,
     ///   `class_stack`, residual `stack` / `frames` / `pinned`.
@@ -2733,19 +2783,33 @@ impl Runtime {
         // Found by the nightly fuzz harness's cached-Runtime +
         // reset() iteration loop.
         //
-        // The lazily-materialised top-level `main` object is
-        // allocated on the FIRST USER EVAL (the preamble runs
-        // before `Object` exists), so its slot sits above the
-        // high-water mark — drop the id and let `main_object()`
-        // re-materialise on next use. This also honours the reset
-        // contract: `self.extend Mod` accumulation on main is
-        // user state. (`filter` rather than `= None` to be exact
-        // about the invariant: only an above-high-water id is
-        // stale.)
-        self.vm.main_obj = self
-            .vm
-            .main_obj
-            .filter(|id| (id.0 as usize) < snapshot.heap_slot_count);
+        // The lazily-materialised top-level `main` object: drop the
+        // id UNCONDITIONALLY and let `main_object()` re-materialise
+        // a fresh singleton Object on next use. The previous shape
+        // (`filter(|id| id < heap_slot_count)`, from the 87d2f1d1
+        // reset sweep) kept a below-high-water main on the theory
+        // that only an above-high-water id is stale — but a main
+        // materialised DURING construction (any build where an eval
+        // runs after `Object` exists but before the post-preamble
+        // capture, e.g. preamble-cache image restores) sits below
+        // the mark and then CARRIES USER STATE across resets: heap
+        // truncation cannot rewind in-place mutations of a
+        // surviving slot, so eval A's `self.extend Mod` /
+        // `instance_variable_set` on main stayed visible to eval B.
+        // The fuzz soak surfaced the extend flavour as a
+        // wrong-method serve: main's eigenclass still included
+        // eval A's module, whose method table is keyed by SymIds
+        // that the interner truncation freed for re-minting —
+        // eval B's `f2` re-minted eval A's `greet` SymId, the
+        // eigenclass walk "found" f2, and the VM executed a
+        // recycled proto index with the wrong locals reservation
+        // (locals_arena OOB / CreateBlock-in-Stack-frame ICEs).
+        // Dropping the id orphans the old slot (swept as garbage on
+        // the next collection — nothing else roots main) and every
+        // post-reset eval starts with a pristine main, matching the
+        // "user state on main is wiped" contract this comment block
+        // has always claimed.
+        self.vm.main_obj = None;
         self.vm.last_uncaught_exception = None;
         self.vm.pending_block_arg = None;
         // String / heap-object eigenclass + ivar side tables are
@@ -2792,6 +2856,26 @@ impl Runtime {
             self.vm.loaded_features.clear();
             self.vm.loaded_stdlib_stubs.clear();
         }
+        // `completed_features` is `loaded_features`' completion-
+        // ordered twin (a `require` inserts into `loaded_features`
+        // at start and `completed_features` at finish; the autoload
+        // machinery consults the latter). Clearing one but not the
+        // other left "this file finished loading" facts from a
+        // rolled-back eval visible to the next eval's require /
+        // autoload-satisfaction checks.
+        self.vm.completed_features.clear();
+        // `at_exit_handlers` (Vec<ObjId>) and `marshal_registry`
+        // (Vec<Value>) are both GC ROOTS (vm/gc.rs gathers them).
+        // `eval()` drains at_exit handlers on every non-panic exit,
+        // but a caught host-side panic skips the drain — and
+        // Marshal registrations accumulate for the Runtime's
+        // lifetime. Either one left populated across reset() holds
+        // ObjIds into the heap region the truncation above just
+        // dropped; the next eval's first GC would walk a dangling
+        // root (the exact use-after-free class the 2026-06-30..07-04
+        // nightly fuzz runs surfaced for young/remembered slots).
+        self.vm.at_exit_handlers.clear();
+        self.vm.marshal_registry.clear();
         // Control-flow signals from a possibly-trapped prior eval.
         // Without these, a user script that broke out of a loop
         // (Op::Break) and then trapped would leave
@@ -2848,6 +2932,38 @@ impl Runtime {
         // restoration steps above, so no live reference now
         // points past the truncate point.
         self.vm.protos.truncate(snapshot.protos_len);
+        // Proto-INDEXED side tables must truncate in lockstep with
+        // `protos`: the next eval's compiler hands out the same
+        // indices again, and "index = proto_idx, immutable once
+        // compiled" (the `nfa_plans` / `rest_preds` lifecycle
+        // comment) only holds while the proto Vec never shrinks —
+        // reset is exactly the shrink. Left alone, a recycled
+        // index served the PREVIOUS eval's lazily-built arg-binding
+        // plan for a brand-new method with a different param shape;
+        // the fuzz-harness soak surfaced that as `locals_arena`
+        // index-out-of-bounds stores/loads (step.rs
+        // `StoreLocal` / `BinOpLL`), an args-shuffle subtract
+        // overflow (dispatch.rs), and the "CreateBlock in a
+        // Locals::Stack frame" ICE (a stale plan classified a
+        // block-carrying method as stack-lite).
+        self.vm.nfa_plans.truncate(snapshot.protos_len);
+        self.vm.rest_preds.truncate(snapshot.protos_len);
+        // Same shape one tier up (jit-native builds): per-proto
+        // JIT verdict bits and tier-2 compiled-body slots keyed by
+        // proto_idx would serve a previous eval's compiled body on
+        // a recycled index. (The many per-shape `jit_native_*`
+        // verdict maps are keyed by proto_idx too and are NOT
+        // swept here — a reset()-loop embedder that also enables
+        // `Config`-level JIT should sweep them when that
+        // combination becomes real; today the JIT is opt-in and
+        // no reset()-loop embedder enables it.)
+        #[cfg(feature = "jit-native")]
+        {
+            self.vm.jit_flags.truncate(snapshot.protos_len);
+            self.vm.t2_lite_ptrs.truncate(snapshot.protos_len);
+            self.vm.t2_lite_blk_ptrs.truncate(snapshot.protos_len);
+            self.vm.t2_protos.retain(|&pidx, _| pidx < snapshot.protos_len);
+        }
         // The two cached forwarder proto indices are
         // `Option<usize>` pointing INTO `vm.protos` at lazily-
         // emitted forwarder bytecode. If either pointed past
