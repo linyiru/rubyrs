@@ -510,6 +510,36 @@ impl std::hash::Hasher for U64Hasher {
 }
 
 impl HashObj {
+    /// Deep copy for the post-preamble baseline snapshot
+    /// (`Heap::capture_baseline_contents`): owns fresh `pairs` /
+    /// `ivars` buffers so post-capture mutations of the live Hash
+    /// can't reach the snapshot. The lazily-rebuilt caches
+    /// (`index`, `user_index`) are dropped rather than cloned —
+    /// they hold only positional offsets and re-derive on first
+    /// use. `class_tag` / `singleton_class` share their `Rc`s:
+    /// classes are snapshot-restored separately
+    /// (`ClassStateSnapshot`), and a baseline eigenclass's inner
+    /// RefCell state is a documented residual (see
+    /// `Heap::capture_baseline_contents`).
+    pub(crate) fn baseline_deep_clone(&self) -> HashObj {
+        HashObj {
+            pairs: self.pairs.clone(),
+            extras: self.extras.as_ref().map(|e| {
+                Box::new(HashExtras {
+                    default_block: e.default_block,
+                    default_value: e.default_value.clone(),
+                    class_tag: e.class_tag.clone(),
+                    ivars: e.ivars.clone(),
+                    index: None,
+                    user_index: None,
+                    singleton_class: e.singleton_class.clone(),
+                })
+            }),
+            frozen: std::cell::Cell::new(self.frozen.get()),
+            by_identity: std::cell::Cell::new(self.by_identity.get()),
+        }
+    }
+
     /// Plain-Hash constructor. Accepts a `Vec` (every pre-existing
     /// caller) or a `PairsBuf` built directly (the hot JSON/YAML
     /// visitors — building inline avoids a Vec alloc + free for
@@ -920,6 +950,90 @@ impl Heap {
         #[cfg(not(feature = "jit-native"))]
         self.class_ptr_of_slab(id)
     }
+    /// Deep-copy the MUTABLE content of every live slot below
+    /// `upto` whose variant supports it — the post-preamble
+    /// baseline image `Runtime::reset()` restores. This closes the
+    /// residual 87d2f1d1 documented and deferred: heap truncation
+    /// cannot rewind IN-PLACE mutations of preamble-era objects, so
+    /// user code appending to a preamble-reachable container
+    /// (`Thread`'s `@coop_threads`/`@coop_runq` registries were the
+    /// fuzz-soak find: `__coop_register` pushes the user's Thread
+    /// object into a preamble-era Array) left dangling ObjIds into
+    /// the truncated region — the next collection's mark walk then
+    /// indexed `marks[]` out of bounds (heap.rs `visit_value`,
+    /// "len is 40 but the index is 40").
+    ///
+    /// Variant coverage:
+    ///   - `Instance` / `Array` / `Hash` / `Range` — deep-copied
+    ///     (owned buffers; `Rc<Class>` tags shared — classes are
+    ///     restored separately via `ClassStateSnapshot`).
+    ///   - `BigInt` / `Rational` — SKIPPED: immutable after
+    ///     construction, nothing to rewind.
+    ///   - `Block` / `TypedData` / `Fiber` — SKIPPED (documented
+    ///     residual): captured cells / native state can't be
+    ///     deep-copied. A baseline Block whose captured cell is
+    ///     mutated to hold a user object can still dangle; no
+    ///     preamble installs such state today.
+    pub(crate) fn capture_baseline_contents(&self, upto: usize) -> Vec<(u32, HeapObj)> {
+        let mut out = Vec::new();
+        for (i, slot) in self.slots.iter().enumerate().take(upto) {
+            if let Slot::Live(obj) = slot
+                && let Some(copy) = Self::baseline_clone(obj)
+            {
+                out.push((i as u32, copy));
+            }
+        }
+        out
+    }
+
+    /// Rewind every captured baseline slot to its capture-time
+    /// content (fresh deep copy per call — the saved image stays
+    /// pristine across resets). Also covers two below-high-water
+    /// corruption shapes the truncation can't reach: a baseline
+    /// slot swept mid-eval (Dead now, but the restored bookkeeping
+    /// counts it live) is re-materialised, and one recycled into a
+    /// USER object is overwritten back to the baseline object.
+    /// Keeps the ADR-0035 `class_ptrs` table in step per slot (a
+    /// user eval may have promoted an entry to an eigenclass
+    /// pointer that no longer exists after the rewind).
+    pub(crate) fn restore_baseline_contents(&mut self, saved: &[(u32, HeapObj)]) {
+        for (i, obj) in saved {
+            let idx = *i as usize;
+            let Some(fresh) = Self::baseline_clone(obj) else {
+                continue;
+            };
+            self.slots[idx] = Slot::Live(fresh);
+            #[cfg(feature = "jit-native")]
+            {
+                self.class_ptrs[idx] =
+                    self.class_ptr_of_slab(ObjId(*i)).unwrap_or(0);
+            }
+        }
+    }
+
+    /// The deep-copy behind `capture_baseline_contents` /
+    /// `restore_baseline_contents`; `None` = variant not covered
+    /// (immutable or un-copyable — see the capture doc).
+    fn baseline_clone(obj: &HeapObj) -> Option<HeapObj> {
+        Some(match obj {
+            HeapObj::Instance(inst) => HeapObj::Instance(crate::value::Instance {
+                class: inst.class.clone(),
+                ivars: inst.ivars.clone(),
+                singleton_class: inst.singleton_class.clone(),
+                frozen: std::cell::Cell::new(inst.frozen.get()),
+            }),
+            HeapObj::Array(a) => HeapObj::Array(ArrayObj {
+                elems: a.elems.clone(),
+                class_tag: a.class_tag.clone(),
+                ivars: a.ivars.clone(),
+                frozen: std::cell::Cell::new(a.frozen.get()),
+            }),
+            HeapObj::Hash(h) => HeapObj::Hash(h.baseline_deep_clone()),
+            HeapObj::Range(r) => HeapObj::Range(r.clone()),
+            _ => return None,
+        })
+    }
+
     /// The slab-walk class pointer (the pre-ADR-0035 implementation): `class_ptr_of`'s
     /// source of truth, kept as the fallback + the debug-assert oracle for the table.
     #[cfg(feature = "jit-native")]

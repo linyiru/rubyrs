@@ -1160,6 +1160,35 @@ struct PostPreambleSnapshot {
     consumed_autoloads: std::collections::HashSet<intern::SymId>,
     autoload_paths: std::collections::HashMap<std::path::PathBuf, Vec<intern::SymId>>,
     private_consts: std::collections::HashSet<intern::SymId>,
+    /// Deep copies of every live baseline heap slot's mutable
+    /// content (Instance / Array / Hash / Range variants) —
+    /// captured by `Heap::capture_baseline_contents` and rewound
+    /// in place by every reset(). Closes the residual 87d2f1d1
+    /// deferred as "full fidelity needs a deep preamble-heap image
+    /// restore": user evals mutate preamble-era objects IN PLACE
+    /// (the fuzz-soak find: `Thread.__coop_register` pushing the
+    /// user's Thread object into the preamble-era `@coop_threads`
+    /// / `@coop_runq` Arrays under the `stdlib` + `_fiber` feature
+    /// set), and truncation cannot reach those slots — the next
+    /// collection then marks a dangling ObjId (index-out-of-bounds
+    /// in `Heap::visit_value`). See the capture fn for variant
+    /// coverage and documented residuals.
+    heap_baseline_contents: Vec<(u32, crate::heap::HeapObj)>,
+    /// `vm.main_obj` as of preamble completion. reset() assigns
+    /// this back VERBATIM: if main was already materialised at
+    /// capture (any build where an eval runs during construction,
+    /// e.g. preamble-cache image restores), its slot is below the
+    /// high-water mark and `heap_baseline_contents` just rewound
+    /// its content to the captured pristine Instance — the id
+    /// stays valid and identity-stable. If main did NOT exist at
+    /// capture (`None` — the plain build materialises it on the
+    /// first user eval), any main a user eval created is user
+    /// state on a truncated/recycled slot and the restored `None`
+    /// lets `main_object()` re-materialise fresh. Replaces the
+    /// earlier keep-if-below-high-water filter (87d2f1d1) whose
+    /// kept main carried `self.extend` / ivar mutations across
+    /// resets.
+    main_obj: Option<value::ObjId>,
     /// The host-injected ENV map (`Config::env`) as of preamble
     /// completion. `Vm::env_hash_or_init` CONSUMES `env_override`
     /// (`take()`) on the first script `ENV` access — the
@@ -2114,6 +2143,11 @@ impl PostPreambleSnapshot {
             autoload_paths: rt.vm.autoload_paths.clone(),
             private_consts: rt.vm.private_consts.clone(),
             env_override: rt.vm.env_override.clone(),
+            heap_baseline_contents: rt
+                .vm
+                .heap
+                .capture_baseline_contents(rt.vm.heap.slots.len()),
+            main_obj: rt.vm.main_obj,
         }
     }
 
@@ -2727,6 +2761,21 @@ impl Runtime {
             self.vm.heap.jit_view.class_ptrs = self.vm.heap.class_ptrs.as_ptr();
             self.vm.heap.jit_view.class_ptrs_len = self.vm.heap.class_ptrs.len();
         }
+        // --- Heap: rewind surviving baseline slots' CONTENT ---
+        // Truncation and the free-list deaden walk above handle
+        // slots the baseline didn't own; this pass rewinds the ones
+        // it DID: user evals mutate preamble-era containers in
+        // place (`Thread.__coop_register` pushing the user's Thread
+        // object into the preamble-era `@coop_threads` Array was
+        // the fuzz-soak find), leaving dangling ObjIds into the
+        // truncated region that the next mark walk indexes out of
+        // bounds. Also re-materialises baseline slots swept or
+        // recycled mid-eval, so the bookkeeping restored above is
+        // consistent with slot contents again. See
+        // `Heap::capture_baseline_contents` for variant coverage.
+        self.vm
+            .heap
+            .restore_baseline_contents(&snapshot.heap_baseline_contents);
         // --- Interner: drop user-interned symbols, but never
         //     truncate past any SymId referenced by long-lived
         //     tables. ---
@@ -2808,102 +2857,21 @@ impl Runtime {
         // Found by the nightly fuzz harness's cached-Runtime +
         // reset() iteration loop.
         //
-        // The lazily-materialised top-level `main` object. The
-        // 87d2f1d1 shape (`filter(|id| id < heap_slot_count)`) kept
-        // a below-high-water main on the theory that only an
-        // above-high-water id is stale — but a main materialised
-        // DURING construction (any build where an eval runs after
-        // `Object` exists but before the post-preamble capture,
-        // e.g. preamble-cache image restores) sits below the mark
-        // and then CARRIES USER STATE across resets: heap
-        // truncation cannot rewind in-place mutations of a
-        // surviving slot, so eval A's `self.extend Mod` /
-        // `instance_variable_set` on main stayed visible to eval B.
-        // The fuzz soak surfaced the extend flavour as a
-        // wrong-method serve: main's eigenclass still included
-        // eval A's module, whose method table is keyed by SymIds
-        // that the interner truncation freed for re-minting —
-        // eval B's `f2` re-minted eval A's `greet` SymId, the
-        // eigenclass walk "found" f2, and the VM executed a
-        // recycled proto index with the wrong locals reservation
-        // (locals_arena OOB / CreateBlock-in-Stack-frame ICEs).
-        //
-        // A below-high-water main is rewound IN PLACE (overwrite
-        // the slot with a pristine Instance) rather than dropped:
-        // the heap bookkeeping restored above counts that slot as
-        // live-at-baseline, so orphaning it would let the next
-        // eval's GC sweep + recycle it as a USER object below the
-        // high-water mark — which the FOLLOWING reset's restored
-        // bookkeeping would again treat as live baseline state (a
-        // zombie whose references dangle into the truncated
-        // region; the STRESS_GC soak caught exactly that as a
-        // use-after-free). In-place re-materialisation keeps the
-        // slot's liveness accounting untouched while wiping the
-        // extend/ivar/eigenclass user state. An above-high-water
-        // main was just truncated, and a below-high-water one on a
-        // recycled baseline-free slot was just deadened (see the
-        // match-guard comment) — both drop the id and let
-        // `main_object()` re-materialise on next use.
-        // Discriminate on the slot's CURRENT state, not the bare
-        // index: `id < heap_slot_count` alone is NOT "live at
-        // capture". A main materialised on the first user eval can
-        // land on a slot `alloc` popped from the PREAMBLE-ERA free
-        // list — below the high-water mark, yet part of the
-        // rollback regime: the deaden loop above just set it Dead
-        // and the restored free list contains it again. Resurrecting
-        // that slot in place would leave it simultaneously Live and
-        // on the free list with `live_count` under-counting it — the
-        // next eval's alloc would pop it and overwrite main with an
-        // unrelated object (identity aliasing). A Dead slot here
-        // means exactly that case → drop the id. A still-Live slot
-        // means main was live at capture (materialised during
-        // construction, counted by the restored bookkeeping) → the
-        // in-place rewind below is the consistent path.
-        match self.vm.main_obj {
-            Some(id)
-                if (id.0 as usize) < snapshot.heap_slot_count
-                    && matches!(
-                        self.vm.heap.slots[id.0 as usize],
-                        crate::heap::Slot::Live(_)
-                    ) =>
-            {
-                let object_cls = self
-                    .vm
-                    .interner
-                    .get_id("Object")
-                    .and_then(|sym| self.vm.classes.get(&sym).cloned());
-                if let Some(cls) = object_cls {
-                    // ADR 0035: keep the slots-parallel JIT class
-                    // table in step with the overwrite — a prior
-                    // eval's `self.extend Mod` promoted main's
-                    // entry to its eigenclass pointer
-                    // (`ensure_singleton_class`), which the pristine
-                    // Instance below no longer has. Left stale, the
-                    // `class_ptr_of` slab/table consistency assert
-                    // fires in debug builds and a baked PIC guard
-                    // reads a dangling eigenclass pointer in
-                    // release. Same maintenance contract as heap.rs
-                    // `alloc` / `ensure_singleton_class`.
-                    #[cfg(feature = "jit-native")]
-                    {
-                        self.vm.heap.class_ptrs[id.0 as usize] =
-                            std::rc::Rc::as_ptr(&cls) as usize;
-                    }
-                    self.vm.heap.slots[id.0 as usize] =
-                        crate::heap::Slot::Live(crate::heap::HeapObj::Instance(
-                            value::Instance::pristine(cls),
-                        ));
-                } else {
-                    // `Object` missing from the baseline classes
-                    // (impossible after a completed preamble, but a
-                    // half-constructed Runtime could get here):
-                    // fall back to dropping the id — a dangling
-                    // main is worse than the bookkeeping skew.
-                    self.vm.main_obj = None;
-                }
-            }
-            _ => self.vm.main_obj = None,
-        }
+        // The lazily-materialised top-level `main` object: restore
+        // the snapshot-time id VERBATIM. Either main existed at
+        // capture — its slot is baseline-live and
+        // `restore_baseline_contents` above just rewound it to the
+        // captured pristine Instance (so `self.extend Mod` / ivar
+        // accumulation from user evals is wiped, class_ptrs
+        // resynced) — or it didn't (`None`), and any main a user
+        // eval materialised sits on a truncated/recycled slot;
+        // dropping the id lets `main_object()` re-materialise
+        // fresh. Replaces 87d2f1d1's keep-if-below-high-water
+        // filter, which kept a construction-era main WITH its user
+        // mutations (the fuzz-soak wrong-method-serve family), and
+        // the interim in-place `Instance::pristine` overwrite,
+        // which the generic baseline-content restore now subsumes.
+        self.vm.main_obj = snapshot.main_obj;
         self.vm.last_uncaught_exception = None;
         self.vm.pending_block_arg = None;
         // String / heap-object eigenclass + ivar side tables are
