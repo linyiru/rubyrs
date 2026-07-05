@@ -5028,6 +5028,11 @@ impl Vm {
                 self.release_frame_locals(f.locals);
                 if is_owner { break; }
             }
+            // The raw-pop walk above skips the ensure machinery
+            // (pre-existing require-scope limitation) — cancel any
+            // ensure-walk suspended in the frames it discarded so a
+            // stale entry can't be mis-resumed by a later EndEnsure.
+            self.cancel_transfers_in_dead_frames(self.frames.len());
             if escaped {
                 self.method_return = Some(val);
                 self.sync_control_signals();
@@ -5671,6 +5676,12 @@ impl Vm {
             }
             self.release_frame_locals(f.locals);
         }
+        // The legacy raw-pop walks above (block frames + one method
+        // frame) skip the ensure machinery — cancel any ensure-walk
+        // suspended in the discarded frames so a stale entry can't
+        // be mis-resumed by a later EndEnsure. Reached on every exit
+        // path of the loop; mirrors require_in_filescope's sweep.
+        self.cancel_transfers_in_dead_frames(self.frames.len());
         self.class_stack.truncate(cls_depth_at_entry);
         self.class_visibility_stack.truncate(vis_depth_at_entry);
         // Method-return escaping out of the eval — let outer
