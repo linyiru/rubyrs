@@ -61,7 +61,7 @@ describe "autoload arity & type guards" do
   it "raises TypeError on non-Symbol/non-String name" do
     klass, msg = caught_pair { autoload(42, "p") }
     assert_eq(klass, "TypeError")
-    assert_eq(msg, "no implicit conversion of Integer into Symbol")
+    assert_eq(msg, "42 is not a symbol nor a string")
   end
 
   it "raises TypeError on non-String path" do
@@ -117,7 +117,7 @@ describe "autoload? arity & type guards" do
   it "raises TypeError on non-Symbol/non-String name" do
     klass, msg = caught_pair { autoload?(42) }
     assert_eq(klass, "TypeError")
-    assert_eq(msg, "no implicit conversion of Integer into Symbol")
+    assert_eq(msg, "42 is not a symbol nor a string")
   end
 
   it "raises NameError on lowercase Symbol" do
