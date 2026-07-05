@@ -1286,6 +1286,8 @@ impl IvarTable {
     /// pairs in assignment order — the native object builders
     /// (prism materialize / exception construction) accumulate pairs
     /// before the class is resolved, then materialize here.
+    /// Only the `_prism_native` materializers call it today.
+    #[cfg(feature = "_prism_native")]
     pub(crate) fn from_pairs(
         class: &Class,
         pairs: impl IntoIterator<Item = (SymId, Value)>,

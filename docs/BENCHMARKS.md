@@ -386,6 +386,16 @@ accelerator bundle, wasm builds) keep their own documented sets —
 the constant across all of them is mimalloc on any native binary
 being timed.
 
+RuboCop-workload measurements additionally need `_prism_native`
+(the RuboCop parser-engine port: prism_native/prism_wq/commdrv).
+It was cfg-gated out of lib `default` in 2026-07 as the ticketed
+~380 KB `.text` clawback — the standard set above deliberately does
+NOT carry it, so base-RSS/binary-size numbers stay comparable to
+the CI default build. The canonical rubocop build is
+`--features stdlib,jit-native,mimalloc,_prism_native`
+(ADR 0034); `cli-defaults` (the shipped CLI) keeps the feature on.
+Without it, `require "prism"` raises a feature-absent LoadError.
+
 Verify a binary before timing it with
 `perf/alloc_fingerprint.sh path/to/rubyrs` — it fingerprints the
 allocator (mi_ symbols / mimalloc strings, macOS + Linux) and exits

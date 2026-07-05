@@ -3469,13 +3469,18 @@ impl Vm {
                     // so `require "prism"` works + RuboCop's parser_prism engine runs.
                     // require-once via `loaded_stdlib_stubs`.
                     //
+                    // `_prism_native` gate: the whole Rust bridge (prism_native +
+                    // prism_wq + commdrv) is feature-gated out of the default
+                    // build (~380 KB .text clawback); both injections go with it.
+                    // The feature-off arm below keeps the failure loud.
+                    //
                     // wasi gate: on wasm32-wasi `require` always raises
                     // LoadError (see the `target_os = "wasi"` arm below),
                     // so neither injection can fire — and the machinery
                     // they lean on (`loaded_stdlib_stubs`,
                     // `compile_and_run_source`) is cfg'd out of the Vm on
                     // wasi as dead code. Gate the whole block to match.
-                    #[cfg(not(target_os = "wasi"))]
+                    #[cfg(all(feature = "_prism_native", not(target_os = "wasi")))]
                     {
                         let p = path.to_string_lossy();
                         if &*p == "prism/prism" {
@@ -3516,6 +3521,26 @@ impl Vm {
                                 }
                                 Err(t) => Err(t),
                             });
+                        }
+                    }
+                    // `_prism_native` OFF: the prism gem's own
+                    // `require "prism/prism"` (its C-extension load, which the
+                    // injection above satisfies when the feature is built in)
+                    // cannot be satisfied — the gem has no pure-Ruby parser, so
+                    // there is no honest slow path to degrade to. Fail loudly
+                    // with a feature-absent LoadError naming the rebuild flag
+                    // (sass/regex-off precedent) instead of letting the request
+                    // fall through to the cext dlopen path's cryptic miss.
+                    #[cfg(not(feature = "_prism_native"))]
+                    {
+                        if &*path.to_string_lossy() == "prism/prism" {
+                            return Some(Err(self.trap(RubyError::LoadError {
+                                msg: "cannot load such file -- prism/prism \
+                                      (rubyrs's native prism backend is not built into \
+                                      this binary; rebuild with `--features _prism_native` \
+                                      to run the prism gem / RuboCop's parser_prism engine)"
+                                    .to_string(),
+                            })));
                         }
                     }
                     #[cfg(not(target_os = "wasi"))]
@@ -4524,6 +4549,13 @@ impl Vm {
         // unless the host fns were registered. Inner `rubocop/...`
         // requires don't match the bare name, and a repeat require
         // returns Bool(false), so this fires exactly once per fresh load.
+        // `_prism_native`-gated with the rest of the RuboCop port. (The
+        // hook was already `defined?(...)`-inert without the host fns;
+        // in practice a feature-off binary never even reaches here on
+        // the modern stack — rubocop-ast hard-requires prism, so
+        // `require "rubocop"` raises the feature-absent LoadError at
+        // the `prism/prism` intercept first.)
+        #[cfg(feature = "_prism_native")]
         if path_str == "rubocop" && matches!(result, Ok(Value::Bool(true))) {
             self.eval_string(
                 crate::commdrv::HOOK_RB,

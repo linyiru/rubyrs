@@ -401,16 +401,22 @@ fn main() {
     // always registered so the pure-Ruby JSON canon's generate emits
     // byte-identical floats to CRuby with or without `_json_native`.
     rubyrs::register_json_float_host_fns(&mut rt);
-    // Prism serialize-parse host fns (ADR 0036 Slice 1): always available — the prism C lib
-    // is unconditionally linked. Lets RuboCop's `parser_prism` engine build its AST natively,
-    // bypassing the slow interpreted whitequark lexer. Inert unless the prism shim calls them.
+    // `_prism_native` (the RuboCop parser-engine port): Prism
+    // serialize-parse host fns (ADR 0036 Slice 1) — the prism C lib is
+    // unconditionally linked, but the Rust bridge (materialize + node
+    // specs + wq translation + commdrv) is feature-gated. Lets RuboCop's
+    // `parser_prism` engine build its AST natively, bypassing the slow
+    // interpreted whitequark lexer. Inert unless the prism shim calls them.
+    #[cfg(feature = "_prism_native")]
     rubyrs::register_prism_native_host_fns(&mut rt);
     // Native whitequark translation (prism_wq): the Translation::Parser#tokenize
     // pipeline in Rust. Inert unless the prism translation hook calls it.
+    #[cfg(feature = "_prism_native")]
     rubyrs::register_prism_wq_host_fns(&mut rt);
     // Native Commissioner walk driver (commdrv): RuboCop's cop-walk
     // machinery (per-node callback triggering + traversal) in Rust.
     // Inert unless the require("rubocop") hook calls it.
+    #[cfg(feature = "_prism_native")]
     rubyrs::register_commdrv_host_fns(&mut rt);
     // `_rouge_native` accelerator: expose the carmine engine host fns;
     // the require("rouge") hook injects the shim that detects + uses

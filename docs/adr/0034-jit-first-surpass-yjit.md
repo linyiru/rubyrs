@@ -981,9 +981,13 @@ output + diff_cruby green) measured the JIT against the REAL RuboCop 1.88 cop wa
   — NOT more compile() coverage. For rubocop-shaped CLI runs, `RUBYRS_JIT_NATIVE` off is
   currently the faster configuration; the compile-attempt tax should be gated before the
   JIT is defaulted on for such workloads.
-- Canonical rubocop-workload build: `--features stdlib,jit-native,mimalloc` — mimalloc is a
-  measured win on every leg of this workload (single-file wall −10.6%, `require` −12%,
-  walk −3.5%, 20-file batch −4.7%).
+- Canonical rubocop-workload build: `--features stdlib,jit-native,mimalloc,_prism_native` —
+  mimalloc is a measured win on every leg of this workload (single-file wall −10.6%,
+  `require` −12%, walk −3.5%, 20-file batch −4.7%). (`_prism_native` added 2026-07: the
+  RuboCop parser-engine port — prism_native/prism_materialize/prism_wq/commdrv — was
+  cfg-gated out of the default build as the ticketed ~380 KB .text clawback; without the
+  feature `require "prism"` raises a feature-absent LoadError — and since rubocop-ast
+  1.49 hard-requires prism, `require "rubocop"` on this stack fails the same loud way.)
 
 ### Serving-plumbing fix (2026-07-02) — compiled code now REACHABLE; tax cut ~9.3% → ~2.5-3%
 

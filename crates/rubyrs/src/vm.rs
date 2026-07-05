@@ -61,15 +61,25 @@ pub(crate) use vm_ptr::with_vm_ptr_set;
 // cext-invariant debug_assert.
 //
 // The native-accelerator host fns (_json_native / _yaml_native /
-// _liquid_native / _sqlite) read it too, as do the ALWAYS-compiled
-// ADR 0036 modules (prism_native's materialize path, prism_wq's
-// tokenize host fns, commdrv's walk driver). Because of those
-// always-on readers the re-export is unconditional — unlike
-// `with_vm_ptr_set` above, whose only callers are feature-gated.
-// In configurations where no feature enables the V1 dispatch wrap
-// (e.g. `--no-default-features`) the ptr is never set, so the host
-// fns see null and decline / error out of host-fn scope — degraded
-// but correct.
+// _liquid_native / _sqlite) read it too, as do the `_prism_native`
+// modules (prism_native's materialize path, prism_wq's tokenize
+// host fns, commdrv's walk driver) — each is listed so a
+// `--no-default-features --features <accel>` build compiles.
+// (The prism trio was ALWAYS-compiled until the `_prism_native`
+// gate landed, which is why this re-export was briefly
+// unconditional.) In configurations where no feature enables the
+// V1 dispatch wrap the ptr is never set, so the host fns see null
+// and decline / error out of host-fn scope — degraded but correct.
+#[cfg(any(
+    all(feature = "cext", not(target_os = "wasi")),
+    feature = "_http_server",
+    feature = "_fiber",
+    feature = "_json_native",
+    feature = "_yaml_native",
+    feature = "_liquid_native",
+    feature = "_sqlite",
+    feature = "_prism_native",
+))]
 pub(crate) use vm_ptr::current_vm_ptr;
 
 // `iter::BlockStep` is the result of `step_block`. The

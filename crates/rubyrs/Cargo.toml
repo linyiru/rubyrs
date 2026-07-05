@@ -238,6 +238,27 @@ _encoding_full = ["dep:encoding_rs", "dep:unicode-normalization", "dep:unicode-s
 # No external crate (the algorithm is a self-contained port of
 # crypt_blowfish.c); makes `require "bcrypt"` load + run on rubyrs.
 _bcrypt = []
+# `_prism_native` — the RuboCop parser-engine port (ADR 0036 slices /
+# the ADR 0034 rubocop campaign): the Rust bridge that makes
+# `require "prism"` work and RuboCop's `parser_prism` engine run
+# natively. Covers prism_native (serialize-parse host fns over the
+# always-linked prism C lib), prism_materialize + prism_node_specs
+# (wire→Ruby-object AST materialization + the generated NodeSpec
+# tables), prism_wq (native `Prism::Translation::Parser#tokenize`:
+# lexer/builder/compiler ports), and commdrv (native Commissioner
+# cop-walk driver). No new crate deps — it is pure code weight:
+# ~380 KB of .text / ~0.3-0.4 MB base RSS that the default
+# (non-RuboCop) build shouldn't carry, which is why it is gated
+# like `jit-native`/`jit_tier2` rather than always-compiled.
+# In `cli-defaults` (the shipped CLI keeps `require "prism"` +
+# the RuboCop accelerators working); lib `default` stays lean.
+# With the feature OFF, the prism gem's `require "prism/prism"`
+# raises a clear feature-absent LoadError naming this flag (the
+# gem has no pure-Ruby parser to degrade to). Probed 2026-07 on
+# the rubocop-1.88.0 stack: rubocop-ast 1.49 hard-requires prism,
+# so `require "rubocop"` fails the same loud way — the RuboCop
+# workload needs this feature, full stop.
+_prism_native = []
 # `_oj` — pure-Ruby shim for the oj gem's C extension (`oj/oj`),
 # routing `Oj.dump` / `Oj.load` to rubyrs's JSON (= oj's `:compat`
 # mode = standard JSON). Correct for plain-data dump/load — the common
@@ -293,7 +314,11 @@ _openssl = ["_socket", "dep:rustls", "dep:webpki-roots", "dep:rustls-pki-types"]
 # (67.5 → 68.4MB, still under CRuby's 79.7) — the old "~9% RSS"
 # cost shrank because lazy regex removed most of the allocation
 # volume mimalloc's segment cache used to hold.
-cli-defaults = ["stdlib", "_sqlite", "_http_server", "sass", "mimalloc"]
+# `_prism_native` rides in cli-defaults (2026-07: the RuboCop
+# parser-engine port was cfg-gated out of lib `default` as the
+# ticketed ~380 KB .text clawback; the installed CLI keeps the
+# `require "prism"` / RuboCop-accelerator behaviour it always had).
+cli-defaults = ["stdlib", "_sqlite", "_http_server", "sass", "mimalloc", "_prism_native"]
 # `everything` — kitchen sink for embedders who want every
 # available battery pre-wired. ADR 0019 v3 line 314's "Bun-
 # class CLI / Edge runtime" target. ≤ 150 MB stripped.

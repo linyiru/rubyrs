@@ -37,6 +37,7 @@ mod bcrypt;
 #[cfg(feature = "_oj")]
 mod oj;
 mod bytecode;
+#[cfg(feature = "_prism_native")]
 mod commdrv;
 mod compiler;
 mod const_marker;
@@ -59,11 +60,18 @@ mod json_float;
 mod json_native;
 // ADR 0036 Slice 1: Prism serialize-parse host fns (prism C lib is always linked via
 // `ruby-prism`), so RuboCop's `parser_prism` engine runs without the C extension.
+// The whole RuboCop parser-engine port (prism_native + prism_materialize +
+// prism_node_specs + prism_wq + commdrv) is gated behind `_prism_native` —
+// ~380 KB of .text the default (non-RuboCop) build shouldn't carry.
+#[cfg(feature = "_prism_native")]
 mod prism_materialize;
+#[cfg(feature = "_prism_native")]
 mod prism_native;
+#[cfg(feature = "_prism_native")]
 mod prism_node_specs;
 // Native whitequark translation: `Prism::Translation::Parser#tokenize` in Rust
 // (compiler + builder + lexer ports), for RuboCop's prism engine.
+#[cfg(feature = "_prism_native")]
 mod prism_wq;
 // VM snapshot/image (thin slice) — capture the class graph to serde bytes so a
 // future restore can skip `require`'s parse+compile+execute. Gated on the serde
@@ -151,16 +159,19 @@ pub use json_float::register_host_fns as register_json_float_host_fns;
 
 /// Register the Prism serialize-parse host fns so RuboCop's `parser_prism` engine can build
 /// its AST natively on rubyrs (ADR 0036 Slice 1). See [`prism_native::register_host_fns`].
+#[cfg(feature = "_prism_native")]
 pub use prism_native::register_host_fns as register_prism_native_host_fns;
 /// Register the native whitequark-translation host fn
 /// (`__rubyrs_wqtrans_tokenize`) that runs `Prism::Translation::Parser#tokenize`
 /// in Rust for RuboCop's prism engine. See [`prism_wq::register_host_fns`].
+#[cfg(feature = "_prism_native")]
 pub use prism_wq::register_host_fns as register_prism_wq_host_fns;
 /// Register the native Commissioner walk-driver host fns
 /// (`__rubyrs_commdrv_*`) that run RuboCop's cop-walk machinery
 /// (`Commissioner#walk` dispatch + callback triggering) natively.
 /// The hook rubyrs injects after `require "rubocop"` detects the
 /// registration via `defined?(...)`. See [`commdrv::register_host_fns`].
+#[cfg(feature = "_prism_native")]
 pub use commdrv::register_host_fns as register_commdrv_host_fns;
 /// Register `_rouge_native` host fns (`__rubyrs_rouge_native_table`,
 /// `__rubyrs_rouge_native_lex_html`) onto a `Runtime`. The shim that
@@ -3131,6 +3142,13 @@ impl Runtime {
         let _t_total = std::time::Instant::now();
         #[cfg(feature = "preamble-cache")]
         {
+            // NOT `Option::zip` (clippy suggests it): `zip` evaluates its
+            // argument eagerly, and `cache_key` touches the filesystem
+            // (current_exe metadata + a 128 KB content sample). Per ADR
+            // 0017 the library must not touch the host FS unless the
+            // embedder opted in via `preamble_cache_dir` — `and_then`
+            // keeps the probe behind that capability gate.
+            #[allow(clippy::manual_option_zip)]
             let key_dir = self
                 .preamble_cache_dir
                 .clone()
