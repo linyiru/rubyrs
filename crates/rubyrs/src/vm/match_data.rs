@@ -275,18 +275,13 @@ impl Vm {
         let owned = if re.g_anchored() {
             match re.captures_owned_str_anchored(tail) {
                 Some(inner) => inner,
-                None => re.captures_owned(tail).map_err(|e| {
-                    self.trap(crate::error::RubyError::RuntimeError {
-                        msg: format!("regex match failed: {} (pattern: /{}/)", e, re.as_str()),
-                    })
-                })?,
+                None => re
+                    .captures_owned(tail)
+                    .map_err(|e| self.trap(e.to_ruby_error(re.as_str())))?,
             }
         } else {
-            re.captures_owned(tail).map_err(|e| {
-                self.trap(crate::error::RubyError::RuntimeError {
-                    msg: format!("regex match failed: {} (pattern: /{}/)", e, re.as_str()),
-                })
-            })?
+            re.captures_owned(tail)
+                .map_err(|e| self.trap(e.to_ruby_error(re.as_str())))?
         };
         match owned {
             None => {
@@ -393,11 +388,7 @@ impl Vm {
                 re.captures_owned(tail)
             }
         };
-        let owned = owned.map_err(|e| {
-            self.trap(crate::error::RubyError::RuntimeError {
-                msg: format!("regex match failed: {} (pattern: /{}/)", e, re.as_str()),
-            })
-        })?;
+        let owned = owned.map_err(|e| self.trap(e.to_ruby_error(re.as_str())))?;
         match owned {
             None => {
                 self.save_match_scope_on_write();

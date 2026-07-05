@@ -1006,11 +1006,9 @@ impl Vm {
                 // match-time error doesn't have the side effect of
                 // wiping `$~` — the operation never produced output, so
                 // the caller's prior `$~` should survive untouched.
-                let owned_matches = re.captures_iter_owned(&source).map_err(|e| {
-                    g.vm.trap(crate::error::RubyError::RuntimeError {
-                        msg: format!("regex match failed: {} (pattern: /{}/)", e, re.as_str()),
-                    })
-                })?;
+                let owned_matches = re
+                    .captures_iter_owned(&source)
+                    .map_err(|e| g.vm.trap(e.to_ruby_error(re.as_str())))?;
                 // (The old `last_match.take()` pre-snapshot here was a
                 // leftover from before frame-scoped `$~`: under the
                 // LAZY scoping model taking the global would destroy
@@ -1269,12 +1267,13 @@ impl Vm {
                     // `errors.any?` true and silently blocked every
                     // result-cache save. A fancy match-time error
                     // (recursion-limit blow-up) traps like block-gsub's.
-                    let owned_matches = re.captures_iter_owned(&source_str).map_err(|e| {
-                        g.vm.trap(crate::error::RubyError::RuntimeError {
-                            msg: format!("regex match failed: {} (pattern: /{}/)", e, re.as_str()),
-                        })
-                    })?;
-                    let has_groups = re.captures_len() > 1;
+                    let owned_matches = re
+                        .captures_iter_owned(&source_str)
+                        .map_err(|e| g.vm.trap(e.to_ruby_error(re.as_str())))?;
+                    // Infallible after the successful iteration above
+                    // (the engine cell is filled) — a build failure
+                    // already trapped.
+                    let has_groups = re.captures_len().map(|n| n > 1).unwrap_or(false);
                     let cap_names = re.capture_group_names();
                     // CRuby sets `$~` to nil after a NO-match scan (block
                     // form included); the loops below consume

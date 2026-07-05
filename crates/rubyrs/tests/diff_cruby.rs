@@ -1542,6 +1542,10 @@ fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 #[test] fn struct_subclass_super() { run_diff("struct_subclass_super"); }
 #[test] fn array_fetch() { run_diff("array_fetch"); }
 #[test] fn regexp_error_standarderror() { run_diff("regexp_error_standarderror"); }
+// A deferred fancy-build failure (parse_tree accepts, real build
+// rejects) raises RegexpError at first use instead of panicking —
+// fuzz find 2026-07 on the defer-all-validated-patterns perf change.
+#[test] fn regex_deferred_build_error() { run_diff("regex_deferred_build_error"); }
 #[cfg(feature = "stdlib")]
 #[test] fn optparse_csv_yield() { run_diff("optparse_csv_yield"); }
 #[cfg(feature = "stdlib")]

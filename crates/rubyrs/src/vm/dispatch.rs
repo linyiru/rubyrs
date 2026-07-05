@@ -2912,11 +2912,9 @@ impl Vm {
         re: &crate::regex_engine::CompiledRegex,
         input: &str,
     ) -> Result<bool, Trap> {
-        let owned = re.captures_owned(input).map_err(|e| {
-            self.trap(RubyError::RuntimeError {
-                msg: format!("regex match failed: {} (pattern: /{}/)", e, re.as_str()),
-            })
-        })?;
+        let owned = re
+            .captures_owned(input)
+            .map_err(|e| self.trap(e.to_ruby_error(re.as_str())))?;
         match owned {
             Some(oc) => {
                 self.save_match_scope_on_write();
@@ -14953,7 +14951,15 @@ impl Vm {
         if &*name == "names" && args.is_empty()
             && let Value::Regex(re) = &recv
         {
-            let names: Vec<Value> = re.names().into_iter().map(Value::new_str).collect();
+            // `#names` can be the FIRST use of a lazily-compiled
+            // regexp — a deferred build failure raises RegexpError
+            // here, per the lazy-compile posture.
+            let names: Vec<Value> = re
+                .names()
+                .map_err(|e| self.trap(e.to_ruby_error(re.as_str())))?
+                .into_iter()
+                .map(Value::new_str)
+                .collect();
             let id = self.heap.alloc(HeapObj::Array(names.into()));
             self.stack.push(Value::Array(id));
             return Ok(());
@@ -14980,7 +14986,9 @@ impl Vm {
             // so this consults the source-parsed map to recover every
             // index — mustermann's `params` reads this to collect each
             // `*` splat capture into the "splat" array.
-            let index_map = re.named_capture_index_map();
+            let index_map = re
+                .named_capture_index_map()
+                .map_err(|e| self.trap(e.to_ruby_error(re.as_str())))?;
             let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(index_map.len());
             for (nm, idxs) in index_map {
                 let arr: Vec<Value> = idxs.into_iter().map(|i| Value::Int(i as i64)).collect();
@@ -15119,24 +15127,12 @@ impl Vm {
                                 match re.captures_owned_str_anchored(&bound) {
                                     Some(inner) => inner,
                                     None => re.captures_owned(&bound).map_err(|e| {
-                                        self.trap(RubyError::RuntimeError {
-                                            msg: format!(
-                                                "regex match failed: {} (pattern: /{}/)",
-                                                e,
-                                                re.as_str()
-                                            ),
-                                        })
+                                        self.trap(e.to_ruby_error(re.as_str()))
                                     })?,
                                 }
                             } else {
                                 re.captures_owned(&bound).map_err(|e| {
-                                    self.trap(RubyError::RuntimeError {
-                                        msg: format!(
-                                            "regex match failed: {} (pattern: /{}/)",
-                                            e,
-                                            re.as_str()
-                                        ),
-                                    })
+                                    self.trap(e.to_ruby_error(re.as_str()))
                                 })?
                             };
                             (o, false)

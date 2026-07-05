@@ -1016,15 +1016,21 @@ pub(crate) fn string_call(
             // Known-valid-UTF-8 fast path: borrowed view, no per-call
             // O(n) lossy validation.
             if let Some(m) = is_match_at_char_pos(a, 0, re) {
-                return Ok(Some(Value::Bool(m)));
+                return Ok(Some(Value::Bool(
+                    m.map_err(|e| e.to_ruby_error(re.as_str()))?,
+                )));
             }
             // BINARY subjects match byte-wise (CRuby ASCII-8BIT); fall
             // back to the UTF-8 engine when there's no byte engine.
             let matched = if matches!(a.encoding.get(), crate::value::EncodingTag::Binary) {
-                re.is_match_bytes(&a.content.borrow())
-                    .unwrap_or_else(|| a.with_str_lossy(|s| re.is_match_from(s)))
+                match re.is_match_bytes(&a.content.borrow()) {
+                    Some(m) => m,
+                    None => a.with_str_lossy(|s| re.is_match_from(s))
+                        .map_err(|e| e.to_ruby_error(re.as_str()))?,
+                }
             } else {
                 a.with_str_lossy(|s| re.is_match_from(s))
+                    .map_err(|e| e.to_ruby_error(re.as_str()))?
             };
             Some(Value::Bool(matched))
         }
@@ -1037,7 +1043,9 @@ pub(crate) fn string_call(
             // borrowed view — the lossy path below copies the subject
             // and walks its chars per call (13µs on a 21KB buffer).
             if let Some(m) = is_match_at_char_pos(a, *pos, re) {
-                return Ok(Some(Value::Bool(m)));
+                return Ok(Some(Value::Bool(
+                    m.map_err(|e| e.to_ruby_error(re.as_str()))?,
+                )));
             }
             let lossy = a.to_string_lossy();
             let char_len = lossy.chars().count() as i64;
@@ -1051,6 +1059,7 @@ pub(crate) fn string_call(
                     .map(|(b, _)| b)
                     .unwrap_or(lossy.len());
                 re.is_match_from(&lossy[byte_off..])
+                    .map_err(|e| e.to_ruby_error(re.as_str()))?
             };
             Some(Value::Bool(matched))
         }
@@ -1242,7 +1251,10 @@ pub(crate) fn string_call(
                 return Ok(Some(with_tag(Value::new_str_bytes(out), a.encoding.get())));
             }
             let a_ref = a.to_string_lossy();
-            let out = re.replace(&a_ref, repl_xlated.as_str()).into_owned();
+            let out = re
+                .replace(&a_ref, repl_xlated.as_str())
+                .map_err(|e| e.to_ruby_error(re.as_str()))?
+                .into_owned();
             check(out.len())?;
             Some(Value::new_str(out))
         }
@@ -1257,7 +1269,10 @@ pub(crate) fn string_call(
                 return Ok(Some(with_tag(Value::new_str_bytes(out), a.encoding.get())));
             }
             let a_ref = a.to_string_lossy();
-            let out = re.replace_all(&a_ref, repl_xlated.as_str()).into_owned();
+            let out = re
+                .replace_all(&a_ref, repl_xlated.as_str())
+                .map_err(|e| e.to_ruby_error(re.as_str()))?
+                .into_owned();
             check(out.len())?;
             Some(Value::new_str(out))
         }
@@ -1335,7 +1350,10 @@ pub(crate) fn string_call(
             // when there's no match — use that to detect the
             // no-match case in a single scan instead of running
             // a separate `is_match` first.
-            match re.replace(&a_ref, repl_xlated.as_str()) {
+            match re
+                .replace(&a_ref, repl_xlated.as_str())
+                .map_err(|e| e.to_ruby_error(re.as_str()))?
+            {
                 std::borrow::Cow::Borrowed(_) => Some(Value::Nil),
                 std::borrow::Cow::Owned(new_str) => {
                     let new_bytes = new_str.into_bytes();
@@ -1359,7 +1377,10 @@ pub(crate) fn string_call(
             let repl_xlated = ruby_backref_to_dollar(&repl_ref);
             // Same single-scan no-match detection via the Cow
             // returned by `replace_all`.
-            match re.replace_all(&a_ref, repl_xlated.as_str()) {
+            match re
+                .replace_all(&a_ref, repl_xlated.as_str())
+                .map_err(|e| e.to_ruby_error(re.as_str()))?
+            {
                 std::borrow::Cow::Borrowed(_) => Some(Value::Nil),
                 std::borrow::Cow::Owned(new_str) => {
                     let new_bytes = new_str.into_bytes();
@@ -1669,16 +1690,30 @@ pub(crate) fn string_call(
         // String fast path above handles the common case.
         (Value::Str(a), "start_with?", prefixes) => {
             let src = a.to_string_lossy();
-            let any = prefixes.iter().any(|p| match p {
-                Value::Str(b) => src.starts_with(&*b.to_string_lossy()),
-                #[cfg(feature = "regex")]
-                Value::Regex(re) => re
-                    .captures_owned(&src)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|c| c.m_start == 0),
-                _ => false,
-            });
+            let mut any = false;
+            for p in prefixes {
+                let hit = match p {
+                    Value::Str(b) => src.starts_with(&*b.to_string_lossy()),
+                    #[cfg(feature = "regex")]
+                    Value::Regex(re) => match re.captures_owned(&src) {
+                        Ok(c) => c.is_some_and(|c| c.m_start == 0),
+                        // Deferred build failure — raise RegexpError
+                        // at first use (the fuzz repro's exact path:
+                        // `"x".start_with?(/[a-#b c dz]/)`).
+                        Err(e @ crate::regex_engine::RegexOpError::Build(_)) => {
+                            return Err(e.to_ruby_error(re.as_str()));
+                        }
+                        // Fancy match-time error: pre-existing
+                        // "no match" swallow.
+                        Err(crate::regex_engine::RegexOpError::Match(_)) => false,
+                    },
+                    _ => false,
+                };
+                if hit {
+                    any = true;
+                    break;
+                }
+            }
             Some(Value::Bool(any))
         }
         // `String#delete_prefix` / `delete_suffix` — return a copy
@@ -1900,13 +1935,19 @@ pub(crate) fn string_call(
         #[cfg(feature = "regex")]
         (Value::Regex(re), "match?", [Value::Str(s)]) => {
             if let Some(m) = is_match_at_char_pos(s, 0, re) {
-                return Ok(Some(Value::Bool(m)));
+                return Ok(Some(Value::Bool(
+                    m.map_err(|e| e.to_ruby_error(re.as_str()))?,
+                )));
             }
             let matched = if matches!(s.encoding.get(), crate::value::EncodingTag::Binary) {
-                re.is_match_bytes(&s.content.borrow())
-                    .unwrap_or_else(|| s.with_str_lossy(|s| re.is_match_from(s)))
+                match re.is_match_bytes(&s.content.borrow()) {
+                    Some(m) => m,
+                    None => s.with_str_lossy(|s| re.is_match_from(s))
+                        .map_err(|e| e.to_ruby_error(re.as_str()))?,
+                }
             } else {
                 s.with_str_lossy(|s| re.is_match_from(s))
+                    .map_err(|e| e.to_ruby_error(re.as_str()))?
             };
             Some(Value::Bool(matched))
         }
@@ -1923,7 +1964,9 @@ pub(crate) fn string_call(
         #[cfg(feature = "regex")]
         (Value::Regex(re), "match?", [Value::Str(s), Value::Int(pos)]) => {
             if let Some(m) = is_match_at_char_pos(s, *pos, re) {
-                return Ok(Some(Value::Bool(m)));
+                return Ok(Some(Value::Bool(
+                    m.map_err(|e| e.to_ruby_error(re.as_str()))?,
+                )));
             }
             let lossy = s.to_string_lossy();
             let char_len = lossy.chars().count() as i64;
@@ -1937,6 +1980,7 @@ pub(crate) fn string_call(
                     .map(|(b, _)| b)
                     .unwrap_or(lossy.len());
                 re.is_match_from(&lossy[byte_off..])
+                    .map_err(|e| e.to_ruby_error(re.as_str()))?
             };
             Some(Value::Bool(matched))
         }
@@ -2631,7 +2675,10 @@ impl Vm {
                         Value::Sym(sid) => self.interner.resolve(*sid).to_string(),
                         _ => unreachable!(),
                     };
-                    let idx = match re.capture_name_index(&gname) {
+                    let idx = match re
+                        .capture_name_index(&gname)
+                        .map_err(|e| self.trap(e.to_ruby_error(re.as_str())))?
+                    {
                         Some(i) => i as i64,
                         None => {
                             return Err(self.trap(RubyError::IndexError {
@@ -3043,15 +3090,9 @@ impl Vm {
                         .nth(start_char as usize)
                         .map(|(b, _)| b)
                         .unwrap_or(sa.len());
-                    let owned = re.captures_owned(&sa[start_byte..]).map_err(|e| {
-                        self.trap(RubyError::RuntimeError {
-                            msg: format!(
-                                "regex match failed: {} (pattern: /{}/)",
-                                e,
-                                re.as_str(),
-                            ),
-                        })
-                    })?;
+                    let owned = re
+                        .captures_owned(&sa[start_byte..])
+                        .map_err(|e| self.trap(e.to_ruby_error(re.as_str())))?;
                     return Ok(Some(match owned {
                         None => {
                             self.save_match_scope_on_write();
@@ -3122,7 +3163,10 @@ impl Vm {
                             Some(Value::Int(n)) => *n,
                             Some(Value::Str(gname)) => {
                                 let gname = gname.to_string_lossy();
-                                match re.capture_name_index(&gname) {
+                                match re
+                                    .capture_name_index(&gname)
+                                    .map_err(|e| self.trap(e.to_ruby_error(re.as_str())))?
+                                {
                                     Some(idx) => idx as i64,
                                     None => {
                                         return Err(self.trap(RubyError::IndexError {
@@ -3135,7 +3179,10 @@ impl Vm {
                             }
                             Some(Value::Sym(sid)) => {
                                 let gname = self.interner.resolve(*sid).to_string();
-                                match re.capture_name_index(&gname) {
+                                match re
+                                    .capture_name_index(&gname)
+                                    .map_err(|e| self.trap(e.to_ruby_error(re.as_str())))?
+                                {
                                     Some(idx) => idx as i64,
                                     None => {
                                         return Err(self.trap(RubyError::IndexError {
@@ -3157,15 +3204,9 @@ impl Vm {
                             None => 0,
                         };
                         let bound = s.to_string_lossy();
-                        let owned = re.captures_owned(&bound).map_err(|e| {
-                            self.trap(RubyError::RuntimeError {
-                                msg: format!(
-                                    "regex match failed: {} (pattern: /{}/)",
-                                    e,
-                                    re.as_str(),
-                                ),
-                            })
-                        })?;
+                        let owned = re
+                            .captures_owned(&bound)
+                            .map_err(|e| self.trap(e.to_ruby_error(re.as_str())))?;
                         let Some(oc) = owned else {
                             self.save_match_scope_on_write();
                             self.last_match = None;
@@ -3558,7 +3599,18 @@ impl Vm {
                     #[cfg(feature = "regex")]
                     ("partition", [Value::Regex(re)]) => {
                         let src = s.to_string_lossy();
-                        let parts = match re.captures_owned(&src).ok().flatten() {
+                        // A deferred BUILD failure raises RegexpError
+                        // (first use of a lazily-compiled regexp); a
+                        // fancy MATCH-time error keeps the pre-existing
+                        // "no match" swallow (is_match-style trade-off).
+                        let found = match re.captures_owned(&src) {
+                            Ok(c) => c,
+                            Err(e @ crate::regex_engine::RegexOpError::Build(_)) => {
+                                return Err(self.trap(e.to_ruby_error(re.as_str())));
+                            }
+                            Err(crate::regex_engine::RegexOpError::Match(_)) => None,
+                        };
+                        let parts = match found {
                             Some(c) => [
                                 src[..c.m_start].to_string(),
                                 src[c.m_start..c.m_end].to_string(),
@@ -3575,7 +3627,16 @@ impl Vm {
                     ("rpartition", [Value::Regex(re)]) => {
                         let src = s.to_string_lossy();
                         // Last match → take the final element of all matches.
-                        let parts = match re.captures_iter_owned(&src).ok().and_then(|v| v.into_iter().last()) {
+                        // Same Build-raise / Match-swallow split as
+                        // `partition` above.
+                        let found = match re.captures_iter_owned(&src) {
+                            Ok(v) => v.into_iter().last(),
+                            Err(e @ crate::regex_engine::RegexOpError::Build(_)) => {
+                                return Err(self.trap(e.to_ruby_error(re.as_str())));
+                            }
+                            Err(crate::regex_engine::RegexOpError::Match(_)) => None,
+                        };
+                        let parts = match found {
                             Some(c) => [
                                 src[..c.m_start].to_string(),
                                 src[c.m_start..c.m_end].to_string(),
@@ -3815,14 +3876,16 @@ impl Vm {
                         // receivers (preserves bytes + tag); lossless
                         // fast path for valid UTF-8. See
                         // `regex_split_values`.
-                        let elems = regex_split_values(&s, re, 0);
+                        let elems = regex_split_values(&s, re, 0)
+                            .map_err(|e| self.trap(e.to_ruby_error(re.as_str())))?;
                         self.maybe_gc();
                         let id = self.heap.alloc(HeapObj::Array(elems.into()));
                         Some(Value::Array(id))
                     }
                     #[cfg(feature = "regex")]
                     ("split", [Value::Regex(re), Value::Int(limit)]) => {
-                        let elems = regex_split_values(&s, re, *limit);
+                        let elems = regex_split_values(&s, re, *limit)
+                            .map_err(|e| self.trap(e.to_ruby_error(re.as_str())))?;
                         self.maybe_gc();
                         let id = self.heap.alloc(HeapObj::Array(elems.into()));
                         Some(Value::Array(id))
@@ -4048,12 +4111,15 @@ impl Vm {
                     }
                     #[cfg(feature = "regex")]
                     ("sub" | "gsub" | "sub!" | "gsub!", [Value::Regex(re), Value::Hash(hid)]) => {
-                        let native = re.as_native().ok_or_else(|| self.trap(RubyError::RuntimeError {
-                            msg: format!(
-                                "regex op 'String#{name}' with a Hash replacement is not yet supported on patterns requiring the fancy-regex engine (pattern: /{}/)",
-                                re.as_str(),
-                            ),
-                        }))?;
+                        let native = re
+                            .as_native()
+                            .map_err(|e| self.trap(e.to_ruby_error(re.as_str())))?
+                            .ok_or_else(|| self.trap(RubyError::RuntimeError {
+                                msg: format!(
+                                    "regex op 'String#{name}' with a Hash replacement is not yet supported on patterns requiring the fancy-regex engine (pattern: /{}/)",
+                                    re.as_str(),
+                                ),
+                            }))?;
                         let pairs = self.heap.hash(*hid).to_vec();
                         let mut table: std::collections::HashMap<String, String> =
                             std::collections::HashMap::new();
@@ -4160,12 +4226,13 @@ impl Vm {
                         // (binary input degrades to lossy UTF-8; the engines
                         // only match UTF-8.)
                         let s_owned = s.to_string_lossy();
-                        let has_groups = re.captures_len() > 1;
-                        let matches = re.captures_iter_owned(&s_owned).map_err(|e| {
-                            self.trap(RubyError::RuntimeError {
-                                msg: format!("regex match failed: {} (pattern: /{}/)", e, re.as_str()),
-                            })
-                        })?;
+                        let has_groups = re
+                            .captures_len()
+                            .map_err(|e| self.trap(e.to_ruby_error(re.as_str())))?
+                            > 1;
+                        let matches = re
+                            .captures_iter_owned(&s_owned)
+                            .map_err(|e| self.trap(e.to_ruby_error(re.as_str())))?;
                         // CRuby updates `$~` for no-block scan too: final
                         // match on success, nil on no match. Do this only
                         // after the match walk succeeds so a fancy-regex
@@ -4341,11 +4408,9 @@ impl Vm {
         // died on the old native-only trap here). A fancy-engine
         // match-time error (backtracking blow-up) still traps.
         let bound = s.to_string_lossy();
-        let owned = re.captures_owned(&bound).map_err(|e| {
-            self.trap(RubyError::RuntimeError {
-                msg: format!("regex match failed: {} (pattern: /{}/)", e, re.as_str()),
-            })
-        })?;
+        let owned = re
+            .captures_owned(&bound)
+            .map_err(|e| self.trap(e.to_ruby_error(re.as_str())))?;
         let oc = match owned {
             None => {
                 self.save_match_scope_on_write();
@@ -4609,13 +4674,15 @@ fn wants_byte_faithful(s: &crate::value::RStr) -> bool {
 /// `is_match_from` on a BORROWED view of the content — no subject
 /// copy, no per-call chars walk. Returns `None` when the receiver is
 /// BINARY or not valid UTF-8 (caller falls back to its lossy path);
-/// `Some(false)` for an out-of-range `pos` (CRuby: no match).
+/// `Some(Ok(false))` for an out-of-range `pos` (CRuby: no match);
+/// `Some(Err(..))` when the deferred engine build failed (caller
+/// raises RegexpError).
 #[cfg(feature = "regex")]
 fn is_match_at_char_pos(
     s: &crate::value::RStr,
     pos: i64,
     re: &crate::regex_engine::CompiledRegex,
-) -> Option<bool> {
+) -> Option<Result<bool, crate::regex_engine::RegexOpError>> {
     if s.encoding.get() == crate::value::EncodingTag::Binary || !s.content.is_utf8_cached() {
         return None;
     }
@@ -4625,7 +4692,7 @@ fn is_match_at_char_pos(
         let char_len = s.content.borrow().len() as i64;
         let cpos = if pos < 0 { char_len + pos } else { pos };
         if cpos < 0 || cpos > char_len {
-            return Some(false);
+            return Some(Ok(false));
         }
         cpos as usize
     } else {
@@ -4633,7 +4700,7 @@ fn is_match_at_char_pos(
         let char_len = (starts.len() - 1) as i64;
         let cpos = if pos < 0 { char_len + pos } else { pos };
         if cpos < 0 || cpos > char_len {
-            return Some(false);
+            return Some(Ok(false));
         }
         starts[cpos as usize] as usize
     };
@@ -4661,7 +4728,7 @@ fn regex_split_values(
     s: &std::rc::Rc<crate::value::RStr>,
     re: &std::rc::Rc<crate::regex_engine::CompiledRegex>,
     limit: i64,
-) -> Vec<Value> {
+) -> Result<Vec<Value>, crate::regex_engine::RegexOpError> {
     use crate::value::EncodingTag;
     let enc = s.encoding.get();
     {
@@ -4673,8 +4740,9 @@ fn regex_split_values(
     }
     // Latin-1 decode (1 byte → 1 char) so the split is byte-faithful.
     let latin1: String = s.content.borrow().iter().map(|&byte| byte as char).collect();
-    let raw = regex_split_into_values(re, &latin1, limit);
-    raw.into_iter()
+    let raw = regex_split_into_values(re, &latin1, limit)?;
+    Ok(raw
+        .into_iter()
         .map(|v| match v {
             Value::Str(cs) => {
                 // The chunk is a Latin-1 substring; recover its bytes
@@ -4686,7 +4754,7 @@ fn regex_split_values(
             }
             other => other,
         })
-        .collect()
+        .collect())
 }
 
 #[cfg(feature = "regex")]
@@ -4734,12 +4802,12 @@ fn regex_split_into_values(
     re: &std::rc::Rc<crate::regex_engine::CompiledRegex>,
     src: &str,
     limit: i64,
-) -> Vec<Value> {
+) -> Result<Vec<Value>, crate::regex_engine::RegexOpError> {
     use crate::regex_engine::SplitMatch;
     // CRuby parity: empty source returns `[]` regardless of
     // limit. (`"".split(/,/)` => `[]`.)
     if src.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let limit_pos = limit > 0;
     // Saturating i64 → usize for the per-chunk cap. `limit as
@@ -4775,7 +4843,7 @@ fn regex_split_into_values(
     } else {
         None
     };
-    let matches: Vec<SplitMatch> = re.split_matches(src, collection_bound);
+    let matches: Vec<SplitMatch> = re.split_matches(src, collection_bound)?;
     let mut out: Vec<Value> = Vec::new();
     let mut last_end: usize = 0;
     let mut chunks_emitted: usize = 0;
@@ -4832,7 +4900,7 @@ fn regex_split_into_values(
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// Translate Ruby's `\0` / `\1` / … / `\k<name>` backref syntax

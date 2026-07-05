@@ -62,6 +62,52 @@ pub enum Engine {
     Fancy(fancy_regex::Regex),
 }
 
+/// Error from a regex OPERATION (as opposed to construction —
+/// `compile_with_flags` keeps its plain `Err(String)`). The two
+/// variants map to DIFFERENT Ruby error classes, so call sites
+/// must not collapse them:
+///
+/// * `Build` — the DEFERRED engine build failed at first use.
+///   The lazy-compile posture (see `compile_with_flags`) shifts a
+///   construction-time failure for a pattern that passes the
+///   cheap validation gates (`regex_syntax` parse OR
+///   `fancy_regex::Expr::parse_tree`) but fails the full NFA
+///   build (e.g. an invalid char-class range fancy's syntax-only
+///   parse accepts) to the first operation that touches the
+///   engine. Raise as `RegexpError` — the same class the eager
+///   construction path produces, so `rescue RegexpError` /
+///   `rescue` (StandardError) semantics match, just at first use
+///   instead of at `Regexp.new`. Fuzz find 2026-07: this used to
+///   be a `panic!`.
+/// * `Match` — the engine errored DURING matching (fancy-regex
+///   backtrack/recursion limits on adversarial inputs). Existing
+///   call sites raise `RuntimeError` for this; preserved.
+///
+/// `to_ruby_error(source)` renders the conventional message for
+/// each (`invalid regex /src/: …` / `regex match failed: …
+/// (pattern: /src/)`), so the mapping stays uniform across the
+/// VM's dispatch sites.
+pub(crate) enum RegexOpError {
+    Build(String),
+    Match(String),
+}
+
+impl RegexOpError {
+    /// Convert to the conventional Ruby-level error, given the
+    /// regexp's BARE source (`CompiledRegex::as_str()`).
+    pub(crate) fn to_ruby_error(&self, source: &str) -> crate::error::RubyError {
+        match self {
+            RegexOpError::Build(msg) => crate::error::RubyError::HostException {
+                class_name: "RegexpError".into(),
+                message: format!("invalid regex /{}/: {}", source, msg),
+            },
+            RegexOpError::Match(msg) => crate::error::RubyError::RuntimeError {
+                msg: format!("regex match failed: {} (pattern: /{}/)", msg, source),
+            },
+        }
+    }
+}
+
 /// Ruby `Regexp` option bits — match CRuby's
 /// `Regexp::IGNORECASE` / `EXTENDED` / `MULTILINE` constant
 /// values. Carried on `CompiledRegex` so `Regexp#options` /
@@ -107,7 +153,12 @@ pub struct CompiledRegex {
     /// fallback eagerly — the fancy build is cheap (backtracking
     /// program, no DFA) and pre-filling keeps the error point at
     /// Regexp construction, same as before.
-    engine: std::cell::OnceCell<Engine>,
+    ///
+    /// `Err` records a DEFERRED build failure (a pattern the
+    /// cheap validation gates accepted but the full build
+    /// rejects); every subsequent use keeps surfacing the same
+    /// error via `engine()` → `RegexOpError::Build`.
+    engine: std::cell::OnceCell<Result<Engine, Box<str>>>,
     /// Byte-oriented engine for matching BINARY (ASCII-8BIT) subjects,
     /// built lazily from `engine_pattern` with Unicode disabled
     /// (`(?-u)`), so `\x80`-`\xff` and `.`/`\w` operate on raw bytes —
@@ -267,7 +318,7 @@ pub(crate) fn compile_with_flags(
                     eprintln!("[fancy-regex] /{}/", bare_source);
                 }
                 let cell = std::cell::OnceCell::new();
-                let _ = cell.set(Engine::Fancy(re));
+                let _ = cell.set(Ok(Engine::Fancy(re)));
                 // No bytes engine for the fancy path (lookaround /
                 // backrefs have no byte-oriented build); binary
                 // subjects fall back to the UTF-8 engine.
@@ -812,36 +863,40 @@ fn prepare_pattern(pattern: &str) -> String {
 }
 
 impl CompiledRegex {
-    /// The engine, building it on first access. The pattern was
-    /// already validated by `regex_syntax` at construction, so
-    /// `regex::Regex::new` can only fail here on resource limits
-    /// (`CompiledTooBig` — the linear engine's guard against
-    /// pathological pattern sizes). That failure panics; the
-    /// `Runtime::eval` boundary catches unwinding panics and
-    /// converts them to a RuntimeError trap with the message
-    /// preserved, so Ruby code sees a raise at the first match
-    /// rather than a process abort. (Pre-lazy behaviour trapped at
-    /// Regexp construction instead — acceptable shift: CRuby has
-    /// no size limit at all, and the corpus has zero such
-    /// patterns.)
-    fn engine(&self) -> &Engine {
-        self.engine.get_or_init(|| match regex::Regex::new(&self.engine_pattern) {
-            Ok(re) => Engine::Native(re),
-            // The native engine rejected it: either a large lookaround/
-            // backref/possessive pattern whose fancy build was DEFERRED
-            // (see `compile_with_flags`'s threshold arm), or a genuinely
-            // malformed pattern. Build fancy now; a fancy failure here is
-            // the deferred construction error surfacing at first match
-            // (the `Runtime::eval` boundary converts the panic to a
-            // RegexpError-shaped trap).
-            Err(native_err) => match fancy_regex::Regex::new(&self.engine_pattern) {
-                Ok(re) => Engine::Fancy(re),
-                Err(fancy_err) => panic!(
-                    "regex build failed at first use for /{}/: {} (also rejected by regex: {})",
-                    self.source, fancy_err, native_err
-                ),
-            },
-        })
+    /// The engine, building it on first access. Construction only
+    /// ran the cheap validation gates (`regex_syntax` parse, or
+    /// `fancy_regex::Expr::parse_tree` for the deferred fancy
+    /// path), so the REAL build can still fail here — resource
+    /// limits (`CompiledTooBig`), or a pattern fancy's syntax-only
+    /// parse accepts but its full NFA build rejects (e.g. the
+    /// invalid char-class range in `[a-#b c dz]` — fuzz find
+    /// 2026-07, was a `panic!`). The failure is cached in the
+    /// cell and surfaces as `RegexOpError::Build`, which every
+    /// operation propagates so the VM raises the conventional
+    /// `RegexpError` at first use — the lazy-compile counterpart
+    /// of the construction-time error the eager path produces.
+    fn engine(&self) -> Result<&Engine, RegexOpError> {
+        self.engine
+            .get_or_init(|| match regex::Regex::new(&self.engine_pattern) {
+                Ok(re) => Ok(Engine::Native(re)),
+                // The native engine rejected it: either a lookaround/
+                // backref/possessive pattern whose fancy build was
+                // DEFERRED (see `compile_with_flags`), or a genuinely
+                // malformed pattern that only `Expr::parse_tree`
+                // accepted. Build fancy now; a failure is the deferred
+                // construction error, in the same combined-message
+                // shape the eager path's `Err` uses.
+                Err(native_err) => match fancy_regex::Regex::new(&self.engine_pattern) {
+                    Ok(re) => Ok(Engine::Fancy(re)),
+                    Err(fancy_err) => Err(format!(
+                        "{} (also rejected by regex: {})",
+                        fancy_err, native_err
+                    )
+                    .into_boxed_str()),
+                },
+            })
+            .as_ref()
+            .map_err(|e| RegexOpError::Build(e.to_string()))
     }
 
     /// True once the engine has been built (first match) — or
@@ -878,10 +933,11 @@ impl CompiledRegex {
     /// anchored to the start when the pattern led with `\G`, else a forward
     /// search. The `match?`-family arms use this so a `\G` anchor is honoured
     /// without the MatchData materialisation `String#match` needs.
-    pub(crate) fn is_match_from(&self, tail: &str) -> bool {
+    /// `Err` = the deferred build failed (raise `RegexpError`).
+    pub(crate) fn is_match_from(&self, tail: &str) -> Result<bool, RegexOpError> {
         if self.g_anchored {
             match self.captures_owned_str_anchored(tail) {
-                Some(inner) => inner.is_some(),
+                Some(inner) => Ok(inner.is_some()),
                 None => self.is_match(tail),
             }
         } else {
@@ -934,20 +990,22 @@ impl CompiledRegex {
     /// fancy arm (rubyrs doesn't model `NotImplementedError`
     /// as a `RubyError` variant). New operations are written
     /// to dispatch through the enum from the start.
-    pub(crate) fn as_native(&self) -> Option<&regex::Regex> {
-        match self.engine() {
+    /// `Err` = the deferred build failed (raise `RegexpError`);
+    /// `Ok(None)` = fancy engine (no native regex to borrow).
+    pub(crate) fn as_native(&self) -> Result<Option<&regex::Regex>, RegexOpError> {
+        Ok(match self.engine()? {
             Engine::Native(r) => Some(r),
             Engine::Fancy(_) => None,
-        }
+        })
     }
 
     /// Number of capture groups + 1 (group 0 = whole match), across
-    /// both engines.
-    pub(crate) fn captures_len(&self) -> usize {
-        match self.engine() {
+    /// both engines. `Err` = the deferred build failed.
+    pub(crate) fn captures_len(&self) -> Result<usize, RegexOpError> {
+        Ok(match self.engine()? {
             Engine::Native(r) => r.captures_len(),
             Engine::Fancy(r) => r.captures_len(),
-        }
+        })
     }
 
     /// Absolute group index (0 = whole match, 1..N = capture groups)
@@ -960,11 +1018,12 @@ impl CompiledRegex {
     /// name)` resolve a String/Symbol capture reference against the
     /// PATTERN (independent of any match), so an unknown name is
     /// CRuby's `IndexError: undefined group name reference: <name>`.
-    pub(crate) fn capture_name_index(&self, name: &str) -> Option<usize> {
-        match self.engine() {
+    /// Outer `Err` = the deferred build failed (raise `RegexpError`).
+    pub(crate) fn capture_name_index(&self, name: &str) -> Result<Option<usize>, RegexOpError> {
+        Ok(match self.engine()? {
             Engine::Native(r) => r.capture_names().position(|n| n == Some(name)),
             Engine::Fancy(r) => r.capture_names().position(|n| n == Some(name)),
-        }
+        })
     }
 
     /// Per-group capture names for groups 1..N, in index order (the
@@ -973,13 +1032,21 @@ impl CompiledRegex {
     /// `MatchData#begin(:name)` / `#offset(:name)` — the materialiser
     /// stores this alongside the positional byte spans so a named index
     /// resolves to its group position.
+    ///
+    /// Infallible by design: every call site runs AFTER a successful
+    /// `captures_owned*` on the same regex, so the engine cell is
+    /// already filled with `Ok` — a build failure can never have
+    /// produced the match being materialised. The defensive `Err`
+    /// arm returns "no groups" rather than rippling `Result`
+    /// through the MatchData constructors.
     pub(crate) fn capture_group_names(&self) -> Vec<Option<String>> {
         let collect = |it: &mut dyn Iterator<Item = Option<&str>>| -> Vec<Option<String>> {
             it.skip(1).map(|n| n.map(|s| s.to_string())).collect()
         };
         match self.engine() {
-            Engine::Native(r) => collect(&mut r.capture_names()),
-            Engine::Fancy(r) => collect(&mut r.capture_names()),
+            Ok(Engine::Native(r)) => collect(&mut r.capture_names()),
+            Ok(Engine::Fancy(r)) => collect(&mut r.capture_names()),
+            Err(_) => Vec::new(),
         }
     }
 
@@ -988,7 +1055,10 @@ impl CompiledRegex {
     /// (`/(?<a>.)(?<b>.)(?<a>.)/.names == ["a", "b"]`). `capture_names()`
     /// yields one `Option<&str>` per group (group 0 + unnamed groups are
     /// `None`); we drop the `None`s and collapse duplicates.
-    pub(crate) fn names(&self) -> Vec<String> {
+    /// `Err` = the deferred build failed — `Regexp#names` can be the
+    /// FIRST use of a lazily-compiled regexp, so it must surface the
+    /// build error like any matching operation.
+    pub(crate) fn names(&self) -> Result<Vec<String>, RegexOpError> {
         let mut out: Vec<String> = Vec::new();
         let mut push = |names: &mut dyn Iterator<Item = Option<&str>>| {
             for n in names.flatten() {
@@ -997,11 +1067,11 @@ impl CompiledRegex {
                 }
             }
         };
-        match self.engine() {
+        match self.engine()? {
             Engine::Native(r) => push(&mut r.capture_names()),
             Engine::Fancy(r) => push(&mut r.capture_names()),
         }
-        out
+        Ok(out)
     }
 
     /// Names written on 2+ capture groups (`(?<a>X)|(?<a>Y)`), each
@@ -1039,7 +1109,12 @@ impl CompiledRegex {
     /// a duplicated name's FULL index list is substituted. mustermann's
     /// `params` reads `regexp.named_captures` to gather every `*` splat
     /// capture into the "splat" array.
-    pub(crate) fn named_capture_index_map(&self) -> Vec<(String, Vec<usize>)> {
+    /// `Err` = the deferred build failed — `Regexp#named_captures`
+    /// can be the FIRST use of a lazily-compiled regexp, like
+    /// `names()` above.
+    pub(crate) fn named_capture_index_map(
+        &self,
+    ) -> Result<Vec<(String, Vec<usize>)>, RegexOpError> {
         // Prefer the SOURCE parse when its group count matches the
         // engine's (the same trust gate `duplicate_named_groups` uses):
         // it preserves both every duplicate index AND CRuby's
@@ -1047,7 +1122,7 @@ impl CompiledRegex {
         // (the engine keeps only the last `(?<a>…)`).
         let base_extended = self.ruby_flags & RB_EXTENDED != 0;
         let (count, names) = parse_capture_groups(&self.source, base_extended);
-        if count + 1 == self.captures_len() {
+        if count + 1 == self.captures_len()? {
             let mut out: Vec<(String, Vec<usize>)> = Vec::new();
             for (name, idx) in names {
                 match out.iter_mut().find(|(n, _)| *n == name) {
@@ -1055,7 +1130,7 @@ impl CompiledRegex {
                     None => out.push((name, vec![idx])),
                 }
             }
-            return out;
+            return Ok(out);
         }
         // Untrusted parse (mixed named/unnamed renumbering, exotic
         // syntax): fall back to the engine's per-group names.
@@ -1069,7 +1144,7 @@ impl CompiledRegex {
                 None => out.push((nm.clone(), vec![idx])),
             }
         }
-        out
+        Ok(out)
     }
 
     // `scan_captures` (the original no-block `String#scan` capture
@@ -1092,8 +1167,11 @@ impl CompiledRegex {
         // build. An unbuilt cell is always the native engine:
         // the fancy fallback is pre-filled at construction.
         match self.engine.get() {
-            Some(Engine::Native(_)) | None => "regex",
-            Some(Engine::Fancy(_)) => "fancy-regex",
+            Some(Ok(Engine::Native(_))) | None => "regex",
+            Some(Ok(Engine::Fancy(_))) => "fancy-regex",
+            // Deferred build already failed — label it rather than
+            // pretend an engine exists.
+            Some(Err(_)) => "unbuildable",
         }
     }
 
@@ -1118,11 +1196,15 @@ impl CompiledRegex {
     /// call site needs strict error semantics. Code-review
     /// #353 round 1 flagged this; documenting the trade-off
     /// is the adopted resolution.
-    pub(crate) fn is_match(&self, haystack: &str) -> bool {
-        match self.engine() {
+    ///
+    /// The outer `Err` is different: it's the DEFERRED BUILD
+    /// failure (`RegexOpError::Build`), which call sites must
+    /// raise as `RegexpError` — never collapse it to `false`.
+    pub(crate) fn is_match(&self, haystack: &str) -> Result<bool, RegexOpError> {
+        Ok(match self.engine()? {
             Engine::Native(r) => r.is_match(haystack),
             Engine::Fancy(r) => r.is_match(haystack).unwrap_or(false),
-        }
+        })
     }
 
     /// Lazily build (and cache) the byte-oriented engine for matching
@@ -1308,21 +1390,29 @@ impl CompiledRegex {
     /// `ruby_backref_to_dollar`). fancy-regex uses the same
     /// `$N` convention. Returns `Cow::Borrowed` when there's
     /// no match — rubyrs's `sub!` path uses that as the
-    /// no-match signal.
-    pub(crate) fn replace<'h>(&self, haystack: &'h str, replacement: &str) -> std::borrow::Cow<'h, str> {
-        match self.engine() {
+    /// no-match signal. `Err` = the deferred build failed.
+    pub(crate) fn replace<'h>(
+        &self,
+        haystack: &'h str,
+        replacement: &str,
+    ) -> Result<std::borrow::Cow<'h, str>, RegexOpError> {
+        Ok(match self.engine()? {
             Engine::Native(r) => r.replace(haystack, replacement),
             Engine::Fancy(r) => r.replace(haystack, replacement),
-        }
+        })
     }
 
     /// `String#gsub` — replace all. Same Cow discipline as
-    /// `replace`.
-    pub(crate) fn replace_all<'h>(&self, haystack: &'h str, replacement: &str) -> std::borrow::Cow<'h, str> {
-        match self.engine() {
+    /// `replace`. `Err` = the deferred build failed.
+    pub(crate) fn replace_all<'h>(
+        &self,
+        haystack: &'h str,
+        replacement: &str,
+    ) -> Result<std::borrow::Cow<'h, str>, RegexOpError> {
+        Ok(match self.engine()? {
             Engine::Native(r) => r.replace_all(haystack, replacement),
             Engine::Fancy(r) => r.replace_all(haystack, replacement),
-        }
+        })
     }
 
     /// Byte-level `String#sub` for a BINARY subject — preserves the raw
@@ -1363,11 +1453,12 @@ impl CompiledRegex {
     /// Result through every split call site). For the
     /// lookahead-only patterns that motivated layer #17
     /// (sinatra's `cleaned_caller`) this never fires.
+    /// `Err` = the deferred build failed (raise `RegexpError`).
     pub(crate) fn split_matches(
         &self,
         haystack: &str,
         max_matches: Option<usize>,
-    ) -> Vec<SplitMatch> {
+    ) -> Result<Vec<SplitMatch>, RegexOpError> {
         // Sanity cap on the preallocation. `max_matches` can
         // arrive as `usize::MAX` when an oversized Ruby
         // \`limit\` saturates the \`try_from\` conversion at
@@ -1388,7 +1479,7 @@ impl CompiledRegex {
         // unbounded for the \`None\` case. Code-review #357
         // round 6.
         let bound = max_matches.unwrap_or(usize::MAX);
-        match self.engine() {
+        match self.engine()? {
             Engine::Native(r) => {
                 for caps in r.captures_iter(haystack).take(bound) {
                     if let Some(m0) = caps.get(0) {
@@ -1416,7 +1507,7 @@ impl CompiledRegex {
                 }
             }
         }
-        out
+        Ok(out)
     }
 
     /// Single-match capture extraction in engine-agnostic owned
@@ -1429,16 +1520,18 @@ impl CompiledRegex {
     ///
     /// Returns `Ok(None)` for no-match, `Ok(Some(..))` with the
     /// whole-match span + per-group matched strings + named
-    /// captures, or `Err` only when the fancy engine errors at
-    /// match time (recursion-limit / backtracking blow-up). The
-    /// linear arm never errors. Mirrors `split_matches`' fancy
-    /// `Result` handling but surfaces the error to the caller
-    /// (match/`=~` want a clean trap, not a silent no-match).
+    /// captures, or `Err` when the fancy engine errors at match
+    /// time (`RegexOpError::Match` — recursion-limit /
+    /// backtracking blow-up) or the deferred build failed
+    /// (`RegexOpError::Build`). The linear arm never errors at
+    /// match time. Mirrors `split_matches`' fancy `Result`
+    /// handling but surfaces the error to the caller (match/`=~`
+    /// want a clean trap, not a silent no-match).
     pub(crate) fn captures_owned(
         &self,
         haystack: &str,
-    ) -> Result<Option<OwnedCaptures>, String> {
-        match self.engine() {
+    ) -> Result<Option<OwnedCaptures>, RegexOpError> {
+        match self.engine()? {
             Engine::Native(r) => match r.captures(haystack) {
                 None => Ok(None),
                 Some(caps) => {
@@ -1468,7 +1561,7 @@ impl CompiledRegex {
                 }
             },
             Engine::Fancy(r) => match r.captures(haystack) {
-                Err(e) => Err(e.to_string()),
+                Err(e) => Err(RegexOpError::Match(e.to_string())),
                 Ok(None) => Ok(None),
                 Ok(Some(caps)) => {
                     let m0 = match caps.get(0) {
@@ -1503,15 +1596,16 @@ impl CompiledRegex {
     /// as an `OwnedCaptures`. Engine-agnostic (linear OR fancy-regex),
     /// so callers that need per-match group info across both backends
     /// — block-form `gsub` / `sub` — don't branch on the engine. A
-    /// fancy-regex match-time error surfaces as `Err`. Discovery: P3
+    /// fancy-regex match-time error surfaces as `Err(Match)`; a
+    /// deferred-build failure as `Err(Build)`. Discovery: P3
     /// Jekyll spike — kramdown's IAL parser drives a lookahead pattern
     /// (fancy engine) through `gsub { … }`.
     pub(crate) fn captures_iter_owned(
         &self,
         haystack: &str,
-    ) -> Result<Vec<OwnedCaptures>, String> {
+    ) -> Result<Vec<OwnedCaptures>, RegexOpError> {
         let mut out = Vec::new();
-        match self.engine() {
+        match self.engine()? {
             Engine::Native(r) => {
                 for caps in r.captures_iter(haystack) {
                     let m0 = match caps.get(0) {
@@ -1541,7 +1635,7 @@ impl CompiledRegex {
             }
             Engine::Fancy(r) => {
                 for caps in r.captures_iter(haystack) {
-                    let caps = caps.map_err(|e| e.to_string())?;
+                    let caps = caps.map_err(|e| RegexOpError::Match(e.to_string()))?;
                     let m0 = match caps.get(0) {
                         Some(m) => m,
                         None => continue,
