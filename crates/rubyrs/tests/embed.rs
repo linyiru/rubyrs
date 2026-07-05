@@ -349,20 +349,36 @@ fn definitions_persist_across_eval() {
 #[test]
 fn regex_cache_stats_lazy_build() {
     let mut rt = Runtime::new();
+    // Counts are measured as DELTAS over the freshly-constructed
+    // Runtime, not absolutes: the preamble itself may construct
+    // regex literals in some feature builds (`_openssl`'s
+    // Resolv::IPv4/IPv6 Regex constants since the battery preambles
+    // joined the cached pipeline). Those must obey the same lazy
+    // contract — assert the preamble built no engines either.
+    let (pre_total, pre_built) = rt.regex_cache_stats();
+    assert_eq!(pre_built, 0, "preamble construction alone must not build engines");
     rt.eval("A = /alpha\\d+/; B = /beta/; C = /gamma/", "t.rb").unwrap();
     let (total, built) = rt.regex_cache_stats();
-    assert_eq!(total, 3, "three literals constructed");
+    assert_eq!(total - pre_total, 3, "three literals constructed");
     assert_eq!(built, 0, "construction alone must not build engines");
     rt.eval(r#"raise "no match" unless "alpha42" =~ A"#, "t.rb").unwrap();
     let (total, built) = rt.regex_cache_stats();
-    assert_eq!((total, built), (3, 1), "first match builds exactly that engine");
+    assert_eq!(
+        (total - pre_total, built),
+        (3, 1),
+        "first match builds exactly that engine"
+    );
     // The fancy-regex fallback (lookaround) is ALSO lazy since the
     // Bridgetown-boot perf arc made fancy engines build on first
     // match rather than at construction (perf-regex-and-boot):
     // construction registers the pattern without building.
     rt.eval("D = /foo(?=bar)/", "t.rb").unwrap();
     let (total, built) = rt.regex_cache_stats();
-    assert_eq!((total, built), (4, 1), "fancy fallback is lazy too");
+    assert_eq!(
+        (total - pre_total, built),
+        (4, 1),
+        "fancy fallback is lazy too"
+    );
 }
 
 /// Regression: `reset()` must clear the refinement tables.
