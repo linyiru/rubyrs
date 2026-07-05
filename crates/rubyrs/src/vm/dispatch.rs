@@ -5870,6 +5870,16 @@ impl Vm {
                     // version classes, breaking regexp_parser's
                     // `specified_versions` fallback.
                     let push_short = |k: &crate::intern::SymId, names: &mut Vec<String>| {
+                        // `private_constant`-marked names are hidden from the
+                        // listing (CRuby) — access still raises via LoadConst.
+                        // The visibility set is keyed by the same qualified
+                        // SymId as the tables scanned here. Driver: logger's
+                        // `Severity::LEVELS is private`; ActiveSupport 7.0
+                        // iterates `Logger::Severity.constants` to generate
+                        // one `#{sev.downcase}?` predicate per severity.
+                        if !self.private_consts.is_empty() && self.private_consts.contains(k) {
+                            return;
+                        }
                         let s = self.interner.resolve(*k).to_string();
                         if let Some(short) = s.strip_prefix(prefix)
                             && !short.contains("::")

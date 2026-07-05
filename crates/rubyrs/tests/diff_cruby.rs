@@ -383,6 +383,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn undef_keyword() { run_diff("undef_keyword"); }
 #[test] fn condition_variable() { run_diff("condition_variable"); }
 #[test] fn logger_basic() { run_diff("logger_basic"); }
+#[test] fn logger_severity() { run_diff("logger_severity"); }
 #[test] fn for_loop() { run_diff("for_loop"); }
 #[test] fn enumerable_find_ifnone() { run_diff("enumerable_find_ifnone"); }
 #[test] fn backtick_sandbox() { run_diff("backtick_sandbox"); }
