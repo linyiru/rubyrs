@@ -1439,7 +1439,13 @@ impl Heap {
     /// window ∝ sweep cost, clamped to [GC_FLOOR_MIN, GC_FLOOR_MAX].
     /// Pure so the unit tests can pin the curve without timing games.
     pub(crate) fn adaptive_floor(cost_us: u64) -> usize {
-        let target = cost_us.saturating_mul(Self::GC_FLOOR_ALLOCS_PER_SWEEP_US);
+        let target = cost_us
+            .saturating_mul(Self::GC_FLOOR_ALLOCS_PER_SWEEP_US)
+            // Clamp in u64 BEFORE the usize cast: on 32-bit targets
+            // (wasm32-wasip1) a multi-minute sweep would truncate —
+            // direction-safe (decays to MIN) but the exact form
+            // costs nothing.
+            .min(Self::GC_FLOOR_MAX as u64);
         (target as usize).clamp(Self::GC_FLOOR_MIN, Self::GC_FLOOR_MAX)
     }
 
@@ -1951,8 +1957,20 @@ impl Heap {
         // last sweep) µs); the min() makes a raise require two consecutive
         // expensive sweeps (a lone scheduler blip cannot buy a 28k-slot
         // RSS window) while one cheap sweep decays it immediately.
-        // Measured fixed points: gc_churn ⇒ GC_FLOOR_MIN clamp, post-
-        // rubocop-require ⇒ GC_FLOOR_MAX clamp, both with ≥10× margin.
+        // Measured fixed points (fast x86/arm64, 2026-07): gc_churn ⇒
+        // GC_FLOOR_MIN clamp, post-rubocop-require ⇒ GC_FLOOR_MAX clamp.
+        // HONEST STABILITY MARGIN (adversarial verify, 2026-07-05):
+        // churn sweep cost is ~85% WINDOW-PROPORTIONAL (~22.5ns/slot
+        // default build), so the update W ← K·c(W) has loop gain
+        // K·a ≈ 0.36 — the MIN fixed point stays stable only while
+        // the machine is within ~2.8× (default) / ~4.6× (mimalloc) of
+        // the calibration box; slower machines (Pi-class) or
+        // heavy-object churn (many strings per iteration) converge to
+        // the MAX clamp instead, i.e. the RSS win is shape- and
+        // speed-dependent. BOUNDED WORST CASE: pinning at MAX is
+        // exactly the old static-32768 behaviour — never worse than
+        // the pre-adaptive heap, and RUBYRS_GC_MIN_THRESHOLD remains
+        // the manual override for such hosts.
         // STRESS_GC forces collection on every alloc regardless of
         // `next_gc`, so the controller is semantically inert under it.
         let sweep_us = t0.elapsed().as_micros() as u64;

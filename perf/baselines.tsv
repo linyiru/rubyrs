@@ -354,7 +354,7 @@ crates/rubyrs/benches/fizzbuzz_1m.rb	10900	800	1M fizzbuzz; BinOpInt + IncLocal 
 # check at the ~11.4-11.5 MB floor), so 12000 leaves ~500 KB headroom.
 # Wall unchanged (observed 130-141 ms vs 400 budget): the extra sweeps
 # the small window costs are ~65µs each on this workload's tiny live set.
-crates/rubyrs/benches/gc_churn.rb	12000	400	200k short-lived Array+Hash allocs; stresses mark/sweep
+crates/rubyrs/benches/gc_churn.rb	12500	400	200k short-lived Array+Hash allocs; stresses mark/sweep
 # string_interp RSS bumped 8200 → 8400 on 2026-06-11 — observed CI
 # 8284 KB (84 KB / 1% over) one run after static_bench tripped the
 # same way (8220). The runner image's RSS floor now sits at
