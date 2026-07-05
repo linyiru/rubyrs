@@ -3178,17 +3178,19 @@ impl Runtime {
         let _t_total = std::time::Instant::now();
         #[cfg(feature = "preamble-cache")]
         {
-            // NOT `Option::zip` (clippy suggests it): `zip` evaluates its
-            // argument eagerly, and `cache_key` touches the filesystem
-            // (current_exe metadata + a 128 KB content sample). Per ADR
-            // 0017 the library must not touch the host FS unless the
-            // embedder opted in via `preamble_cache_dir` — `and_then`
-            // keeps the probe behind that capability gate.
-            #[allow(clippy::manual_option_zip)]
-            let key_dir = self
-                .preamble_cache_dir
-                .clone()
-                .and_then(|dir| preamble_cache::cache_key(&self.vm).map(|k| (dir, k)));
+            // NOT `Option::zip`: `zip` evaluates its argument eagerly,
+            // and `cache_key` touches the filesystem (current_exe
+            // metadata + a 128 KB content sample). Per ADR 0017 the
+            // library must not touch the host FS unless the embedder
+            // opted in via `preamble_cache_dir` — the explicit match
+            // keeps the probe behind that capability gate (and, unlike
+            // an `and_then`+`map` chain, no clippy version suggests
+            // rewriting it to the eager `zip`; an `allow` for that
+            // lint name broke CI where the toolchain doesn't know it).
+            let key_dir = match self.preamble_cache_dir.clone() {
+                Some(dir) => preamble_cache::cache_key(&self.vm).map(|k| (dir, k)),
+                None => None,
+            };
             if let Some((dir, key)) = key_dir {
                 if let Some(plan) = preamble_cache::try_load(&mut self.vm, &dir, key) {
                     // Cache hit: bytecode restored; replay the
