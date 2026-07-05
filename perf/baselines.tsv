@@ -202,8 +202,14 @@
 #     ~250 B/floor-object and env-tunable via
 #     RUBYRS_GC_MIN_THRESHOLD (=4096 recovers 17.9→11.7 MB).
 #     Hash small-rep (429e4c3f, slot 168→136 B) clawed back 1.9 MB.
-#     Fix candidates (ticketed, not blocking): decay the floor to
-#     4096 after the first post-boot sweep, or a byte-based floor.
+#     CLAWED BACK by the cost-proportional adaptive floor (heap.rs,
+#     this branch): floor = clamp(16 × min(last two sweep µs),
+#     4096, 32768) — churn workloads' cheap sweeps (~65µs) keep it
+#     at 4096 while require-rubocop's expensive collections
+#     (~2-3ms: root-gather + mark scale with loaded classes) pin it
+#     at 32768. Box re-measure: gc_churn 18.0→11.5 MB with require
+#     wall within noise of the static-32768 floor; gc_churn budget
+#     dropped 19000→12000 below.
 # (2) base rows +~1.3 MB tracking .text +1.26 MB resident code:
 #     prism_wq +380 KB (RuboCop parser engine, compiled
 #     unconditionally — cfg-gating it like jit_tier2 is the
@@ -341,7 +347,14 @@ crates/rubyrs/benches/fizzbuzz_1m.rb	10900	800	1M fizzbuzz; BinOpInt + IncLocal 
 # workload's baseline uniformly; gc_churn (the highest, alloc-stress
 # peak) crossed at observed 9068 KB. Real preamble cost, not a leak —
 # the other workloads stay well under 8400. ~3.5% headroom.
-crates/rubyrs/benches/gc_churn.rb	19000	400	200k short-lived Array+Hash allocs; stresses mark/sweep
+# gc_churn RSS dropped 19000 → 12000 on 2026-07-04 — the adaptive GC
+# floor (see the campaign-recalibration note above) returns churn
+# workloads to the 4096-object trigger window; box observed
+# 11384-11700 KB across CI-default runs (min-of-3 semantics keep the
+# check at the ~11.4-11.5 MB floor), so 12000 leaves ~500 KB headroom.
+# Wall unchanged (observed 130-141 ms vs 400 budget): the extra sweeps
+# the small window costs are ~65µs each on this workload's tiny live set.
+crates/rubyrs/benches/gc_churn.rb	12000	400	200k short-lived Array+Hash allocs; stresses mark/sweep
 # string_interp RSS bumped 8200 → 8400 on 2026-06-11 — observed CI
 # 8284 KB (84 KB / 1% over) one run after static_bench tripped the
 # same way (8220). The runner image's RSS floor now sits at
