@@ -34,8 +34,13 @@ pub(crate) enum Op {
     /// `/pattern/` literal — looks up an Rc<Regex> in the Vm's
     /// `regex_cache`, compiling it from the interned source the
     /// first time. A compile-time bad pattern surfaces as a
-    /// SyntaxError trap at run-time (not at parse-time, since
-    /// we lazy-compile). Cfg-gated on the `regex` feature
+    /// RegexpError trap at run-time (not a parse-time
+    /// SyntaxError as in CRuby, since we lazy-compile; the
+    /// StandardError rescue-ability is what RuboCop's per-cop
+    /// handler needs). A pattern that passes the cheap validation
+    /// gates but fails the real engine build raises the same
+    /// RegexpError at FIRST USE (`RegexOpError::Build`, fuzz find
+    /// 2026-07). Cfg-gated on the `regex` feature
     /// (ADR 0017 Rule 3) — with the feature off the variant
     /// disappears, AST translation rejects `/.../` literals,
     /// and `Expr::RegexLit` never reaches the compiler arm.
@@ -75,7 +80,7 @@ pub(crate) enum Op {
     /// the same `to_s + +` build sequence used by InterpolatedStr.
     /// Pattern reuse hits the same `regex_cache` keyed by SymId
     /// of the assembled pattern. Compile errors surface as
-    /// SyntaxError traps at runtime (same shape as `LoadRegex`,
+    /// RegexpError traps at runtime (same shape as `LoadRegex`,
     /// since the pattern is unknown until interpolation runs).
     /// The `u8` carries the Ruby flag bitmask for the
     /// interpolated pattern (same encoding as `LoadRegex`).
