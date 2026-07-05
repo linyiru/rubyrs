@@ -399,4 +399,10 @@ crates/rubyrs/benches/hash_mutate.rb	10600	880	200k Hash[]= overwrites + 1k Hash
 # than the 9700 cluster, so accumulated base-runtime growth trips THIS row
 # first. Calibrated by reasoning (CI is the oracle) — tighten once the first
 # CI run reports the actual Linux boot RSS. wall=0: boot is sub-100ms.
-crates/rubyrs/benches/boot.rb	10200	0	boot: Runtime::new + near-empty eval — isolates base/startup RSS (see the .rb header)
+# 2026-07-05 boot 10200 -> 10450: the 10200 tighten (post-_prism_native
+# clawback) was calibrated BEFORE three legitimate baseline additions
+# landed on top: the fuzz-round reset fix's capture_baseline_contents
+# deep copy (dfc846c3 — correctness: reset() rewinds preamble-slot
+# mutations in place), M4's preamble/random.rb growth, and the M-wave
+# baseline churn. CI observed 10,256; 10450 keeps ~200 KB headroom.
+crates/rubyrs/benches/boot.rb	10450	0	boot: Runtime::new + near-empty eval — isolates base/startup RSS (see the .rb header)
