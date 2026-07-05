@@ -186,7 +186,31 @@ ensure
 end
 p heap_value_return
 
-# 13. Both walks parked at IDENTICAL coordinates (a while/break
+# 13. ensure-inside-rescue-inside-ensure, all contained: while the
+#     return walk is suspended, an inner exception path enters a
+#     nested ensure (exception entry, value pushed), re-raises at
+#     its tail, and the sibling rescue catches — then the return
+#     resumes.
+def ensure_in_rescue_in_ensure
+  return 14
+ensure
+  begin
+    begin
+      raise "a"
+    rescue
+      begin
+        raise "b"
+      ensure
+        puts "14: inner-ensure"
+      end
+    end
+  rescue
+    puts "14: second-rescue"
+  end
+end
+p ensure_in_rescue_in_ensure
+
+# 15. Both walks parked at IDENTICAL coordinates (a while/break
 #     ensure as the first statement of an outer suspended ensure
 #     body) — innermost must resume first, then the outer return.
 def identical_coords
