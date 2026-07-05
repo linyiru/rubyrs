@@ -7,7 +7,9 @@
 #     stored equal key (hash prefilter skips non-colliding keys),
 #     updates in place, keeps size
 #   - a lookup hit calls hash once + eql? once against the hit
-#   - a lookup miss calls hash once and NO eql?
+#   - a lookup miss calls hash once and NO eql? (holds only because
+#     the keys' hash values are deterministic and distinct mod 256 —
+#     see the note inside K#hash)
 # (The aggregate hash-call COUNT across CRuby's 8->9 ar->st conversion
 # — where CRuby re-hashes the existing keys — is NOT pinned here; that
 # is a table-conversion artifact, not a per-op contract.)
@@ -21,7 +23,16 @@ class K
   end
   def hash
     $calls << [:hash, @tag]
-    @val.hash
+    # Return the RAW integer, not @val.hash: CRuby seeds Integer#hash
+    # per process, and its packed ar_table compares only a 1-BYTE hint
+    # before calling eql? — seeded hashes therefore roll a ~1/256
+    # per-pair-per-process chance of a phantom eql? on ANY probe
+    # (this fixture flaked exactly that way on CI, 2026-07-05).
+    # Custom-hash RETURN VALUES are used unmixed (probed: 0 phantom
+    # eql? in 400 seeded processes with raw ints), so distinct-mod-256
+    # @vals make every line deterministic on both engines while still
+    # exercising the hash-prefilter contract.
+    @val
   end
   def eql?(other)
     $calls << [:eql?, @tag, other.tag]
