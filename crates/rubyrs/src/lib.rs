@@ -220,9 +220,10 @@ pub use openssl::register_host_fns as register_openssl_host_fns;
 /// bcrypt gem load + run. See [`bcrypt::register_host_fns`].
 #[cfg(feature = "_bcrypt")]
 pub use bcrypt::register_host_fns as register_bcrypt_host_fns;
-/// Register the `_oj` battery: the `Oj` module (dump/load over JSON),
-/// letting the oj gem load + run as a fast-JSON drop-in. See
-/// [`oj::register_host_fns`].
+/// Register the `_oj` battery — currently a no-op (the `Oj` module
+/// loads through the cached preamble pipeline and its `require "json"`
+/// is lazy at first use); kept for the uniform battery-registration
+/// shape. See [`oj::register_host_fns`].
 #[cfg(feature = "_oj")]
 pub use oj::register_host_fns as register_oj_host_fns;
 
@@ -3956,12 +3957,14 @@ self.eval_inner(
             "<rubyrs:bcrypt_ext>",
         )
             .expect("ICE: failed to load _bcrypt preamble");
-        // oj_ext.rb deliberately does NOT `require "json"` (the gem
-        // shape does): a `require` executed inside a cached chunk
-        // would re-parse the vendored json.rb on every replay,
-        // defeating the cache. `register_oj_host_fns` performs the
-        // require at registration time instead — `JSON` is only
-        // referenced from Oj method BODIES, so load order is free.
+        // oj_ext.rb deliberately does NOT `require "json"` at top
+        // level: a `require` executed inside a cached chunk would
+        // re-parse the vendored json.rb on every replay, defeating
+        // the cache. Nor does registration require it eagerly — that
+        // marked "json" loaded before user code, flipping a user's
+        // first `require "json"` to false (CRuby: true; real oj never
+        // loads stdlib json). The Oj method bodies require it lazily
+        // at first use (`Oj.__ensure_json`).
         #[cfg(feature = "_oj")]
         self.eval_inner(
             include_str!("preamble/oj_ext.rb"),

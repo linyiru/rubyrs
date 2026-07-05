@@ -9,16 +9,19 @@
 //! preamble bytecode cache, and `require "oj/oj"` is wired to succeed
 //! in the require path.
 
-/// `require "json"` for the `Oj` module (no host fns — the shim is pure
-/// Ruby over JSON). The module definition itself lives in the cached
-/// preamble pipeline; the require stays HERE (registration time)
-/// because a `require` inside a cached preamble chunk would re-parse
-/// the vendored json.rb on every cache replay — `JSON` is only
-/// referenced from Oj method bodies, so requiring it after the module
-/// definition is equivalent. Mirrors the socket/bcrypt battery
-/// registration shape so the CLI registers it the same way.
-pub fn register_host_fns(rt: &mut crate::Runtime) {
-    if let Err(trap) = rt.eval("require \"json\"", "<rubyrs:oj_ext:require-json>") {
-        panic!("ICE: _oj failed to require json: {trap:?}");
-    }
-}
+/// No-op — the `_oj` battery needs no registration. Kept so the CLI's
+/// uniform per-battery `register_*_host_fns` sequence (and any
+/// embedder following it) stays stable, and as the slot should the
+/// battery ever grow real host fns.
+///
+/// This USED to eval `require "json"` (the `Oj` bodies reference
+/// `JSON`), but an eager require put "json" in loaded_features before
+/// any user code ran, so a user script's first `require "json"`
+/// returned false where CRuby returns true — real oj is a C extension
+/// with its own parser and never loads stdlib json (probed against
+/// oj 3.17.0; caught by the stdlib_require_stub diff fixture under
+/// `--features stdlib,_oj`). The require is now lazy at first Oj
+/// method use (`Oj.__ensure_json` in preamble/oj_ext.rb), which also
+/// keeps it out of the cached preamble chunks (a require inside one
+/// would re-parse the vendored json.rb on every cache replay).
+pub fn register_host_fns(_rt: &mut crate::Runtime) {}
