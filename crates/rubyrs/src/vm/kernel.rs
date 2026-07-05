@@ -6075,7 +6075,7 @@ fn is_stdlib_stub_name(name: &str) -> bool {
         // 0019 Rule 8 the load form is `rubyrs/sqlite` (NOT bare
         // `sqlite3`) so MRI's gem stays loadable independently
         // when Tier-4 compat lands. The constants get installed
-        // by `register_sqlite_host_fns` at battery init time;
+        // by the preamble pipeline at Runtime construction;
         // the require itself is a no-op stub confirming "yes,
         // the battery is in this build."
         | "rubyrs/sqlite"

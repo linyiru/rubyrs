@@ -10,7 +10,12 @@
 # unsupported object raises). `mode:` and most options are accepted and
 # ignored. Apps using oj purely as a fast JSON parser/generator work;
 # apps relying on `:object`-mode round-tripping of Ruby objects do not.
-require "json"
+#
+# NO `require "json"` here (the gem shape has one): this file loads as
+# a cached preamble chunk, where a require would re-parse json.rb on
+# every cache replay. `register_oj_host_fns` requires json at battery
+# registration time instead; JSON is only referenced from the method
+# bodies below, so the split changes nothing observable.
 
 module Oj
   class << self

@@ -139,11 +139,11 @@ fn read_cap() -> Option<usize> {
 }
 
 pub fn register_host_fns(rt: &mut crate::Runtime) {
-    const PREAMBLE: &str = include_str!("preamble/socket.rb");
-    if let Err(trap) = rt.eval(PREAMBLE, "<rubyrs:socket>") {
-        panic!("ICE: _socket failed to load preamble: {trap:?}");
-    }
-
+    // The Ruby surface (preamble/socket.rb: TCPSocket veneer + Socket
+    // constants + SocketError) is loaded by `load_preamble_inner` at
+    // Runtime construction, THROUGH the preamble bytecode cache —
+    // not eval'd here (which re-parsed it on every boot). This fn
+    // only wires up the host-fn backend.
     rt.register_fn("__rubyrs_socket_connect", |args| {
         let (host, port, open_to) = match args {
             [Value::Str(h), Value::Int(p)] => (h.to_string_lossy(), *p, None),

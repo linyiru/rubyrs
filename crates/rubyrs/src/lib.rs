@@ -1841,10 +1841,11 @@ RUBYRS = "rubyrs".freeze
 /// INDEX instead of ~318 KB of owned source text: the cache key
 /// hashes the executable's identity, so a blob is only ever decoded
 /// by the binary that wrote it and an index always resolves to the
-/// identical bytes. Entries carry the load site's cfg gates; the
-/// three tiny stdlib autoload/trampoline literals and any battery
-/// preamble (`_socket` / `_openssl` / ...) are deliberately NOT here
-/// — they fall back to the blob's owned-sources section.
+/// identical bytes. Entries carry the load site's cfg gates (the
+/// battery preambles at the tail included — they joined the cached
+/// pipeline in 2026-07, ending their boot-time re-parse); only the
+/// tiny stdlib autoload/trampoline literals are deliberately NOT
+/// here — they fall back to the blob's owned-sources section.
 #[cfg(feature = "preamble-cache")]
 pub(crate) static PREAMBLE_BAKED_SOURCES: &[(&str, &str)] = &[
     ("<rubyrs:preamble:exceptions>", include_str!("preamble/exceptions.rb")),
@@ -1873,6 +1874,18 @@ pub(crate) static PREAMBLE_BAKED_SOURCES: &[(&str, &str)] = &[
     ("<rubyrs:preamble:signal>", include_str!("preamble/signal.rb")),
     ("<rubyrs:preamble:process>", include_str!("preamble/process.rb")),
     ("<rubyrs:preamble:math>", include_str!("preamble/math.rb")),
+    // Battery preambles — see the load site at the tail of
+    // `load_preamble_inner` for the order/cfg rationale.
+    #[cfg(feature = "_sqlite")]
+    ("<rubyrs:sqlite_database>", include_str!("preamble/sqlite_database.rb")),
+    #[cfg(feature = "_socket")]
+    ("<rubyrs:socket>", include_str!("preamble/socket.rb")),
+    #[cfg(feature = "_openssl")]
+    ("<rubyrs:openssl>", include_str!("preamble/openssl.rb")),
+    #[cfg(feature = "_bcrypt")]
+    ("<rubyrs:bcrypt_ext>", include_str!("preamble/bcrypt_ext.rb")),
+    #[cfg(feature = "_oj")]
+    ("<rubyrs:oj_ext>", include_str!("preamble/oj_ext.rb")),
 ];
 
 /// Per-process slot used by the wizer pre-initialize path. On
@@ -3883,6 +3896,78 @@ self.eval_inner(
         // The feature now contributes only the Rust transcoding
         // backend (encoding_full.rs) consumed by String#encode /
         // force_encoding / the E3 File-read plumbing.
+
+        // ---- Battery preambles (ADR 0027/0028/0029) ----
+        // The Ruby class/module surface of the sqlite / socket /
+        // openssl / bcrypt / oj batteries. Historically these were
+        // `rt.eval`'d by each battery's `register_host_fns` AFTER
+        // Runtime construction, which bypassed the preamble bytecode
+        // cache — `_socket,_openssl` builds re-parsed ~1,000 lines
+        // on every boot. Loading them here routes them through the
+        // cache like every other chunk (the exe-identity cache key
+        // covers the feature set, so a cfg-gated chunk list is sound
+        // — same precedent as the `_fiber` entry above).
+        //
+        // Order-safety: all five files are pure `class`/`module`
+        // definitions — every `__rubyrs_*` host-fn call sits inside
+        // a method body, resolved at CALL time — so loading them
+        // before `register_*_host_fns` has run (indeed, before the
+        // host has even decided to call it) is safe. Consequences,
+        // both deliberate:
+        //   - the classes now exist in every build carrying the
+        //     feature, even if the host never registers the fns
+        //     (calling a method then raises NoMethodError on the
+        //     missing host fn — the same "surface present, backend
+        //     absent" shape as an unregistered accelerator);
+        //   - the classes are part of the post-preamble baseline,
+        //     so `Runtime::reset()` now PRESERVES them (previously
+        //     reset wiped battery classes while keeping the
+        //     registered host fns — a broken half-state).
+        //
+        // `_openssl` additionally assumes the `regex` feature (its
+        // Resolv IP regexps are load-time literals). That combo
+        // constraint predates this move — a regex-off `_openssl`
+        // build previously ICE'd at registration time; it now ICEs
+        // at construction. Both are "don't build that combo".
+        #[cfg(feature = "_sqlite")]
+        self.eval_inner(
+            include_str!("preamble/sqlite_database.rb"),
+            "<rubyrs:sqlite_database>",
+        )
+            .expect("ICE: failed to load _sqlite preamble");
+        #[cfg(feature = "_socket")]
+        self.eval_inner(
+            include_str!("preamble/socket.rb"),
+            "<rubyrs:socket>",
+        )
+            .expect("ICE: failed to load _socket preamble");
+        // After socket.rb: SSLSocket wraps a TCPSocket (the ADR 0029
+        // take_stream hand-off), and the feature dep is `_openssl =
+        // ["_socket", ...]` so socket.rb is always present here.
+        #[cfg(feature = "_openssl")]
+        self.eval_inner(
+            include_str!("preamble/openssl.rb"),
+            "<rubyrs:openssl>",
+        )
+            .expect("ICE: failed to load _openssl preamble");
+        #[cfg(feature = "_bcrypt")]
+        self.eval_inner(
+            include_str!("preamble/bcrypt_ext.rb"),
+            "<rubyrs:bcrypt_ext>",
+        )
+            .expect("ICE: failed to load _bcrypt preamble");
+        // oj_ext.rb deliberately does NOT `require "json"` (the gem
+        // shape does): a `require` executed inside a cached chunk
+        // would re-parse the vendored json.rb on every replay,
+        // defeating the cache. `register_oj_host_fns` performs the
+        // require at registration time instead — `JSON` is only
+        // referenced from Oj method BODIES, so load order is free.
+        #[cfg(feature = "_oj")]
+        self.eval_inner(
+            include_str!("preamble/oj_ext.rb"),
+            "<rubyrs:oj_ext>",
+        )
+            .expect("ICE: failed to load _oj preamble");
     }
 
     /// Replace the `ARGV` constant with the host's argument vector.

@@ -150,11 +150,12 @@ mod danger {
 }
 
 pub fn register_host_fns(rt: &mut crate::Runtime) {
-    const PREAMBLE: &str = include_str!("preamble/openssl.rb");
-    if let Err(trap) = rt.eval(PREAMBLE, "<rubyrs:openssl>") {
-        panic!("ICE: _openssl failed to load preamble: {trap:?}");
-    }
-
+    // The Ruby surface (preamble/openssl.rb: OpenSSL module tree —
+    // SSLSocket/SSLContext, Digest, HMAC, KDF, Cipher, Resolv
+    // regexps) is loaded by `load_preamble_inner` at Runtime
+    // construction, THROUGH the preamble bytecode cache — not
+    // eval'd here (which re-parsed its ~570 lines on every boot).
+    // This fn only wires up the host-fn backend.
     rt.register_fn("__rubyrs_openssl_connect", |args| {
         let (socket_handle, hostname, verify) = match args {
             [Value::Int(h), Value::Str(host), Value::Int(v)] => (*h, host.to_string_lossy(), *v),

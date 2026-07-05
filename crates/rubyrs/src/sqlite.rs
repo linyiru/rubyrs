@@ -105,21 +105,14 @@ thread_local! {
     static NEXT_HANDLE: std::cell::Cell<i64> = const { std::cell::Cell::new(1) };
 }
 
-/// Register the `_sqlite` host fns + load the
-/// `SQLite3::Database` preamble. Call once per Runtime that
+/// Register the `_sqlite` host fns. Call once per Runtime that
 /// wants the battery. Mirrors `register_http_server_host_fns` /
-/// `register_json_native_host_fns` shape.
+/// `register_json_native_host_fns` shape. The Ruby surface
+/// (preamble/sqlite_database.rb: SQLite3 module + 25 exception
+/// subclasses + Database/Statement wrappers) is loaded by
+/// `load_preamble_inner` at Runtime construction, through the
+/// preamble bytecode cache — not eval'd here.
 pub fn register_host_fns(rt: &mut crate::Runtime) {
-    // Preamble: SQLite3 module + 25 exception subclasses +
-    // SQLite3::Database class. Authored as Ruby source so the
-    // 25 empty `class Foo < SQLite3::Exception; end` lines stay
-    // readable + the Database wrapper class doesn't need a
-    // round trip through host-fn dispatch for every method call.
-    const PREAMBLE: &str = include_str!("preamble/sqlite_database.rb");
-    if let Err(trap) = rt.eval(PREAMBLE, "<rubyrs:sqlite_database>") {
-        panic!("ICE: _sqlite failed to load preamble: {trap:?}");
-    }
-
     rt.register_fn("__rubyrs_sqlite_open", |args| {
         let (path_str, opts) = match args {
             [Value::Str(p)] => (p.to_string_lossy(), None),

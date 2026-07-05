@@ -1,6 +1,7 @@
 # `SQLite3::Database` + the 25-class exception hierarchy per
-# ADR 0027 §6. Loaded by `register_host_fns` at battery init
-# time so the constants exist before any user script calls
+# ADR 0027 §6. Loaded by `load_preamble_inner` at Runtime
+# construction (through the preamble bytecode cache) so the
+# constants exist before any user script calls
 # `require "rubyrs/sqlite"`. The require itself is a lenient
 # stub (the is_stdlib_stub_name whitelist accepts
 # "rubyrs/sqlite") that succeeds without reloading — the

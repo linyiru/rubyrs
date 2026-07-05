@@ -388,18 +388,15 @@ pub(crate) fn bc_crypt(key: &[u8], setting: &[u8]) -> Option<String> {
     Some(String::from_utf8(out).expect("output is ASCII"))
 }
 
-/// Register the `_bcrypt` battery: define `BCrypt::Engine` (with the two
-/// native `__bc_salt` / `__bc_crypt` class methods) and the host fns they
-/// call. Mirrors the socket/openssl battery shape — the preamble loads at
-/// startup, and `require "bcrypt_ext"` then succeeds as a known stub.
+/// Register the `_bcrypt` battery's host fns. The Ruby surface
+/// (`BCrypt::Engine` with the two `__bc_salt` / `__bc_crypt` class
+/// methods, preamble/bcrypt_ext.rb) is loaded by `load_preamble_inner`
+/// at Runtime construction through the preamble bytecode cache —
+/// mirrors the socket/openssl battery shape; `require "bcrypt_ext"`
+/// succeeds as a known stub.
 pub fn register_host_fns(rt: &mut crate::Runtime) {
     use crate::error::{RubyError, Trap};
     use crate::value::Value;
-
-    const PREAMBLE: &str = include_str!("preamble/bcrypt_ext.rb");
-    if let Err(trap) = rt.eval(PREAMBLE, "<rubyrs:bcrypt_ext>") {
-        panic!("ICE: _bcrypt failed to load preamble: {trap:?}");
-    }
 
     fn bytes_of(v: &Value) -> Option<Vec<u8>> {
         match v {
