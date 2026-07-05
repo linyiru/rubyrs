@@ -212,7 +212,12 @@ pub(crate) struct FiberSnapshot {
     pub(crate) class_visibility_stack: Vec<Visibility>,
     pub(crate) method_return: Option<Value>,
     pub(crate) break_signaled: bool,
-    pub(crate) pending_loop_transfer: Option<LoopTransfer>,
+    pub(crate) pending_loop_transfers: Vec<LoopTransfer>,
+    /// Stashed alongside `pending_loop_transfers`: a method-break
+    /// walk suspended in an ensure body is parked against THIS
+    /// fiber's frame stack (its `SuspendCoord.frame_idx` indexes
+    /// `frames`), so it must travel with the frames it refers to.
+    pub(crate) pending_method_breaks: Vec<crate::vm::MethodBreak>,
     pub(crate) suppress_call_result_push: bool,
     pub(crate) bypass_visibility_once: bool,
     /// `public_send` strict-visibility one-shot — `bypass`'s twin
@@ -251,8 +256,12 @@ impl FiberSnapshot {
         std::mem::swap(&mut vm.method_return, &mut self.method_return);
         std::mem::swap(&mut vm.break_signaled, &mut self.break_signaled);
         std::mem::swap(
-            &mut vm.pending_loop_transfer,
-            &mut self.pending_loop_transfer,
+            &mut vm.pending_loop_transfers,
+            &mut self.pending_loop_transfers,
+        );
+        std::mem::swap(
+            &mut vm.pending_method_breaks,
+            &mut self.pending_method_breaks,
         );
         std::mem::swap(
             &mut vm.suppress_call_result_push,
@@ -290,7 +299,8 @@ impl FiberSnapshot {
             class_visibility_stack: Vec::new(),
             method_return: None,
             break_signaled: false,
-            pending_loop_transfer: None,
+            pending_loop_transfers: Vec::new(),
+            pending_method_breaks: Vec::new(),
             suppress_call_result_push: false,
             bypass_visibility_once: false,
             require_public_once: false,
@@ -934,8 +944,12 @@ mod tests {
         assert!(snap.method_return.is_none(), "method_return must start None");
         assert!(!snap.break_signaled, "break_signaled must start false");
         assert!(
-            snap.pending_loop_transfer.is_none(),
-            "pending_loop_transfer must start None",
+            snap.pending_loop_transfers.is_empty(),
+            "pending_loop_transfers must start empty",
+        );
+        assert!(
+            snap.pending_method_breaks.is_empty(),
+            "pending_method_breaks must start empty",
         );
         assert!(
             !snap.suppress_call_result_push,

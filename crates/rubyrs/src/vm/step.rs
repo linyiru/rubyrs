@@ -715,8 +715,8 @@ impl Vm {
                 // continue_method_break now walks intermediate
                 // frames + ensures until landing on the yielding
                 // method. If the walk drains the frame stack, exit.
-                if let Some(mb) = self.pending_method_break.as_ref()
-                    && !mb.suspended
+                if let Some(mb) = self.pending_method_breaks.last()
+                    && mb.suspended.is_none()
                     && self.frames.len() > mb.target_frame_idx
                 {
                     self.continue_method_break()?;
@@ -1029,8 +1029,8 @@ impl Vm {
                 // If target < until_depth, the target sits in a
                 // frame our outer driver owns — bail and let the
                 // outer dispatch level fire continue_method_break.
-                if let Some(mb) = self.pending_method_break.as_ref()
-                    && !mb.suspended
+                if let Some(mb) = self.pending_method_breaks.last()
+                    && mb.suspended.is_none()
                     && mb.target_frame_idx >= until_depth
                     && self.frames.len() > mb.target_frame_idx
                 {
@@ -5671,21 +5671,55 @@ impl Vm {
             }
             Op::EndEnsure => {
                 // Tail of an ensure handler body. Three paths:
-                //   - Loop-transfer in flight: `pending_loop_transfer`
-                //     is Some because BreakLoop/NextLoop kicked off a
-                //     walk through this ensure. Resume the walk.
-                //   - Method-break in flight (ADR 0024 Phase A.4):
-                //     `pending_method_break` is Some because Op::Yield's
-                //     case (a) kicked off a block-break that has to
-                //     walk the yielding method's ensures before the
-                //     frame returns. Resume the walk.
-                //   - Normal exception unwind: the ensure was entered
-                //     by `unwind_with_exception` which pushed the
-                //     exception onto the operand stack. Pop and
-                //     re-raise so unwind continues.
-                if self.pending_loop_transfer.is_some() {
+                //   - Loop-transfer suspended HERE: the top of
+                //     `pending_loop_transfers` carries a
+                //     SuspendCoord matching this tail (same frame,
+                //     same rescues baseline, same stack depth)
+                //     because BreakLoop/NextLoop kicked off a walk
+                //     through this ensure. Resume the walk.
+                //   - Method-break suspended HERE (ADR 0024 Phase
+                //     A.4): same coordinate match on the top of
+                //     `pending_method_breaks` (block-break /
+                //     non-local return walking this frame's
+                //     ensures). Resume the walk.
+                //   - Otherwise: normal exception unwind — the
+                //     ensure was entered by `unwind_with_exception`
+                //     which pushed the exception onto the operand
+                //     stack (making the stack one DEEPER than any
+                //     suspension recorded at this position, so the
+                //     coordinate match cannot false-positive on an
+                //     exception entry). Pop and re-raise so unwind
+                //     continues.
+                //
+                // When BOTH tops match this tail (a nested walk
+                // parked at coordinates identical to its outer
+                // walk — e.g. `while…break`-with-ensure as the
+                // first statement of an outer suspended ensure
+                // body), the HIGHEST seq is the innermost walk and
+                // resumes first; the outer one gets its own tail
+                // once the body resumes and finishes.
+                let here = {
+                    let f = self.frames.last().expect("ICE: EndEnsure no frame");
+                    (self.frames.len() - 1, f.rescues_len(), self.stack.len())
+                };
+                let matches_here = |s: &crate::vm::SuspendCoord| {
+                    (s.frame_idx, s.rescues_len, s.stack_len) == here
+                };
+                let loop_seq = self
+                    .pending_loop_transfers
+                    .last()
+                    .and_then(|t| t.suspended)
+                    .filter(matches_here)
+                    .map(|s| s.seq);
+                let mb_seq = self
+                    .pending_method_breaks
+                    .last()
+                    .and_then(|mb| mb.suspended)
+                    .filter(matches_here)
+                    .map(|s| s.seq);
+                if loop_seq.is_some() && loop_seq > mb_seq {
                     self.continue_loop_transfer()?;
-                } else if self.pending_method_break.is_some() {
+                } else if mb_seq.is_some() {
                     self.continue_method_break()?;
                 } else {
                     // Stack invariant on the exception path: the
@@ -5988,6 +6022,14 @@ impl Vm {
                     return Ok(!self.frames.is_empty());
                 }
                 let f = self.frames.pop().expect("ICE: Return no frame");
+                // Cancel any ensure-walk suspended in the popped
+                // frame: a plain `return` from inside a suspended
+                // ensure body (`while…; begin; break; ensure;
+                // return v; end`) abandons that body — its
+                // EndEnsure tail never runs, and a stale suspended
+                // entry would be mis-resumed by an unrelated later
+                // EndEnsure. (Fast no-pending path: two loads.)
+                self.cancel_transfers_in_dead_frames(self.frames.len());
                 if f.dm_share {
                     self.dm_share_depth = self.dm_share_depth.saturating_sub(1);
                 }
@@ -6520,11 +6562,21 @@ impl Vm {
             // the breaking block) has the right target —
             // outer wrappers should leave that target
             // alone and just propagate.
-            if yguard.vm.pending_method_break.is_none() {
-                yguard.vm.pending_method_break = Some(crate::vm::MethodBreak {
+            // (With the Vec-of-walks contract this guard keys off
+            // the TOP entry: a suspended top belongs to some outer
+            // ensure walk, not to this in-flight break, so a fresh
+            // entry is still parked on top of it; a NON-suspended
+            // top IS this break already propagating — leave it.)
+            if yguard
+                .vm
+                .pending_method_breaks
+                .last()
+                .is_none_or(|mb| mb.suspended.is_some())
+            {
+                yguard.vm.pending_method_breaks.push(crate::vm::MethodBreak {
                     value: block_return_value.clone(),
                     target_frame_idx: yielding_idx,
-                    suspended: false,
+                    suspended: None,
                 });
                 yguard.vm.sync_control_signals();
             }

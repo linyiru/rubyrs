@@ -24,6 +24,8 @@ mod adr_0017;
 mod dispatch_quirks;
 #[path = "embed/equality.rs"]
 mod equality;
+#[path = "embed/ensure_host_raise.rs"]
+mod ensure_host_raise;
 #[path = "embed/error_handling.rs"]
 mod error_handling;
 #[path = "embed/filesystem_sandbox.rs"]

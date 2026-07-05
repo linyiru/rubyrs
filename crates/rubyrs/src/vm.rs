@@ -460,9 +460,11 @@ impl Frame {
 /// `target_loop_depth` is the `loop_rescue_depths` length the
 /// frame should have after the transfer (entries pushed by
 /// `EnterLoop`s the transfer is escaping out of get truncated).
-/// One slot per VM is enough — break/next transfers are single-
-/// frame and complete (or get superseded by a real raise)
-/// before any new one can start.
+/// Transfers live on a VM-level STACK (`pending_loop_transfers`):
+/// an ensure body run by a suspended transfer can itself contain a
+/// `while … break` through another ensure, which suspends a second,
+/// inner transfer that must complete before the outer one resumes
+/// (`while; begin; break; ensure; while; begin; break; ensure …`).
 pub(crate) struct LoopTransfer {
     pub(crate) kind: LoopTransferKind,
     pub(crate) target_ip: usize,
@@ -478,6 +480,61 @@ pub(crate) struct LoopTransfer {
     /// end` leaks the exception value on the operand stack until
     /// the surrounding frame pops.
     pub(crate) target_stack_depth: usize,
+    /// `Some` while the transfer's walk is parked inside an
+    /// `is_ensure` handler body (set at the suspension point in
+    /// `continue_loop_transfer`, cleared when `Op::EndEnsure`
+    /// resumes the walk). See [`SuspendCoord`] for how the
+    /// coordinates identify "the body's tail reached EndEnsure"
+    /// and drive escape-cancellation.
+    pub(crate) suspended: Option<SuspendCoord>,
+}
+
+/// Where an ensure-walk (loop transfer / method break) is parked.
+///
+/// Captured at the moment `continue_loop_transfer` /
+/// `continue_method_break` jumps into an `is_ensure` handler body.
+/// Serves two purposes:
+///
+/// 1. **EndEnsure identification.** `Op::EndEnsure` at an ensure
+///    body's tail resumes a suspended walk only when the walk's
+///    coordinates match the CURRENT tail position: same frame
+///    index, same `rescues_len` (bodies are push/pop-balanced),
+///    same operand-stack depth (bodies are compile_stmt-balanced;
+///    an exception-path entry into some ensure sits at depth+1
+///    because the unwinder pushed the exception value, so the two
+///    entry modes can never alias). `seq` breaks the tie when a
+///    nested walk suspends at coordinates identical to its outer
+///    walk (e.g. a `while … break`-with-ensure as the FIRST
+///    statement of an outer suspended ensure body): the highest
+///    seq is the innermost body, and its tail is reached first.
+///
+/// 2. **Escape cancellation.** A suspended walk stays alive while
+///    control remains INSIDE its ensure body (a raise that is
+///    rescued within the body — or within a callee — must not
+///    cancel a pending `return`/`break`; CRuby resumes it). It is
+///    cancelled exactly when control leaves the body without
+///    reaching its tail: an exception unwinding to a handler BELOW
+///    the suspension baseline, the suspended frame being popped, or
+///    a superseding `return`/`break`/`next` crossing out of the
+///    body. See `Vm::cancel_transfers_*` and the sweep sites in
+///    `unwind_with_exception` / `begin_method_break` /
+///    `begin_loop_transfer` / `Op::Return`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SuspendCoord {
+    /// Absolute index of the frame whose ensure body we're parked in.
+    pub(crate) frame_idx: usize,
+    /// `frame.rescues_len()` right after the ensure handler (and
+    /// everything above it) was popped — the baseline the body's
+    /// tail returns to.
+    pub(crate) rescues_len: usize,
+    /// `stack.len()` at handler entry (the handler's recorded
+    /// `stack_depth`, which the suspension truncated to). The
+    /// body is statement-balanced, so its tail sits at exactly
+    /// this depth; an exception-path entry sits one higher.
+    pub(crate) stack_len: usize,
+    /// Monotonic suspension counter (`Vm::suspend_seq`) — total
+    /// order of suspensions for innermost-first resume.
+    pub(crate) seq: u64,
 }
 
 pub(crate) enum LoopTransferKind {
@@ -510,14 +567,16 @@ pub(crate) enum LoopTransferKind {
 pub(crate) struct MethodBreak {
     pub(crate) value: Value,
     pub(crate) target_frame_idx: usize,
-    /// True while control is parked inside an `is_ensure` body
+    /// `Some` while control is parked inside an `is_ensure` body
     /// because `continue_method_break` jumped to its handler IP.
     /// The dispatch loops' top-of-iteration check honours this:
     /// they skip firing `continue_method_break` while suspended
     /// so the ensure body runs to completion. `Op::EndEnsure`
-    /// clears the flag before re-entering
-    /// `continue_method_break`, resuming the walk.
-    pub(crate) suspended: bool,
+    /// clears the slot before re-entering
+    /// `continue_method_break`, resuming the walk. The recorded
+    /// [`SuspendCoord`] identifies the suspension for EndEnsure
+    /// matching and escape cancellation — see its doc.
+    pub(crate) suspended: Option<SuspendCoord>,
 }
 
 /// ADR 0031 increment 2 — precomputed argument-binding plan for a
@@ -2624,25 +2683,36 @@ pub(crate) struct Vm {
     /// a missed sync fails the (debug-built) test suites loudly
     /// rather than dispatching against a stale mask.
     pub(crate) control_signals: u8,
-    /// In-flight `break`/`next` through `ensure` chain. Set by
-    /// `Op::BreakLoop`/`Op::NextLoop` when an `is_ensure` handler
-    /// sits between the source and the target; cleared once the
-    /// transfer lands at its target loop label. `Op::EndEnsure`
-    /// (emitted at the tail of every ensure handler body) reads
-    /// this field to decide whether to keep walking the rescue
-    /// chain or fall back to normal end-of-ensure exception
-    /// re-raise. `unwind_with_exception` clears this field
-    /// whenever a real exception starts unwinding — matching
-    /// CRuby semantics where a `raise` inside an ensure body
-    /// silently drops a pending break/next.
-    pub(crate) pending_loop_transfer: Option<LoopTransfer>,
-    /// ADR 0024 Phase A.4: in-flight block-break walking the
-    /// yielding method's ensure chain before that frame returns.
-    /// `Op::EndEnsure` checks this slot (after
-    /// `pending_loop_transfer`) and calls `continue_method_break`
-    /// to resume. Cleared once the yielding-method frame is
-    /// popped and the break value lands on the caller's stack.
-    pub(crate) pending_method_break: Option<MethodBreak>,
+    /// In-flight `break`/`next` transfers through `ensure` chains.
+    /// `Op::BreakLoop`/`Op::NextLoop` push an entry when an
+    /// `is_ensure` handler sits between the source and the target;
+    /// the entry pops once the transfer lands at its target loop
+    /// label. `Op::EndEnsure` (emitted at the tail of every ensure
+    /// handler body) resumes the TOP entry when its
+    /// [`SuspendCoord`] matches the current tail position, else
+    /// falls back to the exception re-raise path. A STACK (not a
+    /// slot): a suspended transfer's ensure body can contain
+    /// another `while … break`-through-ensure that must complete
+    /// first. An exception unwinding OUT of a suspended entry's
+    /// ensure body cancels that entry (CRuby: the raise wins);
+    /// an exception raised AND rescued within the body leaves it
+    /// alive (CRuby: the break resumes) — see
+    /// `unwind_with_exception`'s escape sweeps.
+    pub(crate) pending_loop_transfers: Vec<LoopTransfer>,
+    /// ADR 0024 Phase A.4: in-flight block-breaks / non-local
+    /// returns walking method frames' ensure chains before those
+    /// frames pop. Same stack discipline + EndEnsure coordinate
+    /// matching + escape cancellation as
+    /// `pending_loop_transfers`; a nested entry arises when a
+    /// suspended entry's ensure body calls a method that itself
+    /// does a block-`return` (`def m; return 1; ensure; helper;
+    /// end` where helper runs `[1].each { return 2 }`).
+    pub(crate) pending_method_breaks: Vec<MethodBreak>,
+    /// Monotonic counter stamped into each [`SuspendCoord`] —
+    /// total order of ensure-body suspensions so `Op::EndEnsure`
+    /// resumes the INNERMOST matching walk when a nested walk
+    /// parked at coordinates identical to its outer walk.
+    pub(crate) suspend_seq: u64,
     /// One-shot flag set by a builtin that detected its caller was
     /// unwound past its own call-site (e.g. `require_relative` saw
     /// `unwind_with_exception` route control to an outer
@@ -3424,8 +3494,9 @@ impl Vm {
             dm_share_depth: 0,
             locals_arena: Vec::new(),
             control_signals: 0,
-            pending_loop_transfer: None,
-            pending_method_break: None,
+            pending_loop_transfers: Vec::new(),
+            pending_method_breaks: Vec::new(),
+            suspend_seq: 0,
             suppress_call_result_push: false,
             bypass_visibility_once: false,
             require_public_once: false,
@@ -4171,7 +4242,7 @@ impl Vm {
     pub(crate) fn sync_control_signals(&mut self) {
         self.control_signals = (self.method_return.is_some() as u8)
             | ((self.break_signaled as u8) << 1)
-            | ((self.pending_method_break.is_some() as u8) << 2);
+            | (((!self.pending_method_breaks.is_empty()) as u8) << 2);
     }
 
     /// Debug-gate: does the cached mask agree with the fields?
@@ -4182,18 +4253,62 @@ impl Vm {
         self.control_signals
             == ((self.method_return.is_some() as u8)
                 | ((self.break_signaled as u8) << 1)
-                | ((self.pending_method_break.is_some() as u8) << 2))
+                | (((!self.pending_method_breaks.is_empty()) as u8) << 2))
+    }
+
+    /// Cancel every pending loop-transfer / method-break entry
+    /// suspended in a frame at index >= `frames_len` — i.e. in a
+    /// frame that no longer exists once the stack has been popped
+    /// or truncated to `frames_len` frames. Their ensure bodies
+    /// were abandoned along with the frames, so their `EndEnsure`
+    /// tails can never run; a stale survivor would either be
+    /// mis-resumed by an unrelated later `EndEnsure` (coordinate
+    /// collision with a recycled frame index) or leak its value.
+    /// Call at every frame-pop/truncate site OUTSIDE the walks
+    /// themselves (the walks — `unwind_with_exception`,
+    /// `continue_method_break` — carry their own sweeps).
+    /// Next value of the monotonic ensure-suspension counter —
+    /// stamped into each [`SuspendCoord`] so `Op::EndEnsure` can
+    /// order nested suspensions (innermost = highest seq).
+    #[inline]
+    pub(crate) fn next_suspend_seq(&mut self) -> u64 {
+        self.suspend_seq += 1;
+        self.suspend_seq
+    }
+
+    pub(crate) fn cancel_transfers_in_dead_frames(&mut self, frames_len: usize) {
+        // Fast out: pending transfers are rare; keep the common
+        // frame-pop paths (every plain `Op::Return`) to two loads.
+        if self.pending_loop_transfers.is_empty() && self.pending_method_breaks.is_empty() {
+            return;
+        }
+        self.pending_loop_transfers.retain(|t| {
+            t.suspended.is_none_or(|s| s.frame_idx < frames_len)
+        });
+        self.pending_method_breaks.retain(|mb| {
+            mb.suspended.is_none_or(|s| s.frame_idx < frames_len)
+        });
+        self.sync_control_signals();
     }
 
     pub(crate) fn take_method_return(&mut self) -> Option<Value> {
         let v = self.method_return.take();
         if v.is_some() {
-            self.pending_loop_transfer = None;
-            // Same invariant for the Phase A.4 block-break walk:
-            // a return-from-block that fires mid-ensure-walk
-            // supersedes the in-flight break (CRuby semantics —
-            // `return` wins, the break value is dropped).
-            self.pending_method_break = None;
+            // A consumed non-local return supersedes any pending
+            // transfer that is NOT parked inside an ensure body
+            // (CRuby semantics — `return` wins, the break value is
+            // dropped). SUSPENDED entries are left alone here: the
+            // return may be entirely contained within a suspended
+            // entry's ensure body (`def m; return 1; ensure; helper;
+            // end` where helper's block returns), in which case that
+            // entry must survive to resume at its EndEnsure. The
+            // consumer that knows the return's target frame
+            // (`begin_method_break`) cancels the suspended entries
+            // the return actually escapes; the no-owner
+            // LocalJumpError path cancels via
+            // `unwind_with_exception`'s escape sweeps.
+            self.pending_loop_transfers.retain(|t| t.suspended.is_some());
+            self.pending_method_breaks.retain(|mb| mb.suspended.is_some());
         }
         self.sync_control_signals();
         // Always clear `method_return_locals` — the field-pair
@@ -4304,8 +4419,8 @@ impl Vm {
         // `method_return.is_some() ⇔ method_return_locals.is_some()`
         // invariant. (code-review #285 round 2 #3.)
         self.method_return_locals = None;
-        self.pending_loop_transfer = None;
-        self.pending_method_break = None;
+        self.pending_loop_transfers.clear();
+        self.pending_method_breaks.clear();
         self.suppress_call_result_push = false;
         self.bypass_visibility_once = false;
         self.require_public_once = false;

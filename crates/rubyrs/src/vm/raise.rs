@@ -370,17 +370,24 @@ impl Vm {
 
     pub(crate) fn unwind_with_exception(&mut self, exc: Value) -> Result<(), Trap> {
         cold_path();
-        // A real exception supersedes any in-flight `break`/`next`
-        // transfer (CRuby semantics: if the ensure body raises while
-        // a break is pending, the raise wins and the break is silently
-        // dropped). Clear the slot before walking handlers so a later
-        // EndEnsure doesn't try to resume a now-cancelled transfer.
-        self.pending_loop_transfer = None;
-        // Same invariant for Phase A.4's block-break-through-ensure
-        // walk: a `raise` from inside the yielding method's ensure
-        // body cancels the in-flight break — the exception takes
-        // over the unwind, and the break value is dropped.
-        self.pending_method_break = None;
+        // A real exception supersedes an in-flight `break`/`next`/
+        // block-`return` transfer that is NOT parked inside an
+        // ensure body (CRuby semantics: the raise wins, the break
+        // value is dropped). Entries SUSPENDED in an ensure body
+        // are NOT cancelled here: the exception may be raised and
+        // rescued entirely WITHIN that body (directly or in a
+        // callee), in which case CRuby resumes the pending
+        // transfer at the body's end (`def m; return 1; ensure;
+        // begin; raise; rescue; end; end` returns 1). Cancelling
+        // eagerly left EndEnsure's exception path with nothing on
+        // the operand stack — the "ICE: EndEnsure with empty stack
+        // on exception path" net/http crash. Suspended entries are
+        // instead cancelled by the ESCAPE sweeps in the handler
+        // walk below, exactly when the exception leaves their
+        // ensure body (a handler below the suspension baseline
+        // matches, or the suspended frame pops).
+        self.pending_loop_transfers.retain(|t| t.suspended.is_some());
+        self.pending_method_breaks.retain(|mb| mb.suspended.is_some());
         self.sync_control_signals();
         // Implicit cause chain (CRuby): raising while another
         // exception is being handled (`$!` is a DIFFERENT live
@@ -505,6 +512,10 @@ impl Vm {
                                 }
                             }
                             self.frames.truncate(pre_frames);
+                            // A failing user set_backtrace override
+                            // could have parked an ensure walk in
+                            // one of the discarded frames.
+                            self.cancel_transfers_in_dead_frames(pre_frames);
                         }
                     }
                     for _ in 0..n_pinned {
@@ -592,6 +603,39 @@ impl Vm {
                 if matches { break Some(h); }
             };
             if let Some(h) = chosen {
+                // ESCAPE sweep (handler-match case): the exception
+                // is about to land in a handler of THIS frame. Any
+                // transfer suspended in this frame whose baseline
+                // sits ABOVE the matched handler's position (the
+                // remaining `rescues_len` after the pop-walk) had
+                // its ensure body abandoned — the handler was
+                // pushed BEFORE that body started, so control
+                // jumps below/out of the body and its EndEnsure
+                // tail never runs. Cancel those entries. Entries
+                // with baseline <= remaining length were suspended
+                // BELOW the handler's begin region — i.e. the
+                // handler was pushed while running their ensure
+                // body — so the exception is contained within the
+                // body and they stay alive to resume at its tail.
+                {
+                    let fidx = self.frames.len() - 1;
+                    let remaining = self
+                        .frames
+                        .last()
+                        .expect("ICE: frames disappeared")
+                        .rescues_len();
+                    self.pending_loop_transfers.retain(|t| {
+                        t.suspended.is_none_or(|s| {
+                            s.frame_idx != fidx || s.rescues_len <= remaining
+                        })
+                    });
+                    self.pending_method_breaks.retain(|mb| {
+                        mb.suspended.is_none_or(|s| {
+                            s.frame_idx != fidx || s.rescues_len <= remaining
+                        })
+                    });
+                    self.sync_control_signals();
+                }
                 self.stack.truncate(h.stack_depth);
                 let f = self.frames.last_mut().expect("ICE: frames disappeared");
                 f.ip = h.handler_ip;
@@ -667,6 +711,11 @@ impl Vm {
             }
             // No matching handler in this frame — pop it and try the caller.
             let f = self.frames.pop().expect("ICE: unwind pop empty");
+            // ESCAPE sweep (frame-pop case): any transfer suspended
+            // in the frame we just popped (or above) had its ensure
+            // body abandoned by the exception — cancel it so a
+            // later unrelated EndEnsure can't mis-resume it.
+            self.cancel_transfers_in_dead_frames(self.frames.len());
             if f.dm_share {
                 self.dm_share_depth = self.dm_share_depth.saturating_sub(1);
             }
@@ -763,24 +812,53 @@ impl Vm {
             .as_ref()
             .and_then(|a| a.loop_stack_depths.last())
             .expect("ICE: loop_stack_depths empty at begin_loop_transfer");
-        self.pending_loop_transfer = Some(LoopTransfer {
+        // SUPERSEDE sweep: this break/next may itself sit inside an
+        // ensure body that an OLDER transfer (or method-break walk)
+        // is suspended in. If the new transfer's target loop is
+        // OUTSIDE that body (the suspension baseline sits above the
+        // target's rescue depth), the body is being abandoned — the
+        // newer control transfer wins (CRuby) and the older entry's
+        // EndEnsure tail never runs. Cancel those. A target INSIDE
+        // the body (nested `while` with its own ensure — baseline <=
+        // target depth) leaves the outer entry alive: the nested
+        // transfer completes within the body and the outer walk
+        // resumes at the body's tail.
+        let fidx = self.frames.len() - 1;
+        self.pending_loop_transfers.retain(|t| {
+            t.suspended.is_none_or(|s| {
+                s.frame_idx != fidx || s.rescues_len <= target_rescues_len
+            })
+        });
+        self.pending_method_breaks.retain(|mb| {
+            mb.suspended.is_none_or(|s| {
+                s.frame_idx != fidx || s.rescues_len <= target_rescues_len
+            })
+        });
+        self.sync_control_signals();
+        self.pending_loop_transfers.push(LoopTransfer {
             kind,
             target_ip,
             target_rescues_len,
             target_loop_depth,
             target_stack_depth,
+            suspended: None,
         });
         self.continue_loop_transfer()
     }
 
-    /// Resume the in-flight `break`/`next` transfer. Called by
-    /// `Op::EndEnsure` at the tail of an ensure handler body, and
-    /// directly by `begin_loop_transfer` to do the first hop.
+    /// Resume the in-flight `break`/`next` transfer (top of the
+    /// `pending_loop_transfers` stack). Called by `Op::EndEnsure`
+    /// at the tail of an ensure handler body, and directly by
+    /// `begin_loop_transfer` to do the first hop.
     pub(crate) fn continue_loop_transfer(&mut self) -> Result<(), Trap> {
         let target = self
-            .pending_loop_transfer
-            .as_ref()
+            .pending_loop_transfers
+            .last_mut()
             .expect("ICE: continue_loop_transfer with no pending transfer");
+        // Resuming — clear the suspension marker; we're either
+        // about to suspend again (re-stamped below) or land
+        // (entry popped).
+        target.suspended = None;
         let target_rescues_len = target.target_rescues_len;
         let target_ip = target.target_ip;
         let target_loop_depth = target.target_loop_depth;
@@ -803,19 +881,35 @@ impl Vm {
             if h.is_ensure {
                 // Suspend the transfer here. Restore the operand
                 // stack to PushEnsure depth (matching the
-                // exception-path entry) but do NOT push anything —
-                // the ensure body runs with whatever the surrounding
-                // code already had on stack at PushEnsure time.
-                // EndEnsure at the body's tail resumes the walk.
+                // exception-path entry MINUS its exception push) —
+                // the ensure body runs with whatever the
+                // surrounding code already had on stack at
+                // PushEnsure time. EndEnsure at the body's tail
+                // matches the recorded coordinates and resumes
+                // the walk.
                 self.stack.truncate(h.stack_depth);
                 f.ip = h.handler_ip;
+                let coord = crate::vm::SuspendCoord {
+                    frame_idx: self.frames.len() - 1,
+                    rescues_len: self
+                        .frames
+                        .last()
+                        .expect("ICE: frame vanished at suspension")
+                        .rescues_len(),
+                    stack_len: h.stack_depth,
+                    seq: self.next_suspend_seq(),
+                };
+                self.pending_loop_transfers
+                    .last_mut()
+                    .expect("ICE: pending_loop_transfers vanished mid-walk")
+                    .suspended = Some(coord);
                 return Ok(());
             }
             // Plain rescue handler — silently discard. break/next
             // never trigger a rescue clause.
         }
         // No more intervening ensures. Land at the target.
-        let transfer = self.pending_loop_transfer.take().expect("ICE: just had it");
+        let transfer = self.pending_loop_transfers.pop().expect("ICE: just had it");
         // Flush operand-stack residue down to the EnterLoop snapshot.
         // Most importantly: if `break`/`next` started from inside an
         // ensure body that `unwind_with_exception` had entered (which
@@ -873,10 +967,29 @@ impl Vm {
         value: Value,
         target_frame_idx: usize,
     ) -> Result<(), Trap> {
-        self.pending_method_break = Some(crate::vm::MethodBreak {
+        // SUPERSEDE sweep: this return/block-break is about to pop
+        // every frame down to and including `target_frame_idx`.
+        // Transfers suspended in any of those frames had their
+        // ensure bodies abandoned (the new return wins — CRuby:
+        // `def m; return 1; ensure; return 2; end` returns 2) —
+        // cancel them. Transfers suspended in frames BELOW the
+        // target contain this whole return (e.g. an outer method's
+        // suspended ensure body called the method doing the
+        // returning) and stay alive to resume at their tails.
+        // Non-suspended entries are superseded outright (the old
+        // singleton-slot overwrite semantics).
+        self.pending_loop_transfers.retain(|t| {
+            t.suspended
+                .is_some_and(|s| s.frame_idx < target_frame_idx)
+        });
+        self.pending_method_breaks.retain(|mb| {
+            mb.suspended
+                .is_some_and(|s| s.frame_idx < target_frame_idx)
+        });
+        self.pending_method_breaks.push(crate::vm::MethodBreak {
             value,
             target_frame_idx,
-            suspended: false,
+            suspended: None,
         });
         self.sync_control_signals();
         self.continue_method_break()
@@ -889,17 +1002,17 @@ impl Vm {
     /// Rust iter driver returns control to bytecode in a frame
     /// above the target (Phase A.5 multi-frame propagation).
     pub(crate) fn continue_method_break(&mut self) -> Result<(), Trap> {
-        // Clear any previous suspension marker — we're either
-        // about to suspend again (set below) or land (cleared
-        // when we `.take()` the slot).
-        if let Some(mb) = self.pending_method_break.as_mut() {
-            mb.suspended = false;
+        // Clear the top entry's suspension marker — we're either
+        // about to suspend again (re-stamped below) or land
+        // (entry popped).
+        if let Some(mb) = self.pending_method_breaks.last_mut() {
+            mb.suspended = None;
         }
         loop {
             let top_idx = self.frames.len() - 1;
             let target = self
-                .pending_method_break
-                .as_ref()
+                .pending_method_breaks
+                .last()
                 .expect("ICE: continue_method_break with no pending break")
                 .target_frame_idx;
             debug_assert!(
@@ -924,16 +1037,26 @@ impl Vm {
             }
             if let Some(h) = found_ensure {
                 // Suspend walk inside ensure body. EndEnsure
-                // resumes via `continue_method_break`. Mark the
-                // suspension so the dispatch loops' top-of-loop
-                // check knows to leave us alone while the body
-                // runs.
+                // matches the recorded coordinates and resumes via
+                // `continue_method_break`. The marker also tells
+                // the dispatch loops' top-of-loop check to leave
+                // us alone while the body runs.
                 self.stack.truncate(h.stack_depth);
                 f.ip = h.handler_ip;
-                self.pending_method_break
-                    .as_mut()
-                    .expect("ICE: pending_method_break vanished mid-walk")
-                    .suspended = true;
+                let coord = crate::vm::SuspendCoord {
+                    frame_idx: self.frames.len() - 1,
+                    rescues_len: self
+                        .frames
+                        .last()
+                        .expect("ICE: frame vanished at suspension")
+                        .rescues_len(),
+                    stack_len: h.stack_depth,
+                    seq: self.next_suspend_seq(),
+                };
+                self.pending_method_breaks
+                    .last_mut()
+                    .expect("ICE: pending_method_breaks vanished mid-walk")
+                    .suspended = Some(coord);
                 return Ok(());
             }
             // Current frame's rescues exhausted.
@@ -952,9 +1075,9 @@ impl Vm {
                 // CRuby's class-body semantics ("class Foo; X;
                 // end" evaluates to X's class).
                 let mb = self
-                    .pending_method_break
-                    .take()
-                    .expect("ICE: pending_method_break vanished mid-continue");
+                    .pending_method_breaks
+                    .pop()
+                    .expect("ICE: pending_method_breaks vanished mid-continue");
                 self.sync_control_signals();
                 let popped = self
                     .frames

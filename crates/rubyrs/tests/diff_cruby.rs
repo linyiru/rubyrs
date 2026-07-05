@@ -854,6 +854,11 @@ fn tier2_restblock_lite() { run_diff("tier2_restblock_lite"); }
 #[test] fn lambda_strict_arity() { run_diff("lambda_strict_arity"); }
 #[test] fn symbol_proc_multiarg() { run_diff("symbol_proc_multiarg"); }
 #[test] fn ensure_on_return() { run_diff("ensure_on_return"); }
+// Suspended-ensure-walk contract (EndEnsure ICE regression class):
+// contained exceptions must not cancel a pending return/break walk;
+// escaping control flow must.
+#[test] fn ensure_walk_contained_raise() { run_diff("ensure_walk_contained_raise"); }
+#[test] fn ensure_walk_supersede() { run_diff("ensure_walk_supersede"); }
 #[test] fn raise_class_runs_initialize() { run_diff("raise_class_runs_initialize"); }
 #[test] fn time_components() { run_diff("time_components"); }
 #[cfg(feature = "stdlib")]

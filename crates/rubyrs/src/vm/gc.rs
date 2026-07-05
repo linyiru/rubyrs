@@ -595,9 +595,9 @@ impl Vm {
         }
         for v in &self.stack { roots.push(v.clone()); }
         for v in &self.pinned { roots.push(v.clone()); }
-        // In-flight break/next transfer: the break value lives only
-        // in `pending_loop_transfer` between `begin_loop_transfer`
-        // and the final landing. The ensure body runs in between
+        // In-flight break/next transfers: a break value lives only
+        // in `pending_loop_transfers` between `begin_loop_transfer`
+        // and the final landing. The ensure bodies run in between
         // and can trigger GC at allocation sites; without rooting
         // here a heap-allocated break value (Array/Hash/String/
         // Object) gets swept and the eventual stack.push in
@@ -605,10 +605,19 @@ impl Vm {
         // handle — silent heap corruption (ICE on the next op
         // that consults the slot's type). Reproduced under
         // STRESS_GC=1.
-        if let Some(super::LoopTransfer {
-            kind: super::LoopTransferKind::Break { value }, ..
-        }) = &self.pending_loop_transfer {
-            roots.push(value.clone());
+        for t in &self.pending_loop_transfers {
+            if let super::LoopTransferKind::Break { value } = &t.kind {
+                roots.push(value.clone());
+            }
+        }
+        // Same lifetime for a non-local return / block-break value:
+        // it lives only in `pending_method_breaks` while the walk
+        // runs the intervening ensure bodies (which are arbitrary
+        // user code and can allocate). `def m; return [1,2]; ensure;
+        // Array.new(9); end` under STRESS_GC swept the return value
+        // before this rooting existed.
+        for mb in &self.pending_method_breaks {
+            roots.push(mb.value.clone());
         }
         // ENV hash, once initialised, is reachable from script
         // code via the `ENV` constant — pin it so the cache
@@ -802,10 +811,13 @@ impl Vm {
             for v in &snap.stack { roots.push(v.clone()); }
             for v in &snap.pinned { roots.push(v.clone()); }
             if let Some(v) = &snap.method_return { roots.push(v.clone()); }
-            if let Some(t) = &snap.pending_loop_transfer
-                && let crate::vm::LoopTransferKind::Break { value } = &t.kind
-            {
-                roots.push(value.clone());
+            for t in &snap.pending_loop_transfers {
+                if let crate::vm::LoopTransferKind::Break { value } = &t.kind {
+                    roots.push(value.clone());
+                }
+            }
+            for mb in &snap.pending_method_breaks {
+                roots.push(mb.value.clone());
             }
         }
         // `define_method`-installed methods carry captured-locals
