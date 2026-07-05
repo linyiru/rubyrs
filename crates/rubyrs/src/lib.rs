@@ -1154,6 +1154,19 @@ struct PostPreambleSnapshot {
     consumed_autoloads: std::collections::HashSet<intern::SymId>,
     autoload_paths: std::collections::HashMap<std::path::PathBuf, Vec<intern::SymId>>,
     private_consts: std::collections::HashSet<intern::SymId>,
+    /// The host-injected ENV map (`Config::env`) as of preamble
+    /// completion. `Vm::env_hash_or_init` CONSUMES `env_override`
+    /// (`take()`) on the first script `ENV` access — the
+    /// materialised Ruby Hash becomes the canonical ENV for that
+    /// Runtime lifetime. reset() drops the materialised hash
+    /// (`env_hash = None`, it lives in the truncated user heap),
+    /// so without re-arming the override every post-reset eval
+    /// would rebuild `ENV` as EMPTY: a silent, permanent loss of
+    /// the host's injected environment after the first
+    /// ENV-touching eval (the fuzz soak caught it as fixtures'
+    /// `if ENV["STRESS_GC"]` self-quarantine guards silently
+    /// failing on every eval after tests/diff/env_hash.rb ran).
+    env_override: Option<std::collections::HashMap<String, String>>,
 }
 
 /// Per-Class snapshot covering every `RefCell` field on `Class`
@@ -2092,6 +2105,7 @@ impl PostPreambleSnapshot {
             consumed_autoloads: rt.vm.consumed_autoloads.clone(),
             autoload_paths: rt.vm.autoload_paths.clone(),
             private_consts: rt.vm.private_consts.clone(),
+            env_override: rt.vm.env_override.clone(),
         }
     }
 
@@ -2783,16 +2797,14 @@ impl Runtime {
         // Found by the nightly fuzz harness's cached-Runtime +
         // reset() iteration loop.
         //
-        // The lazily-materialised top-level `main` object: drop the
-        // id UNCONDITIONALLY and let `main_object()` re-materialise
-        // a fresh singleton Object on next use. The previous shape
-        // (`filter(|id| id < heap_slot_count)`, from the 87d2f1d1
-        // reset sweep) kept a below-high-water main on the theory
-        // that only an above-high-water id is stale — but a main
-        // materialised DURING construction (any build where an eval
-        // runs after `Object` exists but before the post-preamble
-        // capture, e.g. preamble-cache image restores) sits below
-        // the mark and then CARRIES USER STATE across resets: heap
+        // The lazily-materialised top-level `main` object. The
+        // 87d2f1d1 shape (`filter(|id| id < heap_slot_count)`) kept
+        // a below-high-water main on the theory that only an
+        // above-high-water id is stale — but a main materialised
+        // DURING construction (any build where an eval runs after
+        // `Object` exists but before the post-preamble capture,
+        // e.g. preamble-cache image restores) sits below the mark
+        // and then CARRIES USER STATE across resets: heap
         // truncation cannot rewind in-place mutations of a
         // surviving slot, so eval A's `self.extend Mod` /
         // `instance_variable_set` on main stayed visible to eval B.
@@ -2804,12 +2816,49 @@ impl Runtime {
         // eigenclass walk "found" f2, and the VM executed a
         // recycled proto index with the wrong locals reservation
         // (locals_arena OOB / CreateBlock-in-Stack-frame ICEs).
-        // Dropping the id orphans the old slot (swept as garbage on
-        // the next collection — nothing else roots main) and every
-        // post-reset eval starts with a pristine main, matching the
-        // "user state on main is wiped" contract this comment block
-        // has always claimed.
-        self.vm.main_obj = None;
+        //
+        // A below-high-water main is rewound IN PLACE (overwrite
+        // the slot with a pristine Instance) rather than dropped:
+        // the heap bookkeeping restored above counts that slot as
+        // live-at-baseline, so orphaning it would let the next
+        // eval's GC sweep + recycle it as a USER object below the
+        // high-water mark — which the FOLLOWING reset's restored
+        // bookkeeping would again treat as live baseline state (a
+        // zombie whose references dangle into the truncated
+        // region; the STRESS_GC soak caught exactly that as a
+        // use-after-free). In-place re-materialisation keeps the
+        // slot's liveness accounting untouched while wiping the
+        // extend/ivar/eigenclass user state. An above-high-water
+        // main was just truncated — drop the id and let
+        // `main_object()` re-materialise on next use.
+        match self.vm.main_obj {
+            Some(id) if (id.0 as usize) < snapshot.heap_slot_count => {
+                let object_cls = self
+                    .vm
+                    .interner
+                    .get_id("Object")
+                    .and_then(|sym| self.vm.classes.get(&sym).cloned());
+                if let Some(cls) = object_cls {
+                    self.vm.heap.slots[id.0 as usize] =
+                        crate::heap::Slot::Live(crate::heap::HeapObj::Instance(
+                            value::Instance {
+                                class: cls,
+                                ivars: value::IvarTable::default(),
+                                singleton_class: None,
+                                frozen: std::cell::Cell::new(false),
+                            },
+                        ));
+                } else {
+                    // `Object` missing from the baseline classes
+                    // (impossible after a completed preamble, but a
+                    // half-constructed Runtime could get here):
+                    // fall back to dropping the id — a dangling
+                    // main is worse than the bookkeeping skew.
+                    self.vm.main_obj = None;
+                }
+            }
+            _ => self.vm.main_obj = None,
+        }
         self.vm.last_uncaught_exception = None;
         self.vm.pending_block_arg = None;
         // String / heap-object eigenclass + ivar side tables are
@@ -2851,6 +2900,16 @@ impl Runtime {
             self.vm.last_match = None;
         }
         self.vm.env_hash = None;
+        // Re-arm the consumable host-ENV override to its baseline —
+        // see the `PostPreambleSnapshot::env_override` field doc.
+        // A user eval that never touched ENV leaves `env_override`
+        // as Some(...) and this clone_from is a same-value rewrite;
+        // one that DID touch ENV consumed it, and the next eval's
+        // first ENV access re-materialises from the same
+        // host-injected map a fresh Runtime would see. User ENV
+        // mutations (`ENV[k] = v`) lived in the dropped Ruby Hash,
+        // so they roll back with it — per the reset contract.
+        self.vm.env_override.clone_from(&snapshot.env_override);
         #[cfg(not(target_os = "wasi"))]
         {
             self.vm.loaded_features.clear();

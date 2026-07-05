@@ -1011,6 +1011,7 @@ fn reset_survives_fixture_corpus_soak_under_tight_caps() {
         // Caps::tight() from crates/rubyrs/fuzz/src/lib.rs. A fresh
         // Runtime per pass so the two orderings can't launder state
         // into each other — each models one fuzz process.
+        let stressed = std::env::var_os("STRESS_GC").is_some_and(|v| v == "1");
         let mut rt = Runtime::with_config(Config {
             fuel: Some(50_000),
             max_frames: Some(64),
@@ -1023,7 +1024,21 @@ fn reset_survives_fixture_corpus_soak_under_tight_caps() {
             // dangling heap references deterministically (a collection
             // fires on every allocation, so a stale root can't hide
             // behind GC timing).
-            stress_gc: std::env::var_os("STRESS_GC").is_some_and(|v| v == "1"),
+            stress_gc: stressed,
+            // Under stress, ALSO surface STRESS_GC to the script's
+            // `ENV` (Config's default env is isolated/empty): a few
+            // fixtures self-quarantine known standalone GC
+            // root-holes behind an `if ENV["STRESS_GC"]` sentinel
+            // (block_kwrest_param.rb, forwardable_shim.rb,
+            // struct_factory.rb — see their headers), exactly like
+            // the diff_cruby runner's stressed pass where the env
+            // var reaches both interpreters. Without this, the
+            // stressed soak runs those known-bugged-under-stress
+            // bodies and fails on a standalone bug this reset soak
+            // doesn't own (the unstressed pass still covers the
+            // bodies).
+            env: stressed
+                .then(|| [("STRESS_GC".to_string(), "1".to_string())].into_iter().collect()),
             ..Default::default()
         });
         for f in pass {
@@ -1127,6 +1142,47 @@ fn reset_drops_pending_autoloads_and_private_consts() {
 /// them; eval B needs two optional-arg defs with a call to the
 /// second. Behaviour assertions pin CRuby semantics: nothing from
 /// eval A is visible, and eval B binds its own defaults.
+/// `Config::env` must survive reset(). `Vm::env_hash_or_init`
+/// consumes the host-injected env map (`env_override.take()`) on
+/// the first script `ENV` access; reset() drops the materialised
+/// Ruby Hash (user heap). Pre-fix nothing re-armed the override,
+/// so every eval after the first ENV-touching one saw an EMPTY
+/// `ENV` — the fuzz soak caught this because fixtures'
+/// `if ENV["STRESS_GC"]` self-quarantine guards silently stopped
+/// firing after tests/diff/env_hash.rb had run once on the cached
+/// Runtime. Also pins the rollback half: user `ENV[k] = v`
+/// mutations live in the dropped Hash and do NOT survive.
+#[test]
+fn reset_restores_host_injected_env() {
+    let mut rt = Runtime::with_config(Config {
+        env: Some(
+            [("FZ_HOST_KEY".to_string(), "host-val".to_string())]
+                .into_iter()
+                .collect(),
+        ),
+        ..Default::default()
+    });
+    // First eval consumes the override AND mutates ENV.
+    let v = rt
+        .eval(r#"ENV["FZ_USER_KEY"] = "user-val"; ENV["FZ_HOST_KEY"]"#, "touch.rb")
+        .expect("ENV-touching eval must succeed");
+    assert!(
+        matches!(&v, rubyrs::Value::Str(s) if &*s.borrow() == b"host-val"),
+        "host env visible pre-reset, got {:?}",
+        v,
+    );
+    rt.reset();
+    // Post-reset: host injection is back, user mutation is gone.
+    let v = rt
+        .eval(r#"[ENV["FZ_HOST_KEY"], ENV["FZ_USER_KEY"]].inspect"#, "post.rb")
+        .expect("post-reset ENV eval must succeed");
+    assert!(
+        matches!(&v, rubyrs::Value::Str(s) if &*s.borrow() == b"[\"host-val\", nil]"),
+        "expected host env restored + user mutation dropped, got {:?}",
+        v,
+    );
+}
+
 #[test]
 fn reset_drops_main_extend_and_proto_plans() {
     let mut rt = Runtime::new();
