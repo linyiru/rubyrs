@@ -1559,6 +1559,22 @@ class Encoding
     when "UTF-32LE" then UTF_32LE
     when "UTF-32BE" then UTF_32BE
     when "UTF-32" then UTF_32
+    ## CRuby's special pseudo-names (encoding.c `enc_find`),
+    ## resolved case-insensitively like real names — verified vs
+    ## 3.4.1. "external"/"filesystem" track the live
+    ## default_external ("filesystem" == external on Unix);
+    ## "locale" is the locale charmap, which on rubyrs's Tier-1
+    ## UTF-8-fixed reality is always UTF-8 (CRuby under
+    ## LC_ALL=C.UTF-8 agrees; a non-UTF-8 locale would give CRuby
+    ## that charmap instead — documented divergence, rubyrs has no
+    ## locale plumbing); "internal" is default_internal — NIL when
+    ## unset, the one find() shape that RETURNS NIL instead of
+    ## raising (CRuby-faithful). Motivating consumer: stdlib
+    ## find.rb:43 `Encoding.find("filesystem")`, reached by
+    ## RuboCop's ResultCache via `Find.find`.
+    when "EXTERNAL", "FILESYSTEM" then default_external
+    when "LOCALE" then UTF_8
+    when "INTERNAL" then default_internal
     else raise ArgumentError, "unknown encoding name - " + name.to_s
     end
   end
@@ -1566,10 +1582,11 @@ class Encoding
   ## Reflection trio (CRuby shapes, registry-sized): every build
   ## serves the three built-ins plus the name-registered family
   ## (constants below). The list and alias map are a SUBSET of
-  ## CRuby's ~100-encoding registry (which also carries locale/
-  ## external/filesystem pseudo-names and historical spellings) —
+  ## CRuby's ~100-encoding registry (historical spellings) —
   ## documented narrowing, asserted by intersection in the
-  ## fixture.
+  ## fixture. The locale/external/filesystem/internal pseudo-names
+  ## ARE carried (see self.aliases below) — list itself holds only
+  ## real encodings, matching CRuby.
   def self.list
     [ASCII_8BIT, UTF_8, US_ASCII,
      ISO_8859_1, Windows_1252, ISO_8859_15, KOI8_R,
@@ -1578,16 +1595,35 @@ class Encoding
   end
 
   def self.name_list
-    list.map(&:name) + aliases.keys
+    names = list.map(&:name) + aliases.keys
+    ## CRuby's name_list carries "internal" even while
+    ## default_internal is nil (when aliases omits the key) — and
+    ## it sits LAST, after "filesystem" (verified vs 3.4.1). When
+    ## default_internal IS set, aliases already ends with it.
+    names << "internal" unless names.include?("internal")
+    names
   end
 
   ## Alias pairs verified against CRuby 3.4.1's Encoding.aliases
-  ## (exact key => value spellings).
+  ## (exact key => value spellings). The special pseudo-names come
+  ## LAST, lowercase-exact keys (find is case-insensitive, the
+  ## alias KEYS are not: `aliases.key?("FILESYSTEM")` is false in
+  ## CRuby), values tracking the live defaults — "locale" stays the
+  ## locale charmap (UTF-8 on rubyrs, see self.find), and
+  ## "internal" is present ONLY while default_internal is set.
+  ## Tail order locale → external → filesystem → internal matches
+  ## CRuby's table order.
   def self.aliases
-    { "BINARY" => "ASCII-8BIT", "ASCII" => "US-ASCII",
+    a = { "BINARY" => "ASCII-8BIT", "ASCII" => "US-ASCII",
       "ISO8859-1" => "ISO-8859-1", "CP1252" => "Windows-1252",
       "ISO8859-15" => "ISO-8859-15", "CP932" => "Windows-31J",
       "SJIS" => "Windows-31J", "CP936" => "GBK" }
+    a["locale"] = "UTF-8"
+    a["external"] = default_external.name
+    a["filesystem"] = default_external.name
+    di = default_internal
+    a["internal"] = di.name if di
+    a
   end
 
   def initialize(name)

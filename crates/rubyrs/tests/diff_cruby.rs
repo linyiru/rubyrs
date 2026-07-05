@@ -707,6 +707,12 @@ fn tier2_restblock_lite() { run_diff("tier2_restblock_lite"); }
 // Shift_JIS) is name-registered in EVERY build — activesupport's
 // transliterate.rb references Encoding::GB18030 at class-body load.
 #[test] fn encoding_constants_core() { run_diff("encoding_constants_core"); }
+// CRuby's special pseudo-names in Encoding.find — "external"/
+// "filesystem" (track default_external), "locale" (locale charmap),
+// "internal" (default_internal — find returns NIL when unset!) +
+// their aliases/name_list membership. Motivating consumer: stdlib
+// find.rb:43, reached by RuboCop's ResultCache via Find.find.
+#[test] fn encoding_special_aliases() { run_diff("encoding_special_aliases"); }
 // String#encode's CRuby error surface: ConverterNotFoundError for
 // unresolvable target names (NOT ArgumentError), TypeError for
 // non-String/non-Encoding args (encode + force_encoding).
