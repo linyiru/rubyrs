@@ -1172,6 +1172,24 @@ pub struct Instance {
 }
 
 impl Instance {
+    /// A fresh, mutation-free instance of `class`: no ivars, no
+    /// eigenclass, not frozen. THE definition of "what a
+    /// just-allocated object looks like" — used by
+    /// `Vm::main_object()` to materialise the top-level `main` and
+    /// by `Runtime::reset()` to rewind a below-high-water `main`
+    /// slot in place. Sharing the constructor keeps those two sites
+    /// from drifting: if a field is ever added to `Instance`, a
+    /// post-reset main stays shape-identical to a freshly
+    /// materialised one by construction.
+    pub(crate) fn pristine(class: std::rc::Rc<Class>) -> Self {
+        Instance {
+            class,
+            ivars: IvarTable::default(),
+            singleton_class: None,
+            frozen: std::cell::Cell::new(false),
+        }
+    }
+
     /// Ivar read by name via the class shape (undefined → None; an
     /// assigned nil is `Some(&Nil)` — reflection needs the difference).
     #[inline]

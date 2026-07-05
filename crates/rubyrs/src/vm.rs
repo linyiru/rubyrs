@@ -3496,6 +3496,48 @@ impl Vm {
         }
     }
 
+    /// Shrink `protos` to `new_len` and every proto_idx-INDEXED side
+    /// table in lockstep. The side tables' "index = proto_idx,
+    /// immutable once compiled" lifecycle only holds while the proto
+    /// Vec never shrinks; `Runtime::reset()` is exactly the shrink
+    /// (it rewinds to the post-preamble baseline and the next eval's
+    /// compiler hands out the same indices again). A recycled index
+    /// paired with a stale side-table entry served the PREVIOUS
+    /// eval's lazily-built arg-binding plan / JIT verdict for a
+    /// brand-new method — the 2026-07-05 fuzz-soak crash family
+    /// (locals_arena OOB stores/loads, args-shuffle subtract
+    /// overflow, "CreateBlock in a Locals::Stack frame" ICEs).
+    ///
+    /// Owning the sweep HERE (not scattered in reset()) is the
+    /// guard-rail for the next proto-indexed table: add its
+    /// truncate/retain to this function when you add the field.
+    ///
+    /// NOT swept (documented carve-out): the ~40 per-shape
+    /// `jit_native_*` verdict maps, `jit_value`, and `restblk_census_by`
+    /// are proto_idx-keyed too, but sweeping them is only observable
+    /// to an embedder that runs a reset() loop WITH the opt-in
+    /// native JIT enabled — no such embedder exists today (the fuzz
+    /// harness and per-request hosts run interpreter-only). When
+    /// that combination becomes real, extend this sweep before
+    /// enabling it; a stale native body on a recycled index executes
+    /// the previous eval's compiled code.
+    pub(crate) fn truncate_protos(&mut self, new_len: usize) {
+        self.protos.truncate(new_len);
+        self.nfa_plans.truncate(new_len);
+        self.rest_preds.truncate(new_len);
+        #[cfg(feature = "jit-native")]
+        {
+            self.jit_flags.truncate(new_len);
+            self.t2_ptrs.truncate(new_len);
+            self.t2_lite_ptrs.truncate(new_len);
+            self.t2_lite_blk_ptrs.truncate(new_len);
+            self.t2_lite_streak.truncate(new_len);
+            self.t2_protos.retain(|&pidx, _| pidx < new_len);
+            self.t2_hot.retain(|&pidx, _| pidx < new_len);
+            self.jit_deopt_count.retain(|&(pidx, _), _| pidx < new_len);
+        }
+    }
+
     /// Read the proto's JIT dispatch flags (`JFLAG_*`); 0 = nothing settled.
     #[cfg(feature = "jit-native")]
     #[inline]

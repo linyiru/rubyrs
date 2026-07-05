@@ -56,12 +56,9 @@ impl Vm {
         let Some(cls) = self.classes.get(&object_sym).cloned() else {
             return Value::Nil;
         };
-        let id = self.heap.alloc(crate::heap::HeapObj::Instance(crate::value::Instance {
-            class: cls,
-            ivars: crate::value::IvarTable::default(),
-            singleton_class: None,
-            frozen: std::cell::Cell::new(false),
-        }));
+        let id = self
+            .heap
+            .alloc(crate::heap::HeapObj::Instance(crate::value::Instance::pristine(cls)));
         self.main_obj = Some(id);
         Value::Object(id)
     }

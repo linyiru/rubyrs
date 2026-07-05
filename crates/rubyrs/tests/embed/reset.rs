@@ -1005,7 +1005,7 @@ fn reset_survives_fixture_corpus_soak_under_tight_caps() {
     let mut by_size = files.clone();
     // Stable sort → path order is preserved within a size class,
     // keeping the pass fully deterministic.
-    by_size.sort_by_key(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0));
+    by_size.sort_by_cached_key(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0));
 
     for (order, pass) in [("path", &files), ("size", &by_size)] {
         // Caps::tight() from crates/rubyrs/fuzz/src/lib.rs. A fresh

@@ -1149,7 +1149,13 @@ struct PostPreambleSnapshot {
     /// `private_constant`, and a preamble-cache image restore
     /// (snapshot.rs) can seed the autoload tables before
     /// `PostPreambleSnapshot::capture` runs.
+    // `autoloads_toplevel` / `autoloads_scoped` mirror their `Vm`
+    // fields' wasi gate (the autoload trigger needs `require`,
+    // which traps on wasm32-wasi); the other three registries are
+    // ungated on `Vm` and so ungated here.
+    #[cfg(not(target_os = "wasi"))]
     autoloads_toplevel: std::collections::HashMap<intern::SymId, String>,
+    #[cfg(not(target_os = "wasi"))]
     autoloads_scoped: std::collections::HashMap<intern::SymId, String>,
     consumed_autoloads: std::collections::HashSet<intern::SymId>,
     autoload_paths: std::collections::HashMap<std::path::PathBuf, Vec<intern::SymId>>,
@@ -2100,7 +2106,9 @@ impl PostPreambleSnapshot {
             toplevel_methods: rt.vm.toplevel_methods.clone(),
             class_states,
             sources: rt.vm.sources.clone(),
+            #[cfg(not(target_os = "wasi"))]
             autoloads_toplevel: rt.vm.autoloads_toplevel.clone(),
+            #[cfg(not(target_os = "wasi"))]
             autoloads_scoped: rt.vm.autoloads_scoped.clone(),
             consumed_autoloads: rt.vm.consumed_autoloads.clone(),
             autoload_paths: rt.vm.autoload_paths.clone(),
@@ -2136,8 +2144,11 @@ impl PostPreambleSnapshot {
         // SymId-keyed cross-eval state; see the field docs on the
         // snapshot struct for the fuzz-found interner-truncation
         // ICE this restoration closes.
-        vm.autoloads_toplevel.clone_from(&self.autoloads_toplevel);
-        vm.autoloads_scoped.clone_from(&self.autoloads_scoped);
+        #[cfg(not(target_os = "wasi"))]
+        {
+            vm.autoloads_toplevel.clone_from(&self.autoloads_toplevel);
+            vm.autoloads_scoped.clone_from(&self.autoloads_scoped);
+        }
         vm.consumed_autoloads.clone_from(&self.consumed_autoloads);
         vm.autoload_paths.clone_from(&self.autoload_paths);
         vm.private_consts.clone_from(&self.private_consts);
@@ -2829,24 +2840,58 @@ impl Runtime {
         // use-after-free). In-place re-materialisation keeps the
         // slot's liveness accounting untouched while wiping the
         // extend/ivar/eigenclass user state. An above-high-water
-        // main was just truncated — drop the id and let
+        // main was just truncated, and a below-high-water one on a
+        // recycled baseline-free slot was just deadened (see the
+        // match-guard comment) — both drop the id and let
         // `main_object()` re-materialise on next use.
+        // Discriminate on the slot's CURRENT state, not the bare
+        // index: `id < heap_slot_count` alone is NOT "live at
+        // capture". A main materialised on the first user eval can
+        // land on a slot `alloc` popped from the PREAMBLE-ERA free
+        // list — below the high-water mark, yet part of the
+        // rollback regime: the deaden loop above just set it Dead
+        // and the restored free list contains it again. Resurrecting
+        // that slot in place would leave it simultaneously Live and
+        // on the free list with `live_count` under-counting it — the
+        // next eval's alloc would pop it and overwrite main with an
+        // unrelated object (identity aliasing). A Dead slot here
+        // means exactly that case → drop the id. A still-Live slot
+        // means main was live at capture (materialised during
+        // construction, counted by the restored bookkeeping) → the
+        // in-place rewind below is the consistent path.
         match self.vm.main_obj {
-            Some(id) if (id.0 as usize) < snapshot.heap_slot_count => {
+            Some(id)
+                if (id.0 as usize) < snapshot.heap_slot_count
+                    && matches!(
+                        self.vm.heap.slots[id.0 as usize],
+                        crate::heap::Slot::Live(_)
+                    ) =>
+            {
                 let object_cls = self
                     .vm
                     .interner
                     .get_id("Object")
                     .and_then(|sym| self.vm.classes.get(&sym).cloned());
                 if let Some(cls) = object_cls {
+                    // ADR 0035: keep the slots-parallel JIT class
+                    // table in step with the overwrite — a prior
+                    // eval's `self.extend Mod` promoted main's
+                    // entry to its eigenclass pointer
+                    // (`ensure_singleton_class`), which the pristine
+                    // Instance below no longer has. Left stale, the
+                    // `class_ptr_of` slab/table consistency assert
+                    // fires in debug builds and a baked PIC guard
+                    // reads a dangling eigenclass pointer in
+                    // release. Same maintenance contract as heap.rs
+                    // `alloc` / `ensure_singleton_class`.
+                    #[cfg(feature = "jit-native")]
+                    {
+                        self.vm.heap.class_ptrs[id.0 as usize] =
+                            std::rc::Rc::as_ptr(&cls) as usize;
+                    }
                     self.vm.heap.slots[id.0 as usize] =
                         crate::heap::Slot::Live(crate::heap::HeapObj::Instance(
-                            value::Instance {
-                                class: cls,
-                                ivars: value::IvarTable::default(),
-                                singleton_class: None,
-                                frozen: std::cell::Cell::new(false),
-                            },
+                            value::Instance::pristine(cls),
                         ));
                 } else {
                     // `Object` missing from the baseline classes
@@ -2914,15 +2959,16 @@ impl Runtime {
         {
             self.vm.loaded_features.clear();
             self.vm.loaded_stdlib_stubs.clear();
+            // `completed_features` is `loaded_features`' completion-
+            // ordered twin (a `require` inserts into `loaded_features`
+            // at start and `completed_features` at finish; the autoload
+            // machinery consults the latter). Clearing one but not the
+            // other left "this file finished loading" facts from a
+            // rolled-back eval visible to the next eval's require /
+            // autoload-satisfaction checks. Wasi-gated with its twin
+            // (the field itself only exists off-wasi).
+            self.vm.completed_features.clear();
         }
-        // `completed_features` is `loaded_features`' completion-
-        // ordered twin (a `require` inserts into `loaded_features`
-        // at start and `completed_features` at finish; the autoload
-        // machinery consults the latter). Clearing one but not the
-        // other left "this file finished loading" facts from a
-        // rolled-back eval visible to the next eval's require /
-        // autoload-satisfaction checks.
-        self.vm.completed_features.clear();
         // `at_exit_handlers` (Vec<ObjId>) and `marshal_registry`
         // (Vec<Value>) are both GC ROOTS (vm/gc.rs gathers them).
         // `eval()` drains at_exit handlers on every non-panic exit,
@@ -2990,39 +3036,13 @@ impl Runtime {
         // pointed past `protos_len` was already removed by the
         // restoration steps above, so no live reference now
         // points past the truncate point.
-        self.vm.protos.truncate(snapshot.protos_len);
-        // Proto-INDEXED side tables must truncate in lockstep with
-        // `protos`: the next eval's compiler hands out the same
-        // indices again, and "index = proto_idx, immutable once
-        // compiled" (the `nfa_plans` / `rest_preds` lifecycle
-        // comment) only holds while the proto Vec never shrinks —
-        // reset is exactly the shrink. Left alone, a recycled
-        // index served the PREVIOUS eval's lazily-built arg-binding
-        // plan for a brand-new method with a different param shape;
-        // the fuzz-harness soak surfaced that as `locals_arena`
-        // index-out-of-bounds stores/loads (step.rs
-        // `StoreLocal` / `BinOpLL`), an args-shuffle subtract
-        // overflow (dispatch.rs), and the "CreateBlock in a
-        // Locals::Stack frame" ICE (a stale plan classified a
-        // block-carrying method as stack-lite).
-        self.vm.nfa_plans.truncate(snapshot.protos_len);
-        self.vm.rest_preds.truncate(snapshot.protos_len);
-        // Same shape one tier up (jit-native builds): per-proto
-        // JIT verdict bits and tier-2 compiled-body slots keyed by
-        // proto_idx would serve a previous eval's compiled body on
-        // a recycled index. (The many per-shape `jit_native_*`
-        // verdict maps are keyed by proto_idx too and are NOT
-        // swept here — a reset()-loop embedder that also enables
-        // `Config`-level JIT should sweep them when that
-        // combination becomes real; today the JIT is opt-in and
-        // no reset()-loop embedder enables it.)
-        #[cfg(feature = "jit-native")]
-        {
-            self.vm.jit_flags.truncate(snapshot.protos_len);
-            self.vm.t2_lite_ptrs.truncate(snapshot.protos_len);
-            self.vm.t2_lite_blk_ptrs.truncate(snapshot.protos_len);
-            self.vm.t2_protos.retain(|&pidx, _| pidx < snapshot.protos_len);
-        }
+        // Also shrinks every proto_idx-indexed side table
+        // (`nfa_plans` / `rest_preds` arg-binding plans; jit-native
+        // verdict bits + tier-2 body slots) in lockstep — see
+        // `Vm::truncate_protos` for the full sweep, the fuzz-soak
+        // crash family stale plans caused, and the documented
+        // jit_native_* carve-out.
+        self.vm.truncate_protos(snapshot.protos_len);
         // The two cached forwarder proto indices are
         // `Option<usize>` pointing INTO `vm.protos` at lazily-
         // emitted forwarder bytecode. If either pointed past
