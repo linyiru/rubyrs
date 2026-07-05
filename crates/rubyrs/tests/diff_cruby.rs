@@ -1210,6 +1210,7 @@ fn tier2_restblock_lite() { run_diff("tier2_restblock_lite"); }
 #[cfg(feature = "stdlib")]
 #[test] fn uri_parse_invalid_authority() { run_diff("uri_parse_invalid_authority"); }
 #[test] fn class_singleton_class() { run_diff("class_singleton_class"); }
+#[test] fn class_shovel_const() { run_diff("class_shovel_const"); }
 #[cfg(feature = "regex")]
 #[test] fn string_bracket_regex() { run_diff("string_bracket_regex"); }
 #[test] fn array_delete() { run_diff("array_delete"); }

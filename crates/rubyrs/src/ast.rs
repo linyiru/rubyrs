@@ -1683,28 +1683,55 @@ fn singleton_body_needs_real_eval(body_nodes: &[Node<'_>], recv_is_self: bool) -
         // desugar can't handle — an arbitrary value-returning call
         // (`(class << obj; ancestors; end)`), a literal, an assignment,
         // an ivar read, etc. — is used for its VALUE (the last
-        // expression). The desugar only knows the def / attr_* / alias /
-        // prepend / reflective-table-call / bare-`self` shapes; route
-        // everything else to the real eigenclass body, which runs with
-        // self = the metaclass and yields the last expression.
-        // rspec-mocks' `(class << object; ancestors; end).map { … }`
-        // (space.rb) hits this. Scoped to non-self so a `class << self`
-        // body's @@cvar/const desugar interplay (class_self_cvar) is
-        // untouched. `self` stays on the desugar (it has a dedicated
-        // arm rewriting to `recv.singleton_class`).
+        // expression). The desugar only knows the def / attr_* /
+        // reflective-table-call / bare-`self` shapes for a non-self
+        // receiver; route everything else to the real eigenclass body,
+        // which runs with self = the metaclass and yields the last
+        // expression. rspec-mocks' `(class << object; ancestors;
+        // end).map { … }` (space.rb) hits this. Scoped to non-self so
+        // a `class << self` body's @@cvar/const desugar interplay
+        // (class_self_cvar) is untouched. `self` stays on the desugar
+        // (it has a dedicated arm rewriting to `recv.singleton_class`).
         if !recv_is_self
             && bn.as_def_node().is_none()
             && bn.as_alias_method_node().is_none()
             && bn.as_self_node().is_none()
             && bn.as_constant_write_node().is_none()
             && bn.as_constant_path_write_node().is_none()
-            && !bn.as_call_node().map(|c| c.receiver().is_none()
-                && matches!(cid_to_string(c.name()).as_str(),
-                    "attr_reader" | "attr_writer" | "attr_accessor" | "prepend"
-                    | "define_method" | "undef_method" | "remove_method"
+            && !bn.as_call_node().map(|c| {
+                if c.receiver().is_some() { return false; }
+                match cid_to_string(c.name()).as_str() {
+                    // attr_* stays on the desugar only in the form its
+                    // non-self arm actually handles: all args plain
+                    // Symbols (zero-arg included — a CRuby silent
+                    // no-op the arm reproduces). Splat / String /
+                    // mixed args route to the real eigenclass body,
+                    // where the runtime attr_* (self = the metaclass,
+                    // shell redirect to real.singleton_*) handles
+                    // them like CRuby. Previously these fell through
+                    // to the desugar's non-symbol-args parse error.
+                    "attr_reader" | "attr_writer" | "attr_accessor" => c
+                        .arguments()
+                        .is_none_or(|a| a.arguments().iter().all(|n| n.as_symbol_node().is_some())),
+                    // Reflective method-table calls — the desugar's
+                    // rewrite-to-`RECV.singleton_class.<call>` arm
+                    // handles any receiver shape.
+                    "define_method" | "undef_method" | "remove_method"
                     | "alias_method" | "method_defined?" | "public_method_defined?"
                     | "private_method_defined?" | "protected_method_defined?"
-                    | "instance_method")).unwrap_or(false)
+                    | "instance_method" => true,
+                    // NOTE: `prepend` is deliberately NOT here. Its
+                    // desugar arm (`Op::SingletonChainPrepend`) is
+                    // `class << self`-only — for a non-self receiver it
+                    // used to fall through to the subset parse error.
+                    // The real eigenclass body runs `prepend Mod` with
+                    // self = the eigenclass shell and
+                    // do_module_inclusion's shell redirect (0cb50579)
+                    // lands it on real.singleton_prepends — same
+                    // machinery `Const.singleton_class.prepend(M)` uses.
+                    _ => false,
+                }
+            }).unwrap_or(false)
         {
             return true;
         }
@@ -2195,8 +2222,10 @@ fn tr_singleton_class(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             // `class << SomeConst` / `class << obj`, the body runs
             // in the same frame without any class_stack push, so
             // the op would silently alias on the wrong receiver
-            // (or on toplevel). Those receivers still fall through
-            // to the existing unsupported-node SyntaxError.
+            // (or on toplevel). Those receivers never reach this
+            // loop: `singleton_body_needs_real_eval` routes any
+            // non-self body containing an `alias` to the real
+            // eigenclass body instead.
             let recv_is_self = matches!(&recv_expr.node, Expr::SelfExpr);
             if recv_is_self
                 && let Some(alias_node) = bn.as_alias_method_node()
@@ -2248,7 +2277,11 @@ fn tr_singleton_class(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
             }
             // `class << self; prepend Mod; end` — install Mod on
             // X's singleton-class prepend chain. Same `self`-
-            // receiver gate as `alias`. The recogniser is purely
+            // receiver gate as `alias` (a non-self body containing
+            // `prepend` routes to the real eigenclass body via
+            // `singleton_body_needs_real_eval`, where
+            // do_module_inclusion's shell redirect lands it on
+            // real.singleton_prepends). The recogniser is purely
             // syntactic: this arm matches any `class << self;
             // prepend Mod; end` regardless of enclosing scope.
             // The compiled `Op::SingletonChainPrepend` enforces
@@ -2728,8 +2761,15 @@ fn tr_singleton_class(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                     ], kwargs_trailing: false }));
                 continue;
             }
+            // Non-self receivers: every body statement is either
+            // desugar-eligible (def / all-symbol attr_* / reflective
+            // table calls / bare `self` — each with an arm above) or
+            // routed whole-body to the real eigenclass path by
+            // `singleton_body_needs_real_eval`, so this fallthrough is
+            // defensive-only (a desugar-eligible shape with no arm
+            // would be a routing bug, not a user-code limitation).
             ctx.errors.push(
-                "class << <non-self> body: only `def`, `attr_reader`/`attr_writer`/`attr_accessor`, and `alias` are supported in the spike subset".into()
+                "class << <non-self> body: internal — statement passed the desugar-eligibility check but no desugar arm matched (please report)".into()
             );
             out.push(sp(bn, Expr::Nil));
         }
