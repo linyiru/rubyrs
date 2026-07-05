@@ -378,10 +378,10 @@ pub(crate) fn numeric_call(
         }
         (Value::Int(_), "to_s", [other]) => {
             return Err(RubyError::TypeError {
-                msg: format!(
-                    "no implicit conversion of {} into Integer",
-                    type_name_for_coerce(other),
-                ),
+                // CRuby num2long shape (probed vs 3.4.1: `1.to_s(nil)` /
+                // `1.ceil(nil)` → "no implicit conversion from nil to
+                // integer"); non-nil keeps the value-word "of X into Integer".
+                msg: other.num2int_conv_msg(),
             });
         }
         // `Integer#eql?(other)` — type-strict equality.
@@ -524,15 +524,18 @@ pub(crate) fn numeric_call(
         // range up to U+10FFFF and returns a multi-byte String
         // tagged with the requested Encoding. We don't model the
         // Tier 3/4 Encoding object (ADR 0017 / ADR 0020), so no
-        // value the caller passes can satisfy "implicitly
-        // convertible to Encoding". Surface CRuby's TypeError
-        // shape uniformly across all arg types — placement here
-        // (before line ~617) is what guarantees `Int` args also
-        // reach this arm.
+        // value the caller passes can satisfy the conversion.
+        // Surface CRuby's TypeError shape uniformly across all arg
+        // types — and CRuby's `rb_to_encoding` names **String** as
+        // the conversion target, not Encoding (probed vs 3.4.1:
+        // `65.chr(nil)` / `65.chr(1)` / `65.chr(:x)` all raise
+        // "no implicit conversion of X into String"). Placement
+        // here (before line ~617) is what guarantees `Int` args
+        // also reach this arm.
         (Value::Int(_), "chr", [arg]) => {
             return Err(RubyError::TypeError {
                 msg: format!(
-                    "no implicit conversion of {} into Encoding",
+                    "no implicit conversion of {} into String",
                     type_name_for_coerce(arg),
                 ),
             });
@@ -556,10 +559,10 @@ pub(crate) fn numeric_call(
             if !matches!(other, Value::Int(_) | Value::BigInt(_)) =>
         {
             return Err(RubyError::TypeError {
-                msg: format!(
-                    "no implicit conversion of {} into Integer",
-                    type_name_for_coerce(other),
-                ),
+                // CRuby num2long shape (probed vs 3.4.1: `1.to_s(nil)` /
+                // `1.ceil(nil)` → "no implicit conversion from nil to
+                // integer"); non-nil keeps the value-word "of X into Integer".
+                msg: other.num2int_conv_msg(),
             });
         }
         #[cfg(not(feature = "bignum"))]
@@ -567,10 +570,10 @@ pub(crate) fn numeric_call(
             if !matches!(other, Value::Int(_)) =>
         {
             return Err(RubyError::TypeError {
-                msg: format!(
-                    "no implicit conversion of {} into Integer",
-                    type_name_for_coerce(other),
-                ),
+                // CRuby num2long shape (probed vs 3.4.1: `1.to_s(nil)` /
+                // `1.ceil(nil)` → "no implicit conversion from nil to
+                // integer"); non-nil keeps the value-word "of X into Integer".
+                msg: other.num2int_conv_msg(),
             });
         }
         // Bit-mask predicates — Int × Int happy path. CRuby

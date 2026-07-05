@@ -484,10 +484,9 @@ impl Vm {
                 }
                 Some(other) => {
                     return Err(self.trap(RubyError::TypeError {
-                        msg: format!(
-                            "no implicit conversion of {} into Integer",
-                            other.type_name(),
-                        ),
+                        // CRuby num2long shape (probed: `/a/.match("abc", nil)` →
+                        // "no implicit conversion from nil to integer").
+                        msg: other.num2int_conv_msg(),
                     }));
                 }
             };
@@ -518,10 +517,9 @@ impl Vm {
             }
             Some(other) => {
                 return Err(self.trap(RubyError::TypeError {
-                    msg: format!(
-                        "no implicit conversion of {} into Integer",
-                        other.type_name(),
-                    ),
+                    // CRuby num2long shape (probed: `/a/.match("abc", nil)` →
+                    // "no implicit conversion from nil to integer").
+                    msg: other.num2int_conv_msg(),
                 }));
             }
         };

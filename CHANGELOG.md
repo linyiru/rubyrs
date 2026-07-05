@@ -98,6 +98,17 @@ holding off concurrent SIGINT during close).
 
 ### Fixed
 
+- **"no implicit conversion" TypeError spellings match CRuby across the
+  conversion surface** — nil/true/false now render as value words ("no
+  implicit conversion of nil into String") instead of `NilClass`/"Boolean";
+  num2long-shaped Integer ops get CRuby's distinct "no implicit conversion
+  from nil to integer" wording; `Kernel#Integer/#Float/#Rational` and
+  sprintf `%d`/`%f` operands use the "can't convert X into Y" family;
+  `const_get`/`const_defined?`/`const_source_location` name String (not
+  Symbol) and `const_set`/`autoload`/`autoload?` name args raise "X is not
+  a symbol nor a string"; `Integer#chr(enc)` names String (not Encoding);
+  a BigInt receiver's `chr` is always `RangeError`; `class_eval(src, nil)`
+  accepts the nil filename. (`conv_type_name_messages.rb`)
 - **Stack overflow at startup in debug builds on small main-thread stacks** (#356, our first user-filed issue) — building a `Runtime` compiles the preamble through a recursive AST→IR translator whose unoptimised frames overflowed the 1 MB default main-thread stack on Windows (Linux/macOS 8 MB and release builds were unaffected). The translator now grows the native stack on demand; native-only, wasm keeps plain recursion, and a `windows-latest` debug CI job guards the regression. ([#356](https://github.com/linyiru/rubyrs/issues/356))
 - **ADR 0023 Risk #1 — `body.close` on client disconnect now actually fires** — the Drop-initiated close is shielded from a concurrent SIGINT so it can't abort mid-flight, fixing the ensure-leak shape. ([ADR 0023](docs/adr/0023-true-async-streaming.md))
 - **`at_exit` handler drain is panic-safe** — a panicking handler no longer abandons the rest of the LIFO queue; the panic converts to a RuntimeError that flows through "last-error-wins". ([ADR 0025](docs/adr/0025-signal-handling-interruptible-primitives.md))

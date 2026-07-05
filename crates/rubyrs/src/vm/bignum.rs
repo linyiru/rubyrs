@@ -1773,10 +1773,9 @@ impl Vm {
                 [Value::Int(_)] => return Ok(None),  // negative precision: defer
                 [other] => {
                     return Err(self.trap(RubyError::TypeError {
-                        msg: format!(
-                            "no implicit conversion of {} into Integer",
-                            crate::vm::numeric::type_name_for_coerce(other),
-                        ),
+                        // CRuby num2long shape (probed: `(2**100).ceil(nil)` →
+                        // "no implicit conversion from nil to integer").
+                        msg: other.num2int_conv_msg(),
                     }));
                 }
                 _ => {
@@ -1947,10 +1946,9 @@ impl Vm {
                 }
                 other => {
                     return Err(self.trap(RubyError::TypeError {
-                        msg: format!(
-                            "no implicit conversion of {} into Integer",
-                            crate::vm::numeric::type_name_for_coerce(other),
-                        ),
+                        // CRuby num2long shape (probed: `(2**100).to_s(nil)` →
+                        // "no implicit conversion from nil to integer").
+                        msg: other.num2int_conv_msg(),
                     }));
                 }
             };
@@ -1981,23 +1979,15 @@ impl Vm {
         }
         if name == "chr" && recv_is_bigint && args.len() == 1 {
             // `chr(encoding)` on a BigInt: any BigInt is far beyond
-            // U+10FFFF, so CRuby raises `RangeError: bignum out of char
-            // range` (matching the 0-arg path) once it accepts the
-            // Encoding argument. Only a non-Encoding argument yields the
-            // TypeError. (Encoding recognised via `real_class_of` so an
-            // instance carrying a singleton method still matches.)
-            let is_encoding = matches!(&args[0], Value::Object(id)
-                if self.heap.real_class_of(*id).name == "Encoding");
-            if is_encoding {
-                return Err(self.trap(RubyError::RangeError {
-                    msg: "bignum out of char range".to_string(),
-                }));
-            }
-            return Err(self.trap(RubyError::TypeError {
-                msg: format!(
-                    "no implicit conversion of {} into Encoding",
-                    crate::vm::numeric::type_name_for_coerce(&args[0]),
-                ),
+            // U+10FFFF, so CRuby raises `RangeError: bignum out of
+            // char range` for EVERY 1-arg shape — the receiver range
+            // check fires before the argument is converted (probed vs
+            // 3.4.1: `(2**100).chr(:x)` / `.chr(nil)` / `.chr(1)` all
+            // RangeError, never TypeError). Pre-fix we raised a
+            // TypeError "no implicit conversion of X into Encoding"
+            // for non-Encoding args, which CRuby never emits here.
+            return Err(self.trap(RubyError::RangeError {
+                msg: "bignum out of char range".to_string(),
             }));
         }
         // Phase A heap-read operations — only meaningful on a BigInt

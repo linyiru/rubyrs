@@ -1818,7 +1818,7 @@ impl Vm {
     ///
     /// Returns `Ok(true)` when handled (result pushed), `Ok(false)` to
     /// fall through to the stateless `numeric_call` (which raises the
-    /// CRuby-shaped "no implicit conversion of X into Encoding" TypeError
+    /// CRuby-shaped "no implicit conversion of X into String" TypeError
     /// for a non-Encoding argument), and `Err(RangeError)` for an
     /// out-of-range / invalid codepoint.
     ///
@@ -6737,7 +6737,7 @@ impl Vm {
                 return Err(self.trap(RubyError::TypeError {
                     msg: format!(
                         "no implicit conversion of {} into String",
-                        other.type_name(),
+                        other.conv_type_name(),
                     ),
                 }));
             }
@@ -7103,10 +7103,9 @@ impl Vm {
             [Value::Array(aid)] => self.heap.array(*aid).clone(),
             [other] => {
                 return Err(self.trap(RubyError::TypeError {
-                    msg: format!(
-                        "no implicit conversion of {} into Integer",
-                        other.type_name()
-                    ),
+                    // CRuby num2long shape: nil gets "from nil to integer"
+                    // (probed vs 3.4.1); others value-word "of X into Integer".
+                    msg: other.num2int_conv_msg(),
                 }));
             }
             _ => {
@@ -7150,7 +7149,7 @@ impl Vm {
             Value::Str(s) => s.to_string_lossy(),
             other => {
                 return Err(self.trap(RubyError::TypeError {
-                    msg: format!("no implicit conversion of {} into String", other.type_name()),
+                    msg: format!("no implicit conversion of {} into String", other.conv_type_name()),
                 }));
             }
         };
@@ -7280,7 +7279,7 @@ impl Vm {
             Value::Str(s) => s.to_string_lossy(),
             other => {
                 return Err(self.trap(RubyError::TypeError {
-                    msg: format!("no implicit conversion of {} into String", other.type_name()),
+                    msg: format!("no implicit conversion of {} into String", other.conv_type_name()),
                 }));
             }
         };
@@ -7331,7 +7330,7 @@ impl Vm {
                 Value::Regex(r) => chunks.push(r.to_s_string()),
                 other => {
                     return Err(self.trap(RubyError::TypeError {
-                        msg: format!("no implicit conversion of {} into String", other.type_name()),
+                        msg: format!("no implicit conversion of {} into String", other.conv_type_name()),
                     }));
                 }
             }
@@ -10224,7 +10223,7 @@ impl Vm {
                             return Err(self.trap(RubyError::TypeError {
                                 msg: format!(
                                     "no implicit conversion of {} into String",
-                                    other.type_name()
+                                    other.conv_type_name()
                                 ),
                             }));
                         }
@@ -10321,7 +10320,11 @@ impl Vm {
                     Value::Sym(s) => (self.interner.resolve(*s).to_string(), false),
                     Value::Str(s) => (s.to_string_lossy(), true),
                     other => return Err(self.trap(RubyError::TypeError {
-                        msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
+                        // CRuby converts the name via rb_check_string_type: the
+                        // TypeError names String (not Symbol) and spells the
+                        // nil/true/false singletons literally ("no implicit
+                        // conversion of nil into String"). Probed vs CRuby 3.4.1.
+                        msg: format!("no implicit conversion of {} into String", other.conv_type_name()),
                     })),
                 };
                 let cls_clone = cls.clone();
@@ -10357,7 +10360,11 @@ impl Vm {
                     Value::Sym(s) => (self.interner.resolve(*s).to_string(), false),
                     Value::Str(s) => (s.to_string_lossy(), true),
                     other => return Err(self.trap(RubyError::TypeError {
-                        msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
+                        // CRuby converts the name via rb_check_string_type: the
+                        // TypeError names String (not Symbol) and spells the
+                        // nil/true/false singletons literally ("no implicit
+                        // conversion of nil into String"). Probed vs CRuby 3.4.1.
+                        msg: format!("no implicit conversion of {} into String", other.conv_type_name()),
                     })),
                 };
                 let cls_clone = cls.clone();
@@ -11076,20 +11083,24 @@ impl Vm {
                 return Err(self.trap(RubyError::TypeError {
                     msg: format!(
                         "no implicit conversion of {} into String",
-                        args[0].type_name()
+                        args[0].conv_type_name()
                     ),
                 }));
             }
             // Validate args[1] (filename) type when present:
-            // CRuby raises TypeError for non-String. Falling back
-            // to the default label would silently ignore the
-            // caller's mistake.
+            // CRuby raises TypeError for non-String — EXCEPT nil,
+            // which class_eval ACCEPTS as "no filename" (probed vs
+            // 3.4.1: `c.class_eval("1", nil)` → 1, while
+            // `eval("1", nil, nil)` raises). Fall back to the
+            // default label for nil; still raise for other
+            // non-String types so a caller's mistake isn't
+            // silently ignored.
             if let Some(a1) = args.get(1)
-                && !matches!(a1, Value::Str(_)) {
+                && !matches!(a1, Value::Str(_) | Value::Nil) {
                 return Err(self.trap(RubyError::TypeError {
                     msg: format!(
                         "no implicit conversion of {} into String",
-                        a1.type_name()
+                        a1.conv_type_name()
                     ),
                 }));
             }
@@ -11101,10 +11112,9 @@ impl Vm {
             if let Some(a2) = args.get(2)
                 && !matches!(a2, Value::Int(_) | Value::Float(_)) {
                 return Err(self.trap(RubyError::TypeError {
-                    msg: format!(
-                        "no implicit conversion of {} into Integer",
-                        a2.type_name()
-                    ),
+                    // CRuby num2long shape: nil gets "from nil to integer"
+                    // (probed vs 3.4.1); others value-word "of X into Integer".
+                    msg: a2.num2int_conv_msg(),
                 }));
             }
             // Source encoding: when the eval'd string isn't UTF-8 (a
@@ -11821,7 +11831,7 @@ impl Vm {
                         return Err(self.trap(RubyError::TypeError {
                             msg: format!(
                                 "no implicit conversion of {} into String",
-                                other.type_name()
+                                other.conv_type_name()
                             ),
                         }));
                     }
@@ -11922,7 +11932,11 @@ impl Vm {
                 Value::Sym(s) => (self.interner.resolve(*s).to_string(), false),
                 Value::Str(s) => (s.to_string_lossy(), true),
                 other => return Err(self.trap(RubyError::TypeError {
-                    msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
+                    // CRuby converts the name via rb_check_string_type: the
+                    // TypeError names String (not Symbol) and spells the
+                    // nil/true/false singletons literally ("no implicit
+                    // conversion of nil into String"). Probed vs CRuby 3.4.1.
+                    msg: format!("no implicit conversion of {} into String", other.conv_type_name()),
                 })),
             };
             // `const_defined?(name, inherit = true)`. When `inherit` is
@@ -12043,7 +12057,11 @@ impl Vm {
                 Value::Sym(s) => (self.interner.resolve(*s).to_string(), false),
                 Value::Str(s) => (s.to_string_lossy(), true),
                 other => return Err(self.trap(RubyError::TypeError {
-                    msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
+                    // CRuby converts the name via rb_check_string_type: the
+                    // TypeError names String (not Symbol) and spells the
+                    // nil/true/false singletons literally ("no implicit
+                    // conversion of nil into String"). Probed vs CRuby 3.4.1.
+                    msg: format!("no implicit conversion of {} into String", other.conv_type_name()),
                 })),
             };
             // Single-segment, valid, never-interned name → definitely missing.
@@ -12107,7 +12125,7 @@ impl Vm {
                 Value::Sym(s) => self.interner.resolve(*s).to_string(),
                 Value::Str(s) => s.to_string_lossy(),
                 other => return Err(self.trap(RubyError::TypeError {
-                    msg: format!("no implicit conversion of {} into String", other.type_name()),
+                    msg: format!("no implicit conversion of {} into String", other.conv_type_name()),
                 })),
             };
             let key_str = match owner.effective_name().as_deref() {
@@ -12443,9 +12461,18 @@ impl Vm {
             let const_name = match &args[0] {
                 Value::Sym(s) => self.interner.resolve(*s).to_string(),
                 Value::Str(s) => s.to_string_lossy(),
-                other => return Err(self.trap(RubyError::TypeError {
-                    msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
-                })),
+                // CRuby's `const_set` name guard is the id-or-string
+                // check (`rb_check_id` shape), NOT a String/Symbol
+                // conversion: it reports the INSPECTED value —
+                // `nil is not a symbol nor a string` — same family
+                // as the Module#autoload name guard. Probed vs
+                // CRuby 3.4.1.
+                other => {
+                    let inspected = other.to_inspect(&self.heap, &self.interner);
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!("{} is not a symbol nor a string", inspected),
+                    }));
+                }
             };
             let value = args[1].clone();
             // CRuby raises NameError on lowercase-leading names; the
@@ -15045,7 +15072,7 @@ impl Vm {
                     return Err(self.trap(RubyError::TypeError {
                         msg: format!(
                             "no implicit conversion of {} into String",
-                            other.type_name()
+                            other.conv_type_name()
                         ),
                     }));
                 }

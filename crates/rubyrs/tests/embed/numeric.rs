@@ -2887,11 +2887,15 @@ fn integer_chr_basic() {
         ("(-(2**64)).chr", "RangeError"),
         // BigInt-recv arity/1-arg coherence with respond_to?
         // — previously `(2**64).chr("UTF-8")` fell through
-        // bignum_primitive and raised NoMethodError.
+        // bignum_primitive and raised NoMethodError, then briefly
+        // raised TypeError for non-Encoding args. CRuby raises
+        // RangeError ("bignum out of char range") for EVERY 1-arg
+        // shape — the receiver range check fires before the arg
+        // conversion (probed vs 3.4.1).
         #[cfg(feature = "bignum")]
-        ("(2**64).chr(\"UTF-8\")", "TypeError"),
+        ("(2**64).chr(\"UTF-8\")", "RangeError"),
         #[cfg(feature = "bignum")]
-        ("(2**64).chr(nil)", "TypeError"),
+        ("(2**64).chr(nil)", "RangeError"),
         #[cfg(feature = "bignum")]
         ("(2**64).chr(1, 2)", "ArgumentError"),
     ] {
@@ -3028,7 +3032,9 @@ fn rational_phase_c1_construction_and_readers() {
         // Non-Numeric arg → TypeError. (Float is accepted as of
         // Phase C.4.3 — see rational_phase_c4_3_float_to_r below.)
         ("Rational(\"x\")",    "TypeError",    "can't convert String into Rational"),
-        ("Rational(1, nil)",   "TypeError",    "can't convert NilClass into Rational"),
+        // Value-word nil (CRuby 3.4.1: "can't convert nil into
+        // Rational", not "NilClass") — conv_type_name migration.
+        ("Rational(1, nil)",   "TypeError",    "can't convert nil into Rational"),
         // Arity.
         ("Rational()",         "ArgumentError","wrong number of arguments (given 0, expected 1..2)"),
         ("Rational(1, 2, 3)",  "ArgumentError","wrong number of arguments (given 3, expected 1..2)"),

@@ -495,7 +495,7 @@ impl Vm {
                         return Err(self.trap(RubyError::TypeError {
                             msg: format!(
                                 "no implicit conversion of {} into Array",
-                                other.type_name(),
+                                other.conv_type_name(),
                             ),
                         }));
                     }
@@ -708,9 +708,15 @@ impl Vm {
                                 vec![fill; *n as usize]
                             }
                             [Value::Array(src)] => self.heap.array(*src).clone(),
-                            _ => {
+                            [other, ..] => {
+                                // CRuby num2long shape (probed:
+                                // `Array.new(nil)` → "no implicit
+                                // conversion from nil to integer",
+                                // `Array.new(true)` → "of true into
+                                // Integer"); the pre-fix literal
+                                // dropped the arg's type name.
                                 return Err(self.trap(RubyError::TypeError {
-                                    msg: "no implicit conversion into Integer".to_string(),
+                                    msg: other.num2int_conv_msg(),
                                 }));
                             }
                         };
@@ -815,7 +821,7 @@ impl Vm {
                             Value::Nil => 0,
                             Value::Int(b) => if b < 0 { len + b } else { b },
                             other => return Err(self.trap(RubyError::TypeError {
-                                msg: format!("no implicit conversion of {} into Integer", other.type_name()),
+                                msg: format!("no implicit conversion of {} into Integer", other.conv_type_name()),
                             })),
                         };
                         // For endless ranges (`a[2..]` / `a[2...]`)
@@ -831,7 +837,7 @@ impl Vm {
                                 if r_exclusive { resolved - 1 } else { resolved }
                             }
                             other => return Err(self.trap(RubyError::TypeError {
-                                msg: format!("no implicit conversion of {} into Integer", other.type_name()),
+                                msg: format!("no implicit conversion of {} into Integer", other.conv_type_name()),
                             })),
                         };
                         if begin < 0 || begin > len {
@@ -1025,7 +1031,7 @@ impl Vm {
                             Value::Nil => 0,
                             Value::Int(b) => if b < 0 { len + b } else { b },
                             other => return Err(self.trap(RubyError::TypeError {
-                                msg: format!("no implicit conversion of {} into Integer", other.type_name()),
+                                msg: format!("no implicit conversion of {} into Integer", other.conv_type_name()),
                             })),
                         };
                         let end_idx = match r_end {
@@ -1035,7 +1041,7 @@ impl Vm {
                                 if r_exclusive { resolved - 1 } else { resolved }
                             }
                             other => return Err(self.trap(RubyError::TypeError {
-                                msg: format!("no implicit conversion of {} into Integer", other.type_name()),
+                                msg: format!("no implicit conversion of {} into Integer", other.conv_type_name()),
                             })),
                         };
                         if begin < 0 {
@@ -1967,7 +1973,7 @@ impl Vm {
                                 return Err(self.trap(RubyError::TypeError {
                                     msg: format!(
                                         "no implicit conversion of {} into Array",
-                                        r.type_name()
+                                        r.conv_type_name()
                                     ),
                                 }));
                             };

@@ -667,7 +667,7 @@ impl Vm {
                                 return Some(Err(self.trap(RubyError::TypeError {
                                     msg: format!(
                                         "no implicit conversion of {} into Integer",
-                                        other.type_name(),
+                                        other.conv_type_name(),
                                     ),
                                 })));
                             }
@@ -679,7 +679,7 @@ impl Vm {
                                 return Some(Err(self.trap(RubyError::TypeError {
                                     msg: format!(
                                         "no implicit conversion of {} into Integer",
-                                        other.type_name(),
+                                        other.conv_type_name(),
                                     ),
                                 })));
                             }
@@ -739,31 +739,13 @@ impl Vm {
                         // CRuby uses a distinct phrasing for nil
                         // ("from nil to integer") versus other
                         // types ("of <Class> into Integer") —
-                        // mirrors the existing nil-arg path at
-                        // `Vm::arity_error_arg1_int` (gc.rs:292).
+                        // `Value::num2int_conv_msg` (the shared
+                        // rb_num2long-shaped message helper; was a
+                        // hand-rolled map with identical output).
                         // Code-review #342 round 2.
-                        let msg = match a {
-                            Value::Nil => {
-                                "no implicit conversion from nil to integer".to_string()
-                            }
-                            other => {
-                                let type_name = match other {
-                                    Value::Bool(true) => "true",
-                                    Value::Bool(false) => "false",
-                                    Value::Str(_) => "String",
-                                    Value::Sym(_) => "Symbol",
-                                    Value::Float(_) => "Float",
-                                    Value::Array(_) => "Array",
-                                    Value::Hash(_) => "Hash",
-                                    o => o.type_name(),
-                                };
-                                format!(
-                                    "no implicit conversion of {} into Integer",
-                                    type_name,
-                                )
-                            }
-                        };
-                        return Some(Err(self.trap(RubyError::TypeError { msg })));
+                        return Some(Err(self.trap(RubyError::TypeError {
+                            msg: a.num2int_conv_msg(),
+                        })));
                     }
                 }
                 // BigInt → i64 coercion: CRuby raises RangeError
@@ -1183,9 +1165,16 @@ impl Vm {
                         }
                         self.interner.intern(&name)
                     }
-                    other => return Some(Err(self.trap(RubyError::TypeError {
-                        msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
-                    }))),
+                    // CRuby's name guard is the id-or-string check, not a
+                    // Symbol conversion: it reports the INSPECTED value
+                    // ("nil is not a symbol nor a string"). Probed vs 3.4.1;
+                    // same family as the Module#autoload/const_set sites.
+                    other => {
+                        let inspected = other.to_inspect(&self.heap, &self.interner);
+                        return Some(Err(self.trap(RubyError::TypeError {
+                            msg: format!("{} is not a symbol nor a string", inspected),
+                        })));
+                    }
                 };
                 // Validate constant-name shape (uppercase start +
                 // alnum/underscore body). CRuby raises NameError on
@@ -1199,7 +1188,7 @@ impl Vm {
                 let path_str = match &args[1] {
                     Value::Str(s) => s.to_string_lossy(),
                     other => return Some(Err(self.trap(RubyError::TypeError {
-                        msg: format!("no implicit conversion of {} into String", other.type_name()),
+                        msg: format!("no implicit conversion of {} into String", other.conv_type_name()),
                     }))),
                 };
                 #[cfg(not(target_os = "wasi"))]
@@ -1252,9 +1241,16 @@ impl Vm {
                         }
                         self.interner.intern(&name)
                     }
-                    other => return Some(Err(self.trap(RubyError::TypeError {
-                        msg: format!("no implicit conversion of {} into Symbol", other.type_name()),
-                    }))),
+                    // CRuby's name guard is the id-or-string check, not a
+                    // Symbol conversion: it reports the INSPECTED value
+                    // ("nil is not a symbol nor a string"). Probed vs 3.4.1;
+                    // same family as the Module#autoload/const_set sites.
+                    other => {
+                        let inspected = other.to_inspect(&self.heap, &self.interner);
+                        return Some(Err(self.trap(RubyError::TypeError {
+                            msg: format!("{} is not a symbol nor a string", inspected),
+                        })));
+                    }
                 };
                 let name_str = self.interner.resolve(name_sym).clone();
                 if !crate::vm::dispatch::is_valid_const_name(&name_str) {
@@ -1381,7 +1377,7 @@ impl Vm {
                         msg: "can't convert nil into Float".into(),
                     }),
                     other => Err(RubyError::TypeError {
-                        msg: format!("can't convert {} into Float", other.type_name()),
+                        msg: format!("can't convert {} into Float", other.conv_type_name()),
                     }),
                 };
                 Some(result.map_err(|e| self.trap(e)))
@@ -1474,12 +1470,12 @@ impl Vm {
                                     Ok(r.num.clone())
                                 } else {
                                     Err(RubyError::TypeError {
-                                        msg: format!("can't convert {} into Rational", v.type_name()),
+                                        msg: format!("can't convert {} into Rational", v.conv_type_name()),
                                     })
                                 }
                             }
                             _ => Err(RubyError::TypeError {
-                                msg: format!("can't convert {} into Rational", v.type_name()),
+                                msg: format!("can't convert {} into Rational", v.conv_type_name()),
                             }),
                         }
                     };
@@ -1511,12 +1507,12 @@ impl Vm {
                                     Ok(r.num)
                                 } else {
                                     Err(RubyError::TypeError {
-                                        msg: format!("can't convert {} into Rational", v.type_name()),
+                                        msg: format!("can't convert {} into Rational", v.conv_type_name()),
                                     })
                                 }
                             }
                             _ => Err(RubyError::TypeError {
-                                msg: format!("can't convert {} into Rational", v.type_name()),
+                                msg: format!("can't convert {} into Rational", v.conv_type_name()),
                             }),
                         }
                     };
@@ -1700,7 +1696,11 @@ impl Vm {
                         Some(Ok(Value::Hash(id)))
                     }
                     other => {
-                        let tn = other.type_name().to_string();
+                        // CRuby prints the CLASS name in Hash()'s "can't convert X
+                        // into Hash" (probed: Hash(true) → "can't convert TrueClass
+                        // into Hash"), and type_name's Bool arm is the non-Ruby
+                        // "Boolean" — use the class-name helper instead.
+                        let tn = crate::vm::numeric::class_name_for_error(other).to_string();
                         let recv = args[0].clone();
                         let mid = self.interner.intern("to_hash");
                         let m = match self.class_of(&recv) {
@@ -2019,7 +2019,7 @@ impl Vm {
                     Some(other) => return Some(Err(self.trap(RubyError::TypeError {
                         msg: format!(
                             "no implicit conversion of {} into String",
-                            other.type_name(),
+                            other.conv_type_name(),
                         ),
                     }))),
                     None => {
@@ -3388,7 +3388,7 @@ impl Vm {
                         return Some(Err(self.trap(RubyError::TypeError {
                             msg: format!(
                                 "no implicit conversion of {} into String",
-                                other.type_name(),
+                                other.conv_type_name(),
                             ),
                         })));
                     }
@@ -3878,7 +3878,7 @@ impl Vm {
                 [other] => Some(Err(self.trap(RubyError::TypeError {
                     msg: format!(
                         "no implicit conversion of {} into String",
-                        other.type_name()
+                        other.conv_type_name()
                     ),
                 }))),
                 _ => Some(Err(self.trap(RubyError::ArgumentError {
@@ -4055,7 +4055,7 @@ impl Vm {
                 [other] | [other, _] => Some(Err(self.trap(RubyError::TypeError {
                     msg: format!(
                         "no implicit conversion of {} into String",
-                        other.type_name()
+                        other.conv_type_name()
                     ),
                 }))),
                 _ => Some(Err(self.trap(RubyError::ArgumentError {
@@ -4103,7 +4103,7 @@ impl Vm {
                     Some(Err(self.trap(RubyError::TypeError {
                         msg: format!(
                             "no implicit conversion of {} into String",
-                            other.type_name()
+                            other.conv_type_name()
                         ),
                     })))
                 }
@@ -4135,7 +4135,7 @@ impl Vm {
                     Some(Err(self.trap(RubyError::TypeError {
                         msg: format!(
                             "no implicit conversion of {} into String",
-                            file_arg.type_name()
+                            file_arg.conv_type_name()
                         ),
                     })))
                 }
@@ -4148,10 +4148,9 @@ impl Vm {
                 [Value::Str(_), _binding, Value::Str(_), line_arg]
                     if !matches!(line_arg, Value::Int(_) | Value::Float(_)) => {
                     Some(Err(self.trap(RubyError::TypeError {
-                        msg: format!(
-                            "no implicit conversion of {} into Integer",
-                            line_arg.type_name()
-                        ),
+                        // CRuby num2long shape: nil gets "from nil to integer"
+                        // (probed vs 3.4.1); others value-word "of X into Integer".
+                        msg: line_arg.num2int_conv_msg(),
                     })))
                 }
                 [Value::Str(src), binding, Value::Str(file)]
@@ -6268,10 +6267,9 @@ impl Vm {
             Some(Value::Int(r)) => Some(*r),
             Some(other) => {
                 return Err(self.trap(RubyError::TypeError {
-                    msg: format!(
-                        "no implicit conversion of {} into Integer",
-                        other.type_name(),
-                    ),
+                    // CRuby num2long shape: nil gets "from nil to integer"
+                    // (probed vs 3.4.1); others value-word "of X into Integer".
+                    msg: other.num2int_conv_msg(),
                 }));
             }
         };
@@ -6322,7 +6320,7 @@ impl Vm {
                 msg: "can't convert nil into Integer".into(),
             },
             (other, None) => RubyError::TypeError {
-                msg: format!("can't convert {} into Integer", other.type_name()),
+                msg: format!("can't convert {} into Integer", other.conv_type_name()),
             },
             // CRuby's exact message for `Integer(non_string, radix)`
             // is `"base specified for non string value"` — an
@@ -6361,10 +6359,7 @@ fn parse_exit_status(args: &[Value]) -> Result<i32, Option<Result<Value, Trap>>>
         [Value::Int(n)] => Ok(*n as i32),
         [other] => Err(Some(Err(Trap {
             err: RubyError::TypeError {
-                msg: format!(
-                    "no implicit conversion of {} into Integer",
-                    other.type_name(),
-                ),
+                msg: other.num2int_conv_msg(),
             },
             backtrace: vec![],
         }))),

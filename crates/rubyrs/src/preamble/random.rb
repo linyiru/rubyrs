@@ -27,7 +27,15 @@ class Random
       raise ArgumentError, "Tier 1 Random.new requires an explicit Integer seed"
     end
     unless seed.is_a?(Integer)
-      raise TypeError, "no implicit conversion of #{seed.class} into Integer"
+      # CRuby spells the singletons as value words here ("no implicit
+      # conversion of true into Integer" — probed vs 3.4.1), not as
+      # class names. nil never reaches this branch (guarded above).
+      kind = case seed
+             when true then "true"
+             when false then "false"
+             else seed.class
+             end
+      raise TypeError, "no implicit conversion of #{kind} into Integer"
     end
     @seed = seed
     @mt = Array.new(MT_N, 0)
@@ -249,7 +257,16 @@ end
 
 def srand(seed = 0)
   unless seed.is_a?(Integer)
-    raise TypeError, "no implicit conversion of #{seed.class} into Integer"
+    # Value-word singleton spelling, matching CRuby's rb_to_int shape
+    # (probed: `srand(nil)` → "no implicit conversion of nil into
+    # Integer" — NOT the num2long "from nil to integer" variant).
+    kind = case seed
+           when nil then "nil"
+           when true then "true"
+           when false then "false"
+           else seed.class
+           end
+    raise TypeError, "no implicit conversion of #{kind} into Integer"
   end
   prev = $__rubyrs_default_random_seed || 0
   $__rubyrs_default_random = Random.new(seed)

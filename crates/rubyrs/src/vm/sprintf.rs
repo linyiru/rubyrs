@@ -178,10 +178,8 @@ pub(crate) fn ruby_sprintf(
                 Value::Int(n) => *n,
                 other => {
                     return Err(RubyError::TypeError {
-                        msg: format!(
-                            "no implicit conversion of {} into Integer",
-                            other.type_name()
-                        ),
+                        // num2long shape: nil → "from nil to integer".
+                        msg: other.num2int_conv_msg(),
                     });
                 }
             };
@@ -215,10 +213,8 @@ pub(crate) fn ruby_sprintf(
                     Value::Int(_) => {} // negative → unset
                     other => {
                         return Err(RubyError::TypeError {
-                            msg: format!(
-                                "no implicit conversion of {} into Integer",
-                                other.type_name()
-                            ),
+                            // num2long shape: nil → "from nil to integer".
+                            msg: other.num2int_conv_msg(),
                         });
                     }
                 }
@@ -436,8 +432,14 @@ pub(crate) fn ruby_sprintf(
                     })?
                 }
                 Value::Str(s) => s.to_string_lossy().chars().next().map(|c| c.to_string()).unwrap_or_default(),
+                // CRuby's %c type error is the num2long Integer-
+                // coercion family (probed: `sprintf("%c", nil)` →
+                // "no implicit conversion from nil to integer";
+                // `("%c", true)` → "of true into Integer") — the
+                // pre-fix "no implicit conversion to %c from X" was
+                // not a CRuby message.
                 _ => return Err(RubyError::TypeError {
-                    msg: format!("no implicit conversion to %c from {}", arg.type_name()),
+                    msg: arg.num2int_conv_msg(),
                 }),
             },
             other => return Err(RubyError::ArgumentError {
@@ -560,8 +562,11 @@ fn coerce_int_any(v: &Value, heap: &Heap) -> Result<CoercedInt, RubyError> {
         Value::Nil => Err(RubyError::TypeError {
             msg: "can't convert nil into Integer".into(),
         }),
+        // conv_type_name: CRuby spells true/false literally here
+        // (probed: `sprintf("%d", true)` → "can't convert true into
+        // Integer").
         _ => Err(RubyError::TypeError {
-            msg: format!("can't convert {} into Integer", v.type_name()),
+            msg: format!("can't convert {} into Integer", v.conv_type_name()),
         }),
     }
 }
@@ -571,11 +576,14 @@ fn coerce_float(v: &Value) -> Result<f64, RubyError> {
         Value::Float(f) => Ok(*f),
         Value::Int(n) => Ok(*n as f64),
         Value::Str(s) => Ok(s.to_string_lossy().trim().parse::<f64>().unwrap_or(0.0)),
-        Value::Nil => Err(RubyError::TypeError {
-            msg: "no implicit conversion from nil to Float".into(),
-        }),
+        // CRuby's %f coercion errors are the Kernel#Float "can't
+        // convert X into Float" family (probed vs 3.4.1:
+        // `sprintf("%f", nil)` → "can't convert nil into Float",
+        // `("%f", :x)` → "can't convert Symbol into Float") — the
+        // pre-fix "no implicit conversion ... Float" shape was not
+        // a CRuby message.
         _ => Err(RubyError::TypeError {
-            msg: format!("no implicit conversion of {} to Float", v.type_name()),
+            msg: format!("can't convert {} into Float", v.conv_type_name()),
         }),
     }
 }

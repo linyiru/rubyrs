@@ -545,10 +545,9 @@ pub(crate) fn string_call(
                 }
                 Some(other) => {
                     return Err(RubyError::TypeError {
-                        msg: format!(
-                            "no implicit conversion of {} into Integer",
-                            other.type_name()
-                        ),
+                        // CRuby num2long shape: nil gets "from nil to integer"
+                        // (probed vs 3.4.1); others value-word "of X into Integer".
+                        msg: other.num2int_conv_msg(),
                     });
                 }
             };
@@ -923,7 +922,7 @@ pub(crate) fn string_call(
                 [Value::Nil] => bytes.clone(),
                 [Value::Str(sep)] => chomp_with_sep(&bytes, &sep.borrow()),
                 [other] => return Err(RubyError::TypeError {
-                    msg: format!("no implicit conversion of {} into String", other.type_name()),
+                    msg: format!("no implicit conversion of {} into String", other.conv_type_name()),
                 }),
                 _ => return Err(RubyError::ArgumentError {
                     msg: format!("wrong number of arguments (given {}, expected 0..1)", args.len()),
@@ -944,7 +943,7 @@ pub(crate) fn string_call(
             match args {
                 [] | [Value::Nil] | [Value::Str(_)] => {}
                 [other] => return Err(RubyError::TypeError {
-                    msg: format!("no implicit conversion of {} into String", other.type_name()),
+                    msg: format!("no implicit conversion of {} into String", other.conv_type_name()),
                 }),
                 _ => return Err(RubyError::ArgumentError {
                     msg: format!("wrong number of arguments (given {}, expected 0..1)", args.len()),
@@ -2450,7 +2449,7 @@ impl Vm {
                             }
                         }
                         other => return Err(self.trap(RubyError::TypeError {
-                            msg: format!("no implicit conversion of {} into String", other.type_name()),
+                            msg: format!("no implicit conversion of {} into String", other.conv_type_name()),
                         })),
                     }
                     return Ok(Some(Value::Str(s)));
@@ -2479,7 +2478,7 @@ impl Vm {
                                 s.encoding.set(tag);
                             }
                             _ => return Err(self.trap(RubyError::TypeError {
-                                msg: format!("no implicit conversion of {} into String", a.type_name()),
+                                msg: format!("no implicit conversion of {} into String", a.conv_type_name()),
                             })),
                         }
                     }
@@ -2496,7 +2495,7 @@ impl Vm {
                         match a {
                             Value::Str(o) => prefix.extend_from_slice(&o.borrow()),
                             _ => return Err(self.trap(RubyError::TypeError {
-                                msg: format!("no implicit conversion of {} into String", a.type_name()),
+                                msg: format!("no implicit conversion of {} into String", a.conv_type_name()),
                             })),
                         }
                     }
@@ -2538,7 +2537,7 @@ impl Vm {
                             return Err(self.trap(RubyError::TypeError {
                                 msg: format!(
                                     "no implicit conversion of {} into String",
-                                    other.type_name()
+                                    other.conv_type_name()
                                 ),
                             }));
                         }
@@ -2561,7 +2560,7 @@ impl Vm {
                             s.encoding.set(o.encoding.get());
                         }
                         other => return Err(self.trap(RubyError::TypeError {
-                            msg: format!("no implicit conversion of {} into String", other.type_name()),
+                            msg: format!("no implicit conversion of {} into String", other.conv_type_name()),
                         })),
                     }
                     return Ok(Some(Value::Str(s)));
@@ -3197,10 +3196,9 @@ impl Vm {
                             }
                             Some(other) => {
                                 return Err(self.trap(RubyError::TypeError {
-                                    msg: format!(
-                                        "no implicit conversion of {} into Integer",
-                                        other.type_name(),
-                                    ),
+                                    // CRuby num2long shape: nil gets "from nil to integer"
+                                    // (probed vs 3.4.1); others value-word "of X into Integer".
+                                    msg: other.num2int_conv_msg(),
                                 }));
                             }
                             None => 0,

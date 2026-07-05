@@ -559,7 +559,7 @@ impl Vm {
             match a {
                 Value::Str(s) => Ok(s.to_string_lossy()),
                 _ => Err(self.trap(RubyError::TypeError {
-                    msg: format!("no implicit conversion of {} into String", a.type_name()),
+                    msg: format!("no implicit conversion of {} into String", a.conv_type_name()),
                 })),
             }
         };
@@ -1151,9 +1151,13 @@ impl Vm {
                 self.check_filesystem_io_allowed("File.chmod", None)?;
                 let Value::Int(m) = mode else {
                     return Err(self.trap(RubyError::TypeError {
+                        // conv_type_name, NOT the num2long helper:
+                        // probed `File.chmod(nil, "f")` → "no implicit
+                        // conversion of nil into Integer" (rb_to_int
+                        // shape, no nil pre-check).
                         msg: format!(
                             "no implicit conversion of {} into Integer",
-                            mode.type_name()
+                            mode.conv_type_name()
                         ),
                     }));
                 };
@@ -1269,7 +1273,7 @@ impl Vm {
                         return Err(self.trap(RubyError::TypeError {
                             msg: format!(
                                 "no implicit conversion of {} into String",
-                                other.type_name()
+                                other.conv_type_name()
                             ),
                         }))
                     }
@@ -1345,12 +1349,24 @@ impl Vm {
                             Some(s) => comps.push(s),
                             None => {
                                 // CRuby names the actual class (e.g.
-                                // "NoConv"), not the generic "Object".
-                                let cls_name = match self.class_of(&v) {
-                                    Value::Class(c) => {
-                                        c.effective_name().unwrap_or_else(|| c.name.clone())
+                                // "NoConv"), not the generic "Object"
+                                // — EXCEPT the nil/true/false
+                                // singletons, which render as their
+                                // literal spelling ("no implicit
+                                // conversion of nil into String",
+                                // probed `File.join("a", nil)` vs
+                                // 3.4.1) — class_of would name
+                                // NilClass/TrueClass here.
+                                let cls_name = match &v {
+                                    Value::Nil | Value::Bool(_) => {
+                                        v.conv_type_name().to_string()
                                     }
-                                    _ => v.type_name().to_string(),
+                                    _ => match self.class_of(&v) {
+                                        Value::Class(c) => {
+                                            c.effective_name().unwrap_or_else(|| c.name.clone())
+                                        }
+                                        _ => v.type_name().to_string(),
+                                    },
                                 };
                                 return Err(self.trap(RubyError::TypeError {
                                     msg: format!(
@@ -1489,7 +1505,7 @@ impl Vm {
             match a {
                 Value::Str(s) => Ok(s.to_string_lossy()),
                 _ => Err(self.trap(RubyError::TypeError {
-                    msg: format!("no implicit conversion of {} into String", a.type_name()),
+                    msg: format!("no implicit conversion of {} into String", a.conv_type_name()),
                 })),
             }
         };
@@ -1512,7 +1528,7 @@ impl Vm {
                     }
                     _ => {
                         return Err(self.trap(RubyError::TypeError {
-                            msg: format!("no implicit conversion of {} into String", pat.type_name()),
+                            msg: format!("no implicit conversion of {} into String", pat.conv_type_name()),
                         }));
                     }
                 };
@@ -1647,14 +1663,14 @@ impl Vm {
                             out.push(s.to_string_lossy());
                         } else {
                             return Err(vm.trap(RubyError::TypeError {
-                                msg: format!("no implicit conversion of {} into String", e.type_name()),
+                                msg: format!("no implicit conversion of {} into String", e.conv_type_name()),
                             }));
                         }
                     }
                     Ok(out)
                 }
                 other => Err(vm.trap(RubyError::TypeError {
-                    msg: format!("no implicit conversion of {} into String", other.type_name()),
+                    msg: format!("no implicit conversion of {} into String", other.conv_type_name()),
                 })),
             }
         };

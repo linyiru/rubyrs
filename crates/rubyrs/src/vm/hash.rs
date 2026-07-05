@@ -1888,9 +1888,13 @@ impl Vm {
                                     let to_hash = g.vm.interner.intern("to_hash");
                                     if !g.vm.responds_to(other, to_hash, false) {
                                         return Err(g.vm.trap(RubyError::TypeError {
+                                            // conv_type_name: CRuby spells
+                                            // nil/true/false literally
+                                            // ({}.merge(nil) → "of nil
+                                            // into Hash", probed 3.4.1).
                                             msg: format!(
                                                 "no implicit conversion of {} into Hash",
-                                                other.type_name()
+                                                other.conv_type_name()
                                             ),
                                         }));
                                     }

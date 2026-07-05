@@ -2586,19 +2586,41 @@ impl Value {
     /// class name — verified vs CRuby 3.4.1. Everything else is the
     /// plain `type_name()`.
     ///
-    /// Adopted so far only by the String#encode / #force_encoding
-    /// argument path (dispatch.rs `try_string_encoding_ops`); the
-    /// other ~85 inline "no implicit conversion" format sites still
-    /// print `type_name()` and mis-spell the three singletons
-    /// (NilClass / Boolean). Migrating them is ticketed follow-up
-    /// work: each site's fixture has to be re-diffed against CRuby
-    /// rather than batch-edited blind.
+    /// Adopted across the "no implicit conversion" format sites
+    /// (String/Array/Hash/Integer targets — each op category probed
+    /// vs CRuby 3.4.1 rather than batch-edited blind). Sites where
+    /// CRuby genuinely prints the CLASS name (`File.join`'s
+    /// user-class path, `Hash()`'s "can't convert TrueClass into
+    /// Hash", `File.utime`'s "can't convert X into time") keep
+    /// their class-name helpers instead.
     pub(crate) fn conv_type_name(&self) -> &'static str {
         match self {
             Value::Nil => "nil",
             Value::Bool(true) => "true",
             Value::Bool(false) => "false",
             _ => self.type_name(),
+        }
+    }
+    /// CRuby's rb_num2long-shaped Integer-coercion TypeError message:
+    /// nil gets the distinct lowercase "no implicit conversion from
+    /// nil to integer" wording (numeric.c `rb_num2long` special-cases
+    /// nil BEFORE falling back to `rb_to_int`); everything else gets
+    /// "no implicit conversion of X into Integer" with
+    /// `conv_type_name`'s value-word singleton spelling.
+    ///
+    /// NOT every Integer-coercing op is num2long-shaped: ops that
+    /// call `rb_to_int` directly say "of nil into Integer" instead
+    /// (`1 << nil`, `Integer#digits`, `Integer#allbits?`,
+    /// `File.chmod`) — those sites format with `conv_type_name`
+    /// directly. Probed per op category vs CRuby 3.4.1
+    /// (`Array.new(nil)` / `"abc".byteslice(nil)` /
+    /// `sprintf("%*d", nil, 5)` / `1.to_s(nil)` → "from nil to
+    /// integer"; `1 << nil` / `123.digits(nil)` → "of nil into
+    /// Integer").
+    pub(crate) fn num2int_conv_msg(&self) -> String {
+        match self {
+            Value::Nil => "no implicit conversion from nil to integer".to_string(),
+            _ => format!("no implicit conversion of {} into Integer", self.conv_type_name()),
         }
     }
     pub(crate) fn to_display(&self, heap: &Heap, interner: &Interner) -> String {

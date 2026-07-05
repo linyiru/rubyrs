@@ -719,6 +719,14 @@ fn tier2_restblock_lite() { run_diff("tier2_restblock_lite"); }
 // unresolvable target names (NOT ArgumentError), TypeError for
 // non-String/non-Encoding args (encode + force_encoding).
 #[test] fn encoding_converter_not_found() { run_diff("encoding_converter_not_found"); }
+// "no implicit conversion" TypeError spelling battery — nil/true/false
+// render as value words (`conv_type_name`), the num2long ops get the
+// distinct "from nil to integer" nil wording, the explicit-conversion
+// ops use "can't convert X into Y", and the const/autoload name guards
+// use "X is not a symbol nor a string". ~150 probes across the op
+// categories, byte-identical vs CRuby 3.4.1. Uses `2**100` receivers
+// (bignum is a default feature in every diff config).
+#[test] fn conv_type_name_messages() { run_diff("conv_type_name_messages"); }
 #[cfg(feature = "_encoding_full")]
 #[test] fn encoding_full_latin1() { run_diff("encoding_full_latin1"); }
 #[cfg(feature = "_encoding_full")]
