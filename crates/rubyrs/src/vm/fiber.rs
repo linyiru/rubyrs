@@ -1995,7 +1995,7 @@ mod tests {
         // Allocate a Fiber pointing at the body.
         let fiber_id = heap.alloc_fiber(body_id);
         // Run GC with just the Fiber as a root.
-        let _frees = heap.collect(&[crate::value::Value::Object(fiber_id)]);
+        let _frees = heap.collect(&[crate::value::Value::Object(fiber_id)], std::time::Instant::now());
         // Both must survive.
         assert!(
             matches!(heap.get(fiber_id), HeapObj::Fiber(_)),
@@ -2018,7 +2018,7 @@ mod tests {
         let _fiber_id = heap.alloc_fiber(body_id);
         // GC with NO roots — fiber should be swept.
         let pre_count = heap.live_count;
-        let _frees = heap.collect(&[]);
+        let _frees = heap.collect(&[], std::time::Instant::now());
         assert!(
             heap.live_count < pre_count,
             "Fiber must be swept when unreachable",

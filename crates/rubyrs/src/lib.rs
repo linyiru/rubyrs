@@ -975,12 +975,20 @@ struct PostPreambleSnapshot {
     ///   dropped user slots made the minor mark-reset index out of
     ///   bounds (the 2026-06-30 nightly-fuzz crash).
     /// - `heap_minors_since_major` — minor/major cadence counter.
+    /// - `heap_gc_floor` / `heap_last_sweep_us` — the adaptive GC
+    ///   floor controller's state (heap.rs). Without restoring these
+    ///   a floor raised by user-eval sweeps would leak across
+    ///   `reset()`, giving later evals a different trigger window
+    ///   than a fresh Runtime — exactly the `heap_next_gc` ratchet
+    ///   this snapshot exists to prevent, one level up.
     heap_free: Vec<u32>,
     heap_marks: Vec<bool>,
     heap_old: Vec<bool>,
     heap_young_slots: Vec<u32>,
     heap_remembered: Vec<u32>,
     heap_minors_since_major: u32,
+    heap_gc_floor: usize,
+    heap_last_sweep_us: u64,
     /// `vm.interner.len()` at preamble completion. `reset()`
     /// truncates `interner.vec` and drains stale `interner.map`
     /// entries — but never past any SymId still referenced by
@@ -1986,6 +1994,8 @@ impl PostPreambleSnapshot {
             heap_young_slots: rt.vm.heap.young_slots.clone(),
             heap_remembered: rt.vm.heap.remembered.clone(),
             heap_minors_since_major: rt.vm.heap.minors_since_major,
+            heap_gc_floor: rt.vm.heap.gc_floor,
+            heap_last_sweep_us: rt.vm.heap.last_sweep_us,
             interner_len: rt.vm.interner.len(),
             call_caches_len: rt.vm.call_caches.len(),
             ivar_caches_len: rt.vm.ivar_caches.len(),
@@ -2580,6 +2590,8 @@ impl Runtime {
         self.vm.heap.free.clone_from(&snapshot.heap_free);
         self.vm.heap.live_count = snapshot.heap_live_count;
         self.vm.heap.next_gc = snapshot.heap_next_gc;
+        self.vm.heap.gc_floor = snapshot.heap_gc_floor;
+        self.vm.heap.last_sweep_us = snapshot.heap_last_sweep_us;
         #[cfg(feature = "jit-native")]
         {
             // ADR 0035: `class_ptrs` is slots-parallel too (the
@@ -3052,6 +3064,20 @@ impl Runtime {
     #[doc(hidden)]
     pub fn __test_vm_heap_next_gc(&self) -> usize {
         self.vm.heap.next_gc
+    }
+    #[doc(hidden)]
+    pub fn __test_vm_heap_gc_floor(&self) -> usize {
+        self.vm.heap.gc_floor
+    }
+    /// Test-only MUTATOR (sole one in this block): the adaptive GC
+    /// floor only moves when two consecutive sweeps measure expensive
+    /// (heap.rs controller), which an integration test cannot arrange
+    /// deterministically — so the reset-restoration test perturbs the
+    /// state directly instead of timing real sweeps.
+    #[doc(hidden)]
+    pub fn __test_vm_set_heap_gc_floor(&mut self, floor: usize, last_sweep_us: u64) {
+        self.vm.heap.gc_floor = floor;
+        self.vm.heap.last_sweep_us = last_sweep_us;
     }
     #[doc(hidden)]
     pub fn __test_vm_method_gen(&self) -> u32 {

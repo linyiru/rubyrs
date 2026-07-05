@@ -557,6 +557,11 @@ impl Vm {
     /// can't reach them (the zombie-Array dangle the nightly-fuzz
     /// reset loop surfaced).
     pub(crate) fn gc_now(&mut self) {
+        // Collection start time — BEFORE the root gather, which walks
+        // every class table below and dominates a loaded program's
+        // per-collection fixed cost. `Heap::collect`'s adaptive-floor
+        // controller sizes the next trigger window from this.
+        let t0 = std::time::Instant::now();
         // Gather roots: stack + every frame's locals + self_val + swap_return
         // + pinned (native-code accumulators). class_stack holds Rc<Class>
         // which isn't GC-managed, so we don't need to walk it.
@@ -896,7 +901,7 @@ impl Vm {
                 if let Some(b) = cl.captured_yield_block { roots.push(Value::Block(b)); }
             }
         }
-        let pending_frees = self.heap.collect(&roots);
+        let pending_frees = self.heap.collect(&roots, t0);
         // Prune `binding_locals` entries whose Binding object was just
         // swept. The snapshot Values were roots (above), so they kept
         // the binding's *contents* alive — but the binding Instance

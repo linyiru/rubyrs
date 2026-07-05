@@ -1227,6 +1227,14 @@ pub(crate) fn restore(vm: &mut crate::vm::Vm, img: VmImage) {
         .filter(|&i| matches!(vm.heap.slots[i as usize], crate::heap::Slot::Dead))
         .collect();
     vm.heap.live_count = n - vm.heap.free.len();
+    // Re-derive the GC trigger for the LOADED live set, exactly as a
+    // post-sweep would (`live * 2 max floor`). Without this the trigger
+    // keeps the fresh-boot heap's value — the adaptive floor (heap.rs),
+    // typically GC_FLOOR_MIN on a preamble-only heap — which a big image
+    // (rubocop snapshots carry tens of thousands of live slots) exceeds
+    // on the spot, forcing a full major on the first post-load
+    // allocation for nothing.
+    vm.heap.next_gc = (vm.heap.live_count * 2).max(vm.heap.gc_floor);
     #[cfg(feature = "jit-native")]
     {
         // Keep the ObjId-indexed JIT class-ptr cache length-consistent with the

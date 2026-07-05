@@ -624,6 +624,21 @@ pub(crate) struct Heap {
     pub(crate) free: Vec<u32>,
     pub(crate) live_count: usize,
     pub(crate) next_gc: usize,
+    /// The GC trigger's minimum window (the floor in
+    /// `next_gc = (live * growth).max(floor)`), adapted per sweep by the
+    /// cost-proportional controller in `collect`'s epilogue (see the
+    /// comment there for the model + measurements). Captured/restored by
+    /// `Runtime`'s PostPreambleSnapshot so `reset()` rewinds it with the
+    /// rest of the GC bookkeeping.
+    pub(crate) gc_floor: usize,
+    /// `RUBYRS_GC_MIN_THRESHOLD` parsed once at construction. `Some(n)`
+    /// pins `gc_floor` to `n` and disables the adaptive controller.
+    pub(crate) floor_override: Option<usize>,
+    /// Previous sweep's measured wall time in µs — the controller raises
+    /// the floor on `min(current, last)`, so a single anomalously slow
+    /// sweep (scheduler blip) cannot inflate the window; two consecutive
+    /// expensive sweeps are required. Snapshot-captured like `gc_floor`.
+    pub(crate) last_sweep_us: u64,
     /// Generational GC step 1 (groundwork — does not change GC behaviour yet):
     /// `old[i] == true` once slot `i`'s object has survived a collection. New
     /// allocations are young (`false`). A future minor GC will skip re-walking
@@ -684,6 +699,15 @@ pub(crate) struct Heap {
 
 impl Heap {
     pub(crate) fn new() -> Self {
+        // `RUBYRS_GC_MIN_THRESHOLD=N` pins the floor to N and DISABLES the
+        // adaptive controller (an explicit override is a statement of
+        // intent — perf/RSS ratchet investigations want a fixed knob, not
+        // a moving one). Read once at heap construction; the sweep path
+        // no longer re-reads the environment.
+        let floor_override = std::env::var("RUBYRS_GC_MIN_THRESHOLD")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok());
+        let gc_floor = floor_override.unwrap_or(Self::GC_FLOOR_MIN);
         Heap {
             slots: vec![],
             marks: vec![],
@@ -693,23 +717,20 @@ impl Heap {
             minors_since_major: 0,
             young_slots: vec![],
             live_count: 0,
-            // Match the post-sweep min threshold so cold-start
-            // workloads (preamble load + first eval) get the same
-            // 4 KB-slot budget the steady-state sweep settles on.
-            // Tunable via RUBYRS_GC_MIN_THRESHOLD (read inside
-            // `sweep` for steady-state; init reads it too so a
-            // tight-RSS embedder sees the lower bound immediately).
-            // 32768 (was 4096): a monotonic-load phase — `require "rubocop"`
-            // pulls in ~600 cop classes + rubocop-ast/parser, almost all
-            // long-lived — otherwise triggers collections at 4k/8k/16k that
-            // each re-mark a growing, mostly-live set for nothing. Raising the
-            // floor skips those (require 2.08s→1.51s, ~28%); it only bites
-            // while live < 32768, so large steady-state heaps (jekyll/AR use
-            // `live*2`) are unaffected. RSS cost ~+0.5MB.
-            next_gc: std::env::var("RUBYRS_GC_MIN_THRESHOLD")
-                .ok()
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(32768),
+            // Cold-start trigger matches the current floor so preamble
+            // load + first eval see the same budget the steady-state
+            // sweep settles on. Starts at the LOW floor: the boot
+            // preamble allocates only a few dozen heap slots (classes
+            // and methods are `Rc`, not heap objects), so a low first
+            // window costs at most one cheap early sweep, while a HIGH
+            // first window is a pure ~28k-slot RSS tax on any small-
+            // live-set program. Load-heavy programs (`require "rubocop"`)
+            // raise the floor within two sweeps — see the controller in
+            // `collect`'s epilogue.
+            next_gc: gc_floor,
+            gc_floor,
+            floor_override,
+            last_sweep_us: 0,
             max_live: None,
             #[cfg(feature = "_fiber")]
             fiber_alloc_count: 0,
@@ -1397,6 +1418,31 @@ impl Heap {
     /// `schedule_major` can reference it.
     pub(crate) const MAJOR_EVERY: u32 = 8;
 
+    /// Bounds of the adaptive GC floor (the min window in
+    /// `next_gc = (live * growth).max(floor)`). MIN is the historical
+    /// 4096 default (small-live-set churn stays at a ~4k-slot heap);
+    /// MAX is the 32768 the RuboCop require investigation landed on
+    /// (a3073e5f) — kept as the ceiling so the adaptive floor can never
+    /// exceed what that campaign budgeted for.
+    pub(crate) const GC_FLOOR_MIN: usize = 4096;
+    pub(crate) const GC_FLOOR_MAX: usize = 32768;
+    /// The controller's gain: one µs of measured sweep cost buys this
+    /// many allocations of trigger window. Calibrated on the two
+    /// extremes (2026-07 probe, see collect's epilogue comment):
+    /// gc_churn's ~65µs sweeps × 16 = ~1k → clamps to GC_FLOOR_MIN;
+    /// post-`require "rubocop"` sweeps ≥ ~2000µs × 16 → clamps to
+    /// GC_FLOOR_MAX. Equivalent to targeting ~5% GC time on a mutator
+    /// that allocates every ~1.3µs (the measured require-phase rate).
+    pub(crate) const GC_FLOOR_ALLOCS_PER_SWEEP_US: u64 = 16;
+
+    /// The cost-proportional floor for a sweep that took `cost_us`:
+    /// window ∝ sweep cost, clamped to [GC_FLOOR_MIN, GC_FLOOR_MAX].
+    /// Pure so the unit tests can pin the curve without timing games.
+    pub(crate) fn adaptive_floor(cost_us: u64) -> usize {
+        let target = cost_us.saturating_mul(Self::GC_FLOOR_ALLOCS_PER_SWEEP_US);
+        (target as usize).clamp(Self::GC_FLOOR_MIN, Self::GC_FLOOR_MAX)
+    }
+
     /// Make the NEXT collection take the major (full-heap) path.
     /// Used by `Runtime`'s post-preamble snapshot capture to force
     /// a garbage-free baseline (see `Vm::gc_now`).
@@ -1414,10 +1460,26 @@ impl Heap {
     /// `dfree` transitively reaches — even though we don't expect
     /// well-behaved cexts to re-enter the VM from a free callback,
     /// the conservative shape avoids relying on that contract.
+    /// `t0` is the collection's TRUE start — callers take it BEFORE
+    /// gathering roots (`Vm::gc_now`'s gather walks every class table
+    /// and is a large share of a loaded program's per-collection fixed
+    /// cost). The adaptive-floor controller in the epilogue sizes the
+    /// trigger window from `t0.elapsed()`; timing only the mark+sweep
+    /// underestimated a post-`require "rubocop"` collection ~2× and
+    /// left the controller oscillating below the top clamp.
     pub(crate) fn collect(
         &mut self,
         roots: &[Value],
+        t0: std::time::Instant,
     ) -> Vec<(unsafe extern "C" fn(*mut std::ffi::c_void), *mut std::ffi::c_void)> {
+        // `RUBYRS_GC_STATS=1` probe state — captured up-front so the
+        // per-sweep stderr line (printed in the epilogue, after the
+        // next_gc calculation) can report the sweep's inputs: what
+        // the trigger saw (`live_before`), how much was allocated
+        // since the last collection (`young`), and wall time.
+        let stats = std::env::var_os("RUBYRS_GC_STATS").is_some();
+        let stats_live_before = self.live_count;
+        let stats_young_alloc = self.young_slots.len();
         // Generational GC step 2: MINOR vs MAJOR. A minor pre-marks every OLD
         // object live (so `visit_value`'s "already marked → skip" naturally
         // avoids re-walking the stable old graph) and resets only YOUNG marks;
@@ -1833,25 +1895,19 @@ impl Heap {
             self.live_count = live;
         }
         let live = self.live_count;
+        // Probe: exact young-survivor count (marks are final and young_slots
+        // still populated here; a surviving young slot's mark is true, a
+        // freed one's is false — for minors AND majors). Gated on the env
+        // knob so the normal sweep path pays nothing.
+        let stats_young_surv = if stats {
+            self.young_slots.iter().filter(|&&i| self.marks[i as usize]).count()
+        } else {
+            0
+        };
         // The young region has been consumed (survivors promoted, rest freed) and
         // the remembered old→young edges honoured by this collection. Reset both.
         self.young_slots.clear();
         self.remembered.clear();
-        // `RUBYRS_GC_STATS=1`: per-sweep heap-shape line on stderr
-        // (debug knob in the `RUBYRS_IC_STATS` shape). Used for RSS
-        // attribution: on the jekyll liquid-1k build this showed the
-        // slot array itself is small (peak 65,536 slots × 120B =
-        // 7.5MB, peak live only ~10k objects) — proving the RSS gap
-        // vs CRuby lived in malloc'd content (regex engines, Vec/
-        // HashMap spill), not in slot-size bloat, and redirecting
-        // the optimisation to lazy regex building instead of a
-        // HeapObj diet.
-        if std::env::var_os("RUBYRS_GC_STATS").is_some() {
-            eprintln!(
-                "gc_stats: live={} slots={} cap={} free={}",
-                live, self.slots.len(), self.slots.capacity(), self.free.len()
-            );
-        }
         // Post-sweep trigger threshold. History: originally
         // `live * 2 max 1024` (sweeps every ~1k allocs — punishes
         // alloc-and-discard loops); bumped to `live * 4 max 4096`
@@ -1864,27 +1920,74 @@ impl Heap {
         // Meanwhile growth=4 lets garbage pile to 4× the live set
         // between sweeps: on the jekyll liquid-1k build that's
         // +4.7MB peak RSS (90.1 → 85.4MB at growth=2) for zero
-        // wall benefit. So the default is now `live * 2 max 32768` (the 32768
-        // floor kills the `require "rubocop"` collection storm — see the
-        // init-site note; only bites while live < 32768).
+        // wall benefit. So the default is `live * 2 max FLOOR`.
         // growth=1 is NOT viable — every post-sweep allocation
         // immediately re-crosses the threshold and the build
         // degenerates to O(n²) sweeping (41 s vs 0.84 s).
         //
         // Both knobs stay env-tunable (`RUBYRS_GC_GROWTH`,
         // `RUBYRS_GC_MIN_THRESHOLD`) for perf/RSS ratchet
-        // investigations; the vars are parse-time-checked so the
-        // worst case is a cache miss + atoi per sweep — cheap.
+        // investigations; setting the MIN_THRESHOLD one pins the
+        // floor and disables the adaptive controller below.
         let growth = std::env::var("RUBYRS_GC_GROWTH")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .filter(|n| *n >= 1)
             .unwrap_or(2);
-        let min_threshold = std::env::var("RUBYRS_GC_MIN_THRESHOLD")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(32768);
+        // FLOOR history: a static 4096 punished `require "rubocop"` with a
+        // collection storm (a3073e5f measured require −28% at 32768); the
+        // static 32768 that fixed it taxed every small-live-set churn
+        // program ~+6MB peak RSS (gc_churn 11.7 → 17.9MB — the window is
+        // pure garbage held between sweeps, ~250B/slot of malloc'd
+        // content). The 2026-07 RUBYRS_GC_STATS probe showed BOTH
+        // workloads are low-survival churn over a small live set — what
+        // separates them is PER-SWEEP COST: a require-phase sweep costs
+        // ~1.1ms at the same young size where gc_churn's costs 65µs (17×),
+        // because mark/root traversal scales with loaded program
+        // complexity (class graphs, constants, cells), not heap size. So
+        // survival/live-count heuristics are the wrong denominator; the
+        // window that amortises an expensive sweep is proportional to the
+        // sweep's own cost. Controller: floor = clamp(K × min(this sweep,
+        // last sweep) µs); the min() makes a raise require two consecutive
+        // expensive sweeps (a lone scheduler blip cannot buy a 28k-slot
+        // RSS window) while one cheap sweep decays it immediately.
+        // Measured fixed points: gc_churn ⇒ GC_FLOOR_MIN clamp, post-
+        // rubocop-require ⇒ GC_FLOOR_MAX clamp, both with ≥10× margin.
+        // STRESS_GC forces collection on every alloc regardless of
+        // `next_gc`, so the controller is semantically inert under it.
+        let sweep_us = t0.elapsed().as_micros() as u64;
+        let min_threshold = if let Some(f) = self.floor_override {
+            f
+        } else {
+            self.gc_floor = Self::adaptive_floor(sweep_us.min(self.last_sweep_us));
+            self.gc_floor
+        };
+        self.last_sweep_us = sweep_us;
         self.next_gc = (live * growth).max(min_threshold);
+        // `RUBYRS_GC_STATS=1`: per-sweep shape line on stderr (debug knob
+        // in the `RUBYRS_IC_STATS` shape). Historical use: RSS attribution
+        // on the jekyll liquid-1k build (slot array small, gap lived in
+        // malloc'd content → lazy-regex fix). Enriched 2026-07 for the GC
+        // floor-decay investigation: sweep kind, trigger-time live, the
+        // window's allocation count + survivors, and sweep wall time —
+        // enough to reconstruct WHERE a floor change adds/removes sweeps
+        // and what each cost.
+        if stats {
+            eprintln!(
+                "gc_stats: kind={} live_before={} live={} young={} young_surv={} next_gc={} floor={} us={} slots={} cap={} free={}",
+                if minor { "minor" } else { "major" },
+                stats_live_before,
+                live,
+                stats_young_alloc,
+                stats_young_surv,
+                self.next_gc,
+                self.gc_floor,
+                sweep_us,
+                self.slots.len(),
+                self.slots.capacity(),
+                self.free.len()
+            );
+        }
         pending_frees
     }
 
@@ -3100,14 +3203,76 @@ mod tests {
         hobj.extras_mut().singleton_class = Some(sc);
         let h = heap.alloc(HeapObj::Hash(hobj));
         let roots = vec![Value::Hash(h)];
-        let _ = heap.collect(&roots);
+        let _ = heap.collect(&roots, std::time::Instant::now());
         // Both eigenclass-reachable slots survive.
         assert!(matches!(heap.array(captured)[0], Value::Int(42)));
         assert!(matches!(heap.array(ivar_val)[0], Value::Int(7)));
         // An unreachable slot is swept (sanity that collect ran).
         let orphan = heap.alloc(HeapObj::Array(vec![].into()));
-        let _ = heap.collect(&roots);
+        let _ = heap.collect(&roots, std::time::Instant::now());
         assert!(matches!(heap.slots[orphan.0 as usize], Slot::Dead));
+    }
+
+    /// The adaptive-floor controller's transfer curve (pure — no
+    /// timing): proportional band between the clamps, saturating
+    /// multiply at the top. Endpoints match the 2026-07 probe data:
+    /// gc_churn-shaped sweeps (~65µs) clamp to MIN, post-rubocop-
+    /// require sweeps (≥2048µs) clamp to MAX.
+    #[test]
+    fn adaptive_floor_curve() {
+        assert_eq!(Heap::adaptive_floor(0), Heap::GC_FLOOR_MIN);
+        assert_eq!(Heap::adaptive_floor(65), Heap::GC_FLOOR_MIN);
+        assert_eq!(Heap::adaptive_floor(256), Heap::GC_FLOOR_MIN); // 256×16 = 4096 exactly
+        assert_eq!(Heap::adaptive_floor(300), 4800); // proportional band
+        assert_eq!(Heap::adaptive_floor(2048), Heap::GC_FLOOR_MAX); // 2048×16 = 32768 exactly
+        assert_eq!(Heap::adaptive_floor(50_000), Heap::GC_FLOOR_MAX);
+        assert_eq!(Heap::adaptive_floor(u64::MAX), Heap::GC_FLOOR_MAX); // saturating_mul
+    }
+
+    /// A raise requires TWO consecutive expensive sweeps: with a cheap
+    /// last-sweep history, even a slow current sweep (deliberately not
+    /// simulated — min() takes the 0 history regardless of what this
+    /// collect measures) cannot move the floor. Deterministic under any
+    /// scheduler behaviour.
+    #[test]
+    fn floor_raise_needs_two_expensive_sweeps() {
+        let mut heap = Heap::new();
+        heap.floor_override = None;
+        heap.gc_floor = Heap::GC_FLOOR_MIN;
+        heap.last_sweep_us = 0; // cheap history wins the min()
+        let _ = heap.collect(&[], std::time::Instant::now());
+        assert_eq!(heap.gc_floor, Heap::GC_FLOOR_MIN);
+        assert_eq!(heap.next_gc, Heap::GC_FLOOR_MIN); // live 0 → floor
+    }
+
+    /// ONE cheap sweep decays a raised floor (RSS-eager direction).
+    /// The empty-heap collect below takes single-digit µs; retry a few
+    /// times so a scheduler blip landing exactly inside one collect
+    /// can't flake the assert.
+    #[test]
+    fn floor_decays_on_one_cheap_sweep() {
+        let mut heap = Heap::new();
+        heap.floor_override = None;
+        let decayed = (0..5).any(|_| {
+            heap.gc_floor = Heap::GC_FLOOR_MAX;
+            heap.last_sweep_us = 10_000; // expensive history
+            let _ = heap.collect(&[], std::time::Instant::now());
+            heap.gc_floor == Heap::GC_FLOOR_MIN
+        });
+        assert!(decayed, "a cheap sweep must decay the floor to MIN");
+    }
+
+    /// `RUBYRS_GC_MIN_THRESHOLD` (parsed into `floor_override` at
+    /// construction) pins the trigger floor and freezes the adaptive
+    /// state — an explicit override disables adaptivity.
+    #[test]
+    fn floor_override_pins_threshold_and_disables_controller() {
+        let mut heap = Heap::new();
+        heap.floor_override = Some(12_345);
+        heap.gc_floor = 7; // sentinel: controller must not touch it
+        let _ = heap.collect(&[], std::time::Instant::now());
+        assert_eq!(heap.next_gc, 12_345);
+        assert_eq!(heap.gc_floor, 7);
     }
 
     #[test]
@@ -3143,10 +3308,10 @@ mod tests {
 
         // GC: root only the tagged array — `inner` must survive
         // through the ivar edge.
-        let _ = heap.collect(&[Value::Array(tagged)]);
+        let _ = heap.collect(&[Value::Array(tagged)], std::time::Instant::now());
         assert!(matches!(heap.get(inner), HeapObj::Array(_)));
         // Drop the root: inner becomes garbage.
-        let _ = heap.collect(&[]);
+        let _ = heap.collect(&[], std::time::Instant::now());
     }
 
     /// `inspect_escape_bytes_into` — every escape arm (the byte

@@ -340,6 +340,27 @@ fn reset_restores_heap_next_gc_to_preamble_baseline() {
 }
 
 #[test]
+fn reset_restores_adaptive_gc_floor_to_preamble_baseline() {
+    // The GC floor (heap.rs `gc_floor` + `last_sweep_us`) adapts to
+    // measured sweep cost during user evals. Like `next_gc` above, it
+    // must rewind with reset() or a floor raised by one user eval's
+    // expensive sweeps leaks a bigger RSS window into every later
+    // eval. A REAL raise needs two consecutive >256µs sweeps — not
+    // something a test can time deterministically — so perturb the
+    // captured-and-restored state directly through the test hook.
+    let mut rt = Runtime::new();
+    let baseline = rt.vm_heap_gc_floor();
+    rt.__test_vm_set_heap_gc_floor(baseline + 12_288, 9_999);
+    assert_eq!(rt.vm_heap_gc_floor(), baseline + 12_288);
+    rt.reset();
+    assert_eq!(
+        rt.vm_heap_gc_floor(), baseline,
+        "reset must restore the adaptive GC floor to baseline {}",
+        baseline,
+    );
+}
+
+#[test]
 fn reset_truncates_protos_to_preamble_baseline() {
     // Without this, every user `eval()` appends compiled
     // bytecode to `vm.protos` and the Vec grows monotonically
@@ -996,6 +1017,7 @@ trait RuntimeInternals {
     fn vm_live_count(&self) -> usize;
     fn vm_interner_len(&self) -> usize;
     fn vm_heap_next_gc(&self) -> usize;
+    fn vm_heap_gc_floor(&self) -> usize;
     fn vm_method_gen(&self) -> u32;
     fn vm_protos_len(&self) -> usize;
 }
@@ -1014,6 +1036,9 @@ impl RuntimeInternals for Runtime {
     }
     fn vm_heap_next_gc(&self) -> usize {
         Runtime::__test_vm_heap_next_gc(self)
+    }
+    fn vm_heap_gc_floor(&self) -> usize {
+        Runtime::__test_vm_heap_gc_floor(self)
     }
     fn vm_method_gen(&self) -> u32 {
         Runtime::__test_vm_method_gen(self)
