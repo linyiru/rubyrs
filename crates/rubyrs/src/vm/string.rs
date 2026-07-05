@@ -1699,13 +1699,15 @@ pub(crate) fn string_call(
                         Ok(c) => c.is_some_and(|c| c.m_start == 0),
                         // Deferred build failure — raise RegexpError
                         // at first use (the fuzz repro's exact path:
-                        // `"x".start_with?(/[a-#b c dz]/)`).
-                        Err(e @ crate::regex_engine::RegexOpError::Build(_)) => {
-                            return Err(e.to_ruby_error(re.as_str()));
-                        }
-                        // Fancy match-time error: pre-existing
+                        // `"x".start_with?(/[a-#b c dz]/)`). A fancy
+                        // MATCH-time error keeps the pre-existing
                         // "no match" swallow.
-                        Err(crate::regex_engine::RegexOpError::Match(_)) => false,
+                        Err(e) => {
+                            if e.is_build() {
+                                return Err(e.to_ruby_error(re.as_str()));
+                            }
+                            false
+                        }
                     },
                     _ => false,
                 };
@@ -3605,10 +3607,10 @@ impl Vm {
                         // "no match" swallow (is_match-style trade-off).
                         let found = match re.captures_owned(&src) {
                             Ok(c) => c,
-                            Err(e @ crate::regex_engine::RegexOpError::Build(_)) => {
+                            Err(e) if e.is_build() => {
                                 return Err(self.trap(e.to_ruby_error(re.as_str())));
                             }
-                            Err(crate::regex_engine::RegexOpError::Match(_)) => None,
+                            Err(_) => None,
                         };
                         let parts = match found {
                             Some(c) => [
@@ -3631,10 +3633,10 @@ impl Vm {
                         // `partition` above.
                         let found = match re.captures_iter_owned(&src) {
                             Ok(v) => v.into_iter().last(),
-                            Err(e @ crate::regex_engine::RegexOpError::Build(_)) => {
+                            Err(e) if e.is_build() => {
                                 return Err(self.trap(e.to_ruby_error(re.as_str())));
                             }
-                            Err(crate::regex_engine::RegexOpError::Match(_)) => None,
+                            Err(_) => None,
                         };
                         let parts = match found {
                             Some(c) => [

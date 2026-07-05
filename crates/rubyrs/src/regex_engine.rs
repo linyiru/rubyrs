@@ -87,21 +87,47 @@ pub enum Engine {
 /// each (`invalid regex /src/: …` / `regex match failed: …
 /// (pattern: /src/)`), so the mapping stays uniform across the
 /// VM's dispatch sites.
-pub(crate) enum RegexOpError {
+///
+/// Boxed payload: the error travels through HOT `Result` returns
+/// (`is_match`, `captures_owned`, …) — a pointer-sized `Err` keeps
+/// those returns register-friendly (an inline 2×String enum made
+/// `Result<bool, _>` a 32-byte memory-returned aggregate and showed
+/// up as ~1% on the match?-family A/B). Construction allocates, but
+/// only on the (raising) error path.
+pub(crate) struct RegexOpError(Box<RegexOpErrorKind>);
+
+enum RegexOpErrorKind {
     Build(String),
     Match(String),
 }
 
 impl RegexOpError {
+    #[cold]
+    fn build(msg: String) -> Self {
+        RegexOpError(Box::new(RegexOpErrorKind::Build(msg)))
+    }
+
+    #[cold]
+    fn match_time(msg: String) -> Self {
+        RegexOpError(Box::new(RegexOpErrorKind::Match(msg)))
+    }
+
+    /// True for the deferred-BUILD failure (raise `RegexpError`).
+    /// The few call sites that deliberately swallow MATCH-time
+    /// errors (partition/rpartition/start_with?) branch on this.
+    pub(crate) fn is_build(&self) -> bool {
+        matches!(&*self.0, RegexOpErrorKind::Build(_))
+    }
+
     /// Convert to the conventional Ruby-level error, given the
     /// regexp's BARE source (`CompiledRegex::as_str()`).
     pub(crate) fn to_ruby_error(&self, source: &str) -> crate::error::RubyError {
-        match self {
-            RegexOpError::Build(msg) => crate::error::RubyError::HostException {
+        match &*self.0 {
+            RegexOpErrorKind::Build(msg) => crate::error::RubyError::HostException {
                 class_name: "RegexpError".into(),
                 message: format!("invalid regex /{}/: {}", source, msg),
             },
-            RegexOpError::Match(msg) => crate::error::RubyError::RuntimeError {
+            RegexOpErrorKind::Match(msg) => crate::error::RubyError::RuntimeError {
                 msg: format!("regex match failed: {} (pattern: /{}/)", msg, source),
             },
         }
@@ -154,11 +180,19 @@ pub struct CompiledRegex {
     /// program, no DFA) and pre-filling keeps the error point at
     /// Regexp construction, same as before.
     ///
-    /// `Err` records a DEFERRED build failure (a pattern the
-    /// cheap validation gates accepted but the full build
-    /// rejects); every subsequent use keeps surfacing the same
-    /// error via `engine()` → `RegexOpError::Build`.
-    engine: std::cell::OnceCell<Result<Engine, Box<str>>>,
+    /// Stays `OnceCell<Engine>` (not `OnceCell<Result<..>>`) so
+    /// the hot `engine()` fast path is a plain filled-cell read —
+    /// a DEFERRED build failure is recorded in `build_err`
+    /// instead (see `engine_build_slow`). A/B showed the
+    /// Result-in-cell shape taxed every match ~1.2-1.8%.
+    engine: std::cell::OnceCell<Engine>,
+    /// The DEFERRED build failure: the first-use build rejected a
+    /// pattern the cheap validation gates accepted (fuzz find
+    /// 2026-07 — used to be a `panic!` at `engine()`). At most one
+    /// of `engine` / `build_err` ever fills; every use surfaces
+    /// the same error via `engine()` → `RegexOpError::Build`,
+    /// in the eager path's combined fancy+native message shape.
+    build_err: std::cell::OnceCell<Box<str>>,
     /// Byte-oriented engine for matching BINARY (ASCII-8BIT) subjects,
     /// built lazily from `engine_pattern` with Unicode disabled
     /// (`(?-u)`), so `\x80`-`\xff` and `.`/`\w` operate on raw bytes —
@@ -259,6 +293,7 @@ pub(crate) fn compile_with_flags(
     match regex_syntax::Parser::new().parse(&prepared) {
         Ok(_) => Ok(CompiledRegex {
             engine: std::cell::OnceCell::new(),
+            build_err: std::cell::OnceCell::new(),
             bytes_engine: std::cell::OnceCell::new(),
             anchored_bytes_engine: std::cell::OnceCell::new(),
             anchored_fancy_engine: std::cell::OnceCell::new(),
@@ -298,6 +333,7 @@ pub(crate) fn compile_with_flags(
             }
             Ok(CompiledRegex {
                 engine: std::cell::OnceCell::new(),
+                build_err: std::cell::OnceCell::new(),
                 bytes_engine: std::cell::OnceCell::new(),
                 anchored_bytes_engine: std::cell::OnceCell::new(),
                 anchored_fancy_engine: std::cell::OnceCell::new(),
@@ -318,7 +354,7 @@ pub(crate) fn compile_with_flags(
                     eprintln!("[fancy-regex] /{}/", bare_source);
                 }
                 let cell = std::cell::OnceCell::new();
-                let _ = cell.set(Ok(Engine::Fancy(re)));
+                let _ = cell.set(Engine::Fancy(re));
                 // No bytes engine for the fancy path (lookaround /
                 // backrefs have no byte-oriented build); binary
                 // subjects fall back to the UTF-8 engine.
@@ -328,6 +364,7 @@ pub(crate) fn compile_with_flags(
                 let _ = anchored_bytes_cell.set(None);
                 Ok(CompiledRegex {
                     engine: cell,
+                    build_err: std::cell::OnceCell::new(),
                     bytes_engine: bytes_cell,
                     anchored_bytes_engine: anchored_bytes_cell,
                     // Keep the prepared pattern (NOT "") so the anchored
@@ -870,33 +907,51 @@ impl CompiledRegex {
     /// limits (`CompiledTooBig`), or a pattern fancy's syntax-only
     /// parse accepts but its full NFA build rejects (e.g. the
     /// invalid char-class range in `[a-#b c dz]` — fuzz find
-    /// 2026-07, was a `panic!`). The failure is cached in the
-    /// cell and surfaces as `RegexOpError::Build`, which every
-    /// operation propagates so the VM raises the conventional
-    /// `RegexpError` at first use — the lazy-compile counterpart
-    /// of the construction-time error the eager path produces.
+    /// 2026-07, was a `panic!`). The failure is cached in
+    /// `build_err` and surfaces as `RegexOpError::Build`, which
+    /// every operation propagates so the VM raises the
+    /// conventional `RegexpError` at first use — the lazy-compile
+    /// counterpart of the construction-time error the eager path
+    /// produces.
+    #[inline]
     fn engine(&self) -> Result<&Engine, RegexOpError> {
-        self.engine
-            .get_or_init(|| match regex::Regex::new(&self.engine_pattern) {
-                Ok(re) => Ok(Engine::Native(re)),
-                // The native engine rejected it: either a lookaround/
-                // backref/possessive pattern whose fancy build was
-                // DEFERRED (see `compile_with_flags`), or a genuinely
-                // malformed pattern that only `Expr::parse_tree`
-                // accepted. Build fancy now; a failure is the deferred
-                // construction error, in the same combined-message
-                // shape the eager path's `Err` uses.
-                Err(native_err) => match fancy_regex::Regex::new(&self.engine_pattern) {
-                    Ok(re) => Ok(Engine::Fancy(re)),
-                    Err(fancy_err) => Err(format!(
-                        "{} (also rejected by regex: {})",
-                        fancy_err, native_err
-                    )
-                    .into_boxed_str()),
-                },
-            })
-            .as_ref()
-            .map_err(|e| RegexOpError::Build(e.to_string()))
+        // Hot path: after the first use the cell is filled and this
+        // is a plain read — the same shape as the pre-fallible code
+        // (the Result-in-cell variant cost ~1.2-1.8% on every match
+        // in the A/B).
+        if let Some(e) = self.engine.get() {
+            return Ok(e);
+        }
+        self.engine_build_slow()
+    }
+
+    /// First-use build, or replay of a recorded build failure.
+    /// Out-of-line and `#[cold]`: runs at most once per regex on
+    /// success, and only on the (raising) error path afterwards.
+    #[cold]
+    fn engine_build_slow(&self) -> Result<&Engine, RegexOpError> {
+        if let Some(err) = self.build_err.get() {
+            return Err(RegexOpError::build(err.to_string()));
+        }
+        match regex::Regex::new(&self.engine_pattern) {
+            Ok(re) => Ok(self.engine.get_or_init(|| Engine::Native(re))),
+            // The native engine rejected it: either a lookaround/
+            // backref/possessive pattern whose fancy build was
+            // DEFERRED (see `compile_with_flags`), or a genuinely
+            // malformed pattern that only `Expr::parse_tree`
+            // accepted. Build fancy now; a failure is the deferred
+            // construction error, in the same combined-message
+            // shape the eager path's `Err` uses.
+            Err(native_err) => match fancy_regex::Regex::new(&self.engine_pattern) {
+                Ok(re) => Ok(self.engine.get_or_init(|| Engine::Fancy(re))),
+                Err(fancy_err) => {
+                    let msg =
+                        format!("{} (also rejected by regex: {})", fancy_err, native_err);
+                    let cached = self.build_err.get_or_init(|| msg.into_boxed_str());
+                    Err(RegexOpError::build(cached.to_string()))
+                }
+            },
+        }
     }
 
     /// True once the engine has been built (first match) — or
@@ -934,6 +989,7 @@ impl CompiledRegex {
     /// search. The `match?`-family arms use this so a `\G` anchor is honoured
     /// without the MatchData materialisation `String#match` needs.
     /// `Err` = the deferred build failed (raise `RegexpError`).
+    #[inline]
     pub(crate) fn is_match_from(&self, tail: &str) -> Result<bool, RegexOpError> {
         if self.g_anchored {
             match self.captures_owned_str_anchored(tail) {
@@ -1167,11 +1223,12 @@ impl CompiledRegex {
         // build. An unbuilt cell is always the native engine:
         // the fancy fallback is pre-filled at construction.
         match self.engine.get() {
-            Some(Ok(Engine::Native(_))) | None => "regex",
-            Some(Ok(Engine::Fancy(_))) => "fancy-regex",
+            Some(Engine::Native(_)) => "regex",
+            Some(Engine::Fancy(_)) => "fancy-regex",
             // Deferred build already failed — label it rather than
             // pretend an engine exists.
-            Some(Err(_)) => "unbuildable",
+            None if self.build_err.get().is_some() => "unbuildable",
+            None => "regex",
         }
     }
 
@@ -1200,6 +1257,7 @@ impl CompiledRegex {
     /// The outer `Err` is different: it's the DEFERRED BUILD
     /// failure (`RegexOpError::Build`), which call sites must
     /// raise as `RegexpError` — never collapse it to `false`.
+    #[inline]
     pub(crate) fn is_match(&self, haystack: &str) -> Result<bool, RegexOpError> {
         Ok(match self.engine()? {
             Engine::Native(r) => r.is_match(haystack),
@@ -1561,7 +1619,7 @@ impl CompiledRegex {
                 }
             },
             Engine::Fancy(r) => match r.captures(haystack) {
-                Err(e) => Err(RegexOpError::Match(e.to_string())),
+                Err(e) => Err(RegexOpError::match_time(e.to_string())),
                 Ok(None) => Ok(None),
                 Ok(Some(caps)) => {
                     let m0 = match caps.get(0) {
@@ -1635,7 +1693,7 @@ impl CompiledRegex {
             }
             Engine::Fancy(r) => {
                 for caps in r.captures_iter(haystack) {
-                    let caps = caps.map_err(|e| RegexOpError::Match(e.to_string()))?;
+                    let caps = caps.map_err(|e| RegexOpError::match_time(e.to_string()))?;
                     let m0 = match caps.get(0) {
                         Some(m) => m,
                         None => continue,
