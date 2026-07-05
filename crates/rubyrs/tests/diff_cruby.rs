@@ -530,7 +530,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // String#succ!/next! (Tilt compiled-method-name generation).
 #[test] fn string_succ_bang() { run_diff("string_succ_bang"); }
 // File.rename(old, new) — atomic rename.
-#[test] #[ignore = "known: Dir.mktmpdir not implemented"] fn file_rename() { run_diff("file_rename"); }
+#[test] fn file_rename() { run_diff("file_rename"); }
 // foo(**empty, &blk) drops the empty kwsplat even with a block-pass
 // (Tilt fixed-locals compiled_method.bind_call(scope, **locals, &block)).
 #[test] fn kwsplat_empty_block() { run_diff("kwsplat_empty_block"); }
@@ -1378,7 +1378,7 @@ fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 #[test] fn str_subclass_method_missing() { run_diff("str_subclass_method_missing"); }
 #[test] fn string_extend() { run_diff("string_extend"); }
 #[test] fn yaml_safe_load_file() { run_diff("yaml_safe_load_file"); }
-#[test] #[ignore = "known: Pathname#sub_ext not implemented"] fn pathname_sub_ext_filetests() { run_diff("pathname_sub_ext_filetests"); }
+#[test] fn pathname_sub_ext_filetests() { run_diff("pathname_sub_ext_filetests"); }
 #[test] fn encoding_gb18030() { run_diff("encoding_gb18030"); }
 #[test] fn yaml_load_tags() { run_diff("yaml_load_tags"); }
 #[test] fn include_append_features_super() { run_diff("include_append_features_super"); }
@@ -2224,7 +2224,7 @@ fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 
 // `Set#filter_map`. Surfaced by bridgetown-core's
 // `configure_component_paths`.
-#[test] #[ignore = "known: Set.[] not implemented"] fn set_filter_map() { run_diff("set_filter_map"); }
+#[test] fn set_filter_map() { run_diff("set_filter_map"); }
 
 // `File.path(obj)` — path-string of a path-like object. Surfaced by the
 // vendored fileutils' `rm_f` during Bridgetown's LoadersManager.
@@ -2240,7 +2240,7 @@ fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 #[test] fn class_subclasses() { run_diff("class_subclasses"); }
 
 // `Pathname#join`. Surfaced by bridgetown-core/collection.rb#relative_path.
-#[test] #[ignore = "known: Pathname#join not implemented"] fn pathname_join() { run_diff("pathname_join"); }
+#[test] fn pathname_join() { run_diff("pathname_join"); }
 #[cfg(feature = "stdlib")]
 #[test] fn pathname_realpath() { run_diff("pathname_realpath"); }
 #[cfg(feature = "stdlib")]
@@ -2254,7 +2254,7 @@ fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 
 // Kernel#Pathname() + Pathname#{expand_path, basename(suffix), fnmatch?}
 // — the vendored Pathname surface Bridgetown's Site read path uses.
-#[test] #[ignore = "known: Kernel#Pathname() not implemented"] fn pathname_read_path_methods() { run_diff("pathname_read_path_methods"); }
+#[test] fn pathname_read_path_methods() { run_diff("pathname_read_path_methods"); }
 
 // `Numeric#nonzero?` (self / nil). Surfaced by signalize's `_dispose`.
 #[test] fn numeric_nonzero() { run_diff("numeric_nonzero"); }
@@ -2286,11 +2286,11 @@ fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 #[test] fn struct_keyword_init() { run_diff("struct_keyword_init"); }
 
 // `Pathname#each_filename`. Surfaced by bridgetown's resource write path.
-#[test] #[ignore = "known: Pathname#each_filename not implemented"] fn pathname_each_filename() { run_diff("pathname_each_filename"); }
+#[test] fn pathname_each_filename() { run_diff("pathname_each_filename"); }
 
 // `File.utime(atime, mtime, *paths)` (Integer/Time args). Surfaced by
 // bridgetown's `StaticFile#write`.
-#[test] #[ignore = "known: Dir.mktmpdir not implemented"] fn file_utime() { run_diff("file_utime"); }
+#[test] fn file_utime() { run_diff("file_utime"); }
 
 // A lexically-scoped autoloaded constant wins over a same-named toplevel
 // constant. Surfaced by bridgetown's `register YAML` inside
@@ -2298,7 +2298,7 @@ fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 #[test] fn lexical_autoload_over_toplevel() { run_diff("lexical_autoload_over_toplevel"); }
 #[test] fn const_added_scoped_class() { run_diff("const_added_scoped_class"); }
 #[test] fn const_added_assignment() { run_diff("const_added_assignment"); }
-#[test] #[ignore = "known: require with non-String (to_path) arg not supported"] fn require_to_path() { run_diff("require_to_path"); }
+#[test] fn require_to_path() { run_diff("require_to_path"); }
 #[test] fn private_constant() { run_diff("private_constant"); }
 #[test] fn constants_includes_autoload() { run_diff("constants_includes_autoload"); }
 #[test] fn marshal_load_autoload() { run_diff("marshal_load_autoload"); }
