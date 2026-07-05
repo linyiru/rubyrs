@@ -154,6 +154,21 @@ impl Vm {
         if self.fiber_yield_pending.is_some() {
             return Ok(BlockStep::Value(Value::Nil));
         }
+        // Live-native-iter accounting for `__rubyrs_fiber_can_yield`
+        // (see the `native_iter_depth` field doc in vm.rs). The
+        // `_pinned` split keeps the dec on every `?` exit path.
+        self.native_iter_depth += 1;
+        let r = self.step_block_pinned(block, args, pre_frames);
+        self.native_iter_depth -= 1;
+        r
+    }
+
+    fn step_block_pinned(
+        &mut self,
+        block: ObjId,
+        args: Vec<Value>,
+        pre_frames: usize,
+    ) -> Result<BlockStep, Trap> {
         self.invoke_block(block, args)?;
         // TIER-2 wave 5 (ADR 0037): run the just-pushed block frame
         // natively when compiled. DONE → the dispatch_until below no-ops;
@@ -192,6 +207,20 @@ impl Vm {
         if self.fiber_yield_pending.is_some() {
             return Ok(BlockStep::Value(Value::Nil));
         }
+        // Live-native-iter accounting — see `step_block`.
+        self.native_iter_depth += 1;
+        let r = self.step_block2_pinned(block, a, b, pre_frames);
+        self.native_iter_depth -= 1;
+        r
+    }
+
+    fn step_block2_pinned(
+        &mut self,
+        block: ObjId,
+        a: Value,
+        b: Value,
+        pre_frames: usize,
+    ) -> Result<BlockStep, Trap> {
         let served = self.invoke_block2(block, a, b)?;
         // TIER-2 wave 5: see `step_block`; skipped on a lite-block serve.
         #[cfg(feature = "jit-native")]
@@ -229,11 +258,26 @@ impl Vm {
         }
         // B5: run a pure-int 1-param block as native code, skipping the
         // interpreter frame + dispatch entirely. Falls through on any
-        // ineligibility or deopt.
+        // ineligibility or deopt. (No native-iter accounting needed:
+        // a B5-served block dispatches no Ruby, so no park point can
+        // run inside it.)
         #[cfg(feature = "jit-native")]
         if let Some(r) = self.try_native_block1(block, &arg) {
             return Ok(BlockStep::Value(Value::Int(r)));
         }
+        // Live-native-iter accounting — see `step_block`.
+        self.native_iter_depth += 1;
+        let r = self.step_block1_pinned(block, arg, pre_frames);
+        self.native_iter_depth -= 1;
+        r
+    }
+
+    fn step_block1_pinned(
+        &mut self,
+        block: ObjId,
+        arg: Value,
+        pre_frames: usize,
+    ) -> Result<BlockStep, Trap> {
         let served = self.invoke_block1(block, arg)?;
         // TIER-2 wave 5: see `step_block`. Skipped when the invocation was
         // LITE-BLOCK-served (frameless or mid-body materialized — the

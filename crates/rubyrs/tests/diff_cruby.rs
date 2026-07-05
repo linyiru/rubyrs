@@ -2365,6 +2365,15 @@ fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 // scheduler contract.
 #[cfg(feature = "_fiber")]
 #[test] fn thread_coop_pipes() { run_diff("thread_coop_pipes"); }
+// Scheduler yield points (Thread.pass / sleep 0 / Queue#pop / Mutex)
+// INSIDE native Rust-driven iterators (each/map/times/select/...).
+// Pre-fix these silently TRUNCATED the iteration (the fiber can't
+// stash the Rust loop; step_block's fiber_yield_pending guard dropped
+// the rest); the coop park points now detect the pinned shape via
+// `__rubyrs_fiber_can_yield` and drive the scheduler inline instead.
+// Assertions are scheduling-independent so preemptive CRuby matches.
+#[cfg(feature = "_fiber")]
+#[test] fn thread_pass_native_iter() { run_diff("thread_pass_native_iter"); }
 // String#[](substr) substring-search form. Surfaced by rubocop 1.88's
 // Style/MagicCommentFormat (`text[wrong_separator]`), where the missing
 // form crashed the cop and blocked every result-cache save.

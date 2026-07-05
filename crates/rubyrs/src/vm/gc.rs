@@ -211,8 +211,17 @@ impl Vm {
         // (sandboxed) bounds can configure `max_dispatch_depth`
         // (which trips first, with ResourceExhausted instead of
         // SystemStackError).
+        // Debug floor raised 5 → 8 (2026-07): the coop scheduler's
+        // inline-park fallback (preamble/thread.rb __coop_wait_inline —
+        // a green thread parking beneath a native iterator frame drives
+        // the scheduler in place instead of Fiber-yielding) legitimately
+        // sits at ~6 levels for `[..].each { sleep 0 }` inside a green
+        // thread: main + fiber resume + iter step_block + the sleep
+        // builtin-arm's override re-entry + the poll machinery. 8 keeps
+        // a 10× margin under the ~80-push debug+cov overflow point
+        // (and the Coverage job additionally runs RUST_MIN_STACK=16M).
         #[cfg(debug_assertions)]
-        const DEFAULT_MAX_DISPATCH_DEPTH: usize = 5;
+        const DEFAULT_MAX_DISPATCH_DEPTH: usize = 8;
         #[cfg(not(debug_assertions))]
         const DEFAULT_MAX_DISPATCH_DEPTH: usize = 150;
         if self.dispatch_until_depths.len() >= DEFAULT_MAX_DISPATCH_DEPTH {

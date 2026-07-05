@@ -332,6 +332,23 @@ pub(crate) struct FiberObject {
     /// can mutate without needing `&mut HeapObj` (which
     /// the heap doesn't hand out cheaply mid-dispatch).
     pub(crate) state: RefCell<FiberState>,
+    /// `vm.native_iter_depth` recorded at the top of the most recent
+    /// `resume` — how many native (Rust-driven) iterator block
+    /// invocations were live BELOW this fiber's entry (the counter is
+    /// global across fiber switches; FiberSnapshot doesn't swap it,
+    /// and drivers below the resume point are unaffected by a yield).
+    /// While the fiber is Running, a GREATER current count means a
+    /// native driver loop started INSIDE the fiber and is still on
+    /// the Rust stack — a `Fiber.yield` there cannot stash that loop
+    /// and would truncate it (vm/iter.rs step_block's
+    /// fiber_yield_pending guard drops the remaining iterations).
+    /// Re-entrant-but-STASHABLE constructs (Op::Yield, Proc#call)
+    /// deliberately don't count: the fiber machinery yields across
+    /// those correctly (every long-standing coop park crosses them).
+    /// The `__rubyrs_fiber_can_yield` host fn compares these so the
+    /// coop scheduler's park points (preamble/thread.rb) can fall
+    /// back to inline scheduling instead of losing iterations.
+    pub(crate) resume_native_iter_depth: std::cell::Cell<u32>,
 }
 
 impl FiberObject {
@@ -345,6 +362,7 @@ impl FiberObject {
             last_value: RefCell::new(Value::Nil),
             snapshot: RefCell::new(FiberSnapshot::empty()),
             state: RefCell::new(FiberState::Created),
+            resume_native_iter_depth: std::cell::Cell::new(0),
         }
     }
 }
@@ -607,6 +625,18 @@ pub(crate) fn resume_fiber(
     }
 
     guard.vm.fiber_yield_pending = None;
+    // Record how many native-iter driver invocations are live BELOW
+    // this fiber's entry — the basis for `__rubyrs_fiber_can_yield`
+    // (see the `resume_native_iter_depth` field doc). Re-recorded on
+    // EVERY resume: the same fiber can be resumed from different
+    // contexts (main's scheduler loop, a nested inline drive, or
+    // from inside an iterator's block).
+    guard
+        .vm
+        .heap
+        .fiber(fiber_id)
+        .resume_native_iter_depth
+        .set(guard.vm.native_iter_depth);
     let dispatch_result = guard.vm.dispatch_until(pre_depth);
     let yield_val = guard.vm.fiber_yield_pending.take();
 
@@ -745,6 +775,43 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
         }
         vm.fiber_yield_pending = Some(v);
         Ok(Value::Nil)
+    });
+
+    // __rubyrs_fiber_can_yield() -> Bool
+    //
+    // True iff a `Fiber.yield` at THIS point would suspend the
+    // fiber cleanly — i.e. no native (Rust-driven) iterator loop
+    // started inside the fiber is live on the Rust stack. False
+    // when (a) no fiber is running, (b) we're inside a cext
+    // re-entry (`__rubyrs_fiber_yield` would raise FiberError
+    // there), or (c) a native iter driver (Array#each /
+    // Integer#times / map / ...) sits between the fiber's entry and
+    // here, detected as `native_iter_depth` above the value recorded
+    // at resume. In case (c) a yield "succeeds" but TRUNCATES the
+    // iteration (vm/iter.rs step_block's fiber_yield_pending guard
+    // silently drops the remaining elements). Stashable re-entries
+    // (Op::Yield, Proc#call) don't count — yields cross those
+    // correctly. The cooperative green-thread scheduler probes this
+    // at every park point (Thread.pass / Queue#pop / Mutex / sleep /
+    // join — see preamble/thread.rb __coop_yield_parked) and falls
+    // back to main-style inline scheduling when yielding would
+    // truncate.
+    rt.register_fn("__rubyrs_fiber_can_yield", move |_args| {
+        let ptr = crate::vm::current_vm_ptr();
+        if ptr.is_null() {
+            return Ok(Value::Bool(false));
+        }
+        // SAFETY: same ADR 0013 contract as the other fiber host fns.
+        let vm = unsafe { &mut *ptr };
+        let can = match vm.current_fiber_id {
+            None => false,
+            Some(fid) => {
+                vm.cext_depth == 0
+                    && vm.native_iter_depth
+                        == vm.heap.fiber(fid).resume_native_iter_depth.get()
+            }
+        };
+        Ok(Value::Bool(can))
     });
 
     // P1c.3: __rubyrs_fiber_current() -> Value

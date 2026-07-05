@@ -10,8 +10,13 @@
 #   - `$!` is process-global across thread switches (CRuby: per-thread).
 #     `$~` IS per-thread (FiberSnapshot stashes last_match).
 #   - kill lands at the target's next park point (CRuby: async).
-#   - a fiber cannot park across a NATIVE-iterator frame (times/each
-#     with a blocking call inside — use while; vm/iter.rs truncation).
+#   - a park beneath a NATIVE-iterator frame (times/each with a
+#     blocking call inside) no longer truncates: the park point
+#     detects the pinned fiber (`__rubyrs_fiber_can_yield`) and drives
+#     the scheduler INLINE (see thread_pass_native_iter.rb). Remaining
+#     limit: such a thread whose ONLY waker is the code below it on
+#     the stack (e.g. main producing into the queue it pops inside
+#     `each`) raises a descriptive ThreadError instead of suspending.
 #   - Thread.report_on_exception is NOT implemented: the exception
 #     section below makes CRuby print its "#<Thread:0x… terminated
 #     with exception (report_on_exception is true)" block on STDERR,

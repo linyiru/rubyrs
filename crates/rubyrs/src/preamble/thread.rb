@@ -589,10 +589,15 @@ end
 #   - Fibers can suspend arbitrary PURE-RUBY frame chains, but NOT
 #     across a native (Rust-driven) iterator frame — a `Fiber.yield`
 #     under `Array#each`/`Integer#times`/... truncates the iteration
-#     (see vm/iter.rs step_block). Every park point in the supervisor
-#     flow (Marshal frame read/write loops, mutex, join) is reached
-#     through pure-Ruby frames only (`loop` is pure Ruby, Op::Yield
-#     block calls suspend correctly).
+#     (see vm/iter.rs step_block). Park points therefore probe
+#     `__rubyrs_fiber_can_yield` and, when a native frame pins the
+#     fiber, fall back to MAIN-style INLINE scheduling
+#     (`__coop_wait_inline`) instead of yielding — no truncation.
+#     Every park point in the supervisor flow (Marshal frame
+#     read/write loops, mutex, join) is still reached through
+#     pure-Ruby frames only (`loop` is pure Ruby, Op::Yield block
+#     calls suspend correctly), so the fast fiber-switch path stays
+#     the norm.
 #   - fork(2): the preamble fork wrapper calls
 #     `Thread.__coop_after_fork!` in the child — only the forking
 #     thread survives (POSIX), so the child resets to a single-thread
@@ -692,10 +697,120 @@ class Thread
     # Green-thread suspension: yields to the scheduler; the resume arg
     # `:__coop_kill` means this thread was killed while parked — raise
     # so ensure blocks along the thread's stack run.
+    #
+    # When the park point sits under a NATIVE (Rust-driven) iterator
+    # frame (`[..].each { Thread.pass }`, `n.times { q.pop }`, ...),
+    # `Fiber.yield` cannot stash that frame and would silently
+    # TRUNCATE the iteration (vm/iter.rs step_block's
+    # fiber_yield_pending guard drops the remaining elements) —
+    # observed as `[0,1,2].each { |i| p i; Thread.pass }` printing
+    # only `0` inside a green thread. `__rubyrs_fiber_can_yield`
+    # detects that shape (dispatch-nesting deeper than the fiber's
+    # resume level); fall back to driving the scheduler INLINE, the
+    # same way MAIN blocks. Kill delivered while inline-parked is
+    # consumed from the resume-arg slot and raised here, mirroring
+    # the resume-value path below.
     def __coop_yield_parked
+      cur = @coop_current
+      if cur && !__rubyrs_fiber_can_yield
+        __coop_wait_inline(cur)
+        raise CoopKill, "killed" if cur.__coop_take_kill_signal
+        return nil
+      end
       r = ::Fiber.yield
       raise CoopKill, "killed" if r == :__coop_kill
       r
+    end
+
+    # Inline-park fallback for a green thread that cannot
+    # `Fiber.yield` (native Rust-driven frame between the fiber's
+    # entry and the park point — see __coop_yield_parked). Drive the
+    # scheduler ON TOP of the current stack until this thread is
+    # WOKEN — i.e. until a waker / sleeper-expiry / kill calls
+    # `__coop_make_runnable(cur)` and cur reaches the runq head.
+    # FIFO is preserved: threads queued ahead of cur run first, so
+    # `Thread.pass` under a native iterator (which requeues cur at
+    # the TAIL before parking) still gives every runnable thread its
+    # turn. Costs stack depth relative to a real switch, but is
+    # semantically exact — no truncation.
+    #
+    # A runq entry can itself be inline-parked DEEPER on this very
+    # stack (nested inline drives): its fiber is still Running, so
+    # resuming it would be a FiberError double-resume. Its wake has
+    # already fired — it proceeds when control unwinds back down —
+    # so rotate past it. When EVERY queued thread is stack-pinned
+    # that way, cur not woken, and nothing is pollable or timed,
+    # the wake can only come from a pinned thread: a genuine stacked
+    # deadlock. Raise ThreadError (loud) rather than hang.
+    def __coop_wait_inline(cur)
+      cur.__coop_inline_park_set(true)
+      loop do
+        head = @coop_runq.first
+        if head.nil?
+          # Nothing runnable: block in poll (fd parks, timed
+          # sleepers — including cur's own sleeper entry). Poll's
+          # "No live threads left. Deadlock?" fires when nothing
+          # can wake FROM HERE — but unlike main's case this is
+          # not always a program deadlock: the wake source may be
+          # the very code pinned below this stack (e.g. main
+          # producing into the queue cur pops inside `each`).
+          # Either way this thread cannot proceed — re-raise with
+          # the structural cause named. Documented Tier-1 limit;
+          # the full fix is bytecode-level iteration (see
+          # vm/iter.rs step_block).
+          begin
+            __coop_poll(nil, nil, nil)
+          rescue ThreadError
+            raise ThreadError,
+                  "cannot suspend: thread is parked beneath a native iterator frame " \
+                  "(e.g. `Array#each`/`Integer#times`) and no other thread is runnable — " \
+                  "if the waker is the code below this stack, move the blocking call " \
+                  "out of the iterator (use a `while` loop)"
+          end
+          next
+        end
+        if head.equal?(cur)
+          @coop_runq.shift
+          break
+        end
+        if head.__coop_done?
+          @coop_runq.shift
+          next
+        end
+        if head.__coop_inline_parked?
+          @coop_runq.push(@coop_runq.shift)
+          # while-scan, not include?/any? — no native-iterator
+          # frames inside the inline drive (see __coop_poll).
+          cur_queued = false
+          runnable = false
+          i = 0
+          rq = @coop_runq
+          while i < rq.length
+            cur_queued = true if rq[i].equal?(cur)
+            runnable = true unless rq[i].__coop_inline_parked?
+            i += 1
+          end
+          next if cur_queued
+          unless runnable
+            if @coop_fd_r.empty? && @coop_fd_w.empty? && @coop_sleepers.empty?
+              raise ThreadError,
+                    "deadlock: every runnable thread is parked beneath a native iterator frame"
+            end
+            __coop_poll(nil, nil, nil)
+          end
+          next
+        end
+        @coop_runq.shift
+        prev = @coop_current
+        @coop_current = head
+        begin
+          head.__coop_run
+        ensure
+          @coop_current = prev
+        end
+      end
+    ensure
+      cur.__coop_inline_park_set(false)
     end
 
     # One scheduler step: resume the next runnable green thread, or —
@@ -720,6 +835,14 @@ class Thread
       nil
     end
 
+    # `while`-loop iteration throughout (not Array#each): this runs at
+    # the bottom of every park, including a green thread's INLINE park
+    # (`__coop_wait_inline`), where the stack already carries native
+    # iterator frames. Native (Rust-driven) iterators here would both
+    # deepen the re-entrant dispatch nesting (tripping the tight
+    # debug-profile dispatch cap on shapes like `each { sleep 0 }`)
+    # and violate this file's "park machinery reaches the scheduler
+    # through pure-Ruby frames only" rule.
     def __coop_poll(main_fd, main_dir, deadline)
       rfds = @coop_fd_r.keys
       wfds = @coop_fd_w.keys
@@ -728,8 +851,12 @@ class Thread
       end
       # Earliest timed wake bounds the poll.
       min_wake = deadline
-      @coop_sleepers.each do |(wake, _t)|
+      i = 0
+      sleepers = @coop_sleepers
+      while i < sleepers.length
+        wake = sleepers[i][0]
         min_wake = wake if wake && (min_wake.nil? || wake < min_wake)
+        i += 1
       end
       timeout_ms =
         if min_wake
@@ -745,19 +872,42 @@ class Thread
         raise ThreadError, "No live threads left. Deadlock?"
       end
       ready = __rubyrs_fd_poll(rfds, wfds, timeout_ms)
-      ready[0].each do |fd|
-        ts = @coop_fd_r.delete(fd)
-        ts&.dup&.each { |t| __coop_make_runnable(t) }
+      i = 0
+      rready = ready[0]
+      while i < rready.length
+        ts = @coop_fd_r.delete(rready[i])
+        if ts
+          ts = ts.dup
+          j = 0
+          while j < ts.length
+            __coop_make_runnable(ts[j])
+            j += 1
+          end
+        end
+        i += 1
       end
-      ready[1].each do |fd|
-        ts = @coop_fd_w.delete(fd)
-        ts&.dup&.each { |t| __coop_make_runnable(t) }
+      i = 0
+      wready = ready[1]
+      while i < wready.length
+        ts = @coop_fd_w.delete(wready[i])
+        if ts
+          ts = ts.dup
+          j = 0
+          while j < ts.length
+            __coop_make_runnable(ts[j])
+            j += 1
+          end
+        end
+        i += 1
       end
       unless @coop_sleepers.empty?
         now = __coop_now
-        @coop_sleepers.dup.each do |entry|
-          wake, t = entry
-          __coop_make_runnable(t) if wake && wake <= now
+        expired = @coop_sleepers.dup
+        i = 0
+        while i < expired.length
+          wake = expired[i][0]
+          __coop_make_runnable(expired[i][1]) if wake && wake <= now
+          i += 1
         end
       end
       nil
@@ -904,6 +1054,7 @@ class Thread
     @resume_arg = nil
     @park_ref = nil
     @sleep_ref = nil
+    @inline_parked = false
     @joiners = []
     @fiber_locals = {}
     ::Thread.__coop_register(self)
@@ -912,6 +1063,32 @@ class Thread
 
   def __coop_done?
     @done
+  end
+
+  # True while this thread is blocked in `__coop_wait_inline` — its
+  # fiber is Running with live frames pinned on the physical stack,
+  # so it must NOT be fiber-resumed (double resume); it continues on
+  # its own when control unwinds back to its inline loop.
+  def __coop_inline_parked?
+    @inline_parked
+  end
+
+  def __coop_inline_park_set(v)
+    @inline_parked = v
+    nil
+  end
+
+  # Consume a kill delivered while this thread was inline-parked
+  # (`__coop_kill` on a parked thread stores `:__coop_kill` in the
+  # resume-arg slot; the fiber path delivers it as the resume VALUE,
+  # the inline path reads it here).
+  def __coop_take_kill_signal
+    if @resume_arg == :__coop_kill
+      @resume_arg = nil
+      true
+    else
+      false
+    end
   end
 
   def __coop_set_park(list_ref, sleeper_entry)
@@ -944,13 +1121,25 @@ class Thread
     nil
   end
 
+  # Invoke the thread body through Op::Yield (flat, same dispatch
+  # level) rather than `@block.call` (a re-entrant dispatch_until
+  # level). Keeps the body's park points at EXACTLY the fiber's
+  # resume-level dispatch depth, so `__rubyrs_fiber_can_yield`'s
+  # depth comparison distinguishes "plain body frames" (yieldable)
+  # from "pinned under a native iterator" (inline-drive fallback) —
+  # and the yield path no longer unwinds across a Proc#call re-entry
+  # at all.
+  def __coop_call_body
+    yield(*@args)
+  end
+
   # Scheduler-side resume of this thread (runs with @coop_current set).
   def __coop_run
     unless @started
       @started = true
       @fiber = ::Fiber.new do
         begin
-          @value = @block.call(*@args)
+          @value = __coop_call_body(&@block)
         rescue ::Thread::CoopKill
           @killed = true
         rescue ::Exception => e

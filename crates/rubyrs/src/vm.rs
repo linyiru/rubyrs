@@ -2729,6 +2729,23 @@ pub(crate) struct Vm {
     /// field.
     #[cfg(feature = "_fiber")]
     pub(crate) fiber_yield_pending: Option<Value>,
+    /// Count of LIVE native (Rust-driven) iterator block invocations
+    /// — incremented/decremented around `step_block` /
+    /// `step_block1` / `step_block2` (vm/iter.rs). Non-zero while a
+    /// block body is executing under a Rust-level driver loop
+    /// (Array#each / Integer#times / map / ...), whose loop state a
+    /// `Fiber.yield` cannot stash — yielding there truncates the
+    /// iteration (step_block's fiber_yield_pending guard). The
+    /// `__rubyrs_fiber_can_yield` host fn compares this against the
+    /// count recorded at the current fiber's resume
+    /// (`FiberObject::resume_native_iter_depth`): equal ⇒ every
+    /// re-entrant level above the fiber entry is a stashable shape
+    /// (plain frames, Op::Yield, Proc#call), greater ⇒ a native
+    /// driver is pinned and the coop scheduler must inline-drive
+    /// instead of yielding (preamble/thread.rb __coop_wait_inline).
+    /// Deliberately NOT cfg-gated: a plain u32 inc/dec keeps the
+    /// non-fiber hot path branch-free.
+    pub(crate) native_iter_depth: u32,
     /// P1c.3 (ADR 0023) — currently-running Fiber's ObjId.
     ///
     /// Set by `resume_fiber` BEFORE installing the
@@ -3417,6 +3434,7 @@ impl Vm {
             pending_block_arg: None,
             #[cfg(feature = "_fiber")]
             fiber_yield_pending: None,
+            native_iter_depth: 0,
             #[cfg(feature = "_fiber")]
             current_fiber_id: None,
             #[cfg(feature = "_fiber")]
