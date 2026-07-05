@@ -5698,10 +5698,16 @@ impl Vm {
                 // body), the HIGHEST seq is the innermost walk and
                 // resumes first; the outer one gets its own tail
                 // once the body resumes and finishes.
-                let here = {
-                    let f = self.frames.last().expect("ICE: EndEnsure no frame");
-                    (self.frames.len() - 1, f.rescues_len(), self.stack.len())
-                };
+                // Frame is present (the dispatch loop only reaches
+                // `step` with a non-empty frame stack); map_or keeps
+                // this off the panic budget — a hypothetical None
+                // yields coordinates that match no suspension, so
+                // control falls to the exception arm's own check.
+                let here = (
+                    self.frames.len().wrapping_sub(1),
+                    self.frames.last().map_or(usize::MAX, |f| f.rescues_len()),
+                    self.stack.len(),
+                );
                 let matches_here = |s: &crate::vm::SuspendCoord| {
                     (s.frame_idx, s.rescues_len, s.stack_len) == here
                 };

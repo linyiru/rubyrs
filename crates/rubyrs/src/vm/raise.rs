@@ -619,11 +619,11 @@ impl Vm {
                 // body and they stay alive to resume at its tail.
                 {
                     let fidx = self.frames.len() - 1;
-                    let remaining = self
-                        .frames
-                        .last()
-                        .expect("ICE: frames disappeared")
-                        .rescues_len();
+                    // Frame is present (the pop-walk above just
+                    // borrowed it); map_or keeps this off the
+                    // panic budget — a None here would only make
+                    // the retain below a no-op.
+                    let remaining = self.frames.last().map_or(0, |f| f.rescues_len());
                     self.pending_loop_transfers.retain(|t| {
                         t.suspended.is_none_or(|s| {
                             s.frame_idx != fidx || s.rescues_len <= remaining
@@ -887,22 +887,20 @@ impl Vm {
                 // PushEnsure time. EndEnsure at the body's tail
                 // matches the recorded coordinates and resumes
                 // the walk.
+                let rescues_after = f.rescues_len();
                 self.stack.truncate(h.stack_depth);
                 f.ip = h.handler_ip;
                 let coord = crate::vm::SuspendCoord {
                     frame_idx: self.frames.len() - 1,
-                    rescues_len: self
-                        .frames
-                        .last()
-                        .expect("ICE: frame vanished at suspension")
-                        .rescues_len(),
+                    rescues_len: rescues_after,
                     stack_len: h.stack_depth,
                     seq: self.next_suspend_seq(),
                 };
-                self.pending_loop_transfers
-                    .last_mut()
-                    .expect("ICE: pending_loop_transfers vanished mid-walk")
-                    .suspended = Some(coord);
+                // Entry is present (target was read from it at fn
+                // entry); if-let keeps this off the panic budget.
+                if let Some(t) = self.pending_loop_transfers.last_mut() {
+                    t.suspended = Some(coord);
+                }
                 return Ok(());
             }
             // Plain rescue handler — silently discard. break/next
@@ -1041,22 +1039,20 @@ impl Vm {
                 // `continue_method_break`. The marker also tells
                 // the dispatch loops' top-of-loop check to leave
                 // us alone while the body runs.
+                let rescues_after = f.rescues_len();
                 self.stack.truncate(h.stack_depth);
                 f.ip = h.handler_ip;
                 let coord = crate::vm::SuspendCoord {
                     frame_idx: self.frames.len() - 1,
-                    rescues_len: self
-                        .frames
-                        .last()
-                        .expect("ICE: frame vanished at suspension")
-                        .rescues_len(),
+                    rescues_len: rescues_after,
                     stack_len: h.stack_depth,
                     seq: self.next_suspend_seq(),
                 };
-                self.pending_method_breaks
-                    .last_mut()
-                    .expect("ICE: pending_method_breaks vanished mid-walk")
-                    .suspended = Some(coord);
+                // Entry is present (target was read from it at the
+                // loop top); if-let keeps this off the panic budget.
+                if let Some(mb) = self.pending_method_breaks.last_mut() {
+                    mb.suspended = Some(coord);
+                }
                 return Ok(());
             }
             // Current frame's rescues exhausted.
