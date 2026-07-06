@@ -52,6 +52,6 @@ static VALUE ra(VALUE self, VALUE key, VALUE setting)
 void Init_crypt()
 {
   mCrypt = rb_define_module("Crypt");
-  rb_define_singleton_method(mCrypt, "salt", crypt_salt, 3);
-  rb_define_singleton_method(mCrypt, "crypt", ra, 2);
+  rb_define_singleton_method(mCrypt, "salt", RUBY_METHOD_FUNC(crypt_salt), 3);
+  rb_define_singleton_method(mCrypt, "crypt", RUBY_METHOD_FUNC(ra), 2);
 }

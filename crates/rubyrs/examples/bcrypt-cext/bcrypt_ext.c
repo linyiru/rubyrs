@@ -118,8 +118,8 @@ void Init_bcrypt_ext(){
     mBCrypt = rb_define_module("BCrypt");
     cBCryptEngine = rb_define_class_under(mBCrypt, "Engine", rb_cObject);
 
-    rb_define_singleton_method(cBCryptEngine, "__bc_salt", bc_salt, 3);
-    rb_define_singleton_method(cBCryptEngine, "__bc_crypt", bc_crypt, 2);
+    rb_define_singleton_method(cBCryptEngine, "__bc_salt", RUBY_METHOD_FUNC(bc_salt), 3);
+    rb_define_singleton_method(cBCryptEngine, "__bc_crypt", RUBY_METHOD_FUNC(bc_crypt), 2);
 }
 
 /* vim: set noet sws=4 sw=4: */

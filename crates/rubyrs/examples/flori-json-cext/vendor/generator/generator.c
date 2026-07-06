@@ -1575,87 +1575,87 @@ void Init_generator(void)
 
     cState = rb_define_class_under(mGenerator, "State", rb_cObject);
     rb_define_alloc_func(cState, cState_s_allocate);
-    rb_define_singleton_method(cState, "from_state", cState_from_state_s, 1);
-    rb_define_method(cState, "initialize", cState_initialize, -1);
+    rb_define_singleton_method(cState, "from_state", RUBY_METHOD_FUNC(cState_from_state_s), 1);
+    rb_define_method(cState, "initialize", RUBY_METHOD_FUNC(cState_initialize), -1);
     rb_define_alias(cState, "initialize", "initialize"); // avoid method redefinition warnings
-    rb_define_private_method(cState, "_configure", cState_configure, 1);
+    rb_define_private_method(cState, "_configure", RUBY_METHOD_FUNC(cState_configure), 1);
 
-    rb_define_method(cState, "initialize_copy", cState_init_copy, 1);
-    rb_define_method(cState, "indent", cState_indent, 0);
-    rb_define_method(cState, "indent=", cState_indent_set, 1);
-    rb_define_method(cState, "space", cState_space, 0);
-    rb_define_method(cState, "space=", cState_space_set, 1);
-    rb_define_method(cState, "space_before", cState_space_before, 0);
-    rb_define_method(cState, "space_before=", cState_space_before_set, 1);
-    rb_define_method(cState, "object_nl", cState_object_nl, 0);
-    rb_define_method(cState, "object_nl=", cState_object_nl_set, 1);
-    rb_define_method(cState, "array_nl", cState_array_nl, 0);
-    rb_define_method(cState, "array_nl=", cState_array_nl_set, 1);
-    rb_define_method(cState, "max_nesting", cState_max_nesting, 0);
-    rb_define_method(cState, "max_nesting=", cState_max_nesting_set, 1);
-    rb_define_method(cState, "script_safe", cState_script_safe, 0);
-    rb_define_method(cState, "script_safe?", cState_script_safe, 0);
-    rb_define_method(cState, "script_safe=", cState_script_safe_set, 1);
+    rb_define_method(cState, "initialize_copy", RUBY_METHOD_FUNC(cState_init_copy), 1);
+    rb_define_method(cState, "indent", RUBY_METHOD_FUNC(cState_indent), 0);
+    rb_define_method(cState, "indent=", RUBY_METHOD_FUNC(cState_indent_set), 1);
+    rb_define_method(cState, "space", RUBY_METHOD_FUNC(cState_space), 0);
+    rb_define_method(cState, "space=", RUBY_METHOD_FUNC(cState_space_set), 1);
+    rb_define_method(cState, "space_before", RUBY_METHOD_FUNC(cState_space_before), 0);
+    rb_define_method(cState, "space_before=", RUBY_METHOD_FUNC(cState_space_before_set), 1);
+    rb_define_method(cState, "object_nl", RUBY_METHOD_FUNC(cState_object_nl), 0);
+    rb_define_method(cState, "object_nl=", RUBY_METHOD_FUNC(cState_object_nl_set), 1);
+    rb_define_method(cState, "array_nl", RUBY_METHOD_FUNC(cState_array_nl), 0);
+    rb_define_method(cState, "array_nl=", RUBY_METHOD_FUNC(cState_array_nl_set), 1);
+    rb_define_method(cState, "max_nesting", RUBY_METHOD_FUNC(cState_max_nesting), 0);
+    rb_define_method(cState, "max_nesting=", RUBY_METHOD_FUNC(cState_max_nesting_set), 1);
+    rb_define_method(cState, "script_safe", RUBY_METHOD_FUNC(cState_script_safe), 0);
+    rb_define_method(cState, "script_safe?", RUBY_METHOD_FUNC(cState_script_safe), 0);
+    rb_define_method(cState, "script_safe=", RUBY_METHOD_FUNC(cState_script_safe_set), 1);
     rb_define_alias(cState, "escape_slash", "script_safe");
     rb_define_alias(cState, "escape_slash?", "script_safe?");
     rb_define_alias(cState, "escape_slash=", "script_safe=");
-    rb_define_method(cState, "strict", cState_strict, 0);
-    rb_define_method(cState, "strict?", cState_strict, 0);
-    rb_define_method(cState, "strict=", cState_strict_set, 1);
-    rb_define_method(cState, "check_circular?", cState_check_circular_p, 0);
-    rb_define_method(cState, "allow_nan?", cState_allow_nan_p, 0);
-    rb_define_method(cState, "allow_nan=", cState_allow_nan_set, 1);
-    rb_define_method(cState, "ascii_only?", cState_ascii_only_p, 0);
-    rb_define_method(cState, "ascii_only=", cState_ascii_only_set, 1);
-    rb_define_method(cState, "depth", cState_depth, 0);
-    rb_define_method(cState, "depth=", cState_depth_set, 1);
-    rb_define_method(cState, "buffer_initial_length", cState_buffer_initial_length, 0);
-    rb_define_method(cState, "buffer_initial_length=", cState_buffer_initial_length_set, 1);
-    rb_define_private_method(cState, "_generate", cState_generate, 2);
+    rb_define_method(cState, "strict", RUBY_METHOD_FUNC(cState_strict), 0);
+    rb_define_method(cState, "strict?", RUBY_METHOD_FUNC(cState_strict), 0);
+    rb_define_method(cState, "strict=", RUBY_METHOD_FUNC(cState_strict_set), 1);
+    rb_define_method(cState, "check_circular?", RUBY_METHOD_FUNC(cState_check_circular_p), 0);
+    rb_define_method(cState, "allow_nan?", RUBY_METHOD_FUNC(cState_allow_nan_p), 0);
+    rb_define_method(cState, "allow_nan=", RUBY_METHOD_FUNC(cState_allow_nan_set), 1);
+    rb_define_method(cState, "ascii_only?", RUBY_METHOD_FUNC(cState_ascii_only_p), 0);
+    rb_define_method(cState, "ascii_only=", RUBY_METHOD_FUNC(cState_ascii_only_set), 1);
+    rb_define_method(cState, "depth", RUBY_METHOD_FUNC(cState_depth), 0);
+    rb_define_method(cState, "depth=", RUBY_METHOD_FUNC(cState_depth_set), 1);
+    rb_define_method(cState, "buffer_initial_length", RUBY_METHOD_FUNC(cState_buffer_initial_length), 0);
+    rb_define_method(cState, "buffer_initial_length=", RUBY_METHOD_FUNC(cState_buffer_initial_length_set), 1);
+    rb_define_private_method(cState, "_generate", RUBY_METHOD_FUNC(cState_generate), 2);
 
-    rb_define_singleton_method(cState, "generate", cState_m_generate, 3);
+    rb_define_singleton_method(cState, "generate", RUBY_METHOD_FUNC(cState_m_generate), 3);
 
     VALUE mGeneratorMethods = rb_define_module_under(mGenerator, "GeneratorMethods");
 
     VALUE mObject = rb_define_module_under(mGeneratorMethods, "Object");
-    rb_define_method(mObject, "to_json", mObject_to_json, -1);
+    rb_define_method(mObject, "to_json", RUBY_METHOD_FUNC(mObject_to_json), -1);
 
     VALUE mHash = rb_define_module_under(mGeneratorMethods, "Hash");
-    rb_define_method(mHash, "to_json", mHash_to_json, -1);
+    rb_define_method(mHash, "to_json", RUBY_METHOD_FUNC(mHash_to_json), -1);
 
     VALUE mArray = rb_define_module_under(mGeneratorMethods, "Array");
-    rb_define_method(mArray, "to_json", mArray_to_json, -1);
+    rb_define_method(mArray, "to_json", RUBY_METHOD_FUNC(mArray_to_json), -1);
 
 #ifdef RUBY_INTEGER_UNIFICATION
     VALUE mInteger = rb_define_module_under(mGeneratorMethods, "Integer");
-    rb_define_method(mInteger, "to_json", mInteger_to_json, -1);
+    rb_define_method(mInteger, "to_json", RUBY_METHOD_FUNC(mInteger_to_json), -1);
 #else
     VALUE mFixnum = rb_define_module_under(mGeneratorMethods, "Fixnum");
-    rb_define_method(mFixnum, "to_json", mFixnum_to_json, -1);
+    rb_define_method(mFixnum, "to_json", RUBY_METHOD_FUNC(mFixnum_to_json), -1);
 
     VALUE mBignum = rb_define_module_under(mGeneratorMethods, "Bignum");
-    rb_define_method(mBignum, "to_json", mBignum_to_json, -1);
+    rb_define_method(mBignum, "to_json", RUBY_METHOD_FUNC(mBignum_to_json), -1);
 #endif
     VALUE mFloat = rb_define_module_under(mGeneratorMethods, "Float");
-    rb_define_method(mFloat, "to_json", mFloat_to_json, -1);
+    rb_define_method(mFloat, "to_json", RUBY_METHOD_FUNC(mFloat_to_json), -1);
 
     VALUE mString = rb_define_module_under(mGeneratorMethods, "String");
-    rb_define_singleton_method(mString, "included", mString_included_s, 1);
-    rb_define_method(mString, "to_json", mString_to_json, -1);
-    rb_define_method(mString, "to_json_raw", mString_to_json_raw, -1);
-    rb_define_method(mString, "to_json_raw_object", mString_to_json_raw_object, 0);
+    rb_define_singleton_method(mString, "included", RUBY_METHOD_FUNC(mString_included_s), 1);
+    rb_define_method(mString, "to_json", RUBY_METHOD_FUNC(mString_to_json), -1);
+    rb_define_method(mString, "to_json_raw", RUBY_METHOD_FUNC(mString_to_json_raw), -1);
+    rb_define_method(mString, "to_json_raw_object", RUBY_METHOD_FUNC(mString_to_json_raw_object), 0);
 
     mString_Extend = rb_define_module_under(mString, "Extend");
-    rb_define_method(mString_Extend, "json_create", mString_Extend_json_create, 1);
+    rb_define_method(mString_Extend, "json_create", RUBY_METHOD_FUNC(mString_Extend_json_create), 1);
 
     VALUE mTrueClass = rb_define_module_under(mGeneratorMethods, "TrueClass");
-    rb_define_method(mTrueClass, "to_json", mTrueClass_to_json, -1);
+    rb_define_method(mTrueClass, "to_json", RUBY_METHOD_FUNC(mTrueClass_to_json), -1);
 
     VALUE mFalseClass = rb_define_module_under(mGeneratorMethods, "FalseClass");
-    rb_define_method(mFalseClass, "to_json", mFalseClass_to_json, -1);
+    rb_define_method(mFalseClass, "to_json", RUBY_METHOD_FUNC(mFalseClass_to_json), -1);
 
     VALUE mNilClass = rb_define_module_under(mGeneratorMethods, "NilClass");
-    rb_define_method(mNilClass, "to_json", mNilClass_to_json, -1);
+    rb_define_method(mNilClass, "to_json", RUBY_METHOD_FUNC(mNilClass_to_json), -1);
 
     rb_global_variable(&Encoding_UTF_8);
     Encoding_UTF_8 = rb_const_get(rb_path2class("Encoding"), rb_intern("UTF_8"));

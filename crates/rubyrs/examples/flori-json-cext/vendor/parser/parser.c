@@ -3180,11 +3180,11 @@ void Init_parser(void)
     eNestingError = rb_path2class("JSON::NestingError");
     rb_gc_register_mark_object(eNestingError);
     rb_define_alloc_func(cParser, cJSON_parser_s_allocate);
-    rb_define_method(cParser, "initialize", cParser_initialize, -1);
-    rb_define_method(cParser, "parse", cParser_parse, 0);
-    rb_define_method(cParser, "source", cParser_source, 0);
+    rb_define_method(cParser, "initialize", RUBY_METHOD_FUNC(cParser_initialize), -1);
+    rb_define_method(cParser, "parse", RUBY_METHOD_FUNC(cParser_parse), 0);
+    rb_define_method(cParser, "source", RUBY_METHOD_FUNC(cParser_source), 0);
 
-    rb_define_singleton_method(cParser, "parse", cParser_m_parse, 2);
+    rb_define_singleton_method(cParser, "parse", RUBY_METHOD_FUNC(cParser_m_parse), 2);
 
     CNaN = rb_const_get(mJSON, rb_intern("NaN"));
     rb_gc_register_mark_object(CNaN);
