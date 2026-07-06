@@ -67,6 +67,23 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   resurrected it; 27 shapes added to `ensure_walk_break_return.rb`
   (sections M/N: the full next×exception-source matrix plus the errinfo
   restore family).
+- **Positioned regexp matches keep the full subject as anchor context** —
+  `^` / `\A` / `\b` in `match`/`match?`-with-`pos` now anchor against real
+  line/string starts instead of the search position (the old tail-slice made
+  `/^l/.match("hello", 2)` a hit; CRuby: nil). (`s8_arg_shapes.rb`)
+- **`Regexp#match(str, pos)`** — the two-argument form (plus Symbol subjects
+  with pos, the block form, and CRuby's `1..2` arity error) now works;
+  previously NoMethodError. (`s8_arg_shapes.rb`)
+- **`String#[]=(regexp[, backref])`** — the subpat-write family now splices
+  the matched span (Int/Float/String/Symbol/negative backrefs, CRuby's
+  match-first error ordering, `$~` update); previously NoMethodError.
+  (`s8_arg_shapes.rb`)
+- **Argument-coercion shapes for `String#byteslice`, `String#[](re, idx)`,
+  `Kernel#exit`, and `Encoding.find`** — CRuby's num2long/to_str error
+  contracts (nil → "from nil to integer", Float → `to_int` truncation so
+  `exit(2.5)` exits with status 2, negative capture indices count from the
+  last group, `Encoding.find(:utf8)` → TypeError instead of ArgumentError).
+  (`s8_arg_shapes.rb`)
 
 ### Internal
 
