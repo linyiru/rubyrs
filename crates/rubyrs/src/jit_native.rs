@@ -410,12 +410,15 @@ fn local_is_array(code: &[Op], slot: u16, from_ip: usize, syms: &JitSyms) -> boo
             {
                 return true;
             }
-            Op::LoadLocal(s) if *s == slot => {
-                if matches!(code.get(j + 1), Some(Op::LoadLocal(_) | Op::LoadConstInt(_) | Op::LoadSymbol(_)))
-                    && matches!(code.get(j + 2), Some(Op::Call(m, 1, _)) if *m == syms.bracket)
-                {
-                    return true;
-                }
+            // Guard rides on the arm (clippy collapsible_match; the
+            // non-`[]` shapes fall through to the no-op `_` arm, same
+            // as the old inner-`if` fallout).
+            Op::LoadLocal(s)
+                if *s == slot
+                    && matches!(code.get(j + 1), Some(Op::LoadLocal(_) | Op::LoadConstInt(_) | Op::LoadSymbol(_)))
+                    && matches!(code.get(j + 2), Some(Op::Call(m, 1, _)) if *m == syms.bracket) =>
+            {
+                return true;
             }
             Op::StoreLocal(s) | Op::IncLocal(s) | Op::IncLocalNoPush(s) if *s == slot => {
                 return false;

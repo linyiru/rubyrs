@@ -2674,10 +2674,13 @@ pub(crate) fn t2_admit(proto: &Proto) -> Result<(), String> {
             | Op::Break => return Err(format!("op {:?} at {}", op, i)),
             // Structural sanity for the native control flow: every branch
             // target must land on a real op.
-            Op::Jump(off) | Op::BreakLoop(off) | Op::NextLoop(off) => {
-                if jump_target(i, *off) >= n {
-                    return Err(format!("jump target out of range at {}", i));
-                }
+            // Guard on the arm (clippy collapsible_match) — an
+            // in-range target falls through to `_`, matching the
+            // conditional-jump arm's shape below.
+            Op::Jump(off) | Op::BreakLoop(off) | Op::NextLoop(off)
+                if jump_target(i, *off) >= n =>
+            {
+                return Err(format!("jump target out of range at {}", i));
             }
             Op::JumpIfFalse(off) | Op::JumpIfArgGiven(_, off) | Op::JumpIfKwArgGiven(_, off)
                 if jump_target(i, *off) >= n || i + 1 >= n =>

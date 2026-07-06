@@ -2103,6 +2103,15 @@ impl Vm {
                 // `Owner::NAME` via the owner's effective name — for
                 // an eigenclass shell that is `#<Class:X>::NAME`,
                 // exactly CRuby's message spelling. (S3 item b.)
+                // The lint's guard-suggestion is UNSOUND here: moving
+                // `!private_consts.is_empty()` onto the arm would make
+                // a Class base with NO registered private constants
+                // fall through to the `Some(other)` arm below and
+                // raise "X is not a class/module" for every plain
+                // `base::CONST`. The inner `if` is a deliberate
+                // fast-path (skip the resolve+format when nothing was
+                // ever marked private), not a collapsible pattern.
+                #[allow(clippy::collapsible_match)]
                 match self.stack.last() {
                     Some(Value::Class(cls)) => {
                         if !self.private_consts.is_empty() {
