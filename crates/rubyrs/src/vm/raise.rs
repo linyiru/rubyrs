@@ -637,6 +637,42 @@ impl Vm {
                     self.sync_control_signals();
                 }
                 self.stack.truncate(h.stack_depth);
+                // `$!` cancellation-restore snapshot (ticket S2): an
+                // ensure body entered by an exception may exit via
+                // `break`/`next`/`return` instead of its EndEnsure
+                // re-raise — CRuby then restores `$!` to the
+                // ENCLOSING dynamic scope's errinfo (verified 3.4.8
+                // prism + parse.y). That value is the outermost begin
+                // baseline the truncate below is about to drop (the
+                // snapshot from before this exception crossed the
+                // region), or the current `$!` when nothing is
+                // truncated (a rescue-less begin/ensure emits no
+                // EnterBegin, so the region has no baseline of its
+                // own). It is parked as a SYNTHETIC baseline for the
+                // handler-body extent right after the truncate: the
+                // loop-transfer landing pops it (loop-region test in
+                // `continue_loop_transfer`), Op::Return /
+                // `continue_method_break` read it via their
+                // outermost-baseline restore, and the normal
+                // EndEnsure re-raise lets the NEXT handler entry's
+                // truncate (or the frame pop) discard it.
+                let ensure_bang_restore = if h.is_ensure {
+                    Some(
+                        self.frames
+                            .last()
+                            .and_then(|f| f.aux.as_ref())
+                            .and_then(|a| a.begin_rescue_depths.get(h.begin_depth_at_push))
+                            .map(|b| b.saved_dollar_bang.clone())
+                            .unwrap_or_else(|| {
+                                self.globals
+                                    .get(&self.sym_bang)
+                                    .cloned()
+                                    .unwrap_or(crate::value::Value::Nil)
+                            }),
+                    )
+                } else {
+                    None
+                };
                 let f = self.frames.last_mut().expect("ICE: frames disappeared");
                 f.ip = h.handler_ip;
                 // Truncate `loop_rescue_depths` to the snapshot taken
@@ -672,6 +708,24 @@ impl Vm {
                 f.aux_mut()
                     .begin_rescue_depths
                     .truncate(h.begin_depth_at_push);
+                // Park the S2 synthetic baseline (see the snapshot
+                // above). loop_rescue_depths was just truncated to
+                // `h.loop_depth_at_push`, so the recorded loop-region
+                // coordinate is the handler's own — a `break`/`next`
+                // whose target loop lies OUTSIDE the ensure body sees
+                // `loop_rescue_depths_len > target_loop_depth` and
+                // pops it at the landing. GC rooting is free: gc.rs
+                // walks `begin_rescue_depths[].saved_dollar_bang`.
+                if let Some(saved) = ensure_bang_restore {
+                    let rescues_len = f.rescues_len();
+                    let aux = f.aux_mut();
+                    aux.begin_rescue_depths.push(crate::vm::BeginBaseline {
+                        rescues_len,
+                        loop_rescue_depths_len: aux.loop_rescue_depths.len(),
+                        loop_stack_depths_len: aux.loop_stack_depths.len(),
+                        saved_dollar_bang: saved,
+                    });
+                }
                 if h.is_ensure {
                     // ensure handler: push the exception onto the operand
                     // stack; the handler's compiled code ends in `Op::Raise`
@@ -947,7 +1001,37 @@ impl Vm {
         f.aux_mut()
             .loop_stack_depths
             .truncate(target_loop_depth + 1);
+        // `$!` cancellation restore (ticket S2): every begin baseline
+        // opened INSIDE the target loop's body is being abandoned by
+        // this transfer — the ensure-entry SYNTHETIC baseline of a
+        // cancelled exception unwind and the real baselines of rescue
+        // bodies the transfer jumps out of alike. CRuby reverts
+        // errinfo to the enclosing dynamic scope's value here
+        // (verified 3.4.8 prism + parse.y: `next` in an
+        // exception-entered ensure leaves `$!` as the OUTER handled
+        // exception / nil — never the cancelled one); the OUTERMOST
+        // popped baseline holds exactly that snapshot. Membership
+        // test = loop-region, like the supersede sweep: a baseline
+        // pushed inside the target loop recorded
+        // `loop_rescue_depths_len > target_loop_depth` (the target's
+        // own EnterLoop entry sits at index `target_loop_depth`);
+        // baselines of begins ENCLOSING the loop stay put. This also
+        // stops those escaped baselines leaking as orphans.
+        let mut bang_restore = None;
+        {
+            let aux = f.aux_mut();
+            while aux
+                .begin_rescue_depths
+                .last()
+                .is_some_and(|b| b.loop_rescue_depths_len > target_loop_depth)
+            {
+                bang_restore = aux.begin_rescue_depths.pop().map(|b| b.saved_dollar_bang);
+            }
+        }
         f.ip = target_ip;
+        if let Some(v) = bang_restore {
+            self.globals.insert(self.sym_bang, v);
+        }
         if let LoopTransferKind::Break { value } = transfer.kind {
             // Push the break value so the loop's join sees it as
             // the loop expression's result. `next` has no value to
@@ -1128,6 +1212,20 @@ impl Vm {
                 } else {
                     self.stack.push(mb.value);
                 }
+                // `$!` restore across the popped frame (ticket S2) —
+                // same contract as Op::Return's outermost-baseline
+                // restore: the walk abandons every open begin region
+                // of this frame (including the ensure-entry synthetic
+                // baseline of a cancelled exception unwind), so
+                // errinfo reverts to the frame-entry snapshot.
+                if let Some(saved) = popped
+                    .aux
+                    .as_ref()
+                    .and_then(|a| a.begin_rescue_depths.first())
+                    .map(|b| b.saved_dollar_bang.clone())
+                {
+                    self.globals.insert(self.sym_bang, saved);
+                }
                 self.release_frame_locals(popped.locals);
                 self.recycle_frame_aux(popped.aux);
                 return Ok(());
@@ -1160,6 +1258,19 @@ impl Vm {
                 self.class_stack.pop();
                 self.class_visibility_stack.pop();
                 self.module_function_active_stack.pop();
+            }
+            // `$!` restore for the intermediate pop (ticket S2) —
+            // see the landing pop above. Pops run innermost-frame-
+            // first, so the LAST restore applied is the outermost
+            // popped frame's frame-entry snapshot — the enclosing
+            // scope's errinfo the walk lands in.
+            if let Some(saved) = popped
+                .aux
+                .as_ref()
+                .and_then(|a| a.begin_rescue_depths.first())
+                .map(|b| b.saved_dollar_bang.clone())
+            {
+                self.globals.insert(self.sym_bang, saved);
             }
             self.release_frame_locals(popped.locals);
             self.recycle_frame_aux(popped.aux);

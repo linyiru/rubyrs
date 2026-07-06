@@ -60,6 +60,13 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   `ensure_walk_break_return.rb`, leaving only the walk-survives-block-`next`
   family (D3/K1/K4, where modern CRuby hangs forever) pinned in
   `tests/embed/ensure_walk_divergences.rs`.
+- **`$!` now reverts to the enclosing scope's errinfo when a
+  `break`/`next`/`return` cancels an in-flight exception** — a control
+  transfer out of an exception-entered ensure body (or out of a rescue body)
+  previously left the cancelled exception in `$!`, so a later bare `raise`
+  resurrected it; 27 shapes added to `ensure_walk_break_return.rb`
+  (sections M/N: the full next×exception-source matrix plus the errinfo
+  restore family).
 
 ### Internal
 

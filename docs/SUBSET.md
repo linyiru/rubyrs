@@ -793,6 +793,21 @@ structural default and exactly what CRuby ≥ 3.4.2 / parse.y / 3.3.x
 do. All 40 such shapes are byte-identical against the modern oracle
 in `tests/diff/ensure_walk_break_return.rb`.
 
+`$!` follows the cancellation (ticket S2): when a `break`/`next`/
+`return` cancels an in-flight exception (or leaves a rescue body),
+errinfo reverts to the **enclosing dynamic scope's** value — the
+outer handled exception, or nil — never the cancelled one and never
+a hard clear (verified on 3.4.8 prism + parse.y). Mechanically: the
+exception entry into an ensure handler parks a synthetic
+begin-baseline carrying the enclosing snapshot; the loop-transfer
+landing pops every baseline opened inside the target loop and
+restores from the outermost popped one, and the method-break walk
+restores per popped frame like `Op::Return`. Sections M (the
+next×exception-source matrix: raise in body/callee, host-raised
+traps, throw, with-value, nested, bytecode yielder) and N (the
+errinfo family) of the same fixture cover it — 26 more shapes, all
+byte-identical to the ≥ 3.4.2 oracle.
+
 Historical note (it shaped this machinery): the original 39-shape
 matrix was probed against CRuby 3.4.1 — inside **CRuby
 3.4.0/3.4.1's Prism-compiler bug window in exactly this corner**. A

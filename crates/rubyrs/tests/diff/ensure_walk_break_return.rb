@@ -15,11 +15,11 @@
 # to the METHOD (never reaching the loop join), duplicated outer
 # ensure bodies (E1), and re-raised through `next` (K2/K3). Running
 # this fixture against a 3.4.0/3.4.1-prism oracle diverges on
-# B1/B2/B3/B5, C1, C2, E1, E2, E3, H1, I1, I2, J4, K2, K3 — that is
-# an ORACLE bug, not a rubyrs regression (rubyrs mimicked the window
-# via WalkOrigin::LocalMethodReturn until ticket S1 dropped it and
-# re-mainlined those shapes; see SUBSET.md "break/next inside a
-# suspended ensure walk").
+# B1/B2/B3/B5, C1, C2, E1, E2, E3, H1, I1, I2, J4, K2, K3 and ALL of
+# sections M and N — that is an ORACLE bug, not a rubyrs regression
+# (rubyrs mimicked the window via WalkOrigin::LocalMethodReturn until
+# ticket S1 dropped it and re-mainlined those shapes; see SUBSET.md
+# "break/next inside a suspended ensure walk").
 #
 # Three shapes stay OUT of this fixture as pinned goldens in
 # tests/embed/ensure_walk_divergences.rs — the walk-survives-block-
@@ -731,5 +731,462 @@ def l2
   :after
 end
 p l2
+
+# ---- M. next x exception-source matrix (ticket S2 probe) ----
+# `next` in an ensure entered by every exception source: raise in a
+# callee, host-raised traps (ZeroDivisionError / NoMethodError),
+# throw, with-value variants, nested ensures, and a Ruby yielding
+# method. Verified identical on 3.4.8 prism AND parse.y; the
+# 3.4.0/3.4.1-prism bug window re-raised through `next` instead.
+
+# M1. raise in CALLEE, next in block ensure
+def m1_boom; raise "m1"; end
+def m1
+  acc = []
+  [1, 2].each do |x|
+    begin
+      m1_boom if x == 1
+    ensure
+      acc << x
+      next
+    end
+  end
+  "acc=#{acc.inspect}"
+end
+begin; puts "M1 => #{m1.inspect}"; rescue => e; puts "M1 raised #{e.message}"; end
+
+# M3. host-raised trap (ZeroDivisionError), next in while ensure
+def m3
+  i = 0
+  while i < 2
+    i += 1
+    begin
+      1 / 0 if i == 1
+    ensure
+      next
+    end
+  end
+  "i=#{i}"
+end
+begin; puts "M3 => #{m3.inspect}"; rescue => e; puts "M3 raised #{e.class}"; end
+
+# M4. host-raised trap (NoMethodError), next in block ensure
+def m4
+  acc = []
+  [1, 2].each do |x|
+    begin
+      nil.this_method_does_not_exist if x == 1
+    ensure
+      acc << x
+      next
+    end
+  end
+  "acc=#{acc.inspect}"
+end
+begin; puts "M4 => #{m4.inspect}"; rescue => e; puts "M4 raised #{e.class}"; end
+
+# M5. throw crossing the while ensure; next supersedes the throw too
+def m5
+  i = 0
+  r = catch(:tag) do
+    while i < 2
+      i += 1
+      begin
+        throw :tag, :thrown if i == 1
+      ensure
+        next
+      end
+    end
+    :fell
+  end
+  "r=#{r.inspect} i=#{i}"
+end
+begin; puts "M5 => #{m5.inspect}"; rescue => e; puts "M5 raised #{e.class}: #{e.message}"; end
+
+# M6. throw crossing a block ensure with next
+def m6
+  acc = []
+  r = catch(:tag) do
+    [1, 2].each do |x|
+      begin
+        throw :tag, :thrown if x == 1
+      ensure
+        acc << x
+        next
+      end
+    end
+    :fell
+  end
+  "r=#{r.inspect} acc=#{acc.inspect}"
+end
+begin; puts "M6 => #{m6.inspect}"; rescue => e; puts "M6 raised #{e.class}: #{e.message}"; end
+
+# M7. next WITH VALUE in block ensure during unwind (map observes it)
+def m7
+  r = [1, 2].map do |x|
+    begin
+      raise "m7" if x == 1
+      :normal
+    ensure
+      next :override
+    end
+  end
+  "r=#{r.inspect}"
+end
+begin; puts "M7 => #{m7.inspect}"; rescue => e; puts "M7 raised #{e.message}"; end
+
+# M8. next WITH VALUE in while ensure during unwind
+def m8
+  i = 0
+  while i < 2
+    i += 1
+    begin
+      raise "m8" if i == 1
+    ensure
+      next :v
+    end
+  end
+  "i=#{i}"
+end
+begin; puts "M8 => #{m8.inspect}"; rescue => e; puts "M8 raised #{e.message}"; end
+
+# M9. NESTED ensure: raise enters both; INNER does next
+def m9
+  i = 0
+  while i < 2
+    i += 1
+    begin
+      begin
+        raise "m9" if i == 1
+      ensure
+        puts "M9 inner ensure i=#{i}"
+        next
+      end
+    ensure
+      puts "M9 outer ensure i=#{i}"
+    end
+  end
+  "i=#{i}"
+end
+begin; puts "M9 => #{m9.inspect}"; rescue => e; puts "M9 raised #{e.message}"; end
+
+# M10. NESTED ensure: raise enters both; OUTER does next
+def m10
+  i = 0
+  while i < 2
+    i += 1
+    begin
+      begin
+        raise "m10" if i == 1
+      ensure
+        puts "M10 inner ensure i=#{i}"
+      end
+    ensure
+      next
+    end
+  end
+  "i=#{i}"
+end
+begin; puts "M10 => #{m10.inspect}"; rescue => e; puts "M10 raised #{e.message}"; end
+
+# M11. unwind through a Ruby YIELDING method; next in the block ensure
+def m11_yielder
+  yield 1
+  yield 2
+  :yielder_done
+end
+def m11
+  acc = []
+  m11_yielder do |x|
+    begin
+      raise "m11" if x == 1
+    ensure
+      acc << x
+      next
+    end
+  end
+  "acc=#{acc.inspect}"
+end
+begin; puts "M11 => #{m11.inspect}"; rescue => e; puts "M11 raised #{e.message}"; end
+
+# M12. raise in the ensure region BEFORE the next (next never runs)
+def m12
+  i = 0
+  while i < 2
+    i += 1
+    begin
+      raise "orig" if i == 1
+    ensure
+      raise "from-ensure" if i == 1
+      next
+    end
+  end
+  "i=#{i}"
+end
+begin; puts "M12 => #{m12.inspect}"; rescue => e; puts "M12 raised #{e.message}"; end
+
+# M13. rescue-then-ensure: exception handled INSIDE; ensure next is
+#      a normal-entry next every iteration
+def m13
+  i = 0
+  acc = []
+  while i < 3
+    i += 1
+    begin
+      raise "m13" if i == 1
+      acc << :ok
+    rescue
+      acc << :rescued
+    ensure
+      next
+    end
+  end
+  "i=#{i} acc=#{acc.inspect}"
+end
+begin; puts "M13 => #{m13.inspect}"; rescue => e; puts "M13 raised #{e.message}"; end
+
+# ---- N. $! (errinfo) restore across cancelled unwinds (ticket S2) ----
+# CRuby restores `$!` to the ENCLOSING dynamic scope's errinfo when a
+# `break`/`next`/`return` cancels an in-flight exception (or leaves a
+# rescue body) — never leaving the cancelled exception behind, and
+# never hard-clearing an outer handled exception. rubyrs: the
+# ensure-entry SYNTHETIC begin baseline + the loop-transfer landing /
+# method-break-walk restores in vm/raise.rs.
+
+# N1. next-cancel in a plain method: $! reverts to nil
+def n1
+  i = 0
+  while i < 1
+    i += 1
+    begin
+      raise "n1"
+    ensure
+      next
+    end
+  end
+  $!
+end
+puts "N1 => #{n1.inspect}"
+
+# N2. next-cancel INSIDE an outer rescue body: $! reverts to the
+#     OUTER handled exception, and the outer region still clears it
+begin
+  raise "N2-outer"
+rescue
+  i = 0
+  while i < 1
+    i += 1
+    begin
+      raise "N2-inner"
+    ensure
+      next
+    end
+  end
+  puts "N2 in-rescue $!=#{$!.inspect}"
+end
+puts "N2 after $!=#{$!.inspect}"
+
+# N3. break variant of N2
+begin
+  raise "N3-outer"
+rescue
+  while true
+    begin
+      raise "N3-inner"
+    ensure
+      break
+    end
+  end
+  puts "N3 in-rescue $!=#{$!.inspect}"
+end
+
+# N4. multi-hop: exception crosses the INNER ensure (re-raise), the
+#     OUTER ensure's next cancels it — $! reverts past BOTH hops
+i = 0
+while i < 1
+  i += 1
+  begin
+    begin
+      raise "N4"
+    ensure
+      puts "N4 inner ensure $!=#{$!.inspect}"
+    end
+  ensure
+    next
+  end
+end
+puts "N4 after $!=#{$!.inspect}"
+
+# N5. begin with a NON-matching rescue clause + ensure-next
+begin
+  raise "N5-outer"
+rescue
+  i = 0
+  while i < 1
+    i += 1
+    begin
+      raise "N5-inner"
+    rescue TypeError
+      puts "N5 wrong-rescue"
+    ensure
+      next
+    end
+  end
+  puts "N5 in-rescue $!=#{$!.inspect}"
+end
+
+# N6. return-cancel: method ensure returns during unwind; the
+#     caller's $! is the outer handled exception
+def n6
+  begin
+    raise "N6-inner"
+  ensure
+    return :ret
+  end
+end
+begin
+  raise "N6-outer"
+rescue
+  n6
+  puts "N6 $!=#{$!.inspect}"
+end
+
+# N7. non-local-return-cancel from a BLOCK's exception-entered ensure
+def n7
+  [1].each do
+    begin
+      raise "N7-inner"
+    ensure
+      return :ret
+    end
+  end
+end
+begin
+  raise "N7-outer"
+rescue
+  n7
+  puts "N7 $!=#{$!.inspect}"
+end
+
+# N8. next out of a RESCUE BODY (exception handled, not cancelled):
+#     leaving the begin region still reverts $!
+begin
+  raise "N8-outer"
+rescue
+  i = 0
+  while i < 1
+    i += 1
+    begin
+      raise "N8-inner"
+    rescue
+      puts "N8 in-inner-rescue $!=#{$!.inspect}"
+      next
+    end
+  end
+  puts "N8 after-next $!=#{$!.inspect}"
+end
+
+# N9. break out of a rescue body
+begin
+  raise "N9-outer"
+rescue
+  while true
+    begin
+      raise "N9-inner"
+    rescue
+      break
+    end
+  end
+  puts "N9 after-break $!=#{$!.inspect}"
+end
+
+# N10. contained next INSIDE an outer exception-entered ensure body:
+#      cancelling the inner exception reverts $! to the OUTER
+#      in-flight one, whose re-raise then proceeds
+begin
+  begin
+    raise "N10-outer"
+  ensure
+    i = 0
+    while i < 1
+      i += 1
+      begin
+        raise "N10-inner"
+      ensure
+        next
+      end
+    end
+    puts "N10 in-outer-ensure $!=#{$!.inspect}"
+  end
+rescue => e
+  puts "N10 rescued #{e.message}"
+end
+
+# N11. block-next cancel: iteration 2 sees the restored outer $!
+begin
+  raise "N11-outer"
+rescue
+  [1, 2].each do |x|
+    puts "N11 iter#{x} $!=#{$!.inspect}"
+    begin
+      raise "N11-inner" if x == 1
+    ensure
+      next
+    end
+  end
+  puts "N11 after $!=#{$!.inspect}"
+end
+
+# N12. block-break cancel through a bytecode yielder
+def n12_yielder
+  yield
+  yield
+  :done
+end
+begin
+  raise "N12-outer"
+rescue
+  r = n12_yielder do
+    begin
+      raise "N12-inner"
+    ensure
+      break :brk
+    end
+  end
+  puts "N12 r=#{r.inspect} $!=#{$!.inspect}"
+end
+
+# N13. throw-cancel: next supersedes a throw crossing the ensure;
+#      $! reverts (the throw carrier never leaks into errinfo)
+i = 0
+r = catch(:n13) do
+  while i < 2
+    i += 1
+    begin
+      raise "N13" if i == 1
+    ensure
+      next
+    end
+  end
+  :fell
+end
+puts "N13 r=#{r.inspect} $!=#{$!.inspect}"
+
+# N14. normal-path ensure next keeps the enclosing errinfo (no
+#      cancellation happened — nothing to restore)
+begin
+  raise "N14-outer"
+rescue
+  i = 0
+  while i < 1
+    i += 1
+    begin
+      :ok
+    ensure
+      next
+    end
+  end
+  puts "N14 after $!=#{$!.inspect}"
+end
 
 puts "ensure_walk_break_return done"
