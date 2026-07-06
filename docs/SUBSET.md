@@ -778,56 +778,77 @@ puts $ensure_count            # CRuby: 1   rubyrs: 0
   blocking a future fix from landing cleanly. The bypass
   shape is reproducible via the snippet above.
 
-### `break`/`next` inside a suspended ensure walk — matched surface + four pinned divergences
+### `break`/`next` inside a suspended ensure walk — and the CRuby 3.4.0/3.4.1 prism bug window
 
 The b4/b4c family: an ensure body is running because a method-return
 walk (or block-break walk, or exception unwind) is suspended in it,
-and the body itself performs a `break`/`next`. CRuby's behaviour here
-is an artifact of HOW it compiles the crossing (probed shape-by-shape
-against CRuby 3.4.1; the full 39-shape matrix lives in
-`tests/diff/ensure_walk_break_return.rb` and runs byte-identical):
+and the body itself performs a `break`/`next`. The original 39-shape
+matrix was probed shape-by-shape against CRuby 3.4.1 — and that
+turned out to matter: **CRuby 3.4.0/3.4.1's Prism compiler had a bug
+window in exactly this corner**. A bogus `end_label` in EnsureNode
+compilation changed how `break`/`next` inside a crossed ensure body
+behave; fixed upstream by ruby/ruby commit `31905d9e` ("Allow
+escaping from ensures through next", PR #12513,
+[Bug #21001](https://bugs.ruby-lang.org/issues/21001)), backported
+into **3.4.2**. Our own diff matrix caught the flip when CI's
+floating "3.4" oracle moved past 3.4.1: one shape (K4 below) HANGS
+FOREVER under the restored semantics, which hung the oracle and
+timed out the suite. Re-verified locally (2026-07) on 3.3.10, 3.4.1
+prism + parse.y, 3.4.5, 3.4.8 prism + parse.y: 3.4.1-prism is the
+lone outlier; parse.y/3.3.x always had the post-fix behaviour.
 
-- A syntactically-**local** `return` in a `def` body inlines its
-  ensure bodies at the return site; a `while`/`until` `break` inside
-  such a body whose loop lies OUTSIDE it makes the **method return
-  the break value** (`def m; while true; begin return :ret; ensure;
-  break :brk; end; end; :after; end` → `:brk`, the loop join is never
-  reached). rubyrs models this with `WalkOrigin::LocalMethodReturn` +
-  `SuspendCoord::loop_depth` (see `vm.rs`) — the break replaces the
-  suspended walk's value and the walk resumes, running remaining
-  ensures exactly once.
-- Every **other** origin (non-local return from a block/proc — even
-  at its own target frame, lambda return, `define_method` return,
-  block-break walks, exception unwind) runs the ensure via the
-  catch-table path, where the break lands at the **loop join and
-  cancels the walk** (an exception being unwound is swallowed).
-  That is rubyrs's structural default.
-- `next` supersedes a pending return in `while` loops, but a
-  suspended non-local-return walk **survives** a block-`next`
-  (`[..].each { begin return v ensure next end }` returns `v`), and
-  a block's own in-flight `break` value survives a `next`
-  abandonment (`[..].each { begin break :b ensure next end }` → `:b`).
-  Modeled by the abandoned-walk replay in `Op::Return`.
+What that means for the test surface:
 
-Four adjacent shapes deliberately diverge (pinned with rubyrs's
-output in `tests/embed/ensure_walk_divergences.rs`, each citing the
-CRuby output):
-
-1. **Double-ensure double-run**: with TWO nested ensures around the
-   local return and the `break` in the inner one, CRuby executes the
-   OUTER ensure body **twice** (inline-copy duplication — the break's
-   own crossing copy plus the return's). rubyrs runs each body once;
-   the return value (`:brk`) matches.
-2. **Toplevel `return` + ensure `break`**: CRuby ends the script
-   (main gets the inline artifact); rubyrs's toplevel `return` is the
-   pre-existing non-local-return gap, so the break lands at the join
-   and the script continues.
-3. **`next` in a `while` ensure during exception unwind**: CRuby
-   re-raises (`next`, unlike `break`, does not swallow the
-   exception); rubyrs's `next` supersedes the unwind and the loop
-   continues.
-4. **`next` in a block ensure during exception unwind**: same
-   asymmetry, block-iterator shape.
+- `tests/diff/ensure_walk_break_return.rb` keeps the **25 shapes
+  whose output is byte-identical across every probed CRuby** (both
+  parsers, 3.3.x and all 3.4.x patches): contained loops inside the
+  ensure region resolve locally and the walk resumes; a walk from a
+  non-local origin (block-iterator break, lambda/define_method/proc
+  return, exception unwind) that hits a `break` in a crossed ensure
+  lands the break at the **loop join and cancels the walk** (an
+  exception being unwound is swallowed) — rubyrs's structural
+  default; `next` supersedes a pending return in `while` loops.
+- **14 bug-window shapes** moved to pinned goldens in
+  `tests/embed/ensure_walk_divergences.rs` (each citing both CRuby
+  outputs). rubyrs was modeled on 3.4.1-prism and currently keeps
+  that behaviour:
+  - The *local-return inline artifact* (B1/B2/B3/B5, C1/C2, E2/E3,
+    H1, I1/I2): a `while`/`until` `break` inside the ensure of a
+    syntactically-local `return`, loop OUTSIDE the ensure, makes the
+    **method return the break value** on 3.4.1-prism (modeled by
+    `WalkOrigin::LocalMethodReturn` + `SuspendCoord::loop_depth`,
+    see `vm.rs`). CRuby ≥ 3.4.2 lands the break at the loop join and
+    cancels the walk — i.e. exactly rubyrs's structural default for
+    every other origin. A follow-up could drop the
+    `LocalMethodReturn` special case and re-mainline these shapes
+    against the modern oracle.
+  - The *walk-survives-block-`next`* shapes (D3, K1, K4): on
+    3.4.1-prism a suspended non-local-return walk survives a
+    block-`next` and a block's own break value survives a `next`
+    abandonment (modeled by the abandoned-walk replay in
+    `Op::Return`). CRuby ≥ 3.4.2 **discards** the pending walk — for
+    K4 (`next` in a block ensure during a return walk through a
+    `while true; yield; end` yielder) the discarded return makes the
+    yielder spin, so modern CRuby (and 3.4.1 parse.y) **hangs
+    forever**. rubyrs keeps `:ret`; an infinite loop is not a
+    behaviour worth mimicking.
+- Four adjacent shapes were **already pinned** in the same file;
+  their citations were re-verified against both eras:
+  1. **Double-ensure double-run (E1)**: 3.4.1-prism executes the
+     OUTER ensure body **twice** (inline-copy duplication) and
+     returns `:brk`; ≥ 3.4.2 runs it once and returns `:after`.
+     rubyrs runs each body once (matching ≥ 3.4.2) and returns
+     `:brk` (matching 3.4.1-prism).
+  2. **Toplevel `return` + ensure `break` (J4)**: 3.4.1-prism ends
+     the script; rubyrs's toplevel `return` is the pre-existing
+     non-local-return gap, so the break lands at the join and the
+     script continues — **which is what CRuby ≥ 3.4.2 prints too**.
+  3. / 4. **`next` in a `while`/block ensure during exception
+     unwind (K3/K2)**: 3.4.1-prism re-raises; rubyrs's `next`
+     supersedes the unwind and the loop continues — **also matching
+     CRuby ≥ 3.4.2**. J4/K2/K3 stay pinned only because the two
+     patch-version outputs differ from each other, so no single diff
+     fixture can hold them.
 
 ### `rescue` with an unresolved class name
 

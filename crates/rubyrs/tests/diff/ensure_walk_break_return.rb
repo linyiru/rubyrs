@@ -3,24 +3,31 @@
 # the b4/b4c divergence family, fixed by the WalkOrigin +
 # SuspendCoord::loop_depth region model (see vm.rs WalkOrigin doc).
 #
-# CRuby 3.4.1 ground truth, probed shape by shape. The headline
-# artifact: a syntactically-LOCAL `return` compiles its ensure bodies
-# INLINE at the return site, so a `while`/`until` `break` inside such
-# a body whose loop lies OUTSIDE it makes the METHOD return the break
-# value (B1); every other walk origin (non-local return J1/J6/J8,
-# in-block loop J2, lambda J3, define_method J7, block-break F1,
-# exception unwind G1-G4) lands the break at the loop join and
-# CANCELS the walk. `next` supersedes in while-loops (D1/D2) but a
-# suspended non-local-return walk survives a block-`next` (D3/K4),
-# and a block-own break value survives a `next` abandonment (K1).
+# ORACLE-STABILITY WARNING: this fixture must stay byte-identical
+# across ALL CRuby 3.4.x patch versions AND both parsers — CI floats
+# on "3.4"-latest while dev machines may pin older patches. CRuby
+# 3.4.0/3.4.1's Prism compiler had a BUG WINDOW in exactly this
+# corner ([Bug #21001], fixed by ruby/ruby 31905d9e "Allow escaping
+# from ensures through next", backported in 3.4.2): a bogus end_label
+# made `break`/`next` inside an ensure body crossed by a suspended
+# walk behave differently from parse.y / 3.3.x / prism >= 3.4.2.
+# Fourteen shapes that sat in that window were extracted to
+# tests/embed/ensure_walk_divergences.rs as pinned goldens (B1, B2,
+# B3, B5, C1, C2, D3, E2, E3, H1, I1, I2, K1, K4 — K4 HANGS forever
+# on >= 3.4.2, which is what originally hung CI's oracle). Re-verify
+# any new shape against at least 3.4.1 AND the newest 3.4.x (and
+# ideally --parser=parse.y) before adding it here.
 #
-# Four adjacent shapes intentionally live in
-# tests/embed/ensure_walk_divergences.rs instead (documented
-# divergences): E1 (CRuby double-runs the outer ensure — a
-# compile-time inline-copy duplication artifact rubyrs does not
-# mimic), J4 (toplevel `return` rides the pre-existing
-# toplevel-return gap), K2/K3 (`next` in ensure during exception
-# unwind: CRuby re-raises, rubyrs swallows).
+# The scale that remains (stable across every probed CRuby):
+# contained loops inside the ensure region (A1-A3) resolve locally
+# and the walk resumes; a walk from a non-local origin (block `each`
+# B4c / Kernel#loop B4, block-break F1, exception unwind G1-G4,
+# non-local return J1/J6/J8, in-block loop J2, lambda J3,
+# define_method J7) that hits a `break` in a crossed ensure lands the
+# break at the loop join and CANCELS the walk (an exception being
+# unwound is swallowed). `next` supersedes a pending return in
+# while-loops (D1/D2), and `next` in the ensure of a block's own
+# value return leaves/overrides the value (K5/K6).
 
 # A1. return pending; ensure contains `loop { break Y }` (contained)
 def a1
@@ -51,52 +58,11 @@ ensure
 end
 puts "A3 => #{a3.inspect}"
 
-# ---- B. DIVERGENT-candidate shapes (loop OUTSIDE the ensure region) ----
-
-
-# B1. while-loop outside; return pending; ensure does `break :brk`
-def b1
-  while true
-    begin
-      return :ret
-    ensure
-      break :brk
-    end
-  end
-  puts "B1 after-loop reached"
-  :after
-end
-puts "B1 => #{b1.inspect}"
-
-
-# B2. same but break with NO value
-def b2
-  while true
-    begin
-      return :ret
-    ensure
-      break
-    end
-  end
-  puts "B2 after-loop reached"
-  :after
-end
-puts "B2 => #{b2.inspect}"
-
-
-# B3. loop-join value observed: assign the while result
-def b3
-  r = while true
-    begin
-      return :ret
-    ensure
-      break :brk
-    end
-  end
-  puts "B3 loop-join r=#{r.inspect}"
-  :after
-end
-puts "B3 => #{b3.inspect}"
+# ---- B. loop OUTSIDE the ensure region, block-iterator variants ----
+# (The while/until variants B1-B3/B5 — and the whole nested-loop C,
+# ensure-inside-ensure E, retry H and sequential-loop I families that
+# ride the same machinery — live in the embed goldens: their CRuby
+# output flipped at 3.4.2.)
 
 
 # B4. `loop {}` iterator (block-based) outside; return pending; ensure breaks
@@ -128,65 +94,7 @@ def b4c
 end
 puts "B4c => #{b4c.inspect}"
 
-
-# B5. until-loop variant
-def b5
-  until false
-    begin
-      return :ret
-    ensure
-      break :brk
-    end
-  end
-  puts "B5 after-loop reached"
-  :after
-end
-puts "B5 => #{b5.inspect}"
-
-# ---- C. nested loops ----
-
-
-# C1. inner+outer while; ensure breaks INNER loop; outer continues?
-def c1
-  outer_iters = 0
-  while true
-    outer_iters += 1
-    break :outer_done if outer_iters > 2
-    r = while true
-      begin
-        return :ret
-      ensure
-        break :brk
-      end
-    end
-    puts "C1 inner join r=#{r.inspect} iter=#{outer_iters}"
-  end
-  puts "C1 after outer"
-  :after
-end
-puts "C1 => #{c1.inspect}"
-
-
-# C2. break inside ensure targets loop OUTSIDE, but a second CONTAINED
-#     loop wraps the break inside the ensure (contained wins?)
-def c2
-  while true
-    begin
-      return :ret
-    ensure
-      r = while true
-        break :inner_brk
-      end
-      puts "C2 contained join r=#{r.inspect}"
-      break :outer_brk
-    end
-  end
-  puts "C2 after-loop reached"
-  :after
-end
-puts "C2 => #{c2.inspect}"
-
-# ---- D. next variants (known-matching; re-verify) ----
+# ---- D. next in while-loops (stable across versions) ----
 
 
 # D1. next in ensure of pending return (loop outside) — next supersedes
@@ -221,62 +129,6 @@ def d2
   :fell_through
 end
 puts "D2 => #{d2.inspect}"
-
-
-# D3. next in ensure inside iterator block, pending method return
-def d3
-  acc = []
-  [1, 2, 3].each do |x|
-    begin
-      return :ret if x == 2
-    ensure
-      acc << x
-      next
-    end
-  end
-  puts "D3 acc=#{acc.inspect}"
-  :fell_through
-end
-puts "D3 => #{d3.inspect}"
-
-# ---- E. ensure-inside-ensure ----
-
-
-# E2. OUTER ensure breaks; inner ensure just observes
-def e2
-  while true
-    begin
-      begin
-        return :ret
-      ensure
-        puts "E2 inner ensure"
-      end
-    ensure
-      puts "E2 outer ensure"
-      break :brk
-    end
-  end
-  puts "E2 after-loop reached"
-  :after
-end
-puts "E2 => #{e2.inspect}"
-
-
-# E3. method-level ensure AROUND the loop; break in inner ensure
-def e3
-  while true
-    begin
-      return :ret
-    ensure
-      break :brk
-    end
-  end
-  puts "E3 after-loop"
-  :after
-ensure
-  puts "E3 method ensure"
-end
-puts "E3 => #{e3.inspect}"
 
 # ---- F. break in ensure during BLOCK-break walk (not method return) ----
 
@@ -410,73 +262,6 @@ rescue => e
   puts "G4 raised #{e.message}"
 end
 
-# ---- H. retry interplay ----
-
-
-# H1. contained retry in ensure of pending return, then break after
-def h1
-  while true
-    begin
-      return :ret
-    ensure
-      attempts = 0
-      begin
-        attempts += 1
-        raise "h1-x" if attempts < 2
-      rescue
-        retry
-      end
-      puts "H1 attempts=#{attempts}"
-      break :brk
-    end
-  end
-  puts "H1 after-loop"
-  :after
-end
-puts "H1 => #{h1.inspect}"
-
-# ---- I. break value replaced multiple times / interplay with pending value ----
-
-
-# I1. two sequential loops: break in first loop's ensure during return walk,
-#     then normal execution continues to second loop?
-def i1
-  while true
-    begin
-      return :ret1
-    ensure
-      break :brk1
-    end
-  end
-  puts "I1 between loops"
-  while true
-    break :brk2
-  end
-  puts "I1 after second loop"
-  :after
-end
-puts "I1 => #{i1.inspect}"
-
-
-# I2. break in ensure during return walk, where the ensure ALSO has an
-#     ensure after the break (ensure-inside-ensure, break in the inner)
-def i2
-  while true
-    begin
-      return :ret
-    ensure
-      begin
-        break :brk
-      ensure
-        puts "I2 innermost ensure"
-      end
-    end
-  end
-  puts "I2 after-loop"
-  :after
-end
-puts "I2 => #{i2.inspect}"
-
 puts "MATRIX DONE"
 
 # J1. multi-frame: non-local return from block crossing an intermediate
@@ -602,38 +387,6 @@ def j8
   :after
 end
 puts "J8 => #{j8.inspect}"
-
-# K1. next in block ensure during a suspended BLOCK-BREAK walk
-r = [1, 2].each do |x|
-  begin
-    break :b
-  ensure
-    next
-  end
-end
-puts "K1 r=#{r.inspect}"
-
-# K4. bytecode-yield variant of D3: next in block ensure during
-#     non-local return walk through a Ruby yielding method
-def k4_yielder
-  while true
-    yield
-  end
-end
-def k4
-  acc = []
-  k4_yielder do
-    begin
-      return :ret
-    ensure
-      acc << 1
-      next
-    end
-  end
-  puts "K4 acc=#{acc.inspect}"
-  :fell
-end
-puts "K4 => #{k4.inspect}"
 
 # K5. next in the ensure of the block's own terminal-value return
 r = [1, 2].map do |x|
