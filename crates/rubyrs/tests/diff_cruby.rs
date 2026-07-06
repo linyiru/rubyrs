@@ -859,6 +859,11 @@ fn tier2_restblock_lite() { run_diff("tier2_restblock_lite"); }
 // escaping control flow must.
 #[test] fn ensure_walk_contained_raise() { run_diff("ensure_walk_contained_raise"); }
 #[test] fn ensure_walk_supersede() { run_diff("ensure_walk_supersede"); }
+// break/next executing INSIDE a suspended ensure walk (the b4/b4c
+// family): the local-return inline artifact, join-landing walk
+// cancellation, and the next-abandonment replays. Four deliberate
+// divergences live in tests/embed/ensure_walk_divergences.rs.
+#[test] fn ensure_walk_break_return() { run_diff("ensure_walk_break_return"); }
 #[test] fn raise_class_runs_initialize() { run_diff("raise_class_runs_initialize"); }
 #[test] fn time_components() { run_diff("time_components"); }
 #[cfg(feature = "stdlib")]

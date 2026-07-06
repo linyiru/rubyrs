@@ -778,6 +778,57 @@ puts $ensure_count            # CRuby: 1   rubyrs: 0
   blocking a future fix from landing cleanly. The bypass
   shape is reproducible via the snippet above.
 
+### `break`/`next` inside a suspended ensure walk — matched surface + four pinned divergences
+
+The b4/b4c family: an ensure body is running because a method-return
+walk (or block-break walk, or exception unwind) is suspended in it,
+and the body itself performs a `break`/`next`. CRuby's behaviour here
+is an artifact of HOW it compiles the crossing (probed shape-by-shape
+against CRuby 3.4.1; the full 39-shape matrix lives in
+`tests/diff/ensure_walk_break_return.rb` and runs byte-identical):
+
+- A syntactically-**local** `return` in a `def` body inlines its
+  ensure bodies at the return site; a `while`/`until` `break` inside
+  such a body whose loop lies OUTSIDE it makes the **method return
+  the break value** (`def m; while true; begin return :ret; ensure;
+  break :brk; end; end; :after; end` → `:brk`, the loop join is never
+  reached). rubyrs models this with `WalkOrigin::LocalMethodReturn` +
+  `SuspendCoord::loop_depth` (see `vm.rs`) — the break replaces the
+  suspended walk's value and the walk resumes, running remaining
+  ensures exactly once.
+- Every **other** origin (non-local return from a block/proc — even
+  at its own target frame, lambda return, `define_method` return,
+  block-break walks, exception unwind) runs the ensure via the
+  catch-table path, where the break lands at the **loop join and
+  cancels the walk** (an exception being unwound is swallowed).
+  That is rubyrs's structural default.
+- `next` supersedes a pending return in `while` loops, but a
+  suspended non-local-return walk **survives** a block-`next`
+  (`[..].each { begin return v ensure next end }` returns `v`), and
+  a block's own in-flight `break` value survives a `next`
+  abandonment (`[..].each { begin break :b ensure next end }` → `:b`).
+  Modeled by the abandoned-walk replay in `Op::Return`.
+
+Four adjacent shapes deliberately diverge (pinned with rubyrs's
+output in `tests/embed/ensure_walk_divergences.rs`, each citing the
+CRuby output):
+
+1. **Double-ensure double-run**: with TWO nested ensures around the
+   local return and the `break` in the inner one, CRuby executes the
+   OUTER ensure body **twice** (inline-copy duplication — the break's
+   own crossing copy plus the return's). rubyrs runs each body once;
+   the return value (`:brk`) matches.
+2. **Toplevel `return` + ensure `break`**: CRuby ends the script
+   (main gets the inline artifact); rubyrs's toplevel `return` is the
+   pre-existing non-local-return gap, so the break lands at the join
+   and the script continues.
+3. **`next` in a `while` ensure during exception unwind**: CRuby
+   re-raises (`next`, unlike `break`, does not swallow the
+   exception); rubyrs's `next` supersedes the unwind and the loop
+   continues.
+4. **`next` in a block ensure during exception unwind**: same
+   asymmetry, block-iterator shape.
+
 ### `rescue` with an unresolved class name
 
 ```ruby

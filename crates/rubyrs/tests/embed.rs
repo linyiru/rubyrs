@@ -26,6 +26,8 @@ mod dispatch_quirks;
 mod equality;
 #[path = "embed/ensure_host_raise.rs"]
 mod ensure_host_raise;
+#[path = "embed/ensure_walk_divergences.rs"]
+mod ensure_walk_divergences;
 #[path = "embed/error_handling.rs"]
 mod error_handling;
 #[path = "embed/filesystem_sandbox.rs"]

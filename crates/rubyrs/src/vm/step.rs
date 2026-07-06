@@ -736,7 +736,7 @@ impl Vm {
                     let target_idx = self.frames.len() - 1;
                     self.frames[target_idx].pending_yield = false;
                     let value = self.stack.pop().unwrap_or(Value::Nil);
-                    self.begin_method_break(value, target_idx)?;
+                    self.begin_method_break(value, target_idx, crate::vm::WalkOrigin::Block)?;
                     if self.frames.is_empty() {
                         return Ok(());
                     }
@@ -807,7 +807,18 @@ impl Vm {
                         // begin; (1..3).each { |x| return x if x==2
                         // }; ensure; cleanup; end; end` left
                         // `cleanup` un-run.
-                        self.begin_method_break(val.clone(), owner_idx)?;
+                        // Origin carries the owner's locals Rc so a
+                        // block-frame `next` that abandons a suspended
+                        // ensure body of this walk can replay the
+                        // method_return signal (see Op::Return).
+                        let origin = match &owner_rc {
+                            Some(rc) => crate::vm::WalkOrigin::MethodReturnSignal(rc.clone()),
+                            // Unreachable in practice: owner_idx is only
+                            // Some when owner_rc was Some. Fall back to
+                            // the no-replay origin.
+                            None => crate::vm::WalkOrigin::Block,
+                        };
+                        self.begin_method_break(val.clone(), owner_idx, origin)?;
                         if self.frames.is_empty() {
                             return Ok(());
                         }
@@ -1006,8 +1017,17 @@ impl Vm {
                     };
                     match owner_idx {
                         Some(idx) if idx >= until_depth => {
+                            // Clone the owner Rc BEFORE take_method_return
+                            // clears it — the walk origin keeps it for the
+                            // `next`-abandonment replay (see Op::Return).
+                            let origin = match &self.method_return_locals {
+                                Some(rc) => {
+                                    crate::vm::WalkOrigin::MethodReturnSignal(rc.clone())
+                                }
+                                None => crate::vm::WalkOrigin::Block,
+                            };
                             let val = self.take_method_return().unwrap();
-                            self.begin_method_break(val, idx)?;
+                            self.begin_method_break(val, idx, origin)?;
                             if self.frames.len() <= until_depth {
                                 return Ok(());
                             }
@@ -1061,7 +1081,7 @@ impl Vm {
                     let target_idx = self.frames.len() - 1;
                     self.frames[target_idx].pending_yield = false;
                     let value = self.stack.pop().unwrap_or(Value::Nil);
-                    self.begin_method_break(value, target_idx)?;
+                    self.begin_method_break(value, target_idx, crate::vm::WalkOrigin::Block)?;
                     if self.frames.len() <= until_depth {
                         return Ok(());
                     }
@@ -5650,6 +5670,46 @@ impl Vm {
                     .stack
                     .pop()
                     .expect("ICE: BreakLoop with no value on stack");
+                // CRuby local-return × break artifact (probed matrix in
+                // tests/diff/ensure_walk_break_return.rb; mechanism in
+                // WalkOrigin's doc): when this break executes INSIDE an
+                // ensure body in which a LOCAL method-return walk is
+                // suspended, and its target loop lies OUTSIDE that body
+                // (the loop was already open at suspension time —
+                // f.loop_depth() <= coord.loop_depth), CRuby's inlined
+                // ensure copy makes the METHOD return the break value:
+                // `def m; while true; begin return :ret; ensure; break
+                // :brk; end; end; :after; end` returns :brk, never
+                // reaching the loop join. Replace the suspended walk's
+                // value and resume it — remaining ensures (handlers
+                // still open above the suspension baseline, and any
+                // below it) run exactly once on the way out. A loop
+                // entered inside the body (loop_depth above the mark)
+                // is a contained transfer and takes the normal path,
+                // as does every non-LocalMethodReturn walk (block
+                // breaks, non-local returns — CRuby lands those at the
+                // loop join, cancelling the walk, which the default
+                // path already implements).
+                if !self.pending_method_breaks.is_empty() {
+                    let fidx = self.frames.len() - 1;
+                    let cur_loop_depth = self
+                        .frames
+                        .last()
+                        .map_or(0, |fr| fr.loop_depth());
+                    let artifact = self.pending_method_breaks.last().is_some_and(|mb| {
+                        matches!(mb.origin, crate::vm::WalkOrigin::LocalMethodReturn)
+                            && mb.suspended.is_some_and(|s| {
+                                s.frame_idx == fidx && cur_loop_depth <= s.loop_depth
+                            })
+                    });
+                    if artifact {
+                        if let Some(mb) = self.pending_method_breaks.last_mut() {
+                            mb.value = value;
+                        }
+                        self.continue_method_break()?;
+                        return Ok(!self.frames.is_empty());
+                    }
+                }
                 self.begin_loop_transfer(
                     LoopTransferKind::Break { value },
                     target_ip,
@@ -6021,11 +6081,126 @@ impl Vm {
                 if has_ensure {
                     let ret = self.stack.pop().unwrap_or(Value::Nil);
                     let target = self.frames.len() - 1;
-                    self.begin_method_break(ret, target)?;
+                    // A local `return` in a METHOD frame is the one walk
+                    // origin CRuby compiles by INLINING the ensure bodies
+                    // at the return site — the scope of the break-in-
+                    // ensure artifact (see WalkOrigin's doc). A block
+                    // frame reaching Op::Return with ensures (its
+                    // terminal value crossing a begin/ensure) matches
+                    // CRuby's thrown TAG path instead.
+                    let origin = if self.frames.last().is_some_and(|fr| !fr.is_block) {
+                        crate::vm::WalkOrigin::LocalMethodReturn
+                    } else {
+                        crate::vm::WalkOrigin::Block
+                    };
+                    self.begin_method_break(ret, target, origin)?;
                     // Either suspended into an ensure body (frame still
                     // present, ip at the handler) or landed (frame
                     // popped). Continue unless the stack is now empty.
                     return Ok(!self.frames.is_empty());
+                }
+                // Abandoned-walk shapes (probed against CRuby 3.4.1 —
+                // see tests/diff/ensure_walk_break_return.rb): this
+                // plain Return is about to pop a frame in which a
+                // method-break walk is SUSPENDED (we are executing that
+                // walk's ensure body and jumping out of it). The
+                // default below (cancel-in-dead-frames) implements
+                // "newer transfer wins", which is right for `return`
+                // superseding walks — but two block-frame shapes go the
+                // other way in CRuby:
+                //
+                //  (a) `next` in a block ensure while a NON-LOCAL
+                //      return walk is parked there: the RETURN wins
+                //      (`[..].each { begin return v ensure next end }`
+                //      returns v). Replay the walk as the
+                //      method_return signal — the block frame is left
+                //      exactly as Op::ReturnMethod would leave it and
+                //      every dispatch level / iter driver handles the
+                //      rest via the established crossing protocol.
+                //      (Also kills a hang: through a BYTECODE yielder
+                //      the cancelled walk left the `while…yield` loop
+                //      iterating forever.)
+                //
+                //  (b) `next` in a block ensure while the block's OWN
+                //      exit walk (begun by `break` — break_signaled
+                //      still in flight) is parked there: the BREAK's
+                //      value wins (`[..].each { begin break :b ensure
+                //      next end }` evaluates to :b, not nil). Adopt the
+                //      walk's value as this frame's return value; the
+                //      signal protocol already in flight delivers it.
+                let mut crossing_walk_abandoned = false;
+                if !self.pending_method_breaks.is_empty() {
+                    let dying = self.frames.len() - 1;
+                    let is_block = self.frames.last().is_some_and(|fr| fr.is_block);
+                    enum Abandoned {
+                        ReplayReturn,
+                        AdoptBreakValue,
+                        CancelCrossing,
+                    }
+                    let shape = self.pending_method_breaks.last().and_then(|mb| {
+                        let s = mb.suspended?;
+                        if s.frame_idx != dying || !is_block {
+                            return None;
+                        }
+                        if mb.target_frame_idx < dying
+                            && !self.break_signaled
+                            && matches!(
+                                mb.origin,
+                                crate::vm::WalkOrigin::MethodReturnSignal(_)
+                            )
+                        {
+                            Some(Abandoned::ReplayReturn) // (a)
+                        } else if mb.target_frame_idx == dying && self.break_signaled {
+                            Some(Abandoned::AdoptBreakValue) // (b)
+                        } else if mb.target_frame_idx < dying {
+                            // Crossing walk abandoned some other way
+                            // (typically a block-`break` superseding it:
+                            // break_signaled is in flight). The default
+                            // cancel below is right — but flag it for the
+                            // orphaned-signal sweep after the pop.
+                            Some(Abandoned::CancelCrossing)
+                        } else {
+                            None
+                        }
+                    });
+                    match shape {
+                        Some(Abandoned::ReplayReturn) => {
+                            // Entry + origin variant were both matched
+                            // via last() just above; the if-let chain
+                            // keeps this off the panic budget (a
+                            // hypothetical mismatch falls through to
+                            // the default cancel path).
+                            if let Some(mb) = self.pending_method_breaks.pop()
+                                && let crate::vm::WalkOrigin::MethodReturnSignal(rc) =
+                                    mb.origin
+                            {
+                                // Discard the abandoning next/return
+                                // value — the replayed signal carries
+                                // the walk's.
+                                self.stack.pop();
+                                self.method_return = Some(mb.value);
+                                self.method_return_locals = Some(rc);
+                                self.sync_control_signals();
+                                return Ok(true);
+                            }
+                        }
+                        Some(Abandoned::AdoptBreakValue) => {
+                            // Swap the walk's break value in for the
+                            // next's value; fall through to the normal
+                            // frame pop, which pushes it as the block's
+                            // return for the in-flight break protocol.
+                            // (if-let: same panic-budget rationale.)
+                            if let Some(mb) = self.pending_method_breaks.pop() {
+                                self.sync_control_signals();
+                                self.stack.pop();
+                                self.stack.push(mb.value);
+                            }
+                        }
+                        Some(Abandoned::CancelCrossing) => {
+                            crossing_walk_abandoned = true;
+                        }
+                        None => {}
+                    }
                 }
                 let f = self.frames.pop().expect("ICE: Return no frame");
                 // Cancel any ensure-walk suspended in the popped
@@ -6036,6 +6211,29 @@ impl Vm {
                 // entry would be mis-resumed by an unrelated later
                 // EndEnsure. (Fast no-pending path: two loads.)
                 self.cancel_transfers_in_dead_frames(self.frames.len());
+                // Orphaned-break sweep: a block-`break` (Op::Break just
+                // set break_signaled) superseding a CROSSING walk whose
+                // native iter driver already aborted (it saw the walk's
+                // method_return and returned before the ensure ran —
+                // rubyrs runs suspended ensure bodies after the driver
+                // unwinds, unlike CRuby's catch-table timing). The
+                // yielding context the break targets no longer exists;
+                // without this sweep the stale signal poisoned the next
+                // unrelated block completion (`[..].each { begin return
+                // v ensure break b end }` left every later iterator
+                // breaking spuriously). A live BYTECODE receiver is
+                // recognisable by `pending_yield` on the newly-exposed
+                // frame — the dispatch loops' recovery arm consumes the
+                // signal there, so it must survive. A remaining pending
+                // entry means an outer walk still owns the signal.
+                if crossing_walk_abandoned
+                    && self.break_signaled
+                    && self.pending_method_breaks.is_empty()
+                    && !self.frames.last().is_some_and(|fr| fr.pending_yield)
+                {
+                    self.break_signaled = false;
+                    self.sync_control_signals();
+                }
                 if f.dm_share {
                     self.dm_share_depth = self.dm_share_depth.saturating_sub(1);
                 }
@@ -6417,12 +6615,21 @@ impl Vm {
 
         // dispatch_until returned. Determine why:
         if yguard.vm.method_return.is_some() {
-            // return-from-block: leave method_return
-            // set; outer dispatch loop handles unwind.
-            if yielding_idx < yguard.vm.frames.len() {
-                yguard.vm.frames[yielding_idx].pending_yield = false;
-            }
-            // Guard drops on return → decrements counter.
+            // return-from-block: leave method_return set; the outer
+            // dispatch loop handles the unwind. LEAVE `pending_yield`
+            // SET on the yielding frame: the return walk still has
+            // the block's ensure bodies to run, and if one of them
+            // does a block-`break` (Op::Break + Op::Return), the
+            // walk gets cancelled and the yielding frame becomes the
+            // top again with `break_signaled` in flight — the
+            // dispatch loops' `break_signaled && pending_yield`
+            // recovery arm is then the ONLY receiver left (this
+            // Op::Yield wrapper is gone). Clearing the marker here
+            // orphaned that break: the yielding `while … yield` loop
+            // resumed as if the yield completed normally and spun
+            // forever (`loop do return v ensure break b end` hung).
+            // When no break supersedes, the walk pops the yielding
+            // frame anyway and the marker dies with it.
             return Ok(true);
         }
         #[cfg(feature = "_fiber")]
@@ -6526,7 +6733,11 @@ impl Vm {
                 // recursion counter decrements before we
                 // bail.
                 let was_toplevel = yielding_idx == 0;
-                yguard.vm.begin_method_break(block_return_value, yielding_idx)?;
+                yguard.vm.begin_method_break(
+                    block_return_value,
+                    yielding_idx,
+                    crate::vm::WalkOrigin::Block,
+                )?;
                 drop(yguard);
                 if was_toplevel && self.frames.is_empty() {
                     return Ok(false);
@@ -6583,6 +6794,7 @@ impl Vm {
                     value: block_return_value.clone(),
                     target_frame_idx: yielding_idx,
                     suspended: None,
+                    origin: crate::vm::WalkOrigin::Block,
                 });
                 yguard.vm.sync_control_signals();
             }

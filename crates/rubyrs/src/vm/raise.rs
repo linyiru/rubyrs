@@ -815,23 +815,40 @@ impl Vm {
         // SUPERSEDE sweep: this break/next may itself sit inside an
         // ensure body that an OLDER transfer (or method-break walk)
         // is suspended in. If the new transfer's target loop is
-        // OUTSIDE that body (the suspension baseline sits above the
-        // target's rescue depth), the body is being abandoned — the
-        // newer control transfer wins (CRuby) and the older entry's
+        // OUTSIDE that body, the body is being abandoned — the newer
+        // control transfer wins (CRuby) and the older entry's
         // EndEnsure tail never runs. Cancel those. A target INSIDE
-        // the body (nested `while` with its own ensure — baseline <=
-        // target depth) leaves the outer entry alive: the nested
-        // transfer completes within the body and the outer walk
-        // resumes at the body's tail.
+        // the body (nested `while` with its own ensure) leaves the
+        // outer entry alive: the nested transfer completes within
+        // the body and the outer walk resumes at the body's tail.
+        //
+        // "Outside the body" has two detectors, both needed:
+        //  - rescue-depth: the suspension baseline sits above the
+        //    target's rescue depth (the transfer pops handlers below
+        //    the body's baseline);
+        //  - loop-depth region (SuspendCoord::loop_depth): the target
+        //    loop was ALREADY OPEN when the walk suspended
+        //    (target_loop_depth < s.loop_depth) — i.e. the body is
+        //    lexically inside the target loop, so landing at its join
+        //    leaves the body for good. Without this the same-rescue-
+        //    depth crossing (`[..].each { while true; begin return v;
+        //    ensure; break; end; end; ... }`) left a STALE suspended
+        //    walk behind; it was harmless while frame-pop sweeps
+        //    caught it, but the abandoned-walk replay in Op::Return
+        //    must never see it.
         let fidx = self.frames.len() - 1;
         self.pending_loop_transfers.retain(|t| {
             t.suspended.is_none_or(|s| {
-                s.frame_idx != fidx || s.rescues_len <= target_rescues_len
+                s.frame_idx != fidx
+                    || (s.rescues_len <= target_rescues_len
+                        && target_loop_depth >= s.loop_depth)
             })
         });
         self.pending_method_breaks.retain(|mb| {
             mb.suspended.is_none_or(|s| {
-                s.frame_idx != fidx || s.rescues_len <= target_rescues_len
+                s.frame_idx != fidx
+                    || (s.rescues_len <= target_rescues_len
+                        && target_loop_depth >= s.loop_depth)
             })
         });
         self.sync_control_signals();
@@ -888,12 +905,14 @@ impl Vm {
                 // matches the recorded coordinates and resumes
                 // the walk.
                 let rescues_after = f.rescues_len();
+                let loop_depth = f.loop_depth();
                 self.stack.truncate(h.stack_depth);
                 f.ip = h.handler_ip;
                 let coord = crate::vm::SuspendCoord {
                     frame_idx: self.frames.len() - 1,
                     rescues_len: rescues_after,
                     stack_len: h.stack_depth,
+                    loop_depth,
                     seq: self.next_suspend_seq(),
                 };
                 // Entry is present (target was read from it at fn
@@ -964,6 +983,7 @@ impl Vm {
         &mut self,
         value: Value,
         target_frame_idx: usize,
+        origin: crate::vm::WalkOrigin,
     ) -> Result<(), Trap> {
         // SUPERSEDE sweep: this return/block-break is about to pop
         // every frame down to and including `target_frame_idx`.
@@ -988,6 +1008,7 @@ impl Vm {
             value,
             target_frame_idx,
             suspended: None,
+            origin,
         });
         self.sync_control_signals();
         self.continue_method_break()
@@ -1040,12 +1061,14 @@ impl Vm {
                 // the dispatch loops' top-of-loop check to leave
                 // us alone while the body runs.
                 let rescues_after = f.rescues_len();
+                let loop_depth = f.loop_depth();
                 self.stack.truncate(h.stack_depth);
                 f.ip = h.handler_ip;
                 let coord = crate::vm::SuspendCoord {
                     frame_idx: self.frames.len() - 1,
                     rescues_len: rescues_after,
                     stack_len: h.stack_depth,
+                    loop_depth,
                     seq: self.next_suspend_seq(),
                 };
                 // Entry is present (target was read from it at the
