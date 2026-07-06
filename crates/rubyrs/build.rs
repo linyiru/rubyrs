@@ -38,6 +38,17 @@ fn main() {
     // *BSD) needs an explicit `--export-dynamic`.
     if target.contains("linux") || target.contains("freebsd") || target.contains("netbsd") {
         println!("cargo:rustc-link-arg-bin=rubyrs=-Wl,--export-dynamic");
+        // Same requirement for TEST binaries: integration tests that
+        // construct an IN-PROCESS Runtime and `require` a C extension
+        // (e.g. tests/cext_typeddata.rs `cext_typeddata_reset_runs_dfree`)
+        // dlopen the .so from the test executable itself, so the test
+        // executable must export the `rb_*` symbols too. Without this,
+        // ELF dlopen fails with "undefined symbol: rb_cObject" (macOS
+        // passed by accident of Mach-O bundle/flat-namespace lookup).
+        // Applies to every test target of this crate — the only effect
+        // on tests that don't dlopen is a larger .dynsym (symbol
+        // bloat), not behavior.
+        println!("cargo:rustc-link-arg-tests=-Wl,--export-dynamic");
     }
 
     // --- prism node sets: validate + codegen ---
