@@ -18946,16 +18946,23 @@ impl Vm {
             Some(i) => i,
             None => return Ok(false),
         };
-        let id = match self.stack.get(recv_idx) {
-            Some(Value::Object(id)) => *id,
-            _ => return Ok(false),
-        };
         // Only a literal block is stack-direct. A BoundMethod /
         // CurriedProc needs `coerce_callable_to_block`, and `&nil`
         // re-aims at the no-block path — both must fall through to
         // `do_call_block`'s existing coerce logic untouched.
         let block_id = match self.stack.get(block_idx) {
             Some(Value::Block(bid)) => *bid,
+            _ => return Ok(false),
+        };
+        let id = match self.stack.get(recv_idx) {
+            Some(Value::Object(id)) => *id,
+            // Collection receivers (dispatch-campaign P3): serve the
+            // native block-iterator arm (`collection_call_block`)
+            // directly for an allow-listed name, skipping the full
+            // `do_call_block` preamble + pre-collection arm chain.
+            Some(Value::Array(_) | Value::Hash(_) | Value::Range(_) | Value::Str(_)) => {
+                return self.try_serve_collection_block_fast(name_id, argc, recv_idx, block_id);
+            }
             _ => return Ok(false),
         };
         let Some(cls) = self.heap.try_class_of(id) else {
@@ -24938,6 +24945,400 @@ impl Vm {
 
 
 
+    /// Collection-receiver block-form fast serve (dispatch-campaign
+    /// P3): `arr.each { }` / `hash.each { }` / `arr.inject(x) { }` /
+    /// `str.gsub(re) { }` — the AM census's biggest explicit-recv
+    /// block-form fallback rows. For an Array / Hash / Range / Str
+    /// receiver with a LITERAL block, the canonical `do_call_block`
+    /// route walks the whole preamble (name resolve, flag consumes,
+    /// args drain, block coerce) plus every pre-collection arm before
+    /// `collection_call_block` finally serves. This helper calls that
+    /// SAME arm directly.
+    ///
+    /// Soundness (mirror-the-cascade audit, step for step):
+    /// - Every arm between `do_call_block`'s entry and its
+    ///   `collection_call_block` call site is either SHAPE-gated away
+    ///   from these receivers (Dir/`new`/allocate need a Class recv;
+    ///   the Proc/BoundMethod/UnboundMethod intrinsics need those
+    ///   shapes) or NAME-gated (`define_method` /
+    ///   `define_singleton_method` / `instance_exec` /
+    ///   `instance_eval` / `class_eval` / exec / send family) — the
+    ///   allow-list below collides with none of them.
+    /// - The reopen-precedence early gate covers Str (bit 2) but NOT
+    ///   Array/Hash/Range (bit 7): the Str path mirrors it explicitly
+    ///   (revalidate + mask + own-table probe) and declines when a
+    ///   user reopen of THIS name exists. Array/Hash/Range reopens of
+    ///   allow-listed names are shadowed by the native arm in the
+    ///   canonical order too, so no probe is needed.
+    /// - Per-instance singleton arms (`heap_singletons` /
+    ///   `hash_singletons` / `str_singletons`) sit AFTER the
+    ///   collection arm in `do_call_block`, so the native serve
+    ///   already wins in the canonical order — no gate.
+    /// - Hash/Array SUBCLASS overrides are handled INSIDE
+    ///   `collection_call_block` (its `override_tag` probe returns
+    ///   `None`), which declines here → the full cascade runs and its
+    ///   own `collection_call_block` call returns `None` again →
+    ///   the user-method arm serves. Same for any arg-shape the arm
+    ///   doesn't match.
+    ///
+    /// GC rooting: recv / block / args are PEEKED, never popped — they
+    /// stay operand-stack-rooted for the whole native-iterator run
+    /// (strictly stronger than the canonical path, which holds them in
+    /// Rust locals and pins selectively). On a serve the operands are
+    /// truncated and the result pushed; on a decline the stack is
+    /// untouched. An `Err` propagates with the operands still stacked
+    /// — the unwinder truncates to the handler's recorded depth, same
+    /// end state as the canonical pop-first shape.
+    #[inline(never)]
+    fn try_serve_collection_block_fast(
+        &mut self,
+        name_id: SymId,
+        argc: usize,
+        recv_idx: usize,
+        block_id: crate::value::ObjId,
+    ) -> Result<bool, Trap> {
+        let is_str = matches!(self.stack.get(recv_idx), Some(Value::Str(_)));
+        // Allow-list, mapped to `&'static str` so the interner borrow
+        // ends before the `&mut self` call below. Only names verified
+        // to be served by `collection_call_block` for these shapes
+        // (a miss inside the arm returns `None` → decline, correct
+        // but double-walked — keep the list to arms that serve).
+        let name: &'static str = {
+            let n: &str = self.interner.resolve(name_id);
+            match n {
+                "each" if !is_str => "each",
+                "each_pair" if !is_str => "each_pair",
+                "map" if !is_str => "map",
+                "collect" if !is_str => "collect",
+                "select" if !is_str => "select",
+                "filter" if !is_str => "filter",
+                "inject" if !is_str => "inject",
+                "reduce" if !is_str => "reduce",
+                "flat_map" if !is_str => "flat_map",
+                "collect_concat" if !is_str => "collect_concat",
+                "reject" if !is_str => "reject",
+                "detect" if !is_str => "detect",
+                "find" if !is_str => "find",
+                "find_index" if !is_str => "find_index",
+                "each_with_index" if !is_str => "each_with_index",
+                "each_index" if !is_str => "each_index",
+                "each_with_object" if !is_str => "each_with_object",
+                "each_slice" if !is_str => "each_slice",
+                "each_key" if !is_str => "each_key",
+                "each_value" if !is_str => "each_value",
+                "transform_keys" if !is_str => "transform_keys",
+                "transform_values" if !is_str => "transform_values",
+                "any?" if !is_str => "any?",
+                "all?" if !is_str => "all?",
+                "none?" if !is_str => "none?",
+                "min_by" if !is_str => "min_by",
+                "max_by" if !is_str => "max_by",
+                "sort_by" if !is_str => "sort_by",
+                "group_by" if !is_str => "group_by",
+                "partition" if !is_str => "partition",
+                "count" if !is_str => "count",
+                "sum" if !is_str => "sum",
+                "delete_if" if !is_str => "delete_if",
+                "keep_if" if !is_str => "keep_if",
+                "gsub" if is_str => "gsub",
+                "sub" if is_str => "sub",
+                "gsub!" if is_str => "gsub!",
+                "sub!" if is_str => "sub!",
+                "scan" if is_str => "scan",
+                "each_line" if is_str => "each_line",
+                "each_char" if is_str => "each_char",
+                _ => return Ok(false),
+            }
+        };
+        // Str-receiver reopen-precedence mirror: `class String; def
+        // gsub; ...` must win, exactly like `do_call_block`'s early
+        // gate (same revalidate + mask + own-method-table probe).
+        if is_str {
+            if self.fast_index_checked_gen != self.method_gen {
+                self.fast_index_revalidate();
+            }
+            if self.prim_reopen_mask & (1 << 2) != 0 {
+                let recv = self.stack[recv_idx].clone();
+                if let Value::Class(cls) = self.class_of(&recv)
+                    && cls.methods.borrow().get(&name_id).is_some()
+                {
+                    return Ok(false);
+                }
+            }
+        }
+        let recv = self.stack[recv_idx].clone();
+        let args: Vec<Value> = self.stack[recv_idx + 2..].to_vec();
+        debug_assert_eq!(args.len(), argc);
+        match self.collection_call_block(&recv, name, &args, block_id, false)? {
+            Some(v) => {
+                self.stack.truncate(recv_idx);
+                self.stack.push(v);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// TRUE when `name` must NOT be served by the no_recv block-form
+    /// fast path (`try_invoke_norecv_block_cached`) because an arm
+    /// that runs BEFORE the Object-self method lookup in
+    /// `do_call_block`'s bare-call chain could claim it:
+    /// - the bare `instance_exec` / `instance_eval` intercept,
+    /// - the `tap`/`then`/`yield_self` universal routing,
+    /// - `lambda` / `proc` / `at_exit` / `refine` block capture,
+    /// - `builtin_call` (block-form bare calls give builtins
+    ///   precedence over same-named user methods): gated by
+    ///   `is_builtin_name` PLUS the arms that list is known to be
+    ///   missing (see the "keep in sync" note there — `raise` /
+    ///   `fail` / `caller` / `load` / `system` / `Hash`), PLUS the
+    ///   `__`-prefixed internal shim families (`__rubyrs_*`,
+    ///   `__zlib_*`, `__defined_*`, `__uri_*`, `__send__`) wholesale,
+    /// - the `send` / `public_send` dynamic re-aim.
+    ///
+    /// Declining is always sound — the full cascade decides.
+    fn norecv_block_fast_denied(name: &str) -> bool {
+        name.starts_with("__")
+            || Self::is_builtin_name(name)
+            || matches!(
+                name,
+                "instance_exec"
+                    | "instance_eval"
+                    | "tap"
+                    | "then"
+                    | "yield_self"
+                    | "lambda"
+                    | "proc"
+                    | "at_exit"
+                    | "refine"
+                    | "send"
+                    | "public_send"
+                    | "raise"
+                    | "fail"
+                    | "caller"
+                    | "load"
+                    | "system"
+                    | "Hash"
+            )
+    }
+
+    /// Class-self twin of `norecv_block_fast_denied`: names that
+    /// `do_call_block`'s bare-call chain routes through the Class
+    /// bridge set (or the dedicated allocate arm) BETWEEN the
+    /// singleton lookup and the toplevel probe. The canonical order
+    /// puts the singleton lookup FIRST (a user `def self.name` wins
+    /// over the bridge), but declining these names wholesale is
+    /// strictly conservative — the cascade preserves that precedence.
+    fn norecv_block_class_bridge_name(name: &str) -> bool {
+        matches!(
+            name,
+            "new" | "name" | "to_s" | "inspect"
+                | "method_defined?" | "instance_method" | "undef_method" | "remove_method"
+                | "superclass" | "ancestors" | "include?"
+                | "instance_methods" | "public_instance_methods"
+                | "private_instance_methods" | "protected_instance_methods"
+                | "constants"
+                | "autoload" | "autoload?" | "const_defined?" | "const_get" | "const_set"
+                | "private_constant" | "public_constant" | "deprecate_constant"
+                | "private_class_method" | "public_class_method"
+                | "singleton_class"
+                | "class_eval" | "module_eval"
+                | "allocate"
+        )
+    }
+
+    /// Implicit-self (`no_recv`) block-form fast path — the bare-call
+    /// sibling of `try_invoke_explicit_recv_block_cached`
+    /// (dispatch-campaign P3). The AM census's single largest
+    /// block-form fallback is `catch(:abort) { ... }` (~55/iter): a
+    /// bare call with a literal block on an Object self, resolving
+    /// through the class chain (negative-cached per site) and then
+    /// the toplevel-method table. The canonical chain re-pays the
+    /// name resolve, flag consumes, args drain, ~10 name compares,
+    /// a `builtin_call` probe and a host-fn probe on every call.
+    ///
+    /// Mirrors `do_call_block`'s bare-call chain step for step for
+    /// the ONE simple shape it serves — literal block, `Object` self
+    /// — declining (stack untouched) everything else:
+    /// 1. every pre-lookup arm is name-gated out via
+    ///    `norecv_block_fast_denied` (see its doc for the audit),
+    /// 2. `host_fns` keeps precedence via the same map probe,
+    /// 3. resolution is the same `lookup_method_cached` (hits AND
+    ///    misses are IC-cached per site) followed by the same
+    ///    `toplevel_methods` probe, in the canonical order — for an
+    ///    Object self no cascade arm sits between the two,
+    /// 4. a fixed-arity non-closure method binds stack-direct
+    ///    (same frame shape as the explicit-recv block path, minus
+    ///    the recv pop, and with NO visibility gate — an
+    ///    implicit-self call legally reaches private/protected,
+    ///    and the canonical arm performs no check either); any
+    ///    other shape (optionals like `catch(tag = Object.new)`,
+    ///    splats, closures) goes through the same
+    ///    `invoke_method_with_block` the canonical arm calls.
+    ///
+    /// GC rooting: the stack-direct path binds args then pops the
+    /// block (no allocation between the pops and the frame push
+    /// that roots `block_arg`); the general path hands the popped
+    /// block to `invoke_method_with_block`, which pins it across
+    /// the binder — both identical to their canonical twins.
+    #[inline(never)]
+    fn try_invoke_norecv_block_cached(
+        &mut self,
+        name_id: SymId,
+        argc: usize,
+        cache_id: u32,
+    ) -> Result<bool, Trap> {
+        // no_recv block-form layout: [..., block, a1, ..., aN].
+        let block_idx = match self.stack.len().checked_sub(argc + 1) {
+            Some(i) => i,
+            None => return Ok(false),
+        };
+        let block_id = match self.stack.get(block_idx) {
+            Some(Value::Block(bid)) => *bid,
+            _ => return Ok(false),
+        };
+        let self_val = match self.frames.last() {
+            Some(f) => f.self_val.clone(),
+            None => return Ok(false),
+        };
+        {
+            let name: &str = self.interner.resolve(name_id);
+            if Self::norecv_block_fast_denied(name) {
+                return Ok(false);
+            }
+        }
+        if self.host_fns.contains_key(&name_id) {
+            return Ok(false);
+        }
+        // Class/Module self — a bare block-call inside a class body or
+        // a class-method / module-scoped proc (ActiveSupport's
+        // `default_terminator` proc calls `catch(:abort) { }` with a
+        // CallbackChain-class self). Canonical order for a Class self:
+        // singleton-chain lookup (26316-equivalent), then the
+        // Class-bridge name set (denied wholesale below — declining is
+        // sound, the cascade re-routes those), then the toplevel
+        // table. Serve the two lookup arms here via the CACHED
+        // singleton walk (`ptr|1`-tagged slots, same as the no-block
+        // class fast path) + the same toplevel probe.
+        let oid = match self_val {
+            Value::Object(oid) => oid,
+            Value::Class(cls) => {
+                {
+                    let name: &str = self.interner.resolve(name_id);
+                    if Self::norecv_block_class_bridge_name(name) {
+                        return Ok(false);
+                    }
+                }
+                let m = match self.lookup_class_singleton_cached(&cls, name_id, cache_id) {
+                    Some(m) => m,
+                    None => match self.toplevel_methods.get(&name_id) {
+                        Some(m) => m.clone(),
+                        None => return Ok(false),
+                    },
+                };
+                if m.builtin.is_some() {
+                    return Ok(false);
+                }
+                let split = self.stack.len() - argc;
+                let args: Vec<Value> = self.stack.drain(split..).collect();
+                match self.stack.pop() {
+                    Some(_) => {}
+                    None => unreachable!("ICE: no_recv block fast path (class self) block underflow"),
+                }
+                self.invoke_method_with_block(m, Value::Class(cls), args, Some(block_id))?;
+                return Ok(true);
+            }
+            _ => return Ok(false),
+        };
+        let Some(cls) = self.heap.try_class_of(oid) else {
+            return Ok(false); // class-less slot (HeapObj::Fiber) -> full path
+        };
+        let m = match self.lookup_method_cached(&cls, name_id, cache_id) {
+            Some(m) => m,
+            // Class-chain miss (negative-cached per site): the
+            // canonical chain falls through to the toplevel table
+            // next — nothing between the two arms can fire for an
+            // Object self.
+            None => match self.toplevel_methods.get(&name_id) {
+                Some(m) => m.clone(),
+                None => return Ok(false),
+            },
+        };
+        if m.builtin.is_some() {
+            // Synth builtin Methods re-enter dispatch with the real
+            // name — keep that on the canonical path.
+            return Ok(false);
+        }
+        let fixed = match m.fixed_arity {
+            Some(f) if m.closure.is_none() && f.required as usize == argc => f,
+            // Optionals / splat / kwargs / closure — invoke via the
+            // same general path the canonical arm uses, still
+            // skipping the preamble + probe chain.
+            _ => {
+                let split = self.stack.len() - argc;
+                let args: Vec<Value> = self.stack.drain(split..).collect();
+                match self.stack.pop() {
+                    Some(_) => {}
+                    None => unreachable!("ICE: no_recv block fast path block underflow"),
+                }
+                self.invoke_method_with_block(m, Value::Object(oid), args, Some(block_id))?;
+                return Ok(true);
+            }
+        };
+        self.check_frames()?;
+        let n_locals = fixed.n_locals as usize;
+        let locals = if fixed.stack_eligible {
+            let base = self.arena_push_args(argc, n_locals);
+            crate::vm::Locals::Stack(base)
+        } else {
+            let cell = self.locals_cell_nil(n_locals);
+            {
+                let mut l = cell.borrow_mut();
+                for slot in (0..argc).rev() {
+                    l[slot] = match self.stack.pop() {
+                        Some(v) => v,
+                        None => unreachable!("ICE: no_recv block fast path arg underflow"),
+                    };
+                }
+            }
+            crate::vm::Locals::Shared(cell)
+        };
+        // Drop the block value (the ObjId is already captured in
+        // `block_id`); it becomes the frame's `block_arg`.
+        match self.stack.pop() {
+            Some(_) => {}
+            None => unreachable!("ICE: no_recv block fast path block slot underflow"),
+        }
+        self.frames.push(Frame {
+            proto_idx: m.proto_idx,
+            ip: 0,
+            locals,
+            self_val: Value::Object(oid),
+            base_sp: self.stack.len(),
+            is_class_body: false,
+            swap_return: None,
+            block_arg: Some(block_id),
+            defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
+            lexical_cvar_class: None,
+            #[cfg(feature = "regex")] saved_last_match: None,
+            is_block: false, is_lambda: false,
+            n_given_positional: fixed.required,
+            kw_given_mask: 0,
+            aux: None,
+            pending_yield: false,
+            block_writeback: None,
+            dm_share: false,
+            own_start: 0,
+            outer_cell_start: 0,
+            outer_cell: None,
+            outer_rest: None,
+            captured_yield_block: None,
+        });
+        // TIER-2 (ADR 0037): run the just-pushed frame natively when compiled.
+        #[cfg(feature = "jit-native")]
+        self.t2_enter()?;
+        Ok(true)
+    }
+
     pub(crate) fn do_call_block(&mut self, name_id: SymId, argc: usize, no_recv: bool, cache_id: u32) -> Result<(), Trap> {
         // TEMPORARY census (`RUBYRS_T2_FALLBACK_STATS=1`): same
         // one-shot marker consume as `do_call` — reason 19 tags a
@@ -24977,9 +25378,16 @@ impl Vm {
         if !no_recv && self.try_invoke_explicit_recv_block_cached(name_id, argc, cache_id)? {
             return Ok(());
         }
-        // TEMPORARY census: the block-form IC declined (or the call is
-        // no_recv, which has no block IC today) — classify the shape.
-        // Stack here: [.., recv?, block, a1..aN].
+        // Bare-call (implicit self) block-form fast path — the
+        // `catch(:abort) { }` / bare-helper-with-block shape
+        // (dispatch-campaign P3). Same decline contract: `Ok(false)`
+        // leaves the stack untouched and the full path below runs
+        // exactly as before.
+        if no_recv && self.try_invoke_norecv_block_cached(name_id, argc, cache_id)? {
+            return Ok(());
+        }
+        // TEMPORARY census: the block-form IC declined — classify the
+        // shape. Stack here: [.., recv?, block, a1..aN].
         #[cfg(feature = "jit-native")]
         if census_from_t2 {
             let shape = if no_recv {

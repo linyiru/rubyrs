@@ -888,6 +888,13 @@ fn tier2_restblock_lite() { run_diff("tier2_restblock_lite"); }
 // bare-call serve (module-function siblings, private class methods,
 // extended-module resolution, bare block_given? in `def self.`).
 #[test] fn p2_walk_buckets() { run_diff("p2_walk_buckets"); }
+// Dispatch-campaign P3 block-form fast paths: no_recv block IC
+// (Object/Class self, fixed + general arities, toplevel catch/throw
+// fallback, deny-listed names, &nil re-aim, method_missing),
+// collection-receiver block serves (Array/Hash/Range iterator arms,
+// Str gsub family, subclass-override + reopen precedence, frozen
+// mutators, break/next/non-local return).
+#[test] fn p3_block_fast_paths() { run_diff("p3_block_fast_paths"); }
 #[test] fn lazy_each_with_index() { run_diff("lazy_each_with_index"); }
 #[cfg(feature = "stdlib")]
 #[test] fn set_subtract_divide() { run_diff("set_subtract_divide"); }
