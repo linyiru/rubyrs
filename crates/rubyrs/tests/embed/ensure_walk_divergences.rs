@@ -461,8 +461,8 @@ puts "K4 => #{k4.inspect}"
 
 /// E1 in the probe matrix. CRuby 3.4.1-prism prints:
 ///   E1 inner ensure / E1 outer ensure / E1 outer ensure / E1 => :brk
-/// (outer ensure body runs TWICE — inline-copy duplication). CRuby
-/// >= 3.4.2 / parse.y / 3.3.x print:
+/// (outer ensure body runs TWICE — inline-copy duplication).
+/// CRuby >= 3.4.2 / parse.y / 3.3.x print:
 ///   E1 inner ensure / E1 outer ensure / E1 after-loop reached / E1 => :after
 /// (single run, break cancels the walk). rubyrs runs each body once
 /// (matching modern CRuby) and returns :brk (matching 3.4.1-prism).
