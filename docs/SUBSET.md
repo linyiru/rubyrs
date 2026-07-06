@@ -1090,6 +1090,67 @@ Foo.shout   # => "HI"
     persistence in the sinatra `add_charset << x` shape, visibility
     leak fix, `alias_method`, the `nil` name pin).
 
+### Eigenclass residual family (S3): what shipped, what remains
+
+The S3 round closed five `class << X` gaps (each pinned by a
+dual-oracle fixture, byte-identical to CRuby 3.4.8 AND 3.4.1):
+
+- **(a) Eigenclass constants are scoped.** `class << X; CONST = …`
+  no longer leaks into the flat top-level table: top-level `CONST`,
+  `Object.const_get(:CONST)`, and `X::CONST` all NameError (CRuby);
+  `X.singleton_class::CONST` / `sc.const_get` / `sc.const_defined?` /
+  `sc.constants(false)` resolve via the shell's `consts` side-table.
+  Mechanism: the eigenclass-body proto's `class_path` carries a
+  synthetic `#<Class:…>` segment (unspellable from source), so the
+  flat store key can't collide with user paths; bare reads in the
+  body and its methods walk the segmented chain.
+  Test: `eigenclass_const_scoping.rb`.
+- **(b) `private_constant` in eigenclass bodies is enforced** on the
+  `::` reference form ("private constant #<Class:X>::NAME
+  referenced"); `const_get` bypasses (CRuby). Rides the new
+  `Op::LoadConstFromValue` dynamic-base constant read, which ALSO
+  closes the pre-existing gap where `m::PRIV` (dynamic base, normal
+  module) bypassed privacy because the AST desugared `expr::CONST`
+  straight to `const_get`. Test: `eigenclass_private_constant.rb`.
+- **(c) `def self.x` in an eigenclass body** lands on the
+  eigenclass's own eigenclass (`X.singleton_class.x` works; `X.x`
+  NoMethodErrors). Test: `eigenclass_def_self.rb`.
+- **(d) `attr_*` with String args in `class << self`** (was a hard
+  parse error on the self-receiver desugar path).
+  Test: `eigenclass_attr_string.rb`.
+- **(e) `protected` / `private` (bare AND args forms) in eigenclass
+  bodies are enforced on class-method dispatch**, with CRuby's
+  metaclass-kin rule: a subclass's class method may call a base's
+  protected class method (rouge `Lexer.register` pattern); external
+  callers and INSTANCES of the class raise. `respond_to?` /
+  `protected_instance_methods(false)` reflect the visibility.
+  Test: `eigenclass_protected.rb`.
+
+Remaining eigenclass declines (documented, not silent):
+
+- **Const scoping only for stable compile-time receivers.**
+  `class << obj`, `class << self` inside a METHOD body (self = an
+  instance), and toplevel `class << self` (self = main) keep the
+  legacy behavior: the constant is stored under its bare top-level
+  key (visible to top-level reads — CRuby scopes it to the runtime
+  eigenclass). These receivers have no compile-time identity to key
+  the flat store by.
+- **Same eigenclass, different lexical spelling.** Two
+  `class << Bar` bodies whose SPELLED paths differ (e.g. one inside
+  `module A`, one inside `module B`, both reopening top-level
+  `::Bar`) scope their constants by spelling, so a bare read in one
+  body's methods doesn't see a constant assigned in the other —
+  CRuby shares them (same eigenclass). `sc::CONST` via the shell's
+  side-table is unaffected (runtime-keyed).
+- **Privatising BUILTIN class methods stays a no-op.**
+  `class << self; private :new` (Liquid tag.rb) / `private_class_method
+  :new, :allocate` (kramdown Parser::Base) target the builtin
+  constructor arms, which have no Method record to flip —
+  `X.new` stays callable. User-defined records are enforced.
+- **`defined?(sc::CONST)`** has the same divergence as the general
+  `defined?`-on-private-constant note above (the `defined?` walk
+  doesn't consult visibility).
+
 ### Implicit (binding-less) `eval` skips caller locals; explicit `binding` capture works
 
 ```ruby

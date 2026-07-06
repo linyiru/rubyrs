@@ -2204,6 +2204,25 @@ fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 // singleton methods. Surfaced by sorbet's run_sig reflection.
 #[test] fn eigenclass_introspection() { run_diff("eigenclass_introspection"); }
 
+// S3 eigenclass residual family — see each fixture's header.
+// (a) `class << X; CONST = …` scoped to the singleton class (no flat
+//     top-level leak; `sc::CONST` / const_get / constants(false) via
+//     the shell's consts side-table + `#<Class:…>` scoped flat keys).
+#[test] fn eigenclass_const_scoping() { run_diff("eigenclass_const_scoping"); }
+// (b) `private_constant` in an eigenclass body enforced on the `::`
+//     reference form (Op::LoadConstFromValue), const_get bypasses.
+#[test] fn eigenclass_private_constant() { run_diff("eigenclass_private_constant"); }
+// (c) `def self.x` in an eigenclass body lands on the eigenclass's
+//     own eigenclass (`sc.x`, not `Klass.x`).
+#[test] fn eigenclass_def_self() { run_diff("eigenclass_def_self"); }
+// (d) `class << self; attr_accessor "str"` — String attr args on the
+//     self-receiver path (was a parse error).
+#[test] fn eigenclass_attr_string() { run_diff("eigenclass_attr_string"); }
+// (e) bare/args `protected` & `private` in eigenclass bodies enforced
+//     on class-method dispatch (CRuby metaclass-kin rule for
+//     subclass callers).
+#[test] fn eigenclass_protected() { run_diff("eigenclass_protected"); }
+
 // `Object.instance_method(:method)` resolves the Kernel builtin, and an
 // Object/BasicObject/Kernel-rooted UnboundMethod binds to ANY receiver.
 // Surfaced by sorbet's `Object.instance_method(:method).bind_call(...)`.

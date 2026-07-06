@@ -207,6 +207,19 @@ pub(crate) enum Op {
     /// expression's value should also remain on the stack (CRuby's
     /// `FOO = 42` evaluates to 42).
     StoreConst(SymId),
+    /// Dynamic-base constant read — `expr::CONST` where `expr` is a
+    /// RUNTIME value (`self.class::FOO`, `k::FOO`,
+    /// `x.singleton_class::SECRET`). Stack: pops nothing itself —
+    /// the receiver is on top; the handler enforces
+    /// `private_constant` for Class receivers (CRuby: the `::`
+    /// reference form raises "private constant X::Y referenced";
+    /// `const_get` does NOT — probed 3.4.8), then delegates to the
+    /// `const_get` dispatch arm for the resolution itself (ancestor
+    /// walk, autoload fire, error shapes). Emitted by the AST's
+    /// dynamic constant-path arm, which previously desugared
+    /// straight to `const_get` and therefore silently bypassed
+    /// constant privacy. (S3 item b.)
+    LoadConstFromValue(SymId),
     /// `$foo` — push the global's current value onto the stack.
     /// Special globals (`$$`, `$0`) are intercepted in the handler;
     /// plain user globals are looked up in `Vm.globals`; unknown

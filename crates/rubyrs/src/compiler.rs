@@ -1538,6 +1538,18 @@ fn emit_const_owner_read(
     b.emit(Op::Pop);
 }
 
+/// `true` when the lexical `class_path` ends in a synthetic
+/// eigenclass scope segment (`#<Class:…>`) — pushed by the
+/// `Expr::SingletonClassBody` compile arm for receivers with a
+/// stable compile-time identity. Constant writes in such a scope
+/// emit ONLY the segmented qualified store (no bare-key leak);
+/// see the `Expr::ConstWrite` arms. The segment is unspellable
+/// from Ruby source (`#` is not a constant character), so the
+/// scoped keys can never collide with user-written paths.
+fn singleton_scoped_path(class_path: &[String]) -> bool {
+    class_path.last().is_some_and(|s| s.starts_with("#<Class:"))
+}
+
 /// in that case (saves one indirection through `Proto.const_chains`).
 ///
 /// Chain order is innermost-scope first, matching CRuby's "cref
@@ -1700,10 +1712,25 @@ fn compile_stmt(
             // module (`Foo::X`) — CRuby never creates a TOP-LEVEL `X`. Emit ONLY
             // the qualified store; the bare store would leak `X` into Object's
             // constant table (`class Hotel; X = 1; end` polluting top-level `X`,
-            // which then shadowed a later `module X` in zeitwerk). Eigenclass
-            // bodies KEEP the bare store (singleton_class::CONST reads it).
+            // which then shadowed a later `module X` in zeitwerk).
+            //
+            // Eigenclass bodies split two ways (S3 item a):
+            //   - SCOPED (class_path carries a `#<Class:…>` segment —
+            //     `class << self` in a class/module body, `class << Const`):
+            //     emit ONLY the segmented qualified store. The key is
+            //     unspellable from source, so the constant is invisible to the
+            //     enclosing namespace and the top level (CRuby). Bare reads in
+            //     the body / its methods walk the segmented chain; external
+            //     `singleton_class::CONST` resolves via the shell's `consts`
+            //     side-table (Op::StoreConst's eigenclass arm).
+            //   - LEGACY (no stable compile-time identity — `class << obj`,
+            //     `class << self` in a method / at toplevel): KEEP the bare
+            //     store (`singleton_class::CONST` reads it via the toplevel
+            //     fallback; documented leak in SUBSET.md).
             match prefixed_id {
-                Some(pid) if !b.in_singleton_body => { b.emit(Op::StoreConst(pid)); }
+                Some(pid) if !b.in_singleton_body || singleton_scoped_path(&b.class_path) => {
+                    b.emit(Op::StoreConst(pid));
+                }
                 Some(pid) => {
                     b.emit(Op::Dup);
                     b.emit(Op::StoreConst(id));
@@ -1922,6 +1949,14 @@ pub(crate) fn compile_expr(
                 b.emit(Op::LoadConstOrNil(id));
             }
         }
+        Expr::DynConstRead(base, name) => {
+            // `expr::CONST` with a runtime base — base value on the
+            // stack, then the privacy-enforcing dynamic read (see
+            // Op::LoadConstFromValue).
+            compile_expr(b, base, protos, interner, cc);
+            let id = interner.intern(name);
+            b.emit(Op::LoadConstFromValue(id));
+        }
         Expr::ConstWrite(name, absolute, val) => {
             // CRuby: a constant assignment leaves the assigned value
             // on the stack as the expression's result. Same pattern
@@ -1943,10 +1978,13 @@ pub(crate) fn compile_expr(
             //   alias:    Dup, Dup, StoreConst(bare),
             //                       StoreConst(prefixed)   → [val]
             // Leave val on the stack as the expression result; inside a regular
-            // class body emit ONLY the qualified store (see the statement form).
+            // class body emit ONLY the qualified store (see the statement form —
+            // including the scoped-vs-legacy eigenclass split, S3 item a).
             b.emit(Op::Dup);
             match prefixed_id {
-                Some(pid) if !b.in_singleton_body => { b.emit(Op::StoreConst(pid)); }
+                Some(pid) if !b.in_singleton_body || singleton_scoped_path(&b.class_path) => {
+                    b.emit(Op::StoreConst(pid));
+                }
                 Some(pid) => {
                     b.emit(Op::Dup);
                     b.emit(Op::StoreConst(id));
@@ -2317,16 +2355,51 @@ pub(crate) fn compile_expr(
             // SURROUNDING scope (so `class << self` reads the outer
             // self, `class << Const` resolves the constant here),
             // then emit the op that materializes the eigenclass and
-            // opens the class-body frame. The body proto inherits
-            // the surrounding lexical class_path so nested
-            // `module`/`class` and constant reads resolve against
-            // the enclosing namespace (CRuby scopes them under the
-            // metaclass, but the flat const model keeps them under
-            // the surrounding module — observably equivalent for the
-            // bare-name reads inside the body).
+            // opens the class-body frame.
+            //
+            // The body proto inherits the surrounding lexical
+            // class_path PLUS a synthetic `#<Class:…>` scope segment
+            // when the receiver is statically Class-shaped (`self` in
+            // a class/module body, or a named constant). The segment
+            // scopes eigenclass constants under the flat const model
+            // (S3 item a): a `CONST = v` in the body stores under the
+            // segmented key (which no source-level `Foo::Bar` read
+            // can spell — `#` is not a valid const character), bare
+            // reads in the body and in methods defined there walk the
+            // segmented chain first, and the enclosing namespace's
+            // keys stay clean — `Klass::CONST` / top-level `CONST` /
+            // `Object.const_get(:CONST)` all NameError like CRuby.
+            // External access goes through the eigenclass value
+            // (`Klass.singleton_class::CONST`), which resolves via
+            // the shell's own `consts` side-table (populated by
+            // `Op::StoreConst`'s eigenclass arm at runtime).
+            //
+            // No segment (legacy leak-to-toplevel behavior, recorded
+            // in SUBSET.md) for receivers whose eigenclass has no
+            // stable compile-time identity: `class << obj`,
+            // `class << self` inside a METHOD body (self = an
+            // instance), and toplevel `class << self` (self = main).
+            let scope_seg: Option<String> = if b.is_method_body {
+                None
+            } else {
+                match &recv.node {
+                    Expr::SelfExpr if !b.class_path.is_empty() => {
+                        Some(format!("#<Class:{}>", b.class_path.join("::")))
+                    }
+                    Expr::ConstRead(name) => {
+                        let n = crate::const_marker::strip_absolute(name).unwrap_or(name.as_str());
+                        Some(format!("#<Class:{}>", n))
+                    }
+                    _ => None,
+                }
+            };
+            let mut body_path = b.class_path.clone();
+            if let Some(seg) = scope_seg {
+                body_path.push(seg);
+            }
             let proto_idx = compile_proto_at(
                 "<singleton class>".to_string(), vec![], body,
-                b.filename.clone(), protos, interner, cc, b.class_path.clone(),
+                b.filename.clone(), protos, interner, cc, body_path,
             );
             compile_expr(b, recv, protos, interner, cc);
             b.emit(Op::OpenSingletonClass(proto_idx as u32));

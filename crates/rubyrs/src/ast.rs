@@ -241,6 +241,14 @@ pub(crate) enum Expr {
     /// class_path alias for those so they stay at top-level only.
     /// Bare-name writes and relative-path writes pass false.
     ConstWrite(String, bool, Box<SExpr>),
+    /// Dynamic-base constant read — `expr::CONST` where the base is
+    /// a runtime value (`self.class::FOO`, `k::FOO`,
+    /// `sc::SECRET`). Compiles to the base expression followed by
+    /// `Op::LoadConstFromValue`, which enforces `private_constant`
+    /// (the `::` reference form raises in CRuby where `const_get`
+    /// does not) before delegating to the `const_get` resolution
+    /// machinery. Fields: base expression, constant name.
+    DynConstRead(Box<SExpr>, String),
     /// `__FILE__` — the current source file's path. Resolved at
     /// compile time to a string literal of the surrounding
     /// proto's `filename` (the loader / `Runtime::eval` sets
@@ -1627,6 +1635,70 @@ fn singleton_body_needs_real_eval(body_nodes: &[Node<'_>], recv_is_self: bool) -
         if bn.as_constant_write_node().is_some() {
             return true;
         }
+        // `def self.x` (or any explicit-receiver def) inside the
+        // eigenclass body — a method on the eigenclass's OWN
+        // eigenclass. The per-statement desugar's `mk_singleton_def`
+        // DISCARDS the inner receiver, wrongly turning `def self.meta`
+        // into a plain class method of the enclosing class. The real
+        // eigenclass-body path runs the def with self = the metaclass:
+        // `Op::DefSingletonMethod` sees the shell on the class_stack
+        // and installs into the SHELL's singleton_methods, so
+        // `Klass.singleton_class.meta` dispatches like CRuby and
+        // `Klass.meta` NoMethodErrors. (S3 item c.)
+        if bn.as_def_node().is_some_and(|d| d.receiver().is_some()) {
+            return true;
+        }
+        // Bare or args-form visibility modifier (`private` /
+        // `protected` / `public`) in the body. The desugar path can't
+        // honour either form: its per-def `Op::DefSingletonMethod`
+        // hardcodes Public (correct for `def self.x` in a NORMAL class
+        // body, wrong for eigenclass-desugared defs), and the args
+        // form was an explicit no-op arm. The real eigenclass-body
+        // path handles both: the bare form flips the visibility entry
+        // `Op::OpenSingletonClass` pushed (read by `Op::DefMethod`,
+        // whose install redirects to the real class's
+        // singleton_methods), and the args form hits the
+        // eigenclass-shell arm of the runtime visibility call
+        // (`apply_class_method_visibility`). Non-self receivers
+        // already route via the generic non-self clause below; this
+        // covers `class << self`. (S3 item e.)
+        if recv_is_self
+            && let Some(call) = bn.as_call_node()
+            && call.receiver().is_none()
+            && matches!(
+                cid_to_string(call.name()).as_str(),
+                "private" | "public" | "protected"
+            )
+        {
+            return true;
+        }
+        // `attr_*` with non-Symbol literal args (`attr_accessor
+        // "str"`, `attr_reader "ro", :sym`) in a `class << self` body.
+        // The desugar's compile-time per-name expansion only reads
+        // Symbol literals and used to hard parse-error on anything
+        // else. The real eigenclass-body path runs the runtime attr_*
+        // with self = the metaclass (shell redirect to
+        // real.singleton_*), which coerces Strings like CRuby. The
+        // single-splat shape stays OUT (`attr_reader(*ATTRIBUTES)` has
+        // a dedicated desugar arm — mail's multibyte/unicode.rb), and
+        // so does zero-arg (a CRuby silent no-op the desugar
+        // reproduces). Non-self receivers already route via the
+        // non-self clause below (ticket-2). (S3 item d.)
+        if recv_is_self
+            && let Some(call) = bn.as_call_node()
+            && call.receiver().is_none()
+            && matches!(
+                cid_to_string(call.name()).as_str(),
+                "attr_reader" | "attr_writer" | "attr_accessor"
+            )
+            && let Some(args) = call.arguments()
+        {
+            let v: Vec<_> = args.arguments().iter().collect();
+            let single_splat = v.len() == 1 && v[0].as_splat_node().is_some();
+            if !single_splat && !v.iter().all(|n| n.as_symbol_node().is_some()) {
+                return true;
+            }
+        }
         // Control-flow wrapping defs — `if/elsif/else def …`,
         // `unless`, `case/when def …`. The per-statement desugar only
         // admits a single `if`/`else` of pure defs and BAILS on an
@@ -1735,28 +1807,22 @@ fn singleton_body_needs_real_eval(body_nodes: &[Node<'_>], recv_is_self: bool) -
         {
             return true;
         }
-        // Constant assignment in the body (`PATCH_MAP = {…}`): the
-        // constant belongs to the eigenclass, and the body's methods
-        // reference it BARE — which only resolves when those methods
-        // carry the eigenclass cref. The compile-time desugar rewrites
-        // them to `def Recv.m` with the SURROUNDING cref (wrong), so a
-        // bare reference can't find the const. The real eigenclass-body
-        // path runs the whole body with self = the metaclass, giving
-        // both the const and the methods the right scope. Surfaced by
-        // diff-lcs (`class << Diff::LCS; PATCH_MAP = {…}; def …
-        // PATCH_MAP[dir] … end; end`).
+        // Constant-PATH assignment in a non-self body
+        // (`class << Diff::LCS; Foo::X = …`). Plain bare const writes
+        // (ConstantWriteNode) are already routed — receiver-
+        // independent — by the check further up; this adds the path
+        // form for non-self receivers, which has no desugar arm.
         //
-        // NON-self only: a `class << self` body's const write is handled
-        // by the desugar's dedicated arm (which keeps it coexisting with
-        // class-variable writes in the SAME body — the real-eigenclass
-        // path re-roots `@@cvar` on the metaclass and breaks that
-        // interplay, as `class_self_cvar`'s MixedBody pins). A non-self
-        // `class << Const` body has no such desugar arm and needs the
-        // real path for the bare-const-reference cref anyway.
-        if !recv_is_self
-            && (bn.as_constant_write_node().is_some()
-                || bn.as_constant_path_write_node().is_some())
-        {
+        // (Historical note: an older comment here claimed `class <<
+        // self` const writes stayed on a dedicated desugar arm to
+        // protect the `class_self_cvar` MixedBody interplay. That has
+        // not been true since the receiver-independent const-write
+        // routing above landed — the real path's cvar ops re-root a
+        // metaclass scope onto the ATTACHED class via
+        // `surrounding_class`'s singleton_target redirect, so mixed
+        // const+cvar bodies like sinatra base.rb's are safe on the
+        // real path; `class_self_cvar` pins it.)
+        if !recv_is_self && bn.as_constant_path_write_node().is_some() {
             return true;
         }
         false
@@ -2306,24 +2372,17 @@ fn tr_singleton_class(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 out.push(sp(bn, Expr::SingletonChainPrepend(Box::new(src))));
                 continue;
             }
-            // `class << self; FOO = expr; ...` — constant assignment
-            // inside the singleton class body. CRuby places the
-            // constant on the singleton class itself, accessible
-            // via `Foo.singleton_class::FOO`. rubyrs's spike-scope
-            // constants model is flatter — `Vm.constants` is a
-            // single name-keyed table — so we route the assignment
-            // through the regular toplevel `Expr::ConstWrite`. The
-            // result: a bare `FOO` read inside the singleton class
-            // resolves through the same table that a top-level
-            // `FOO` would, which is the model rubyrs already uses
-            // for all other constants in the spike scope.
-            //
-            // Motivating call site: sinatra/base.rb:1292's
-            // `class << self; CALLERS_TO_IGNORE = [...].freeze;
-            // attr_reader :routes, ...; def callers_to_ignore;
-            // CALLERS_TO_IGNORE; end; end` — the constant is
-            // assigned once and read from the singleton method
-            // body that follows. (TRY_RUNS pass 9 layer #11.)
+            // `class << self; FOO = expr; ...` — DEFENSIVE only: any
+            // body containing a ConstantWriteNode is routed to the
+            // real eigenclass path by the receiver-independent check
+            // in `singleton_body_needs_real_eval` (where the
+            // `#<Class:…>`-segmented proto scopes the constant to the
+            // eigenclass, S3 item a), so this arm is unreachable.
+            // Kept as a fallback so an unforeseen shape degrades to
+            // the old flat-toplevel write instead of the subset
+            // parse error. (Historic motivating call site:
+            // sinatra/base.rb:1292's CALLERS_TO_IGNORE — TRY_RUNS
+            // pass 9 layer #11.)
             if recv_is_self && bn.as_constant_write_node().is_some() {
                 out.push(tr(ctx, bn));
                 continue;
@@ -2358,64 +2417,19 @@ fn tr_singleton_class(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
                 out.push(tr(ctx, bn));
                 continue;
             }
-            // `class << self; private; def secret; ...; end; ...` —
-            // bare visibility modifier (`private` / `public` /
-            // `protected`) at body top level. Translates as a
-            // regular method call (Expr::Call with name="private"
-            // and implicit receiver). At runtime self is the
-            // surrounding class (= `class_stack.last()` —
-            // singleton-class body shares the outer class's
-            // class_stack entry), and do_call's
-            // `visibility_from_name` arm at ~line 2417 mutates
-            // `class_visibility_stack.last_mut()` accordingly.
-            // Subsequent `def`s in the same body read that stack
-            // when DefSingletonMethod runs, so the modifier flows
-            // correctly to following method definitions.
-            //
-            // Scope: only the bare-receiver form. The args form
-            // (`private :foo, :bar`) retroactively flips named
-            // methods' visibility on the OUTER class — but
-            // sinatra/base.rb:1690 uses the bare form, and the
-            // args form's interaction with singleton methods is
-            // a separate question we don't need to answer here.
-            //
-            // Motivating call site: sinatra/base.rb:1690's
-            // `class << self; ...; private; ...; end` — bare
-            // `private` precedes a block of helper methods that
-            // sinatra hides from external callers.
-            // (TRY_RUNS pass 9.7 layer #14.)
-            if recv_is_self
-                && let Some(call) = bn.as_call_node()
-                && call.receiver().is_none()
-                && call.arguments().is_none_or(|a| a.arguments().iter().next().is_none())
-                && matches!(cid_to_string(call.name()).as_str(),
-                    "private" | "public" | "protected"
-                )
-            {
-                out.push(tr(ctx, bn));
-                continue;
-            }
-            // `class << self; private :new; end` — visibility
-            // modifier WITH method-name args at body top level.
-            // Equivalent to `private_class_method :new`: it sets the
-            // named SINGLETON method's visibility. rubyrs doesn't
-            // model singleton-method visibility (same documented
-            // Tier-1 trade-off as `private_class_method` / the bare
-            // form's effect on later defs), so this is a no-op — the
-            // method stays callable. Motivating case: Liquid's
-            // tag.rb does `class << self; def parse(...); ...; end;
-            // private :new; end` to push callers toward `Tag.parse`.
-            if recv_is_self
-                && let Some(call) = bn.as_call_node()
-                && call.receiver().is_none()
-                && call.arguments().is_some_and(|a| a.arguments().iter().next().is_some())
-                && matches!(cid_to_string(call.name()).as_str(),
-                    "private" | "public" | "protected"
-                )
-            {
-                out.push(sp(bn, Expr::Nil));
-                continue;
-            }
+            // `class << self; private; …` / `private :new` — the bare
+            // and args-form visibility modifiers never reach this
+            // loop: `singleton_body_needs_real_eval` routes any body
+            // containing one to the real eigenclass path (S3 item e),
+            // where the bare form flips the visibility entry
+            // `Op::OpenSingletonClass` pushed and the args form hits
+            // the eigenclass-shell arm of the runtime visibility
+            // call. (Non-self receivers were already routed by the
+            // generic non-self clause.) The former desugar arms here
+            // — bare-form translate-as-plain-call (which flowed into
+            // `Op::DefSingletonMethod`'s hardcoded-Public install,
+            // silently losing the modifier) and args-form no-op —
+            // are gone with them.
             // `class << self; <stmt> if cond` / `class << self;
             // <stmt> unless cond` — and structurally-equivalent
             // block forms `if cond; <stmt>; end` / `unless cond;
@@ -3220,23 +3234,25 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         // Dynamic path: `expr::CONST` where `expr` is a RUNTIME value
         // (e.g. `self.class::FOO`, `k::FOO` for a local `k`). CRuby
         // resolves FOO on the runtime value's own class/ancestry — NOT
-        // in the lexical scope. Desugar to `expr.const_get(:FOO)` so
-        // the dynamic base is honoured. The previous trailing-name-only
-        // `ConstRead(FOO)` discarded the base entirely and resolved FOO
-        // in the surrounding lexical scope, so a `self.class::FOO` from
-        // a base-class method returned the BASE's `FOO` even when the
-        // runtime subclass redefined it (e.g. kramdown-gfm's
+        // in the lexical scope. `Expr::DynConstRead` honours the
+        // dynamic base AND `private_constant` (the `::` reference
+        // form raises for private constants where `const_get` does
+        // not — S3 item b; the previous straight `const_get` desugar
+        // silently bypassed privacy). The even earlier
+        // trailing-name-only `ConstRead(FOO)` discarded the base
+        // entirely and resolved FOO in the surrounding lexical
+        // scope, so a `self.class::FOO` from a base-class method
+        // returned the BASE's `FOO` even when the runtime subclass
+        // redefined it (e.g. kramdown-gfm's
         // `self.class::FENCED_CODEBLOCK_MATCH` resolved to the
         // tilde-only base constant, breaking ``` ``` ``` code fences).
         if let Some(parent) = n.parent()
             && let Some(name_id) = n.name()
         {
-            return sp(node, Expr::Call {
-                receiver: Some(Box::new(tr(ctx, &parent))),
-                name: "const_get".into(),
-                args: vec![sp(node, Expr::SymbolLit(cid_to_string(name_id)))],
-                kwargs_trailing: false,
-            });
+            return sp(node, Expr::DynConstRead(
+                Box::new(tr(ctx, &parent)),
+                cid_to_string(name_id),
+            ));
         }
         // No parent (shouldn't reach here): trailing-name fallback.
         if let Some(name_id) = n.name() {

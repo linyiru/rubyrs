@@ -8,30 +8,20 @@
 ## tripped the body translator's catch-all NotImplementedError
 ## at class-body load time, blocking everything past line 1690.
 ##
-## Scope (this PR): translator admission only. The runtime
-## semantics:
-##   1. `private` at body top level translates as a regular
-##      method call (Expr::Call with no receiver).
-##   2. At runtime, do_call's visibility-from-name arm fires
-##      because self_val is the surrounding class (Value::Class).
-##   3. The arm mutates `class_visibility_stack.last_mut()` to
-##      the new visibility.
-##   4. Subsequent `def` (DefSingletonMethod op) reads
-##      `class_visibility_stack.last()` and stamps the method
-##      with that visibility.
-## Verified via debug trace: methods following `private` ARE
-## installed with Visibility::Private.
+## Runtime semantics (updated by S3): bodies containing a bare
+## visibility modifier now route to the REAL eigenclass-body
+## path (`Op::OpenSingletonClass`, self = the metaclass) — the
+## modifier flips the visibility entry the op pushed, and
+## `Op::DefMethod`'s shell-redirected install stamps subsequent
+## defs with it.
 ##
-## KNOWN GAP (separate PR): singleton-method dispatch
-## (do_call's `lookup_class_singleton_method` arm) does NOT
-## currently enforce the Private/Protected visibility check
-## that instance dispatch enforces — so `Foo.secret` succeeds
-## even when `:secret` is marked Private. The translator-level
-## acceptance (this PR) doesn't introduce that gap; it's
-## pre-existing in the singleton dispatch path. Fixing it
-## requires adding visibility enforcement at line ~2913 of
-## dispatch.rs, alongside CRuby's "self_recv vs explicit"
-## semantic. Flagged for follow-up.
+## The KNOWN GAP this header used to carry — singleton-method
+## dispatch not enforcing Private/Protected — is CLOSED (S3
+## item e): `Foo.secret` now raises the CRuby NoMethodError for
+## private AND protected class methods, with the metaclass-kin
+## exemption for subclass callers. Enforcement is pinned by
+## eigenclass_protected.rb; this fixture keeps pinning the
+## admission + leak/unwind isolation invariants below.
 
 class WithVisModifier
   class << self
@@ -57,10 +47,10 @@ end
 ## bare `private` before this fix.
 puts "loaded=true"
 
-## The methods ARE installed (and callable; the Private mark
-## doesn't currently enforce on singleton dispatch — separate
-## gap noted above). Both rubyrs and CRuby agree on the values
-## returned by direct call.
+## The PUBLIC methods around the `private` span stay callable
+## (the private span's enforcement is pinned in
+## eigenclass_protected.rb). Both rubyrs and CRuby agree on the
+## values returned by direct call.
 puts "public_one=#{WithVisModifier.public_one}"
 puts "visible_again=#{WithVisModifier.visible_again}"
 

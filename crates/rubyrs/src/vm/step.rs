@@ -2090,6 +2090,54 @@ impl Vm {
                     }
                 }
             }
+            Op::LoadConstFromValue(name_id) => {
+                // `expr::CONST` with a RUNTIME base (`k::FOO`,
+                // `x.singleton_class::SECRET`). The `::` reference
+                // form enforces `private_constant` (CRuby — where
+                // `const_get` deliberately does NOT, probed 3.4.8);
+                // the resolution itself delegates to the `const_get`
+                // dispatch arm (ancestor walk, autoload fire, error
+                // shapes) with the base still on the stack. The
+                // privacy key mirrors `record_const_visibility`'s
+                // derivation: bare name for Object owners, otherwise
+                // `Owner::NAME` via the owner's effective name — for
+                // an eigenclass shell that is `#<Class:X>::NAME`,
+                // exactly CRuby's message spelling. (S3 item b.)
+                match self.stack.last() {
+                    Some(Value::Class(cls)) => {
+                        if !self.private_consts.is_empty() {
+                            let seg = self.interner.resolve(name_id).to_string();
+                            let key = match cls.effective_name().as_deref() {
+                                None | Some("Object") => seg,
+                                Some(on) => format!("{}::{}", on, seg),
+                            };
+                            if let Some(kid) = self.interner.get_id(&key)
+                                && self.private_consts.contains(&kid)
+                            {
+                                return Err(self.trap(crate::error::RubyError::NameError {
+                                    msg: format!("private constant {} referenced", key),
+                                }));
+                            }
+                        }
+                    }
+                    Some(other) => {
+                        // CRuby: `5::FOO` / `nil::FOO` → TypeError
+                        // "<inspect> is not a class/module" (the `::`
+                        // form requires a Module — a user `const_get`
+                        // method would NOT be consulted). The old
+                        // `const_get` desugar surfaced a confusing
+                        // NoMethodError here instead.
+                        let shown = other.to_inspect(&self.heap, &self.interner);
+                        return Err(self.trap(crate::error::RubyError::TypeError {
+                            msg: format!("{} is not a class/module", shown),
+                        }));
+                    }
+                    None => {}
+                }
+                self.stack.push(Value::Sym(name_id));
+                let cg = self.interner.intern("const_get");
+                self.do_call(cg, 1, false, u32::MAX)?;
+            }
             Op::LoadConst(name_id) => {
                 // Explicit `Scope::Const` access to a `private_constant` always
                 // raises (CRuby), even from inside the owning module — bare /
@@ -2687,16 +2735,39 @@ impl Vm {
                             self.stack.push(Value::Hash(id));
                             return Ok(true);
                         }
-                        // Report the INNERMOST-scope qualified form
-                        // in the NameError so the user sees the path
-                        // CRuby would have searched first — e.g.
-                        // `uninitialized constant Foo::Bar::UnresolvedX`
-                        // rather than the bare `UnresolvedX`.
-                        // chain[0] is the innermost candidate.
-                        let name = self.interner.resolve(chain[0]).clone();
-                        return Err(self.trap(crate::error::RubyError::NameError {
-                            msg: format!("uninitialized constant {}", name),
-                        }));
+                        // NameError spelling, matching CRuby's two
+                        // shapes (probed 3.4.8):
+                        //   - QUALIFIED source read (`Widget::X`):
+                        //     CRuby reports the SOURCE spelling
+                        //     (`uninitialized constant Widget::X`) —
+                        //     that's the chain's LAST entry (the
+                        //     un-prefixed name; innermost-first
+                        //     ordering). Reporting chain[0] here
+                        //     produced the doubled-scope wart
+                        //     `Plain::Plain::MISSING` (pre-existing,
+                        //     fixed with S3).
+                        //   - BARE read: CRuby reports the innermost
+                        //     cref scope — chain[0]. In an eigenclass
+                        //     body chain[0] carries the synthetic
+                        //     `#<Class:…>` segment WITH its lexical
+                        //     prefix (`Widget::#<Class:Widget>::X`);
+                        //     CRuby's innermost cref there is the
+                        //     eigenclass itself, so strip the prefix
+                        //     and report `#<Class:Widget>::X`.
+                        let last = self.interner.resolve(bare).clone();
+                        let name: &str = if last.contains("::") {
+                            &last
+                        } else {
+                            let innermost = self.interner.resolve(chain[0]).clone();
+                            match innermost.find("#<Class:") {
+                                Some(pos) if pos > 0 => {
+                                    &self.interner.resolve(chain[0])[pos..]
+                                }
+                                _ => self.interner.resolve(chain[0]),
+                            }
+                        };
+                        let msg = format!("uninitialized constant {}", name);
+                        return Err(self.trap(crate::error::RubyError::NameError { msg }));
                     }
                 };
                 // Fill the IC. The autoload path may have bumped

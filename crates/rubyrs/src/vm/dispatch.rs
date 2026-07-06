@@ -5298,14 +5298,35 @@ impl Vm {
                 .last()
                 .map(|f| f.self_val.clone())
                 .unwrap_or(Value::Nil);
-            let caller_cls = match &caller_self {
-                Value::Object(id) => Some(self.heap.class_of(*id)),
-                _ => None,
-            };
             let defining = m.defining_class.as_ref().and_then(|w| w.upgrade());
-            let allowed = match (&caller_cls, &defining) {
-                (Some(c), Some(d)) => super::class_is_a(c, d),
-                _ => false,
+            let allowed = if matches!(recv, Value::Class(_)) {
+                // Protected CLASS method (S3 item e). CRuby's rule is
+                // caller-self `is_a?` the defining scope — here the
+                // defining scope is conceptually the eigenclass
+                // #<Class:D>, whose instances are exactly D and its
+                // subclasses. `defining_class` records the REAL class
+                // D (effective_install_class), so the equivalent
+                // test is: the caller is itself a Class C with
+                // C ≤ D. An instance caller is never an instance of
+                // a class's metaclass — `W.new` calling `W.prot`
+                // raises (probed CRuby 3.4.8) — so non-Class callers
+                // are denied outright.
+                match (&caller_self, &defining) {
+                    (Value::Class(cc), Some(d)) => super::class_is_a(cc, d),
+                    _ => false,
+                }
+            } else {
+                // Protected INSTANCE method: caller's class must be
+                // an instance of (or descendant of) the method's
+                // defining class.
+                let caller_cls = match &caller_self {
+                    Value::Object(id) => Some(self.heap.class_of(*id)),
+                    _ => None,
+                };
+                match (&caller_cls, &defining) {
+                    (Some(c), Some(d)) => super::class_is_a(c, d),
+                    _ => false,
+                }
             };
             if !allowed {
                 return Err(self.trap(RubyError::NoMethodError {
@@ -5918,6 +5939,39 @@ impl Vm {
                     format!("{}::", own_name)
                 };
                 collect(&own_prefix, &mut names);
+                // Per-class consts side-table — anonymous classes'
+                // `const_set` entries and eigenclass-shell constants
+                // (`class << X; CONST = …` — S3 item a). These live
+                // OUTSIDE the flat prefix-scanned tables (anon: no
+                // stable name; shells: the flat key uses the
+                // unspellable `#<Class:…>` scope segment), so the
+                // prefix scan above can't see them. `private_constant`
+                // filtering uses the same qualified key
+                // `record_const_visibility` stored (`Owner::NAME`,
+                // shell owner name = `#<Class:X>`).
+                for k in cls.consts.borrow().keys() {
+                    let short = self.interner.resolve(*k).to_string();
+                    if short.contains("::") || names.contains(&short) {
+                        continue;
+                    }
+                    if !self.private_consts.is_empty() {
+                        let qualified = if own_name.is_empty() || own_name == "Object" {
+                            short.clone()
+                        } else {
+                            format!("{}::{}", own_name, short)
+                        };
+                        // `get_id` (immutable) — a name that was never
+                        // interned can't be in `private_consts`.
+                        if self
+                            .interner
+                            .get_id(&qualified)
+                            .is_some_and(|qid| self.private_consts.contains(&qid))
+                        {
+                            continue;
+                        }
+                    }
+                    names.push(short);
+                }
                 if inherit {
                     // Walk the full ancestry (prepends, includes,
                     // superclasses) for inherited constants. Skip the
@@ -11587,20 +11641,22 @@ impl Vm {
                 self.lookup_class_singleton_method(cls, name_id)
             };
             if let Some(m) = user_singleton {
-                // `private_class_method` visibility — same check (and
-                // same literal-`self` / `send` exemptions) the
-                // instance explicit-recv path applies. PRIVATE only:
-                // protected class methods (`class << self; protected`
-                // — rouge's `Lexer.register` cross-subclass pattern)
-                // stay permissive, because honouring them needs the
-                // metaclass `is_a?` walk rubyrs doesn't model. The
-                // class-singleton fast path rejects non-Public and
-                // falls through to here, so the error shape stays in
-                // one place. Under `require_public` (a re-aimed
-                // `public_send`) the strict check ALSO catches
-                // protected class methods — `X.public_send(:prot)`
-                // must raise like CRuby.
-                if m.visibility.get() == Visibility::Private || require_public {
+                // `private_class_method` / protected class-method
+                // visibility — same check (and same literal-`self` /
+                // `send` exemptions) the instance explicit-recv path
+                // applies. Protected is honoured too (S3 item e):
+                // `check_method_visibility`'s protected arm models
+                // CRuby's metaclass `is_a?` rule for Class-valued
+                // callers as "caller class ≤ defining class", which
+                // keeps rouge's `Lexer.register` cross-subclass
+                // pattern callable (the subclass body IS an instance
+                // of the base's metaclass) while external callers
+                // raise. The class-singleton fast path rejects
+                // non-Public and falls through to here, so the error
+                // shape stays in one place. Under `require_public` (a
+                // re-aimed `public_send`) the strict check also fires
+                // for the literal-`self` / kin exemptions.
+                if m.visibility.get() != Visibility::Public || require_public {
                     self.check_method_visibility(&m, &recv, &name, bypass_visibility, require_public)?;
                 }
                 let target_self = recv.clone();
@@ -26812,7 +26868,19 @@ impl Vm {
             // const_set on an anon receiver lives here per the
             // explanation in `const_set`'s dispatch arm — this
             // is the symmetric read path.
-            if current_value.is_none() && start_cls.name.is_empty() {
+            //
+            // Eigenclass shells take the same road (S3 item a):
+            // a `class << X; CONST = …` body's Op::StoreConst
+            // registers CONST in the shell's own `consts`
+            // side-table (the flat store uses an unspellable
+            // `#<Class:…>`-segmented key), so
+            // `X.singleton_class::CONST` / `sc.const_get` /
+            // `sc.const_defined?` resolve HERE — the shell's
+            // structural name (`#<Class:X>`) never matches a
+            // flat-table key directly.
+            if current_value.is_none()
+                && (start_cls.name.is_empty() || start_cls.singleton_target.borrow().is_some())
+            {
                 let seg_id = self.interner.intern(segment);
                 if let Some(v) = start_cls.consts.borrow().get(&seg_id).cloned() {
                     let nm = if let Value::Class(c) = &v {
