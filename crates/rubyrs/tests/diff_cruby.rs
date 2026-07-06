@@ -888,7 +888,6 @@ fn tier2_restblock_lite() { run_diff("tier2_restblock_lite"); }
 // bare-call serve (module-function siblings, private class methods,
 // extended-module resolution, bare block_given? in `def self.`).
 #[test] fn p2_walk_buckets() { run_diff("p2_walk_buckets"); }
-<<<<<<< HEAD
 // Dispatch-campaign P3 block-form fast paths: no_recv block IC
 // (Object/Class self, fixed + general arities, toplevel catch/throw
 // fallback, deny-listed names, &nil re-aim, method_missing),
@@ -896,7 +895,6 @@ fn tier2_restblock_lite() { run_diff("tier2_restblock_lite"); }
 // Str gsub family, subclass-override + reopen precedence, frozen
 // mutators, break/next/non-local return).
 #[test] fn p3_block_fast_paths() { run_diff("p3_block_fast_paths"); }
-=======
 // Dispatch-campaign P4 in-body op ICs + collection arms: cvar owner
 // caches (hierarchy-shared writes, ||= write-through, negative-verdict
 // invalidation on late creation, extend-module lexical cref, the
@@ -907,7 +905,6 @@ fn tier2_restblock_lite() { run_diff("tier2_restblock_lite"); }
 // walk buckets (coercion + TypeError shape, default-proc travel,
 // user hash/eql? keys, tagged-subclass decline, reopen-off).
 #[test] fn p4_cvar_super_hash() { run_diff("p4_cvar_super_hash"); }
->>>>>>> 4fd7e2ee (perf(dispatch): P4 in-body op ICs — cvar owner cache, super site cache, Hash merge/slice/except buckets)
 #[test] fn lazy_each_with_index() { run_diff("lazy_each_with_index"); }
 #[cfg(feature = "stdlib")]
 #[test] fn set_subtract_divide() { run_diff("set_subtract_divide"); }
