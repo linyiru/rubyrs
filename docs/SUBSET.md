@@ -3,7 +3,7 @@
 rubyrs targets CRuby 3.4 semantics on the surface it covers, and
 pins that surface with differential testing (1,100+ fixtures whose
 oracle is CRuby itself — stdout compared byte-for-byte, including
-under GC stress; 1112 passing / 0 failed as of 2026-07). This
+under GC stress; 1129 passing / 0 failed as of 2026-07-05). This
 document is the honest catalogue of where the boundary lies: what
 works, what diverges (every divergence documented with its
 trigger and trade-off), and what's absent.
@@ -73,10 +73,9 @@ Concretely, the divergences in this file fall into three categories:
    is shipped but the underlying language semantics aren't — e.g.
    `rb_big2ll` works for any value that fits in i64 (cext ABI is real);
    true arbitrary-precision arithmetic on `Value::BigInt` is Tier 2
-   work. Same shape for `Time` class (no `Time.now` yet — but
-   user-class ext-type frames work today via `register_type_internal`).
+   work.
 3. **Out of scope today, candidate later.** Listed at the bottom under
-   "Not supported (today, but candidates for the roadmap)".
+   "Deferred to outer tiers".
 
 When in doubt, the rule from ADR 0015 applies: **"Does this serve
 Tier 1?"** If a proposed change costs Tier 1 size, cold-start, or
@@ -105,8 +104,10 @@ sandbox guarantees, it doesn't go here — it's a Tier 2+ proposal.
 - `Array` — see "Array built-in methods" below for the
   full method list (~50 methods covering iteration,
   filtering, combinatorics, pack/unpack, bsearch, etc.).
-- `Hash` — insertion-ordered, linear lookup; see "Hash
-  built-in methods" below for the full method list
+- `Hash` — insertion-ordered, indexed O(1) lookup (measured flat
+  ~170 ns/lookup from 100 to 100k keys, 2026-07-05 probe — the
+  earlier "linear lookup" wording predates the hash-index work);
+  see "Hash built-in methods" below for the full method list
   (~25 methods including transform_keys/values, except/slice,
   compact, filter_map, etc.).
 - Class instances with instance variables and methods
@@ -363,8 +364,9 @@ back here.
 
 ### Hash built-in methods
 
-Insertion-ordered with linear lookup (O(n) on n keys —
-acceptable for the niche).
+Insertion-ordered with indexed O(1) lookup (probe 2026-07-05:
+per-lookup cost is flat — ~170 ns — at 100, 10k, and 100k keys;
+the constant factor is ~3× CRuby's, the scaling matches).
 
 Covered (no-block): `length` / `size`, `[]` / `[]=`,
 `empty?`, `include?` / `has_key?` / `key?` / `member?`,
@@ -417,17 +419,16 @@ divergences, both verified against CRuby 3.4.1:
   CRuby. The observable collapse OUTCOME (position, value,
   survivor identity) matches CRuby on consistent keys.
 
-Divergence — `Hash.new` with a default value / default proc
-isn't supported: `Hash.new(5)` and `Hash.new { ... }` both
-return an `Object`, not a Hash. Calling any Hash method on
-the result (`.keys`, `.[]`, `.empty?`) raises NoMethodError.
-For the niche the runtime targets (small embedded DSLs),
-the default-value behaviour rarely shows up; full
-constructor support is a separate engine task. The upstream
-ruby/spec `it` blocks that touch this form are skipped
-inline in
-[`crates/rubyrs/spec/ruby/hash_keys_spec.rb`](../crates/rubyrs/spec/ruby/hash_keys_spec.rb)
-with `# Skipped` comments naming the upstream line.
+~~Divergence — `Hash.new` with a default value / default proc
+isn't supported~~ (FIXED). `Hash.new(5)` and
+`Hash.new { |h, k| ... }` both return a real Hash
+(probe-verified against CRuby 3.4.1, 2026-07-05): missing-key
+reads return the default value or run the default proc
+(including the store-through `h[k] = ...` idiom), present keys
+win, `Hash#default` / `Hash#default_proc` report correctly, and
+`fetch`'s own default still takes precedence. Pinned by the
+`hash_new_default_block` and `hash_default_proc_set` diff
+fixtures.
 
 ### Range built-in methods
 
@@ -638,9 +639,13 @@ they're handled as universal arms in `primitive_call` /
   [`spec/ruby/class_eval_spec.rb`](../crates/rubyrs/spec/ruby/class_eval_spec.rb).
 
 **Caveats for the PoC**
-- No `*args` splat — `method_missing(name, *args)` and arity-flexible
-  `define_method` aren't expressible yet. Tracking item on the
-  "Not supported" list.
+- ~~No `*args` splat~~ (FIXED) — `method_missing(name, *args, &blk)`
+  receives the full argument list, and `define_method(:name) {
+  |*args| ... }` / `{ |a, *rest| ... }` bind splat params
+  (probe-verified against CRuby 3.4.1, 2026-07-05). What still
+  doesn't bind on `define_method`-installed bodies is NAMED
+  keyword params — see the
+  [define_method keyword divergence](#define_method-bodies-dont-bind-named-keyword-params).
 - `method_missing` is invoked when the receiver is a user-class
   instance (`Value::Object`) OR a Class / Module — the latter
   routes through `lookup_class_singleton_method` so a
@@ -658,8 +663,8 @@ they're handled as universal arms in `primitive_call` /
   for the rationale). Fix is a single shared piece of context
   tracking for all four; treated as a follow-up so the existing
   `attr_*` semantics aren't changed in isolation.
-- Per-iteration dispatch is ~1.3-3× CRuby's depending on shape
-  (fizzbuzz 1.31× as of 2026-06-11; metaprog shapes nearer 3×). See
+- Per-iteration dispatch is ~2-3× CRuby's depending on shape
+  (fizzbuzz 2.2× as of 2026-07-05; metaprog shapes nearer 3×). See
   [`examples/metaprog_bench/README.md`](../crates/rubyrs/examples/metaprog_bench/README.md)
   — peak memory is still ~2× lighter than CRuby on the same
   workload (the earlier ~5× predates rubyrs's Jekyll-era preamble
@@ -1371,7 +1376,9 @@ puts total      # rubyrs: 6; CRuby: 6 (was: rubyrs 0)
 class C
   define_method(:m) { |a, k: 1| [a, k] }
 end
-C.new.m(1, k: 2)   # rubyrs: [1, {k: 2}] via rest / k default; CRuby: [1, 2]
+C.new.m(1, k: 2)   # rubyrs: ArgumentError (given 2, expected 1) —
+                   #   the kwargs Hash stays positional; CRuby: [1, 2]
+                   #   (probe re-verified 2026-07-05)
 ```
 
 - The `define_method`-installed closure binder handles
@@ -1396,14 +1403,14 @@ and *what's already in place* to make that future work tractable.
 | Arbitrary-precision Integer arithmetic (`2**100`, true Bignum) | Tier 1 (`bignum` Cargo feature, default ON) | Phase A shipped: `Value::BigInt` + `HeapObj::BigInt`, integer-literal overflow promotes to BigInt at AST time, `+ - * / %` + comparisons + `to_s` / `inspect` / `class` work via `try_bigint_binop`, Float×BigInt coerces with Float-wins-on-mix. Build without `--no-default-features` to drop the `num-bigint` dep and fall back to wrapping i64 arithmetic. Phase B (`**`, bit ops, unary, `abs`) still on the bench. Earlier "i64 saturates at parser" wording belongs to the pre-Phase-A era and only applies under `--no-default-features`. |
 | `Rational`, `Complex`, `BigDecimal` | Tier 2 / Tier 3 | `Rational` and `Complex` shipped in the always-on preamble (probe-verified 2026-07): `Rational()` / `Complex()` constructors, arithmetic with reduction (`Rational(4, 8)` → `(1/2)`), comparisons, `to_f`, `Complex#real` / `imaginary` / `abs`, `Integer#to_c`, `1 / Rational(3)` coercion. Still absent: `String#to_c` / `String#to_r`, imaginary literals (`3i`). `BigDecimal` is vendored behind `--features stdlib`. |
 | Real nested-module namespacing (`Foo::Bar` after `module Foo; class Bar; end; end`) | Tier 1 (shipped) | Class table now keyed by qualified SymId, so top-level `Bar` and `Foo::Bar` are independent `Class` objects with separate method / ivar / superclass tables (was a `class_qualified_separates` divergence, closed). Bare-name reads inside a class/module body walk a precomputed cref chain (`Op::LoadConstChain`) before falling back to the top-level bare slot — matches CRuby's "innermost-scope wins" behaviour. `Module.nesting` reflection API is still deferred (the cref chain exists at compile time but isn't exposed yet); two top-level modules that DON'T collide via the qualified-key story still don't get a real `Module` shape distinct from `Class` — see the `Module` semantics row below. |
-| `Time` class (`Time.now`, `#to_i`, `#nsec`, `Time.at(sec, nsec, …)`) | Tier 2 | None as a primitive value type. User classes carrying `(sec, nsec)` plus `register_type_internal` already round-trip Time-shaped ext-type frames byte-identical to MRI (see `tests/cext_msgpack_app_ext.rs`). |
+| `Time` class (`Time.now`, `#to_i`, `#nsec`, `Time.at(sec, nsec, …)`) | Tier 1 (shipped, always-on preamble) | Shipped as a pure-Ruby preamble class (`src/preamble/time.rb`) over the host-injected clock capability (`Config::time_now`; the CLI injects the system clock, library embedders get the deterministic "raises without injection" Tier 1 default). Probe-verified byte-identical to CRuby 3.4.1 (2026-07-05): `Time.now`, `Time.at(sec)` / `Time.at(sec, usec)`, `Time.utc` / `Time.mktime`, `strftime`, `+` / `-` arithmetic, Comparable, `usec` / `year` components. Pinned by the `time_basics` / `time_components` / `time_strftime` / `time_civil_constructors` / `time_local_flavour` / `time_parse*` diff fixtures. Documented divergence: Tier-1 time is UTC-only — `Time.local` / `Time.mktime` alias to UTC construction, so hosts in non-UTC zones diverge from CRuby (the `TZ=UTC` flavour is the pinned contract). Ext-type `(sec, nsec)` frames additionally round-trip byte-identical to MRI via `register_type_internal` (see `tests/cext_msgpack_app_ext.rs`). |
 | `Fiber`, `Thread`, `Mutex`, `Ractor` | Tier 2 (`_fiber` / `_thread` / `_ractor` feature gates in ADR 0015) | The VM itself stays single-threaded by design — there is no OS-thread parallelism and no preemption. On top of that: `Fiber` subset behind `_fiber`; a **cooperative green-thread `Thread` subset** (~1,100-line preamble) is always on. Works (probe-verified 2026-07): `Thread.new` / `join` / `join(timeout)` / `value` / `alive?` / `status` / `kill`, exception propagation through `value`, thread-locals (`Thread#[]`) and `thread_variable_get/set` (correctly isolated per thread), `Thread.pass` interleaving, `sleep` in threads, `Mutex` (`lock` / `unlock` / `synchronize` / `owned?`), `Queue` incl. cross-thread blocking `pop`, `ConditionVariable`, `Thread.list`. Gaps (probed): `Thread.main`, `Thread#priority`, `abort_on_exception`, `SizedQueue` absent; `Thread.current` at top level returns the `Thread` class itself (not a main-Thread instance; inside spawned threads it is a real `Thread`); `Thread.stop` / `wakeup` raise; `Thread#raise` propagates into the calling thread; **`Thread.pass` inside a NATIVE iterator block (`3.times { … }`) truncates the loop** — use `while` loops in thread bodies that yield. `Ractor` absent. |
 | Full `Module` semantics (real Module type distinct from Class, `include` chain with method-lookup ordering matching CRuby exactly) | Tier 2 | PoC: `include Mod` works via method-table copy; ancestry walks via `class_is_a` + `includes` list. Strict CRuby `ancestors` compatibility deferred. |
 | `eval` (string form), `binding`, `ObjectSpace` | Tier 4 (`mri-compat`) | `Kernel#eval(string)` shipped, and `eval(src, binding)` captures the binding's locals / self / ivars (see the [eval divergence section](#implicit-binding-less-eval-skips-caller-locals-explicit-binding-capture-works)); the `Binding` reflection API is still absent. `ObjectSpace` exists as a module with `define_finalizer` / `undefine_finalizer` only — `each_object` / `count_objects` / `_id2ref` / `garbage_collect` are absent (probe-verified 2026-07). |
 | `require / load / autoload` from LOAD_PATH | Tier 1 (partial) | `require "/abs/path.rb"`, auto-`.rb`, cwd-relative, caller-source-dir + caller-source-parent hops, AND `$LOAD_PATH` walking all work (covered by `tests/diff/require_xpkg.rb`). CRuby's auto-populated stdlib/gem `$LOAD_PATH` entries are NOT pre-seeded — scripts opt in via `$LOAD_PATH.unshift(dir)`. `load` and `autoload` shipped too (probe-verified 2026-07 for the basic forms; the Bridgetown 4-phase probe exercises the zeitwerk autoloader on top of them). |
 | Pure-Ruby stdlib subset (`Pathname`, … future names) | Tier 3 (`stdlib` Cargo feature) | Default Tier 1 build keeps the lenient stub "feature-absent surface": `require 'pathname'` materialises the constant shell, calls raise NoMethodError. With `--features stdlib` the same require path loads `crates/rubyrs/src/stdlib_vendor/<name>.rb` (deterministic, fs-free subset) and the module behaves CRuby-compatibly. Pilot: `Pathname` path-string manipulation methods, covered by `tests/diff/stdlib_pathname.rb` (the test is `#[cfg(feature = "stdlib")]`-gated). |
 | C extension API (CRuby ABI compatibility) | Tier 4 (`mri-compat`) per ADR 0015 | A working partial implementation lives in `crates/rubyrs-cext` as a spike, not as a covenant — see ADR 0015's "C-ext ABI stays out of v1 and v2" rule. Specifically the L3-J/K + A3/A4 work shipped msgpack-shaped FFI that's "real enough to round-trip the wire protocol" but doesn't promise full CRuby C-API equivalence. |
-| Refinements, full pattern matching, full encoding model, `Marshal`, `IO` beyond stdout | Tier 3 / Tier 4 | `Marshal` shipped for the common-tag subset (probe-verified 2026-07, byte-format `\x04\x08` matching CRuby): nil / bool / Integer / Bignum / Float / String (incl. non-ASCII) / Symbol / Array / Hash (nested) / Range / Struct subclasses / user objects with ivars, link-aware, honouring `marshal_dump` / `marshal_load` hooks; `load(dump(x))` is a genuine deep copy; `Marshal.dump(proc)` raises CRuby's `TypeError` ("no _dump_data is defined for class Proc"). Divergences: `Marshal.dump(STDOUT)` serialises a plain-object stand-in where CRuby raises "can't dump IO"; graphs outside the byte subset fall back to a same-process registry token (shallow, process-local, capped at 1024); dump-to-IO writes a rubyrs-only `RMF1` length frame, so IO-port streams are self-consistent but not CRuby-wire-compatible. Encoding model: partial, see [String encoding](#string-encoding). |
+| Refinements, full pattern matching, full encoding model, `Marshal`, `IO` beyond stdout | Tier 3 / Tier 4 | Refinements: `refine Target do ... end` + `using` SHIPPED and active (probe-verified 2026-07-05): refined methods are invisible until `using` executes and dispatch after it, `alias_method` / `alias` inside a `refine` block resolves sibling defs holder-first (`8d5be13f`, the bridgetown-foundation shape), refinements apply to subclass receivers; pinned by the `refinements` / `refine_alias_sibling` / `refine_alias_primitive` / `refinement_applies_to_subclass` / `using_refinement_via_include` / `tier2_call_refined` diff fixtures. Documented divergence — `using` activates GLOBALLY from its execution point onward, not lexically: a `using` inside a module body leaks to code outside that scope (CRuby raises NoMethodError there; probed 2026-07-05). CRuby's file/scope-local activation is the deferred part. `Marshal` shipped for the common-tag subset (probe-verified 2026-07, byte-format `\x04\x08` matching CRuby): nil / bool / Integer / Bignum / Float / String (incl. non-ASCII) / Symbol / Array / Hash (nested) / Range / Struct subclasses / user objects with ivars, link-aware, honouring `marshal_dump` / `marshal_load` hooks; `load(dump(x))` is a genuine deep copy; `Marshal.dump(proc)` raises CRuby's `TypeError` ("no _dump_data is defined for class Proc"). Divergences: `Marshal.dump(STDOUT)` serialises a plain-object stand-in where CRuby raises "can't dump IO"; graphs outside the byte subset fall back to a same-process registry token (shallow, process-local, capped at 1024); dump-to-IO writes a rubyrs-only `RMF1` length frame, so IO-port streams are self-consistent but not CRuby-wire-compatible. Encoding model: partial, see [String encoding](#string-encoding). |
 | Inline cache for method dispatch | Tier 1 (shipped) | 5-way polymorphic per-call-site IC (`IC_WAYS = 5`, widened from 4 in PR #185 after PR #175 measured a cliff at 5 shapes) with round-robin eviction; each way carries `(class_ptr, method_gen, method)` and a `method_gen` bump invalidates every entry. Megamorphic case (> 5 distinct receiver classes at one call site) degenerates to the same uncached walk the original single-slot cache did — worst case unchanged, common polymorphic dispatch no longer thrashes. |
 
 ### What ships today: i64-range BigInt protocol
@@ -1438,8 +1445,20 @@ tier system explicitly leaves the door open through Tier 4
 planned* for any tier:
 
 - Replacing the parser (Prism is fixed per [ADR 0001](adr/0001-prism-as-parser.md))
-- Adding a JIT (the bytecode VM is fixed per [ADR 0002](adr/0002-bytecode-vm-not-jit.md))
 - Pluggable VM backends (no mruby-fallback, no Truffle interop, one core layered outward — see ADR 0015's "What this is not")
 
-If you need a JIT or a parser-pluggable Ruby today, use CRuby (for
-YJIT) or TruffleRuby.
+A note on the JIT, because this section used to list it: the
+original "no JIT" decision ([ADR 0002](adr/0002-bytecode-vm-not-jit.md))
+was **superseded** by [ADR 0030](adr/0030-jit-tier.md) /
+[ADR 0034](adr/0034-jit-first-surpass-yjit.md) — rubyrs now ships an
+opt-in Cranelift-based native JIT (`jit-native` Cargo feature) that
+compiles hot integer/Float loop-and-iterator families, method
+bodies, and PIC-based dispatch chains, beating CRuby+YJIT on the
+covered shapes, plus a baseline compiler tier
+([ADR 0037](adr/0037-baseline-jit-tier.md)). The bytecode VM remains
+the always-on semantic baseline (every JIT path must be
+correctness-invisible: decline-to-interpreter on anything uncovered),
+so ADR 0002's *architecture* — a bytecode VM as the core — still
+stands; its "never a JIT" scope statement does not.
+
+If you need a parser-pluggable Ruby today, use TruffleRuby.
