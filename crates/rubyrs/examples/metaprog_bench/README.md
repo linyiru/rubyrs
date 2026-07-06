@@ -2,7 +2,10 @@
 
 Three tiny scripts, each doing the same 2,000,000-iteration loop with a
 different dispatch shape. Measures (a) per-call dispatch overhead and (b)
-peak RSS. Apple silicon, `cargo build --release`, CRuby 3.4.1.
+peak RSS. Re-measured 2026-07-06: Apple M2 Max, rubyrs built with the
+standard measurement feature set (see docs/BENCHMARKS.md —
+`stdlib,jit-native,_fiber,_json_native,mimalloc`), CRuby 3.4.8 via rbenv
+(direct binary, `--disable-gems`).
 
 ## Workloads
 
@@ -10,85 +13,85 @@ peak RSS. Apple silicon, `cargo build --release`, CRuby 3.4.1.
 |--------|-------------------|
 | `mm_bench.rb`      | every call misses → `method_missing` echoes the symbol |
 | `dm_bench.rb`      | accessor installed via `define_method`; closure over outer local |
-| `static_bench.rb`  | matched workload with `def` + ivar (control — not apples-to-apples; ivars hit a hashmap) |
+| `static_bench.rb`  | matched workload with `def` + ivar (control — no metaprogramming) |
 
-## Timing (hyperfine, 2 warmup + 6 runs, 2M iterations)
+## Timing (hyperfine, 2 warmup + 10 runs, repeated in reverse order, 2M iterations)
 
-| | rubyrs | CRuby 3.4 | CRuby + YJIT |
+| | rubyrs | CRuby 3.4.8 | CRuby + YJIT |
 |---|---|---|---|
-| `method_missing` (mm) | 482 ms | **144 ms** | 146 ms |
-| `define_method` (dm)  | 271 ms | 107 ms | **95 ms** |
-| `def + ivar` (static) | 382 ms | 105 ms | **90 ms** |
+| `method_missing` (mm) | 542 ms | 88 ms | **82 ms** |
+| `define_method` (dm)  | 409 ms | 74 ms | **51 ms** |
+| `def + ivar` (static) | 269 ms | 73 ms | **51 ms** |
 
-CRuby is **3.0×–4.3× faster per-iteration** in steady state. That gap
-*is* the loop body — boot is amortised. None of these scripts are within
-striking distance of CRuby's interpreter, let alone YJIT.
+CRuby's interpreter is **3.7×–6.2× faster per-iteration** in steady
+state (YJIT 5.2×–8.0×). That gap *is* the loop body — boot is
+amortised. None of these scripts are within striking distance of
+CRuby's interpreter; the opt-in `jit-native` tier doesn't cover
+these plain `while`-loop + method-call shapes (measured: the
+jit-native binary lands within ±5% of a no-JIT build on all three).
 
-## Peak memory (`/usr/bin/time -l`)
+## Peak memory (`/usr/bin/time -l`, maximum resident set size)
 
-| | rubyrs | CRuby 3.4 |
+| | rubyrs | CRuby 3.4.8 `--disable-gems` |
 |---|---|---|
-| `method_missing` | **2.4 MB** | 12.9 MB |
-| `define_method`  | **2.4 MB** | 12.8 MB |
+| `method_missing` | **9.7 MB** | 12.5 MB |
+| `define_method`  | **9.7 MB** | 12.5 MB |
 
-rubyrs uses **5.3× less peak memory** on the same workload — heap caps
-and a small `Op` representation pay off here exactly like they do on the
-main `README.md` benchmarks.
+rubyrs runs ~1.3× lighter here (~1.8× against stock CRuby's 17.2 MB).
+Honesty note: the 2026-06-era table said 2.4 MB vs 12.9 MB ("5.3×
+less") — rubyrs's base RSS has since grown to ~9.7 MB because it is
+dominated by the binary's own resident `.text`, which grew through
+the gem-compat + JIT campaigns (see docs/BENCHMARKS.md "Memory").
 
-## What this tells us
+## What this tells us (updated 2026-07-06)
 
-1. **Steady-state dispatch is the bottleneck, not metaprogramming.** The
-   `def + ivar` (no metaprog at all) case is *also* 3.6× slower than
-   CRuby. The 3× gap is just rubyrs' baseline dispatch cost — the PoC
-   features themselves don't add visible overhead.
-2. **`define_method` is *faster* than `def + ivar` in rubyrs (271 ms vs
-   382 ms).** The closure version reads/writes a captured-local slot by
-   index; the `def` version reads/writes an `@state` ivar through a
-   per-Instance `HashMap<SymId, Value>`. Ivar-as-hashmap is the real
-   slow path; the design point is "moving an `@x` access to an inline
-   shape table" not "metaprogramming is expensive."
-3. **`method_missing` adds one `lookup_method_uncached` per missed
-   call.** That's an extra `HashMap<SymId, Rc<Method>>` walk along the
-   class chain *before* every NoMethodError site. In a "every call
-   misses" loop this nearly doubles the per-call cost vs static dispatch
-   (482 ms vs 271 ms). A real workload — DSL with maybe-1%-miss rate —
-   would barely notice.
-4. **Memory advantage holds even with metaprog.** Closure-captured
-   `Rc<RefCell<Vec<Value>>>` adds at most a few words per
-   `define_method`-installed method; no extra arena, no extra page,
-   no GC headers. The 2.4 MB → 12.9 MB ratio survives unchanged from
-   the README's static-Ruby benchmarks.
+1. **Steady-state dispatch is the bottleneck, not metaprogramming.**
+   The `def + ivar` (no metaprog at all) case is *also* 3.7× slower
+   than CRuby. The gap is rubyrs' baseline dispatch cost — the PoC
+   features themselves don't add order-of-magnitude overhead.
+2. **The 2026-06 "define_method beats def + ivar" finding has
+   reversed.** Back then dm won (271 ms vs 382 ms) because `@state`
+   went through a per-Instance `HashMap` on every access. Since
+   then the ivar path gained fast-paths (`Op::IncIvar`, inline
+   caches), and `def` dispatch is now the fastest rubyrs shape
+   (269 ms); the closure-capture method installed by
+   `define_method` is the slower one (409 ms).
+3. **`method_missing` adds one failed lookup along the class chain
+   before every dispatch.** In an "every call misses" loop this
+   doubles the per-call cost vs `def` dispatch (542 ms vs 269 ms).
+   A real workload — DSL with maybe-1%-miss rate — would barely
+   notice.
+4. **The memory advantage on this shape is real but modest** (see
+   the honesty note above): the heap stays tiny either way; what
+   differs is each runtime's fixed footprint.
 
 ## Where the per-iteration gap comes from
 
-Likely suspects (not yet profiled):
-
-- Dispatch is `HashMap<SymId, Rc<Method>>` lookup → `Rc::clone` →
-  frame-push every call. The per-call-site inline cache (`cache_id`)
-  hits most of the time, but the post-IC step is still allocating
-  a frame and a fresh `Rc<RefCell<Vec<Value>>>` for the locals each
-  invocation.
-- `vec_nil(n_locals)` reallocates per call. A frame-pool (reuse the
-  `Vec<Value>` across calls) is the obvious win and doesn't affect
-  semantics.
-- Integer arithmetic in the loop body still routes through `Op::BinOp`
-  / `Op::BinOpInt`, which is fast — but `while i < n` then `i = i + 1`
-  is two ops per loop iteration that could fuse into an `IncLocal +
-  branch-if-less` pair.
-
-These are interpreter-fundamentals fixes that would help every workload
-— not metaprog-specific.
+The 2026-06 suspects listed here (per-call `vec_nil` locals, unfused
+`Op::BinOp`) are dated — the dispatch cost has since been profiled
+properly: ADR 0031 measures `do_call`'s slow cascade at ~72% of
+dispatch time and lands incremental fast-paths, and the structural
+conclusion (interpreter dispatch is ~2.5–5× CRuby even when
+fast-pathed; the lever is the opt-in native JIT + PIC, not more
+interpreter tweaks) is written up in ADR 0034. These loops are
+plain `while` + method-call shapes the JIT doesn't yet cover, so
+they still pay full interpreter dispatch.
 
 ## How to reproduce
 
 ```bash
-cargo build --release
+# standard measurement feature set (docs/BENCHMARKS.md) — verify
+# the binary with perf/alloc_fingerprint.sh before timing
+cargo build --release -p rubyrs \
+  --features stdlib,jit-native,_fiber,_json_native,mimalloc
 cd crates/rubyrs/examples/metaprog_bench
-hyperfine --warmup 2 --runs 6 \
+hyperfine --warmup 2 --runs 10 \
   -n "rubyrs mm" "../../../../target/release/rubyrs mm_bench.rb" \
   -n "cruby mm"  "ruby --disable-gems mm_bench.rb" \
   -n "cruby+yjit mm" "ruby --yjit --disable-gems mm_bench.rb"
-# repeat with dm_bench.rb / static_bench.rb
+# repeat with dm_bench.rb / static_bench.rb; if `ruby` is an rbenv
+# shim, time the real binary (~/.rbenv/versions/…/bin/ruby) — the
+# shim adds ~38 ms of its own
 
 # memory
 /usr/bin/time -l ../../../../target/release/rubyrs mm_bench.rb

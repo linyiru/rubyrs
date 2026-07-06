@@ -28,15 +28,26 @@ functions as Ruby methods, then `load`s the same `Brewfile.rb`):
 ruby examples/brewfile/cruby_runner.rb
 ```
 
-End-to-end wall time on an Apple Silicon M-series mac, release
-build, 30 hyperfine runs, including cold start + parse + eval + the
-script-defined `each` loops + the small class definition:
+End-to-end wall time on an Apple Silicon M-series mac (M2 Max),
+release build, hyperfine `--warmup 3`, 25 runs, repeated in reverse
+order — including cold start + parse + eval + the script-defined
+`each` loops + the small class definition. Re-measured 2026-07-06
+(CRuby 3.4.8 via rbenv, invoked directly — the rbenv shim itself
+adds ~38 ms and is excluded):
 
 | Runtime | Time | vs rubyrs |
 |---------|----:|----------:|
-| **rubyrs (embedded)** | **1.8 ms** | 1.0× |
-| CRuby 3.4 (no YJIT) | 74.7 ms | 42.5× slower |
-| CRuby 3.4 + YJIT | 75.5 ms | 42.9× slower |
+| **rubyrs (embedded)** | **9.5 ms** | 1.0× |
+| CRuby 3.4.8 (no YJIT) | 30.4 ms | 3.2× slower |
+| CRuby 3.4.8 + YJIT | 30.6 ms | 3.2× slower |
+
+(Earlier eras looked very different — 1.8 ms vs 74.7 ms ("42×") on
+the small pre-Jekyll-era binary against a slow-starting CRuby
+install. Since then rubyrs's always-on preamble grew — the embedded
+`Runtime::new` compiles it live, which dominates the 9.5 ms — and
+this CRuby installation starts in ~30 ms, not ~75 ms. See the
+matching table in
+[docs/BENCHMARKS.md](../../../../docs/BENCHMARKS.md).)
 
 YJIT doesn't help here — Ruby spends most of its wall time on
 process startup and Ruby's own gem loader, not on the script's
@@ -51,7 +62,7 @@ designed for.
   (single-arg DSL methods, positional `mas` ID).
 - It is **not** a microbenchmark of "rubyrs vs CRuby on raw
   arithmetic" — see [docs/BENCHMARKS.md](../../../../docs/BENCHMARKS.md)
-  for that. On that axis CRuby's interpreter is 1.76× faster than
+  for that. On that axis CRuby's interpreter is ~2.2× faster than
   us. On *embedded DSL latency* — what an actual DSL-hosting Rust
-  app cares about — we're 42× faster end-to-end. Different shape of
-  workload, different winner.
+  app cares about — we're ~3.2× faster end-to-end. Different shape
+  of workload, different winner.

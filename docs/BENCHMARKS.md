@@ -13,19 +13,21 @@ host code.
 
 | Runtime | Time (incl. process start) |
 |---------|---:|
-| rubyrs (embedded via Runtime API) | **9.6 ms** |
-| CRuby 3.4.1 (no YJIT) | 30.3 ms |
-| CRuby 3.4.1 + YJIT | 30.5 ms |
+| rubyrs (embedded via Runtime API) | **9.5 ms** |
+| CRuby 3.4.8 (no YJIT) | 30.4 ms |
+| CRuby 3.4.8 + YJIT | 30.6 ms |
 
 **rubyrs is ~3.2× faster end-to-end** for this shape of workload.
 YJIT doesn't help because almost all of CRuby's wall-time goes to
 process startup and the gem loader, not arithmetic.
 
-(Re-measured 2026-07-05, hyperfine `--warmup 3`, ≥20 runs, CRuby
-3.4.1 via rbenv. Both sides moved since the 2026-06-11 measure
+(Re-measured 2026-07-06, hyperfine `--warmup 3`, ≥25 runs repeated
+in reverse order, CRuby 3.4.8 via rbenv invoked directly — the
+rbenv shim itself adds ~38 ms and is excluded. Both sides moved
+since the 2026-06-11 measure
 (5.7 ms vs 73.7 ms, "~13×"): rubyrs's always-on preamble kept
 growing — `Runtime::new` compiles it live, which dominates the
-9.6 ms — and this CRuby installation starts in ~30 ms, not ~74 ms.
+9.5 ms — and this CRuby installation starts in ~30 ms, not ~74 ms.
 The even earlier 1.8 ms / 42.5× figure was real on the
 pre-Jekyll-era binary.
 The `preamble-cache` feature (see "Cold start" below) removes most
@@ -89,22 +91,26 @@ Methodology notes:
 ## Cold start
 
 Trivial program: `puts 1 + 2`. Time to first output. Re-measured
-2026-07-05 (Apple M-series, hyperfine `--warmup 3`, ≥15 runs per
+2026-07-06 (Apple M-series, hyperfine `--warmup 3`, ≥15 runs per
 row, paired in one invocation and repeated in reverse order; native
 rubyrs is the standard measurement feature set below,
-mimalloc-fingerprinted; CRuby 3.4.1 via rbenv; wasmtime 45.0.0,
-wasi-sdk 24, wasm-opt `-Oz`, wizer pre-init):
+mimalloc-fingerprinted; CRuby 3.4.8 via rbenv, invoked directly —
+the rbenv shim adds ~38 ms of its own and is excluded; wasmtime
+45.0.0, wasi-sdk 24, wasm-opt `-Oz`, wizer pre-init):
 
 | Implementation | Wall time |
 |----------------|-----------|
 | rubyrs (native, preamble cache warm) | **3.6 ms** |
 | rubyrs (native, cache cold/disabled) | 8.6 ms |
-| rubyrs.cwasm via wasmtime (wizer + AOT, `--allow-precompiled`) | 9.1 ms |
+| rubyrs.cwasm via wasmtime (wizer + AOT, `--allow-precompiled`) | 9.0 ms |
 | rubyrs.cwasm via wasmtime (AOT, no wizer) | 17.4 ms |
-| rubyrs.wasm via wasmtime (raw `-Oz` .wasm, JIT each run) | 40.1 ms |
-| CRuby 3.4.1 (no YJIT) | 30.0 ms |
-| CRuby 3.4.1 + YJIT | 31.0 ms |
-| CRuby 3.4.1 `--disable=gems` | 6.8 ms |
+| rubyrs.wasm via wasmtime (raw `-Oz` .wasm, JIT each run) | 44 ms |
+| CRuby 3.4.8 (no YJIT) | 30.1 ms |
+| CRuby 3.4.8 + YJIT | 30.1 ms |
+| CRuby 3.4.8 `--disable=gems` | 6.8 ms |
+
+(A default-feature build — no mimalloc — measures 3.7 ms on the
+warm-cache row; the binary shape barely moves cold start.)
 
 rubyrs is ~8× faster cold-start than CRuby as users invoke it, and
 ~1.9× faster than the best-tuned `--disable=gems` invocation. (The
@@ -124,11 +130,11 @@ back to the live compile. Library embedders opt in via
 `Config::preamble_cache_dir`; the CLI defaults it on
 (`RUBYRS_NO_PREAMBLE_CACHE=1` to disable). The wasm rows reflect
 different deployment shapes:
-  * raw `.wasm` (40.1 ms) — what you ship to embedders, includes
+  * raw `.wasm` (44 ms) — what you ship to embedders, includes
     wasmtime's per-run JIT. This row grew from the 2026-06-04-era
     12.7 ms because the shipped `.wasm` itself grew ~3× (see
     "Binary size") — per-run JIT cost scales with module size.
-  * AOT `.cwasm` (17.4 ms, or 9.1 ms with wizer pre-init) —
+  * AOT `.cwasm` (17.4 ms, or 9.0 ms with wizer pre-init) —
     wasmtime compiles the module ahead of time (`wasmtime compile`
     then `wasmtime run --allow-precompiled`), and wizer
     additionally snapshots the initialized Runtime into linear
@@ -341,24 +347,41 @@ work), each commit verified against the 10-fixture CRuby diff harness:
 
 ## Memory
 
-Re-measured 2026-07-05 (standard measurement feature set below,
-mimalloc-fingerprinted, preamble cache warm; CRuby 3.4.1 via rbenv;
-peak RSS via `/usr/bin/time -l`, two rounds, values stable to
-±0.1 MB). Both sides have moved repeatedly: rubyrs's resident
-`.text` grew through the gem-compat + JIT campaigns (base RSS is
-dominated by the binary itself, not the heap), and this CRuby
-idles heavier than the build measured 2026-06-11:
+Re-measured 2026-07-06 (standard measurement feature set below,
+mimalloc-fingerprinted, preamble cache warm; CRuby 3.4.8 via rbenv,
+stock invocation; **maximum resident set size** via
+`/usr/bin/time -l`, three rounds, values stable to ±0.1 MB). Both
+sides have moved repeatedly: rubyrs's resident `.text` grew through
+the gem-compat + JIT campaigns (base RSS is dominated by the binary
+itself, not the heap), and this CRuby idles heavier than the build
+measured 2026-06-11:
 
-| Workload | rubyrs RSS | CRuby RSS |
+| Workload | rubyrs max RSS | CRuby max RSS |
 |----------|-----------|-----------|
-| Trivial `puts 1+2` | 9.7 MB | 17.5 MB |
-| 1M fizzbuzz | 9.8 MB | 17.5 MB |
-| 200k-iteration alloc churn (`benches/gc_churn.rb`, mark-sweep GC) | 10.8 MB | 17.6 MB |
+| Trivial `puts 1+2` | 9.6 MB | 17.1 MB |
+| 1M fizzbuzz | 9.8 MB | 17.2 MB |
+| 200k-iteration alloc churn (`benches/gc_churn.rb`, mark-sweep GC) | 10.7 MB | 17.4 MB |
 
 rubyrs runs ~1.8× lighter across these small-script shapes (the
 2026-06-11 table showed 3.7 vs 10.2 MB — a leaner rubyrs binary
 against a leaner CRuby). On big workloads RSS is at parity — see
 the Jekyll section above.
+
+Metric and binary-shape notes (`puts 1+2`, 2026-07-06):
+
+  * macOS `/usr/bin/time -l` reports a second, smaller metric,
+    **peak memory footprint** (physical + compressed accounting).
+    On hello it reads 5.9 MB for rubyrs vs 9.6 MB for stock CRuby
+    and 5.4 MB for `ruby --disable=gems` — this footprint-vs-
+    `--disable=gems` pairing is the comparison the top-level
+    README's "comparable memory" phrasing refers to (an earlier
+    README revision printed "6.4 vs 5.7 MB" without naming either
+    the metric or the CRuby flags; both docs now label them).
+  * Binary shape moves max RSS only slightly: the default-feature
+    build (smaller `.text`, no mimalloc) measures 9.2 MB vs the
+    standard set's 9.6 MB. The rubyrs-vs-CRuby gap is explained by
+    the metric and the CRuby invocation, not the feature set.
+  * CRuby `--disable=gems` max RSS is 12.3 MB (vs 17.1 MB stock).
 
 GC works: heap stays flat even when the Ruby program allocates millions of
 short-lived objects with cycles. See [ADR 0003](adr/0003-rc-plus-mark-sweep-hybrid-gc.md).
@@ -469,7 +492,7 @@ Memory:
 /usr/bin/time -lp ./target/release/rubyrs crates/rubyrs/benches/fizzbuzz_1m.rb
 ```
 
-WASM (raw `.wasm`, JIT each run — the 40.1 ms cold-start row above):
+WASM (raw `.wasm`, JIT each run — the 44 ms cold-start row above):
 
 ```bash
 # After WASI SDK setup (see DEVELOPMENT.md)
@@ -477,7 +500,7 @@ hyperfine 'wasmtime run --dir=. \
   target/wasm32-wasip1/release/rubyrs.wasm crates/rubyrs/benches/fizzbuzz_1m.rb'
 ```
 
-WASM (AOT `.cwasm` — the 9.1 ms cold-start row above; matches the
+WASM (AOT `.cwasm` — the 9.0 ms cold-start row above; matches the
 `perf/wasm_check.sh` measurement shape):
 
 ```bash
@@ -501,6 +524,10 @@ hyperfine 'wasmtime run --allow-precompiled --dir=. /tmp/rubyrs.cwasm \
 - `hyperfine --warmup 2` discards the first two runs to avoid cold-disk
   bias on the binary.
 - CRuby version is whatever is on `PATH`; check with `ruby -v`. Numbers
-  above are from CRuby 3.4.1 with Prism enabled.
+  above are from CRuby 3.4.1 (tables dated ≤2026-07-05) or 3.4.8
+  (2026-07-06 re-measures), both with Prism enabled. If `ruby` is
+  an rbenv shim, time the real binary
+  (`~/.rbenv/versions/…/bin/ruby`) — the shim adds ~38 ms per
+  invocation, which swamps cold-start comparisons.
 - Bench programs are deliberately small. Microbenchmarks lie; real-world
   numbers will differ. Use these as **directional**, not absolute.

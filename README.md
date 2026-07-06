@@ -31,7 +31,7 @@ output **byte-identical to CRuby's**, and faster:
 | Jekyll 4.4.1, 1000-post site | rubyrs | CRuby 3.4 |
 |------------------------------|--------|-----------|
 | Build (posts + rouge + kramdown) | **0.51 s** | 0.66 s |
-| Build (with Liquid layouts)      | **0.55 s** | 0.72 s |
+| Build (with Liquid layouts)      | **0.55 s** | 0.71 s |
 | Instructions retired             | **−8–11%** | (reference) |
 | Peak RSS (layout build)          | **69 MB**  | 70 MB |
 | Output                           | byte-identical | (reference) |
@@ -81,7 +81,7 @@ don't exist, and the documented divergences in
 [docs/SUBSET.md](docs/SUBSET.md) remain the precise boundary —
 start with its at-a-glance table. The claim we *do* make is
 narrower and verifiable: **for the surface rubyrs covers,
-behaviour is pinned to CRuby 3.4 by 1,144 differential fixtures**
+behaviour is pinned to CRuby 3.4 by 1,160 differential fixtures**
 (every fixture runs on both engines across four interpreter/JIT
 configurations; stdout must match exactly, including under GC
 stress), and that surface is now wide enough to run several of
@@ -91,7 +91,7 @@ Ruby's most-used real-world applications byte-for-byte.
 
 **vs CRuby** — CRuby is the reference implementation and rubyrs
 treats it as ground truth: the test suite's oracle IS CRuby
-(`tests/diff/`, 1,144 fixtures, stdout compared byte-for-byte).
+(`tests/diff/`, 1,160 fixtures, stdout compared byte-for-byte).
 Where rubyrs covers a feature, it aims for exact parity —
 divergences are bugs or documented trade-offs, never silent. Where
 it doesn't (OS-thread parallelism, full Encoding transcoding,
@@ -103,7 +103,7 @@ contract) — the JSON battery beats CRuby's C extension on parse,
 generate, and round-trip; rubyrs also retires 8–11% fewer CPU
 instructions end-to-end on Jekyll since the O(n log n) sort +
 dispatch fast-path work; on pure VM-dispatch microbenchmarks CRuby
-is still ~2-5× faster (an opt-in Cranelift JIT, `jit-native`,
+is still ~2-6× faster (an opt-in Cranelift JIT, `jit-native`,
 closes and often reverses that gap on hot loops) — the numbers live
 in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
@@ -127,21 +127,28 @@ WebAssembly target.
 
 Where the cold-start profile matters (CLI tools, DSL hosts,
 sandboxed script execution), rubyrs starts ~8× faster than stock
-CRuby (~1.9× vs `ruby --disable=gems`) at a comparable memory
-footprint (6.4 MB vs 5.7 MB peak on `puts 1+2`). The CLI caches
+CRuby (~1.9× vs `ruby --disable=gems`) at a lighter or comparable
+memory cost on `puts 1+2`: peak RSS 9.6 MB vs CRuby's 17.1 MB
+(12.3 MB with `--disable=gems`); by macOS's compressed-memory
+"peak memory footprint" metric it's 5.9 MB vs 9.6 MB (5.4 MB with
+`--disable=gems`) — metric details in
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md) "Memory". The CLI caches
 the preamble's compiled bytecode under `~/.cache/rubyrs` (the
 `preamble-cache` feature; format v5 is a raw-image blob decoded in
 ~0.5 ms) — the very first run after a (re)build pays a one-time
-~10 ms to populate it. Re-measured 2026-07-04:
+~10 ms to populate it. Re-measured 2026-07-06 (macOS row; Linux row
+2026-07-04; rubyrs is the standard measurement build of
+docs/BENCHMARKS.md, preamble cache warm; macOS CRuby is 3.4.8 via
+rbenv, invoked directly):
 
 | Cold start, `puts 1+2` | rubyrs (native) | CRuby 3.4 | CRuby `--disable=gems` |
 |------------------------|----------------|-----------|------------------------|
-| Apple M2 Max (macOS)   | **4.1 ms** | 33.8 ms | 7.7 ms |
+| Apple M2 Max (macOS)   | **3.6 ms** | 30.1 ms | 6.8 ms |
 | Ryzen 7 8745HS (Linux x86_64) | **3.7 ms** | 26.6 ms | 5.9 ms |
 
-| End-to-end DSL hosting (Brewfile, ~50 lines, embedded `Runtime`) | rubyrs | CRuby 3.4 |
+| End-to-end DSL hosting (Brewfile, ~50 lines, embedded `Runtime`) | rubyrs | CRuby 3.4.8 |
 |----------------------------------------------|--------|-----------|
-| Time | **10.0 ms** | 33.6 ms |
+| Time | **9.5 ms** | 30.4 ms |
 
 (The embedded-`Runtime` row pays a live preamble compile — library
 runtimes never touch the filesystem, so the CLI's bytecode cache
@@ -201,7 +208,7 @@ History note: rubyrs's first crates.io entries (`rubyrs@0.1.0`,
 `rubyrs-cext@0.1.0`, published 2026-05-25) were name-registration
 placeholders from before the Jekyll-era work, and the
 [`v0.1.0` git tag](https://github.com/linyiru/rubyrs/releases/tag/v0.1.0)
-predates them too (263 fixtures vs today's 1,144).
+predates them too (263 fixtures vs today's 1,160).
 [`v0.2.0`](https://github.com/linyiru/rubyrs/releases/tag/v0.2.0)
 (2026-06-14) is the first real published artifact — pin
 `rubyrs = "0.2"` for a stable release, or depend on git `master`

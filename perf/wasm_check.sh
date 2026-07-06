@@ -86,16 +86,17 @@ fi
 #                                              .cwasm  ← gate measures this
 #
 # Layered for three reasons:
-#   1. wasm-opt -Oz shrinks the deliverable binary ~21% (1.48 MB →
-#      1.17 MB locally) — what a downstream embedder would ship
+#   1. wasm-opt -Oz shrinks the deliverable binary ~18% (3.64 MB →
+#      3.00 MB locally, 2026-07-06) — what a downstream embedder would ship
 #      if distributing the .wasm. Running it here keeps the AOT
 #      input matching what a consumer would actually deploy.
 #   2. wizer pre-initializes the Runtime (class registration +
 #      preamble bytecode load) by calling the `wizer.initialize`
 #      export and snapshotting linear memory. The post-wizer
-#      binary skips that work at every invocation. Local PoC:
-#      ~0.5 ms cold start saving — small in absolute ms, but at
-#      sub-10 ms scale it's ~5% relative. Wizer is OPTIONAL; the
+#      binary skips that work at every invocation. Local measure
+#      2026-07-06: ~8.4 ms cold-start saving (17.4 → 9.0 ms on
+#      `puts 1+2` — the preamble grew Jekyll-era, so pre-init now
+#      pays for roughly half the AOT wall). Wizer is OPTIONAL; the
 #      script falls back to the no-wizer path if it's missing.
 #      A second wasm-opt -Oz pass after wizer compacts the
 #      snapshotted memory layout for further size reduction.
@@ -108,10 +109,14 @@ fi
 #      it's wasmtime-version + host-arch specific machine code
 #      and must be regenerated per consumer environment.
 #
-# Local PoC numbers (Apple M-series, M-series local):
-#   - raw .wasm + JIT-each-run:        ~20 ms
-#   - opt + AOT cwasm:                  ~7.6 ms
-#   - wizer + opt + AOT cwasm:          ~7.2 ms (this gate)
+# Local numbers, `puts 1+2` cold start (Apple M2 Max, wasi-sdk 24,
+# wasmtime 45, hyperfine --warmup 3, ≥15 runs, re-measured
+# 2026-07-06 — matches the Cold-start table in docs/BENCHMARKS.md;
+# the ~20/7.6/7.2 ms PoC-era numbers predate the Jekyll-era binary
+# growth):
+#   - raw .wasm + JIT-each-run:        ~44 ms
+#   - opt + AOT cwasm:                 ~17.4 ms
+#   - wizer + opt + AOT cwasm:          ~9.0 ms (this gate)
 # See `perf/wasm_baselines.tsv` for the budget rationale.
 #
 # Derived build artifacts live in a per-invocation tempdir
