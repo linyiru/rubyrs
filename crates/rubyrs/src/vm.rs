@@ -2381,6 +2381,13 @@ pub(crate) struct Vm {
     /// when adding a new Class-recv name arm to `do_call`, add the
     /// name here.
     pub(crate) class_singleton_deny: crate::intern::FxHashSet<SymId>,
+    /// P5b name-keyed probe filter (see the builder in `Vm::new` for
+    /// the maintenance contract): dense bitset by `SymId` index — bit
+    /// set ⇔ some name-keyed pre-cascade bucket in `do_call` can serve
+    /// this name. Consulted once per `do_call` via
+    /// `probe_name_may_serve`; names interned after `Vm::new` (user
+    /// method names) read `false` through the `get` bounds fallback.
+    pub(crate) probe_name_mask: Vec<u64>,
     /// Pre-interned `$!` — read/written on every `begin/rescue` entry &
     /// exit (and `return` out of a rescue body) for the dynamically
     /// scoped errinfo, hot paths in exception-heavy code like Liquid
@@ -3146,6 +3153,43 @@ impl Vm {
         // the universal-Object names handled in the shared arms —
         // over-inclusion is harmless (slow path), under-inclusion is
         // a dispatch-precedence bug.
+        // P5b name-keyed probe filter: one bit per SymId that SOME
+        // name-keyed pre-cascade fast bucket in `do_call` can serve
+        // (`proc.call`, `try_fast_primitive`, `try_fast_index`,
+        // `try_walk_fast_buckets` incl. the hash merge/slice/except
+        // bucket and the send-family re-aims). A name whose bit is
+        // clear cannot be served by any of those probes, so `do_call`
+        // skips them wholesale — an uncovered-shape call site stops
+        // paying the whole probe wave. The receiver-shape-keyed
+        // serving layers (toplevel/self/explicit-recv/class-singleton
+        // ICs, the per-instance singleton gates) serve ARBITRARY
+        // names and are deliberately NOT behind this mask.
+        //
+        // MAINTENANCE CONTRACT: adding a new name-keyed bucket to the
+        // gated zone REQUIRES adding its sym here — a missed entry is
+        // a silent perf loss for that bucket (never a correctness bug:
+        // every gated bucket mirrors the slow cascade byte-for-byte,
+        // so a skipped probe just takes the slow path).
+        let probe_name_mask = {
+            let served = [
+                sym_call, sym_frozen_q, sym_nil_q, sym_length, sym_size,
+                sym_to_s, sym_empty_q, sym_inspect, sym_index_op,
+                sym_index_set_op, sym_key_q, sym_has_key_q, sym_include_q,
+                sym_member_q, sym_case_eq, sym_not, sym_to_sym, sym_neg_at,
+                sym_freeze, sym_dup, sym_class_name, sym_is_a, sym_kind_of,
+                sym_equal_q, sym_eq_op, sym_shovel, sym_drop, sym_fetch,
+                sym_push, sym_method_defined_q, sym_kernel_array,
+                sym_block_given_q, sym_method_intro, sym_respond_to,
+                sym_public_send, sym_send, sym_send_u, sym_merge, sym_slice,
+                sym_except,
+            ];
+            let max = served.iter().map(|s| s.0).max().unwrap_or(0) as usize;
+            let mut mask = vec![0u64; max / 64 + 1];
+            for s in served {
+                mask[(s.0 >> 6) as usize] |= 1u64 << (s.0 & 63);
+            }
+            mask
+        };
         let class_singleton_deny: crate::intern::FxHashSet<SymId> = [
             "__dir__", "__send__", "send", "public_send", "method",
             "methods", "define_method", "define_singleton_method",
@@ -3503,6 +3547,7 @@ impl Vm {
             const_gen: 0,
             sym_length,
             class_singleton_deny,
+            probe_name_mask,
             sym_size,
             sym_bang,
             sym_index_op,

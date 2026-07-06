@@ -905,6 +905,13 @@ fn tier2_restblock_lite() { run_diff("tier2_restblock_lite"); }
 // walk buckets (coercion + TypeError shape, default-proc travel,
 // user hash/eql? keys, tagged-subclass decline, reopen-off).
 #[test] fn p4_cvar_super_hash() { run_diff("p4_cvar_super_hash"); }
+// Dispatch-campaign P5b name-keyed probe filter: mask-miss names
+// (plain/NFA/kwargs shapes, method_missing, define_method, refined),
+// user methods colliding with mask names (explicit-recv precedence
+// over declining buckets), mask-hit serves on their native shapes,
+// send-family re-aims to mask-miss targets, and the class-self
+// bare-call exemption (shape-keyed bucket stays unmasked).
+#[test] fn p5_probe_name_filter() { run_diff("p5_probe_name_filter"); }
 #[test] fn lazy_each_with_index() { run_diff("lazy_each_with_index"); }
 #[cfg(feature = "stdlib")]
 #[test] fn set_subtract_divide() { run_diff("set_subtract_divide"); }

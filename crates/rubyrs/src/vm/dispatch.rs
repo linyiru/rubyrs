@@ -2940,6 +2940,23 @@ impl Vm {
         }
     }
 
+    /// P5b name-keyed probe filter: `true` iff SOME name-keyed
+    /// pre-cascade bucket (`proc.call` / `try_fast_primitive` /
+    /// `try_fast_index` / `try_walk_fast_buckets`) can serve
+    /// `name_id`. One bounds-checked word load + bit test — the
+    /// single branch `do_call` pays before the whole probe wave.
+    /// A `false` is always sound to act on (skipping a probe only
+    /// routes to the slow cascade, which every bucket mirrors);
+    /// the bit table's completeness contract lives at the builder
+    /// in `Vm::new`.
+    #[inline(always)]
+    pub(crate) fn probe_name_may_serve(&self, name_id: SymId) -> bool {
+        match self.probe_name_mask.get((name_id.0 >> 6) as usize) {
+            Some(w) => w & (1u64 << (name_id.0 & 63)) != 0,
+            None => false,
+        }
+    }
+
     pub(crate) fn try_fast_primitive(&mut self, name_id: SymId, argc: usize, no_recv: bool) -> bool {
         if no_recv || argc != 0 {
             return false;
@@ -9863,6 +9880,18 @@ impl Vm {
         // refinements active, only the few refined names detour.
         let maybe_refined = !self.refined_method_names.is_empty()
             && self.refined_method_names.contains(&name_id);
+        // P5b name-keyed probe filter: one bitset test decides whether
+        // ANY name-keyed probe below (`proc.call`, fast-primitive/
+        // index, the walk buckets) can serve this name — an uncovered
+        // name (a user method name outside every bucket) skips the
+        // whole probe wave instead of paying per-bucket declines. The
+        // receiver-shape-keyed serving ICs (toplevel/self/explicit-
+        // recv/class-singleton, the per-instance singleton gates) are
+        // NOT behind this: they serve arbitrary names. `!no_recv`
+        // first: every mask-gated probe is either explicit-recv-only
+        // or a no-op for bare calls (and the walk zone's bare-call
+        // arms are exempted below), so bare calls skip the mask load.
+        let name_probed = !no_recv && self.probe_name_may_serve(name_id);
         // Implicit-self cached fast path (ADR 0031 increment 1): a bare
         // `foo(args)` on an Object self — the bulk of a Sinatra request —
         // otherwise falls through the whole cascade. `!host_fns` keeps a
@@ -9956,7 +9985,7 @@ impl Vm {
         // inside invoke_block. Other aliases ([]/()/yield/===) stay on
         // the general path (rare). Profiled: ~30% of `nilp.call` self-time
         // was this wasted cascade.
-        if !maybe_refined && !no_recv && name_id == self.sym_call && argc < self.stack.len() {
+        if name_probed && !maybe_refined && !no_recv && name_id == self.sym_call && argc < self.stack.len() {
             let ridx = self.stack.len() - 1 - argc;
             if matches!(self.stack.get(ridx), Some(Value::Block(_))) {
                 let split = self.stack.len() - argc;
@@ -9987,14 +10016,14 @@ impl Vm {
         // `take_bypass_visibility()` above; the helper's doc
         // comment spells out why that's currently safe and what
         // changes if a non-primitive arm is ever added.
-        if !maybe_refined && self.try_fast_primitive(name_id, argc, no_recv) {
+        if name_probed && !maybe_refined && self.try_fast_primitive(name_id, argc, no_recv) {
             return Ok(());
         }
         // Collection-index fast path (`h[k]` / `a[i]` on plain
         // Hash/Array) — same gating contract as `try_fast_primitive`
         // above; the helper's doc comment spells out the soundness
         // gates (override flags, subclass tags, default fall-through).
-        if !maybe_refined && self.try_fast_index(name_id, argc, no_recv) {
+        if name_probed && !maybe_refined && self.try_fast_index(name_id, argc, no_recv) {
             return Ok(());
         }
         // Explicit-receiver monomorphic fast path: an `obj.method(args)`
@@ -10030,7 +10059,13 @@ impl Vm {
         // arms, send-family #1-#3) — extracted to
         // `try_walk_fast_buckets` so the tier-2 `t2_call` family can
         // probe the SAME buckets at the same cascade position.
-        if self.try_walk_fast_buckets(name_id, argc, no_recv, cache_id, maybe_refined, force_primitive)? {
+        // `no_recv` exemption: the walk zone's CLASS-SELF BARE-CALL
+        // bucket serves ARBITRARY names (a bare `helper(args)` with a
+        // Class/Module self — I18n/AS module-functions), so bare calls
+        // must always probe the zone; every explicit-recv arm in the
+        // zone is name-keyed and stays behind the mask.
+        if (no_recv || name_probed)
+            && self.try_walk_fast_buckets(name_id, argc, no_recv, cache_id, maybe_refined, force_primitive)? {
             return Ok(());
         }
         // TEMPORARY diagnostics (env-gated): count sends that reach
