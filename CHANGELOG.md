@@ -55,6 +55,16 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 - **Dispatch-core fast paths** — primitive / index / `Proc#call` fast paths
   that bypass the method-name cascade on hot framework dispatch. (ADR
   [0031](docs/adr/0031-dispatch-core.md))
+- **CI: ensure-walk fixture unpinned from the CRuby 3.4.0/3.4.1 prism bug
+  window** — 14 `break`/`next`-in-suspended-ensure shapes whose CRuby output
+  flipped in 3.4.2 ([Bug #21001](https://bugs.ruby-lang.org/issues/21001);
+  one shape hangs modern CRuby forever, which hung CI's floating "3.4"
+  oracle) moved from `ensure_walk_break_return.rb` to pinned goldens in
+  `tests/embed/ensure_walk_divergences.rs`.
+- **CI: C-extension `dlopen` from test binaries works on Linux** — build.rs
+  now emits `--export-dynamic` for ELF test targets too, so in-process
+  `Runtime` tests that `require` a cext (e.g. `cext_typeddata`) resolve
+  `rb_*` symbols instead of failing with `undefined symbol: rb_cObject`.
 
 ## [0.2.0] - 2026-06-14
 
