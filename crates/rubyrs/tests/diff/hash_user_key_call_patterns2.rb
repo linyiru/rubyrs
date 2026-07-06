@@ -18,7 +18,14 @@ class OK
   attr_reader :t
   def initialize(t, v) = (@t = t; @v = v)
   def hash = ($hashes << @t; @v.hash)
-  def eql?(o) = ($eqls << [@t, o.t]; o.is_a?(OK) && o.instance_variable_get(:@v) == @v)
+  # Cross-type pairs are excluded from the log AND answered false
+  # without touching `o.t`: CRuby's seeded st buckets can (rarely,
+  # ~1/300 runs measured) collide an OK key's bucket with a stored
+  # Symbol key in transform_keys!, firing OK#eql?(Symbol) — the old
+  # `o.t`-first body crashed CRuby itself on those seeds and made
+  # the fixture flaky. The pinned CONTRACT (header) is which OK↔OK
+  # pairs compare; seed-dependent cross-type probes are noise.
+  def eql?(o) = (o.is_a?(OK) ? ($eqls << [@t, o.t]; o.instance_variable_get(:@v) == @v) : false)
 end
 
 # literal dedup orientation
