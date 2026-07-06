@@ -1173,13 +1173,108 @@ pub(crate) fn store(
         return;
     }
     let _ = std::fs::rename(&tmp, cache_file(dir, key));
-    if let Some(t_write) = t_write {
+    let write_ns = t_write.map_or(0, |t| t.elapsed().as_nanos() as u64);
+    // Best-effort sibling eviction — see `evict_stale_siblings`.
+    // AFTER the rename so the just-published blob is on disk (and
+    // excluded by name); still on the MISS path only, so the warm-
+    // HIT boot never pays for it.
+    let t_evict = prof.then(std::time::Instant::now);
+    evict_stale_siblings(dir, &cache_file(dir, key));
+    if let Some(t_evict) = t_evict {
         eprintln!(
-            "startup-prof: preamble-cache store blob={}B encode={:.3}ms write={:.3}ms",
+            "startup-prof: preamble-cache store blob={}B encode={:.3}ms write={:.3}ms evict={:.3}ms",
             bytes.len(),
             encode_ns as f64 / 1e6,
-            t_write.elapsed().as_nanos() as f64 / 1e6,
+            write_ns as f64 / 1e6,
+            t_evict.elapsed().as_nanos() as f64 / 1e6,
         );
+    }
+}
+
+/// How many cache blobs (INCLUDING the one just written) a store
+/// leaves in the directory. The key is exe identity (version +
+/// length + mtime + content sample), so every rebuild strands the
+/// previous build's blob — before eviction a busy dev machine
+/// accumulated one ~MB blob per rebuild, forever. 4 keeps the
+/// realistic concurrently-active working set warm (debug + release
+/// CLI, a test-harness binary, one older build still on someone's
+/// PATH) while bounding the directory at ~4 blobs; a host cycling
+/// MORE than 4 distinct binaries through one cache dir degrades to
+/// the miss path for the evicted ones (~ms live compile + a
+/// re-store) — colder, never incorrect.
+const KEEP_BLOBS: usize = 4;
+
+/// Age past which an orphaned `preamble-<key>.tmp.<pid>` is
+/// reclaimed. A LIVE writer's temp file is renamed away within
+/// milliseconds of creation; only a crashed/killed writer strands
+/// one. One hour is comfortably past any plausible in-flight write
+/// while still cleaning up within the day.
+const TMP_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// `preamble-<16 lowercase hex>` + the given suffix-shape — the
+/// exact names THIS module writes. Anything else in the directory
+/// is foreign and never touched.
+fn split_cache_name(name: &str) -> Option<&str> {
+    let hex = name.strip_prefix("preamble-")?;
+    if hex.len() < 16 || !hex.as_bytes()[..16].iter().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b)) {
+        return None;
+    }
+    Some(&hex[16..])
+}
+
+/// Best-effort eviction of stranded sibling blobs, run on the
+/// store (miss) path only — `try_load` never touches it, so the
+/// warm-HIT boot is unchanged.
+///
+/// Policy:
+///   * keep the newest `KEEP_BLOBS` `.bin` blobs by mtime, always
+///     including `just_written` (excluded by name from the
+///     candidate set, never examined or removed) — remove the
+///     rest;
+///   * remove orphaned `.tmp.<pid>` files older than
+///     `TMP_MAX_AGE` (crashed writers strand them; a concurrent
+///     writer's live temp is seconds old and is left alone).
+///
+/// Concurrency-safe by inertness: the only operation is `unlink`
+/// of files this module's own naming pattern produced. On unix,
+/// unlinking a blob another process has open (mid-`try_load`) is
+/// harmless — its fd keeps the data alive; a process that keyed to
+/// an evicted blob simply misses and re-stores. Every error
+/// (unreadable dir, vanished entry, permission, a directory
+/// squatting on a blob name) is swallowed: the cache is a pure
+/// fast-path and eviction is best-effort housekeeping on it.
+fn evict_stale_siblings(dir: &Path, just_written: &Path) {
+    let just_written_name = just_written.file_name();
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let now = std::time::SystemTime::now();
+    // (mtime, name, path) — name as the deterministic tie-break for
+    // equal mtimes.
+    let mut blobs: Vec<(std::time::SystemTime, std::ffi::OsString, PathBuf)> = Vec::new();
+    for ent in rd.flatten() {
+        let name_os = ent.file_name();
+        if Some(name_os.as_os_str()) == just_written_name {
+            continue;
+        }
+        let Some(name) = name_os.to_str() else { continue };
+        let Some(suffix) = split_cache_name(name) else { continue };
+        let Ok(meta) = ent.metadata() else { continue };
+        let mtime = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        if suffix == ".bin" {
+            blobs.push((mtime, name_os, ent.path()));
+        } else if let Some(pid) = suffix.strip_prefix(".tmp.")
+            && pid.bytes().all(|b| b.is_ascii_digit())
+            && now.duration_since(mtime).is_ok_and(|age| age > TMP_MAX_AGE)
+        {
+            let _ = std::fs::remove_file(ent.path());
+        }
+    }
+    if blobs.len() > KEEP_BLOBS - 1 {
+        // Newest first; keep KEEP_BLOBS - 1 siblings (just_written
+        // is the KEEP_BLOBS-th).
+        blobs.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+        for (_, _, path) in blobs.drain(KEEP_BLOBS - 1..) {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 
@@ -1510,6 +1605,129 @@ mod tests {
             super::decode_body(&bytes[super::HEADER_LEN..]).is_none(),
             "evidence blob must be structurally rejected by decode_body"
         );
+    }
+
+    // ---------- eviction (M7) ----------
+
+    /// Write an empty file with the given mtime offset (seconds
+    /// before now — 0 = now).
+    fn touch_aged(dir: &std::path::Path, name: &str, age_secs: u64) -> std::path::PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, b"x").unwrap();
+        let f = std::fs::OpenOptions::new().write(true).open(&p).unwrap();
+        let t = std::time::SystemTime::now() - std::time::Duration::from_secs(age_secs);
+        f.set_times(std::fs::FileTimes::new().set_modified(t)).unwrap();
+        p
+    }
+
+    /// Keep-N policy: the just-written blob survives regardless of
+    /// its mtime (here it's the OLDEST — pinning "never touch the
+    /// file just written"), plus the `KEEP_BLOBS - 1` newest
+    /// siblings; everything older goes.
+    #[test]
+    fn eviction_keeps_newest_n_including_just_written() {
+        let dir = test_dir("evict-n");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // 6 blobs, ..01 oldest .. ..06 newest.
+        for i in 1..=6u64 {
+            touch_aged(&dir, &format!("preamble-{i:016x}.bin"), 700 - i * 100);
+        }
+        let just_written = dir.join("preamble-0000000000000001.bin");
+        super::evict_stale_siblings(&dir, &just_written);
+        let survives = |n: u64| dir.join(format!("preamble-{n:016x}.bin")).exists();
+        assert!(survives(1), "just-written blob must never be evicted");
+        assert!(survives(6) && survives(5) && survives(4), "newest siblings kept");
+        assert!(!survives(3) && !survives(2), "older siblings evicted");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Only names this module writes are touched: foreign files —
+    /// wrong prefix, non-hex or uppercase-hex key, extra suffix —
+    /// survive even under eviction pressure. Orphaned `.tmp.<pid>`
+    /// files are reclaimed by AGE only: an old one goes, a fresh
+    /// one (a concurrent writer's in-flight temp) stays.
+    #[test]
+    fn eviction_leaves_foreign_files_and_fresh_tmps_alone() {
+        let dir = test_dir("evict-foreign");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let foreign = [
+            "README.txt",
+            "preamble-nothexnothexnot0.bin",
+            "preamble-0123456789ABCDEF.bin", // uppercase: not ours
+            "preamble-0123456789abcdef.bin.bak",
+            "zpreamble-0123456789abcdef.bin",
+            "preamble-0123456789abcdef.tmp.12a", // non-numeric pid: not ours
+        ];
+        for f in &foreign {
+            touch_aged(&dir, f, 10_000);
+        }
+        let fresh_tmp = touch_aged(&dir, "preamble-00000000000000aa.tmp.4242", 0);
+        let old_tmp = touch_aged(&dir, "preamble-00000000000000bb.tmp.4243", 2 * 60 * 60);
+        // Enough real blobs to trigger blob eviction too.
+        for i in 1..=6u64 {
+            touch_aged(&dir, &format!("preamble-{i:016x}.bin"), 700 - i * 100);
+        }
+        super::evict_stale_siblings(&dir, &dir.join("preamble-0000000000000006.bin"));
+        for f in &foreign {
+            assert!(dir.join(f).exists(), "foreign file {f} must be untouched");
+        }
+        assert!(fresh_tmp.exists(), "a fresh tmp (live concurrent writer) must survive");
+        assert!(!old_tmp.exists(), "an orphaned old tmp must be reclaimed");
+        assert!(!dir.join("preamble-0000000000000001.bin").exists(), "blob eviction ran");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unremovable entry (here: a DIRECTORY squatting on a blob
+    /// name — `remove_file` fails on it everywhere) must neither
+    /// panic nor stop the rest of the sweep.
+    #[test]
+    fn eviction_swallows_unremovable_entries() {
+        let dir = test_dir("evict-err");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let squatter = dir.join("preamble-00000000000000aa.bin");
+        std::fs::create_dir_all(&squatter).unwrap();
+        std::fs::write(squatter.join("inner"), b"x").unwrap();
+        for i in 1..=6u64 {
+            touch_aged(&dir, &format!("preamble-{i:016x}.bin"), 700 - i * 100);
+        }
+        super::evict_stale_siblings(&dir, &dir.join("preamble-0000000000000006.bin"));
+        assert!(squatter.exists(), "unremovable entry is left in place, error swallowed");
+        // The sweep still ran past the failure: with the squatter
+        // consuming one keep slot, only the two newest siblings
+        // survive alongside it.
+        assert!(!dir.join("preamble-0000000000000001.bin").exists(), "sweep continued");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// End-to-end: a real construction's store() evicts stranded
+    /// sibling blobs down to `KEEP_BLOBS` and the fresh blob still
+    /// hits on the next construction.
+    #[test]
+    fn store_evicts_stranded_siblings() {
+        let dir = test_dir("evict-store");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 1..=7u64 {
+            touch_aged(&dir, &format!("preamble-{i:016x}.bin"), 800 - i * 100);
+        }
+        let _ = mk(&dir); // miss → live compile → store → evict
+        let blobs: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|n| super::split_cache_name(n) == Some(".bin"))
+            .collect();
+        assert_eq!(
+            blobs.len(),
+            super::KEEP_BLOBS,
+            "store must leave exactly KEEP_BLOBS blobs, got {blobs:?}",
+        );
+        let rt = mk(&dir);
+        assert!(rt.preamble_cache_hit(), "the just-stored blob must survive its own eviction");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A stale blob from the previous format version must be
