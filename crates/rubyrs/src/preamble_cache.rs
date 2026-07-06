@@ -93,7 +93,7 @@ use crate::vm::Vm;
 pub(crate) const STEP_INSTALL_BUILTINS: u32 = u32::MAX;
 
 const MAGIC: &[u8; 4] = b"RBPC";
-const FORMAT_VERSION: u32 = 5; // bumped: hybrid POD-region body + whole-body checksum
+const FORMAT_VERSION: u32 = 6; // bumped: cvar/super site cids in Op + their CidGen counters (campaign P4)
 /// MAGIC(4) + FORMAT_VERSION(4) + key(8) + body checksum(8).
 const HEADER_LEN: usize = 24;
 
@@ -379,6 +379,11 @@ struct SnapshotCold {
     /// `vm.cache_counter.ivar` at preamble completion (sizes the
     /// ivar-site cache vector, ADR 0035 Ph4/5).
     ivar_counter: u32,
+    /// `vm.cache_counter.cvar` / `.sup` at preamble completion
+    /// (size the cvar-owner and super-site cache vectors,
+    /// campaign P4).
+    cvar_counter: u32,
+    super_counter: u32,
     /// Replay program: entry proto index per preamble chunk, in
     /// chunk order, with `STEP_INSTALL_BUILTINS` marking the
     /// host-side builtin-install step.
@@ -410,6 +415,8 @@ struct SnapshotColdRef<'a> {
     pre_protos_len: u32,
     cache_counter: u32,
     ivar_counter: u32,
+    cvar_counter: u32,
+    super_counter: u32,
     steps: &'a [u32],
     baked_sources: Vec<u32>,
     sources: Vec<(&'a str, &'a str)>,
@@ -479,6 +486,8 @@ struct Decoded<'a> {
     pre_protos_len: u32,
     cache_counter: u32,
     ivar_counter: u32,
+    cvar_counter: u32,
+    super_counter: u32,
     steps: Vec<u32>,
     baked_sources: Vec<u32>,
     sources: Vec<(String, String)>,
@@ -523,6 +532,8 @@ fn decode_body(body: &[u8]) -> Option<Decoded<'_>> {
         pre_protos_len,
         cache_counter,
         ivar_counter,
+        cvar_counter,
+        super_counter,
         steps,
         baked_sources,
         sources,
@@ -713,6 +724,8 @@ fn decode_body(body: &[u8]) -> Option<Decoded<'_>> {
         pre_protos_len,
         cache_counter,
         ivar_counter,
+        cvar_counter,
+        super_counter,
         steps,
         baked_sources,
         sources,
@@ -899,9 +912,16 @@ pub(crate) fn try_load(vm: &mut Vm, dir: &Path, key: u64) -> Option<ReplayPlan> 
     }
     debug_assert_eq!(vm.interner.len(), dec.interner.len());
     vm.protos = dec.protos;
-    vm.cache_counter = crate::compiler::CidGen { call: dec.cache_counter, ivar: dec.ivar_counter };
+    vm.cache_counter = crate::compiler::CidGen {
+        call: dec.cache_counter,
+        ivar: dec.ivar_counter,
+        cvar: dec.cvar_counter,
+        sup: dec.super_counter,
+    };
     vm.ensure_call_caches(dec.cache_counter as usize);
     vm.ensure_ivar_caches(dec.ivar_counter as usize);
+    vm.ensure_cvar_caches(dec.cvar_counter as usize);
+    vm.ensure_super_caches(dec.super_counter as usize);
     for &i in &dec.baked_sources {
         let (f, src) = crate::PREAMBLE_BAKED_SOURCES[i as usize];
         vm.sources.insert(Rc::from(f), Rc::from(src));
@@ -1084,6 +1104,8 @@ pub(crate) fn store(
         pre_protos_len,
         cache_counter: vm.cache_counter.call,
         ivar_counter: vm.cache_counter.ivar,
+        cvar_counter: vm.cache_counter.cvar,
+        super_counter: vm.cache_counter.sup,
         steps,
         baked_sources,
         sources: owned_sources,

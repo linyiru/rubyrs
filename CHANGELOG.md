@@ -46,6 +46,18 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   `define_method(:nil?)` / `(:!)` overrides now win over the built-in
   truthiness arms exactly like their `def` twins.
   (`define_method_ic_serve.rb`)
+- **Dispatch-campaign P4: `@@cvar` and `super` sites get inline caches;
+  Hash `merge`/`slice`/`except` get walk fast buckets** — per-site owner
+  caches for `Op::LoadCvar`/`StoreCvar` (their own `CidGen::cvar` id
+  space, `cvar_gen`-validated; tier-2 additionally serves both ops
+  through lean helpers instead of the generic op boundary), a per-site
+  resolved-method cache for the `super` family (`CidGen::sup`,
+  `method_gen`-validated), and a Hash merge/slice/except bucket that
+  serves the canonical collection arm at the walk-bucket position —
+  ActiveModel `valid?` +1.3–3.2% (tier-2) / +0.8–2.9% (interp),
+  `hash_micro` merge row −17%, RuboCop walkonly −1.2% (interp) / parity
+  (tier-2); the preamble-cache and snapshot blob formats bump (v6 / v5)
+  for the new op payloads + counters. (`p4_cvar_super_hash.rb`)
 - **Dispatch-campaign P2: builtin/universal sends on primitive and Class
   receivers skip the slow cascade** — new walk fast buckets for
   Class-receiver `respond_to?`, primitive-receiver `is_a?`/`kind_of?`,

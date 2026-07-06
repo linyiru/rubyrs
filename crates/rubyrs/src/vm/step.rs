@@ -696,6 +696,372 @@ impl Vm {
         None
     }
 
+    /// `Op::ApplySuperBlock` body, extracted out of `step`'s match
+    /// (campaign P4): the splat-super-with-block shape is the rarest
+    /// super form but carried the largest inline arm — keeping it a
+    /// non-inlined call keeps `step` inside LLVM's inline budget so
+    /// the hot arms' helpers (ivar slot reads etc.) stay inlined.
+    #[inline(never)]
+    fn apply_super_block(
+        &mut self,
+        name_id: crate::intern::SymId,
+        cid: u32,
+    ) -> Result<(), Trap> {
+            // Stack: `[block, array]` (block pushed first, array
+            // on top). Same super-lookup path as Op::ApplySuper,
+            // but the popped block forwards through
+            // `invoke_method_with_block` so the dispatched
+            // frame sees an explicit block in the same slot it
+            // would for `do ... end`. Used by
+            // `def foo(*a, &b); super(*a, &b); end` forwarders
+            // — sinatra-contrib/MultiRoute's per-verb methods.
+            let args_val = self
+                .stack
+                .pop()
+                .expect("ICE: ApplySuperBlock without args slot");
+            let args: Vec<Value> = match args_val {
+                Value::Array(aid) => self.heap.array(aid).clone(),
+                other => {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "ApplySuperBlock expected Array args, got {}",
+                            other.type_name()
+                        ),
+                    }));
+                }
+            };
+            let block_val = self
+                .stack
+                .pop()
+                .expect("ICE: ApplySuperBlock without block slot");
+            // `&nil` is the legitimate "no block" shape; map it
+            // to a None block slot. A real block forwards as-is; a
+            // `&method(:x)` / `&curried_proc` (BoundMethod /
+            // CurriedProc) coerces to a forwarder block via
+            // `coerce_callable_to_block`, mirroring CallBlock's
+            // richer arm. Sinatra's IndifferentHash#transform_values!
+            // does `super(&method(:convert_value))`.
+            let block_id = match block_val {
+                Value::Block(id) => Some(id),
+                Value::Nil => None,
+                Value::BoundMethod(_) | Value::CurriedProc(_) => {
+                    Some(self.coerce_callable_to_block(block_val)?)
+                }
+                other => {
+                    return Err(self.trap(RubyError::TypeError {
+                        msg: format!(
+                            "wrong argument type {} (expected Proc)",
+                            other.type_name()
+                        ),
+                    }));
+                }
+            };
+            let name_id = self.super_runtime_name(name_id);
+            match self.super_lookup(name_id, cid) {
+                Ok((m, self_val)) => {
+                    self.invoke_method_with_block(m, self_val, args, block_id)?;
+                }
+                Err(trap) => {
+                    // Builtin-substitution twin of the no-block
+                    // path's intercept in
+                    // super_call_with_lifecycle_noop: minitest
+                    // Mock's blank-slate keeps a
+                    // `define_method(:send) { |*a, &b|
+                    // super(*a, &b) }` passthrough, and
+                    // Object#send is a do_call recogniser (no
+                    // table Method above the override).
+                    // Re-dispatch the FORWARDED name — an
+                    // undef'd target then falls to
+                    // method_missing, exactly Object#send's
+                    // contract. `===` substitutes identity.
+                    let is_no_super = matches!(
+                        &trap.err,
+                        RubyError::NoMethodError {
+                            kind: crate::error::NoMethodErrorKind::SuperNoSuperclass,
+                            ..
+                        },
+                    );
+                    if !is_no_super {
+                        return Err(trap);
+                    }
+                    let nm = self.interner.resolve(name_id).clone();
+                    let cur_self = self.frames.last().map(|f| f.self_val.clone());
+                    match (&*nm, cur_self) {
+                        // `super(*a, &b)` to the builtin `Class#new` —
+                        // twin of the no-block arm in
+                        // `super_call_with_lifecycle_noop`. A
+                        // `def self.new(*a, &b); super(*a, &b); end`
+                        // override (or one `extend`ed via a module,
+                        // e.g. concurrent-ruby's `SafeInitialization`
+                        // on `Concurrent::Delay`) resolves super to
+                        // the inline allocator; allocate + run
+                        // initialize (forwarding the block) and yield
+                        // the instance.
+                        ("new", Some(Value::Class(cls))) => {
+                            self.super_builtin_class_new_with_block(&cls, args, block_id)?;
+                        }
+                        ("allocate", Some(Value::Class(cls))) => {
+                            let obj = self.alloc_default_instance(&cls)?;
+                            self.stack.push(obj);
+                        }
+                        ("initialize", Some(Value::Object(_))) => {
+                            // BasicObject#initialize no-op (nil).
+                            self.stack.push(Value::Nil);
+                        }
+                        ("send" | "__send__" | "public_send", Some(obj @ Value::Object(_))) => {
+                            let mut args = args;
+                            if args.is_empty() {
+                                return Err(self.trap(RubyError::ArgumentError {
+                                    msg: "no method name given".into(),
+                                }));
+                            }
+                            let target = args.remove(0);
+                            let target_id = match &target {
+                                Value::Sym(s) => *s,
+                                Value::Str(s) => self.interner.intern(&s.to_string_lossy()),
+                                other => {
+                                    return Err(self.trap(RubyError::TypeError {
+                                        msg: format!(
+                                            "{} is not a symbol nor a string",
+                                            other.type_name()
+                                        ),
+                                    }));
+                                }
+                            };
+                            let argc = args.len();
+                            match block_id {
+                                Some(bid) => {
+                                    self.stack.push(obj);
+                                    self.stack.push(Value::Block(bid));
+                                    for a in args {
+                                        self.stack.push(a);
+                                    }
+                                    self.do_call_block(
+                                        target_id,
+                                        argc,
+                                        /*no_recv=*/ false,
+                                        u32::MAX,
+                                    )?;
+                                }
+                                None => {
+                                    self.stack.push(obj);
+                                    for a in args {
+                                        self.stack.push(a);
+                                    }
+                                    self.do_call(
+                                        target_id,
+                                        argc,
+                                        /*no_recv=*/ false,
+                                        u32::MAX,
+                                    )?;
+                                }
+                            }
+                        }
+                        ("===", Some(obj @ Value::Object(_))) => {
+                            let same = match (&obj, args.first()) {
+                                (Value::Object(a), Some(Value::Object(b))) => a == b,
+                                (_, Some(other)) => obj.ruby_eq(other, &self.heap),
+                                (_, None) => false,
+                            };
+                            self.stack.push(Value::Bool(same));
+                        }
+                        // `super(...) { |h, k| ... }` from a
+                        // Hash-subclass method. `initialize`
+                        // with a block is `Hash.new { ... }`
+                        // semantics — install the default_proc
+                        // (rack's QueryParser params_class
+                        // subclasses `Params < Hash` and supers
+                        // with an auto-vivify block). Twin of
+                        // the no-block Hash arm in
+                        // `super_call_with_lifecycle_noop`;
+                        // other names route to the same
+                        // primitives (the block is dropped
+                        // there — collection_call has no block
+                        // plumbing; documented divergence, no
+                        // known consumer).
+                        (_, Some(Value::Hash(id)))
+                            if self.heap.hash_class_tag(id).is_some() =>
+                        {
+                            if &*nm == "initialize" {
+                                self.heap.hash_set_default_block(id, block_id);
+                                if let Some(d) = args.first() {
+                                    self.heap.hash_set_default_value(id, Some(d.clone()));
+                                }
+                                self.stack.push(Value::Nil);
+                            } else {
+                                let recv = Value::Hash(id);
+                                // Block-form FIRST when a block is
+                                // forwarded: a non-block `fetch` /
+                                // `fetch_values` RAISES KeyError on a
+                                // miss (never returns None), so a
+                                // block-carrying `super` must reach
+                                // the block-form (`fetch { }`) first.
+                                // `super(&method(:convert_value))` from
+                                // IndifferentHash#transform_values! and
+                                // `def fetch(k,*d,&b); super; end` both
+                                // land here. bypass the subclass-override
+                                // deferral (no user super method).
+                                if let Some(bid) = block_id
+                                    && let Some(v) = self
+                                        .collection_call_block(&recv, &nm, &args, bid, true)?
+                                {
+                                    self.stack.push(v);
+                                } else if let Some(v) =
+                                    self.collection_call(&recv, &nm, &args)?
+                                {
+                                    self.stack.push(v);
+                                } else {
+                                    return Err(trap);
+                                }
+                            }
+                        }
+                        // `super` FROM `method_missing` itself (a
+                        // `def method_missing(m, *a, &b); …; super; end`
+                        // fallthrough — the bare `super` forwards the
+                        // block, so it lands here) reaches
+                        // BasicObject#method_missing, which raises
+                        // NoMethodError for the ORIGINAL missing method
+                        // (args[0]). Routing it back through
+                        // try_method_missing would re-invoke the SAME
+                        // user method_missing → infinite recursion.
+                        ("method_missing", _) => {
+                            let missing = match args.first() {
+                                Some(Value::Sym(s)) => self.interner.resolve(*s).to_string(),
+                                Some(Value::Str(s)) => s.to_string_lossy(),
+                                _ => self.interner.resolve(name_id).to_string(),
+                            };
+                            let recv_desc = self
+                                .frames
+                                .last()
+                                .map(|f| self.recv_desc_for_error(&f.self_val))
+                                .unwrap_or_else(|| "Object".into());
+                            return Err(self.trap(RubyError::NoMethodError {
+                                kind: crate::error::NoMethodErrorKind::Missing,
+                                method: missing,
+                                recv_type: std::borrow::Cow::Owned(recv_desc),
+                            }));
+                        }
+                        // Lifecycle / inclusion hooks: CRuby ships real
+                        // empty defaults on Module/Class
+                        // (Module#included/extended/prepended,
+                        // Class#inherited, method_added family), so a
+                        // user hook's bare `super` (forwarding its
+                        // block) reaches a no-op. ActiveSupport::Concern
+                        // defines `included(base = nil, &block)` whose
+                        // `super` (block-carrying → this path) must land
+                        // here. Twin of the plain-super lifecycle no-op
+                        // in super_call_with_lifecycle_noop.
+                        (
+                            "included"
+                            | "extended"
+                            | "prepended"
+                            | "inherited"
+                            | "method_added"
+                            | "method_removed"
+                            | "method_undefined"
+                            | "singleton_method_added"
+                            | "singleton_method_removed"
+                            | "singleton_method_undefined"
+                            | "const_added",
+                            Some(Value::Class(_)),
+                        ) => {
+                            self.stack.push(Value::Nil);
+                        }
+                        (_, cur) => {
+                            // CRuby: `super(*a, &b)` with no superclass
+                            // method invokes `method_missing(name, *a,
+                            // &b)` on self before raising. Sinatra's
+                            // Delegator proxies a delegated method
+                            // (`super if respond_to?`) to a mixin's
+                            // method_missing this way. The no-block
+                            // super path (super_call_with_lifecycle_noop)
+                            // already does this; this is its block-form
+                            // twin.
+                            let recv = cur.unwrap_or(Value::Nil);
+                            if !self.try_method_missing(&recv, name_id, args, block_id)? {
+                                return Err(trap);
+                            }
+                        }
+                    }
+                }
+            }
+        Ok(())
+    }
+
+    /// `@@name` read (Op::LoadCvar + the tier-2 lean serve).
+    /// Surrounding class resolution order:
+    ///   - class body / `def self.foo`: self_val IS the
+    ///     class → use it directly.
+    ///   - instance method: self_val is an Object →
+    ///     `heap.real_class_of` gives the class.
+    ///   - toplevel / block-in-toplevel: no class on
+    ///     hand → fall back to Vm.toplevel_cvars.
+    ///
+    /// CRuby class variables are shared across the class
+    /// hierarchy: read resolves to the nearest ancestor
+    /// that defines `@@name` (so a subclass sees a parent's
+    /// `@@x`), through the per-site owner cache (campaign P4).
+    /// Falls back to nil if no ancestor has it.
+    #[inline(never)]
+    pub(crate) fn cvar_load(&mut self, name_id: crate::intern::SymId, cid: u32) -> Value {
+        match self.surrounding_class() {
+            Some(cls) => match self.cvar_owner_cached(&cls, name_id, cid) {
+                Some(owner) => owner
+                    .class_vars
+                    .borrow()
+                    .get(&name_id)
+                    .cloned()
+                    .unwrap_or(Value::Nil),
+                None => Value::Nil,
+            },
+            None => self
+                .toplevel_cvars
+                .get(&name_id)
+                .cloned()
+                .unwrap_or(Value::Nil),
+        }
+    }
+
+    /// `@@name = v` write (Op::StoreCvar + the tier-2 lean serve).
+    /// Writes to the ancestor that already owns `@@name` (shared
+    /// hierarchy semantics, via the per-site owner cache); if none
+    /// does, the variable is CREATED on the current class — an
+    /// ownership-shape event, so `cvar_gen` bumps (every cached
+    /// negative/farther-owner verdict that this creation could
+    /// shadow goes stale) and this site's entry is refreshed to the
+    /// new owner so the next write hits.
+    #[inline(never)]
+    pub(crate) fn cvar_store(&mut self, name_id: crate::intern::SymId, cid: u32, v: Value) {
+        match self.surrounding_class() {
+            Some(cls) => match self.cvar_owner_cached(&cls, name_id, cid) {
+                Some(owner) => {
+                    owner.class_vars.borrow_mut().insert(name_id, v);
+                }
+                None => {
+                    cls.class_vars.borrow_mut().insert(name_id, v);
+                    self.cvar_gen = self.cvar_gen.wrapping_add(1);
+                    if cid != u32::MAX {
+                        let idx = cid as usize;
+                        if idx >= self.cvar_caches.len() {
+                            self.cvar_caches.resize(
+                                idx + 1,
+                                crate::vm::lookup::CvarSiteCache::default(),
+                            );
+                        }
+                        self.cvar_caches[idx] = crate::vm::lookup::CvarSiteCache {
+                            class_ptr: Rc::as_ptr(&cls) as usize,
+                            cgen: self.cvar_gen,
+                            owner: Some(cls),
+                        };
+                    }
+                }
+            },
+            None => {
+                self.toplevel_cvars.insert(name_id, v);
+            }
+        }
+    }
+
     pub(crate) fn dispatch(&mut self) -> Result<(), Trap> {
         while !self.frames.is_empty() {
             debug_assert!(
@@ -1817,52 +2183,13 @@ impl Vm {
                     _ => { /* drop — CRuby raises but the toplevel/primitive cases are rare */ }
                 }
             }
-            Op::LoadCvar(name_id) => {
-                // Surrounding class resolution order:
-                //   - class body / `def self.foo`: self_val IS the
-                //     class → use it directly.
-                //   - instance method: self_val is an Object →
-                //     `heap.real_class_of` gives the class.
-                //   - toplevel / block-in-toplevel: no class on
-                //     hand → fall back to Vm.toplevel_cvars.
-                // CRuby class variables are shared across the class
-                // hierarchy: read resolves to the nearest ancestor
-                // that defines `@@name` (so a subclass sees a parent's
-                // `@@x`). Falls back to nil if no ancestor has it.
-                let cls_opt = self.surrounding_class();
-                let v = match cls_opt {
-                    Some(cls) => match self.cvar_owner_class(&cls, name_id) {
-                        Some(owner) => owner
-                            .class_vars
-                            .borrow()
-                            .get(&name_id)
-                            .cloned()
-                            .unwrap_or(Value::Nil),
-                        None => Value::Nil,
-                    },
-                    None => self
-                        .toplevel_cvars
-                        .get(&name_id)
-                        .cloned()
-                        .unwrap_or(Value::Nil),
-                };
+            Op::LoadCvar(name_id, cid) => {
+                let v = self.cvar_load(name_id, cid);
                 self.stack.push(v);
             }
-            Op::StoreCvar(name_id) => {
+            Op::StoreCvar(name_id, cid) => {
                 let v = self.stack.pop().expect("ICE: StoreCvar stack underflow");
-                let cls_opt = self.surrounding_class();
-                match cls_opt {
-                    // Write to the ancestor that already owns `@@name`
-                    // (shared hierarchy semantics); if none does, the
-                    // variable is created on the current class.
-                    Some(cls) => {
-                        let owner = self.cvar_owner_class(&cls, name_id).unwrap_or(cls);
-                        owner.class_vars.borrow_mut().insert(name_id, v);
-                    }
-                    None => {
-                        self.toplevel_cvars.insert(name_id, v);
-                    }
-                }
+                self.cvar_store(name_id, cid, v);
             }
             Op::IncIvarNoPush(name_id, cid) => {
                 // `@x = @x + 1` fast path, statement form. Mirrors
@@ -3529,7 +3856,7 @@ impl Vm {
                 self.trailing_hash_positional = false;
                 r?;
             }
-            Op::ApplySuper(name_id) => {
+            Op::ApplySuper(name_id, cid) => {
                 // Pop assembled args Array and drain elements
                 // into a Vec<Value>. From here the super-
                 // lookup path is identical to Op::Super; the
@@ -3548,292 +3875,16 @@ impl Vm {
                         }));
                     }
                 };
-                self.super_call_with_lifecycle_noop(name_id, args)?;
+                self.super_call_with_lifecycle_noop(name_id, args, cid)?;
             }
-            Op::ApplySuperBlock(name_id) => {
-                // Stack: `[block, array]` (block pushed first, array
-                // on top). Same super-lookup path as Op::ApplySuper,
-                // but the popped block forwards through
-                // `invoke_method_with_block` so the dispatched
-                // frame sees an explicit block in the same slot it
-                // would for `do ... end`. Used by
-                // `def foo(*a, &b); super(*a, &b); end` forwarders
-                // — sinatra-contrib/MultiRoute's per-verb methods.
-                let args_val = self
-                    .stack
-                    .pop()
-                    .expect("ICE: ApplySuperBlock without args slot");
-                let args: Vec<Value> = match args_val {
-                    Value::Array(aid) => self.heap.array(aid).clone(),
-                    other => {
-                        return Err(self.trap(RubyError::TypeError {
-                            msg: format!(
-                                "ApplySuperBlock expected Array args, got {}",
-                                other.type_name()
-                            ),
-                        }));
-                    }
-                };
-                let block_val = self
-                    .stack
-                    .pop()
-                    .expect("ICE: ApplySuperBlock without block slot");
-                // `&nil` is the legitimate "no block" shape; map it
-                // to a None block slot. A real block forwards as-is; a
-                // `&method(:x)` / `&curried_proc` (BoundMethod /
-                // CurriedProc) coerces to a forwarder block via
-                // `coerce_callable_to_block`, mirroring CallBlock's
-                // richer arm. Sinatra's IndifferentHash#transform_values!
-                // does `super(&method(:convert_value))`.
-                let block_id = match block_val {
-                    Value::Block(id) => Some(id),
-                    Value::Nil => None,
-                    Value::BoundMethod(_) | Value::CurriedProc(_) => {
-                        Some(self.coerce_callable_to_block(block_val)?)
-                    }
-                    other => {
-                        return Err(self.trap(RubyError::TypeError {
-                            msg: format!(
-                                "wrong argument type {} (expected Proc)",
-                                other.type_name()
-                            ),
-                        }));
-                    }
-                };
-                let name_id = self.super_runtime_name(name_id);
-                match self.super_lookup(name_id) {
-                    Ok((m, self_val)) => {
-                        self.invoke_method_with_block(m, self_val, args, block_id)?;
-                    }
-                    Err(trap) => {
-                        // Builtin-substitution twin of the no-block
-                        // path's intercept in
-                        // super_call_with_lifecycle_noop: minitest
-                        // Mock's blank-slate keeps a
-                        // `define_method(:send) { |*a, &b|
-                        // super(*a, &b) }` passthrough, and
-                        // Object#send is a do_call recogniser (no
-                        // table Method above the override).
-                        // Re-dispatch the FORWARDED name — an
-                        // undef'd target then falls to
-                        // method_missing, exactly Object#send's
-                        // contract. `===` substitutes identity.
-                        let is_no_super = matches!(
-                            &trap.err,
-                            RubyError::NoMethodError {
-                                kind: crate::error::NoMethodErrorKind::SuperNoSuperclass,
-                                ..
-                            },
-                        );
-                        if !is_no_super {
-                            return Err(trap);
-                        }
-                        let nm = self.interner.resolve(name_id).clone();
-                        let cur_self = self.frames.last().map(|f| f.self_val.clone());
-                        match (&*nm, cur_self) {
-                            // `super(*a, &b)` to the builtin `Class#new` —
-                            // twin of the no-block arm in
-                            // `super_call_with_lifecycle_noop`. A
-                            // `def self.new(*a, &b); super(*a, &b); end`
-                            // override (or one `extend`ed via a module,
-                            // e.g. concurrent-ruby's `SafeInitialization`
-                            // on `Concurrent::Delay`) resolves super to
-                            // the inline allocator; allocate + run
-                            // initialize (forwarding the block) and yield
-                            // the instance.
-                            ("new", Some(Value::Class(cls))) => {
-                                self.super_builtin_class_new_with_block(&cls, args, block_id)?;
-                            }
-                            ("allocate", Some(Value::Class(cls))) => {
-                                let obj = self.alloc_default_instance(&cls)?;
-                                self.stack.push(obj);
-                            }
-                            ("initialize", Some(Value::Object(_))) => {
-                                // BasicObject#initialize no-op (nil).
-                                self.stack.push(Value::Nil);
-                            }
-                            ("send" | "__send__" | "public_send", Some(obj @ Value::Object(_))) => {
-                                let mut args = args;
-                                if args.is_empty() {
-                                    return Err(self.trap(RubyError::ArgumentError {
-                                        msg: "no method name given".into(),
-                                    }));
-                                }
-                                let target = args.remove(0);
-                                let target_id = match &target {
-                                    Value::Sym(s) => *s,
-                                    Value::Str(s) => self.interner.intern(&s.to_string_lossy()),
-                                    other => {
-                                        return Err(self.trap(RubyError::TypeError {
-                                            msg: format!(
-                                                "{} is not a symbol nor a string",
-                                                other.type_name()
-                                            ),
-                                        }));
-                                    }
-                                };
-                                let argc = args.len();
-                                match block_id {
-                                    Some(bid) => {
-                                        self.stack.push(obj);
-                                        self.stack.push(Value::Block(bid));
-                                        for a in args {
-                                            self.stack.push(a);
-                                        }
-                                        self.do_call_block(
-                                            target_id,
-                                            argc,
-                                            /*no_recv=*/ false,
-                                            u32::MAX,
-                                        )?;
-                                    }
-                                    None => {
-                                        self.stack.push(obj);
-                                        for a in args {
-                                            self.stack.push(a);
-                                        }
-                                        self.do_call(
-                                            target_id,
-                                            argc,
-                                            /*no_recv=*/ false,
-                                            u32::MAX,
-                                        )?;
-                                    }
-                                }
-                            }
-                            ("===", Some(obj @ Value::Object(_))) => {
-                                let same = match (&obj, args.first()) {
-                                    (Value::Object(a), Some(Value::Object(b))) => a == b,
-                                    (_, Some(other)) => obj.ruby_eq(other, &self.heap),
-                                    (_, None) => false,
-                                };
-                                self.stack.push(Value::Bool(same));
-                            }
-                            // `super(...) { |h, k| ... }` from a
-                            // Hash-subclass method. `initialize`
-                            // with a block is `Hash.new { ... }`
-                            // semantics — install the default_proc
-                            // (rack's QueryParser params_class
-                            // subclasses `Params < Hash` and supers
-                            // with an auto-vivify block). Twin of
-                            // the no-block Hash arm in
-                            // `super_call_with_lifecycle_noop`;
-                            // other names route to the same
-                            // primitives (the block is dropped
-                            // there — collection_call has no block
-                            // plumbing; documented divergence, no
-                            // known consumer).
-                            (_, Some(Value::Hash(id)))
-                                if self.heap.hash_class_tag(id).is_some() =>
-                            {
-                                if &*nm == "initialize" {
-                                    self.heap.hash_set_default_block(id, block_id);
-                                    if let Some(d) = args.first() {
-                                        self.heap.hash_set_default_value(id, Some(d.clone()));
-                                    }
-                                    self.stack.push(Value::Nil);
-                                } else {
-                                    let recv = Value::Hash(id);
-                                    // Block-form FIRST when a block is
-                                    // forwarded: a non-block `fetch` /
-                                    // `fetch_values` RAISES KeyError on a
-                                    // miss (never returns None), so a
-                                    // block-carrying `super` must reach
-                                    // the block-form (`fetch { }`) first.
-                                    // `super(&method(:convert_value))` from
-                                    // IndifferentHash#transform_values! and
-                                    // `def fetch(k,*d,&b); super; end` both
-                                    // land here. bypass the subclass-override
-                                    // deferral (no user super method).
-                                    if let Some(bid) = block_id
-                                        && let Some(v) = self
-                                            .collection_call_block(&recv, &nm, &args, bid, true)?
-                                    {
-                                        self.stack.push(v);
-                                    } else if let Some(v) =
-                                        self.collection_call(&recv, &nm, &args)?
-                                    {
-                                        self.stack.push(v);
-                                    } else {
-                                        return Err(trap);
-                                    }
-                                }
-                            }
-                            // `super` FROM `method_missing` itself (a
-                            // `def method_missing(m, *a, &b); …; super; end`
-                            // fallthrough — the bare `super` forwards the
-                            // block, so it lands here) reaches
-                            // BasicObject#method_missing, which raises
-                            // NoMethodError for the ORIGINAL missing method
-                            // (args[0]). Routing it back through
-                            // try_method_missing would re-invoke the SAME
-                            // user method_missing → infinite recursion.
-                            ("method_missing", _) => {
-                                let missing = match args.first() {
-                                    Some(Value::Sym(s)) => self.interner.resolve(*s).to_string(),
-                                    Some(Value::Str(s)) => s.to_string_lossy(),
-                                    _ => self.interner.resolve(name_id).to_string(),
-                                };
-                                let recv_desc = self
-                                    .frames
-                                    .last()
-                                    .map(|f| self.recv_desc_for_error(&f.self_val))
-                                    .unwrap_or_else(|| "Object".into());
-                                return Err(self.trap(RubyError::NoMethodError {
-                                    kind: crate::error::NoMethodErrorKind::Missing,
-                                    method: missing,
-                                    recv_type: std::borrow::Cow::Owned(recv_desc),
-                                }));
-                            }
-                            // Lifecycle / inclusion hooks: CRuby ships real
-                            // empty defaults on Module/Class
-                            // (Module#included/extended/prepended,
-                            // Class#inherited, method_added family), so a
-                            // user hook's bare `super` (forwarding its
-                            // block) reaches a no-op. ActiveSupport::Concern
-                            // defines `included(base = nil, &block)` whose
-                            // `super` (block-carrying → this path) must land
-                            // here. Twin of the plain-super lifecycle no-op
-                            // in super_call_with_lifecycle_noop.
-                            (
-                                "included"
-                                | "extended"
-                                | "prepended"
-                                | "inherited"
-                                | "method_added"
-                                | "method_removed"
-                                | "method_undefined"
-                                | "singleton_method_added"
-                                | "singleton_method_removed"
-                                | "singleton_method_undefined"
-                                | "const_added",
-                                Some(Value::Class(_)),
-                            ) => {
-                                self.stack.push(Value::Nil);
-                            }
-                            (_, cur) => {
-                                // CRuby: `super(*a, &b)` with no superclass
-                                // method invokes `method_missing(name, *a,
-                                // &b)` on self before raising. Sinatra's
-                                // Delegator proxies a delegated method
-                                // (`super if respond_to?`) to a mixin's
-                                // method_missing this way. The no-block
-                                // super path (super_call_with_lifecycle_noop)
-                                // already does this; this is its block-form
-                                // twin.
-                                let recv = cur.unwrap_or(Value::Nil);
-                                if !self.try_method_missing(&recv, name_id, args, block_id)? {
-                                    return Err(trap);
-                                }
-                            }
-                        }
-                    }
-                }
+            Op::ApplySuperBlock(name_id, cid) => {
+                // Extracted to `apply_super_block` (P4) — see its doc.
+                self.apply_super_block(name_id, cid)?;
             }
-            Op::Super(name_id, argc) => {
+            Op::Super(name_id, argc, cid) => {
                 let split = self.stack.len() - argc as usize;
                 let args: Vec<Value> = self.stack.drain(split..).collect();
-                self.super_call_with_lifecycle_noop(name_id, args)?;
+                self.super_call_with_lifecycle_noop(name_id, args, cid)?;
             }
             Op::CreateBlock(p_idx, param_start, n_params, rest_slot_raw, kw_rest_slot_raw)
             | Op::CreateLambda(p_idx, param_start, n_params, rest_slot_raw, kw_rest_slot_raw) => {
@@ -5276,6 +5327,9 @@ impl Vm {
                     let mut sc = cls.superclass.borrow_mut();
                     if sc.is_none() {
                         *sc = Some(p.clone());
+                        // Superclass chain changed → cvar ownership
+                        // resolution can change (P4 owner caches).
+                        self.cvar_gen = self.cvar_gen.wrapping_add(1);
                     }
                 }
                 self.method_gen = self.method_gen.wrapping_add(1); // class structure changed

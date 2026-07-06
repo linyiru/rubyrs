@@ -46,6 +46,8 @@ use std::rc::Rc;
 pub(crate) struct CapturedGraph {
     pub(crate) cache_counter: u32,
     pub(crate) ivar_counter: u32,
+    pub(crate) cvar_counter: u32,
+    pub(crate) super_counter: u32,
     pub(crate) classes: Vec<ClassImage>,
     pub(crate) registry: Vec<(u32, u32)>,
     pub(crate) const_classes: Vec<(u32, u32)>,
@@ -73,6 +75,8 @@ struct VmImageRef<'a> {
     protos: &'a [Proto],
     cache_counter: u32,
     ivar_counter: u32,
+    cvar_counter: u32,
+    super_counter: u32,
     classes: &'a [ClassImage],
     registry: &'a [(u32, u32)],
     const_classes: &'a [(u32, u32)],
@@ -98,6 +102,10 @@ pub(crate) struct VmImage {
     pub(crate) cache_counter: u32,
     /// `vm.cache_counter.ivar` — sizes the ivar-site cache vector (ADR 0035 Ph4/5).
     pub(crate) ivar_counter: u32,
+    /// `vm.cache_counter.cvar` / `.sup` — size the cvar-owner and
+    /// super-site cache vectors (campaign P4).
+    pub(crate) cvar_counter: u32,
+    pub(crate) super_counter: u32,
     /// Every reachable class, dense-id order (index = class id).
     pub(crate) classes: Vec<ClassImage>,
     /// The `vm.classes` registry: (name SymId, class id).
@@ -659,6 +667,8 @@ pub(crate) fn capture(vm: &crate::vm::Vm) -> CapturedGraph {
     CapturedGraph {
         cache_counter: vm.cache_counter.call,
         ivar_counter: vm.cache_counter.ivar,
+        cvar_counter: vm.cache_counter.cvar,
+        super_counter: vm.cache_counter.sup,
         classes,
         registry,
         const_classes,
@@ -688,6 +698,8 @@ pub(crate) fn to_bytes(
         protos: &vm.protos,
         cache_counter: graph.cache_counter,
         ivar_counter: graph.ivar_counter,
+        cvar_counter: graph.cvar_counter,
+        super_counter: graph.super_counter,
         classes: &graph.classes,
         registry: &graph.registry,
         const_classes: &graph.const_classes,
@@ -715,7 +727,7 @@ const MAGIC: &[u8; 4] = b"RRS1";
 //     consumed_autoloads, autoload_paths) — without them every unfired
 //     `autoload` constant (all of rubocop's formatters + correctors) was
 //     silently dropped across a restore.
-const FORMAT_VERSION: u32 = 4; // bumped: ivar-site cids in Op + ivar_counter (ADR 0035 Ph4/5)
+const FORMAT_VERSION: u32 = 5; // bumped: cvar/super site cids in Op + their CidGen counters (campaign P4)
 
 /// Outcome of a validated load: either the image was restored, or it was
 /// rejected (with a reason) and the VM is UNTOUCHED so the caller can fall
@@ -1130,9 +1142,19 @@ pub(crate) fn restore(vm: &mut crate::vm::Vm, img: VmImage) {
     }
     // 2. Protos + call-cache sizing (image ⊇ preamble at identical indices).
     vm.protos = img.protos;
-    vm.cache_counter = crate::compiler::CidGen { call: img.cache_counter, ivar: img.ivar_counter };
+    vm.cache_counter = crate::compiler::CidGen {
+        call: img.cache_counter,
+        ivar: img.ivar_counter,
+        cvar: img.cvar_counter,
+        sup: img.super_counter,
+    };
     vm.ensure_call_caches(img.cache_counter as usize);
     vm.ensure_ivar_caches(img.ivar_counter as usize);
+    vm.ensure_cvar_caches(img.cvar_counter as usize);
+    vm.ensure_super_caches(img.super_counter as usize);
+    // Restore rewrites `class_vars` tables wholesale below —
+    // stale any pre-restore cvar-owner cache entries (P4).
+    vm.cvar_gen = vm.cvar_gen.wrapping_add(1);
 
     // 2b. Require guard: repopulate `loaded_features` + `loaded_stdlib_stubs` so
     //     a post-restore `require` of anything the image already loaded is a

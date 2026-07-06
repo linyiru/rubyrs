@@ -1022,6 +1022,14 @@ struct PostPreambleSnapshot {
     /// ivar name onto the same cid — wrong-slot serves, not just
     /// misses).
     ivar_caches_len: usize,
+    /// Twins of `ivar_caches_len` for the cvar-owner and super-site
+    /// cache vectors (campaign P4) — same cid-reuse aliasing
+    /// rationale. Reset ALSO bumps `cvar_gen` (the class-state
+    /// restore rewrites `class_vars` tables wholesale, which can
+    /// remove names and thereby change ownership for the surviving
+    /// preamble-range entries).
+    cvar_caches_len: usize,
+    super_caches_len: usize,
     /// `vm.cache_counter` at preamble completion. The compiler
     /// casts this counter to `u16` when emitting `Op::Call*`
     /// cache-site ids, so a long-lived Runtime that runs many
@@ -2164,6 +2172,8 @@ impl PostPreambleSnapshot {
             interner_len: rt.vm.interner.len(),
             call_caches_len: rt.vm.call_caches.len(),
             ivar_caches_len: rt.vm.ivar_caches.len(),
+            cvar_caches_len: rt.vm.cvar_caches.len(),
+            super_caches_len: rt.vm.super_caches.len(),
             cache_counter: rt.vm.cache_counter,
             method_gen: rt.vm.method_gen,
             const_gen: rt.vm.const_gen,
@@ -3056,6 +3066,20 @@ impl Runtime {
         // wrap and start aliasing unrelated call sites.
         self.vm.call_caches.truncate(snapshot.call_caches_len);
         self.vm.ivar_caches.truncate(snapshot.ivar_caches_len);
+        self.vm.cvar_caches.truncate(snapshot.cvar_caches_len);
+        self.vm.super_caches.truncate(snapshot.super_caches_len);
+        // The class-state restore below rewrites `class_vars`
+        // tables wholesale (names created post-snapshot vanish),
+        // which can change cvar OWNERSHIP for the surviving
+        // preamble-range entries — clear them outright (few sites;
+        // avoids any gen-wrap hazard a per-reset bump would
+        // accumulate). `super_caches` survivors are covered by the
+        // `method_gen` restore-to-baseline below: any entry filled
+        // after a post-preamble method-table mutation carries a
+        // later generation and reads as stale.
+        for e in &mut self.vm.cvar_caches {
+            *e = Default::default();
+        }
         self.vm.cache_counter = snapshot.cache_counter;
         // `vm.fuel` and `deadline_at` are NOT restored here.
         // Both are per-eval: `eval()` re-anchors `vm.fuel` from
@@ -4582,6 +4606,10 @@ self.eval_inner(
         self.vm.ensure_call_caches(cache_count);
         let ivar_count = self.vm.cache_counter.ivar as usize;
         self.vm.ensure_ivar_caches(ivar_count);
+        let cvar_count = self.vm.cache_counter.cvar as usize;
+        self.vm.ensure_cvar_caches(cvar_count);
+        let super_count = self.vm.cache_counter.sup as usize;
+        self.vm.ensure_super_caches(super_count);
         // Preamble-cache recording: on a cache miss, load_preamble
         // arms this Vec and each preamble chunk's entry proto lands
         // here in execution order — the recording IS the replay

@@ -1344,7 +1344,12 @@ impl IvarTable {
     /// never-grown slots read as Nil — exactly CRuby's undefined-ivar
     /// semantics — with no defined-set consulted.
     #[allow(dead_code)] // wired by the ivar-IC step arms
-    #[inline]
+    // `always`: the interpreter's LoadIvar arm rides this on every
+    // `@x` read; when `Vm::step` grew past LLVM's inline budget
+    // (campaign P4) the plain hint stopped firing and static_bench
+    // lost ~5% to the call boundary. The body is a bounds-checked
+    // vec index + clone — always profitable to inline.
+    #[inline(always)]
     pub(crate) fn read_slot_raw(&self, slot: u32) -> Value {
         self.slots.get(slot as usize).cloned().unwrap_or(Value::Nil)
     }
@@ -1354,6 +1359,8 @@ impl IvarTable {
     }
     /// Slot-level store (IC hit / JIT helpers / `insert`). Grows the
     /// slot vector (Nil-filling holes) on first touch past the end.
+    /// `inline`: same step-arm hot path as `read_slot_raw` above.
+    #[inline]
     pub(crate) fn write_slot(&mut self, slot: u32, val: Value) -> Option<Value> {
         let i = slot as usize;
         if i >= self.slots.len() {

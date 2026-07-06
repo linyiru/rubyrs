@@ -963,7 +963,7 @@ impl Vm {
                     }
                 });
                 let has = match name_id {
-                    Some(nid) => self.super_lookup(nid).is_ok(),
+                    Some(nid) => self.super_lookup(nid, u32::MAX).is_ok(),
                     None => false,
                 };
                 Some(Ok(if has { Value::new_str("super") } else { Value::Nil }))

@@ -3356,6 +3356,10 @@ impl Vm {
             && !chain_has(self, &arr_cls, self.sym_freeze)
             && !chain_has(self, &arr_cls, self.sym_dup);
         self.fast_hash_fetch_safe = !chain_has(self, &hash_cls, self.sym_fetch);
+        // Campaign-P4 bucket twin: Hash merge/slice/except.
+        self.fast_hash_msx_safe = !chain_has(self, &hash_cls, self.sym_merge)
+            && !chain_has(self, &hash_cls, self.sym_slice)
+            && !chain_has(self, &hash_cls, self.sym_except);
         let str_cls = self.classes.get(&str_sym).cloned();
         self.fast_str_dup_safe = !chain_has(self, &str_cls, self.sym_dup);
         // Rest-predicate serve deps (see `Vm::rest_pred_deps_ok`):
@@ -8318,6 +8322,73 @@ impl Vm {
             false
         }
 
+        /// Hash#merge / #slice / #except walk bucket, out-of-line
+        /// (campaign P4). Serves the canonical collection arms AT the
+        /// arm: it CALLS `hash_collection_call` — the exact function
+        /// the cascade's `collection_call` reaches for a plain Hash —
+        /// so the fast and canonical answers cannot drift (coercion,
+        /// TypeError shapes, user-`hash`-key handling and the arms'
+        /// own pin/maybe_gc discipline all ride along). Guards:
+        ///   - `fast_hash_msx_safe` (method_gen-revalidated by the
+        ///     caller's zone entry): no user merge/slice/except on
+        ///     the Hash chain (lumped, strictly conservative);
+        ///   - no `class_tag` (subclass override precedence stays in
+        ///     the canonical cascade);
+        ///   - any argc (the arms are variadic; merge's re-entrant
+        ///     `to_hash` coercion runs inside the arm exactly as the
+        ///     cascade would run it).
+        ///
+        /// Stack discipline mirrors do_call's slow path: args
+        /// drained and receiver popped into Rust locals BEFORE the
+        /// arm (the arms pin what they hold across their own GC
+        /// points — they were written for exactly this
+        /// popped-operands convention).
+        ///
+        /// `#[inline(never)]`: probed on every explicit-recv
+        /// Hash-receiver bucket miss, but the serve itself is not
+        /// walk-hot — keeping the body out of `try_walk_fast_buckets`
+        /// keeps that fn's I-cache footprint flat (the AM census's
+        /// merge/slice/except traffic is ~40/iter, three orders below
+        /// the walk's probe traffic).
+        #[inline(never)]
+        fn try_hash_msx_bucket(
+            &mut self,
+            id: crate::value::ObjId,
+            name_id: SymId,
+            ridx: usize,
+        ) -> Result<bool, Trap> {
+            let name: &str = if name_id == self.sym_merge {
+                "merge"
+            } else if name_id == self.sym_slice {
+                "slice"
+            } else if name_id == self.sym_except {
+                "except"
+            } else {
+                return Ok(false);
+            };
+            if !self.fast_hash_msx_safe || self.heap.hash_class_tag(id).is_some() {
+                return Ok(false);
+            }
+            let args: Vec<Value> = self.stack.drain(ridx + 1..).collect();
+            self.stack.pop(); // receiver (still live via `id` + the arm's pins)
+            match self.hash_collection_call(id, name, &args)? {
+                Some(v) => {
+                    self.stack.push(v);
+                    Ok(true)
+                }
+                None => {
+                    // Unreachable for these three names (their arms
+                    // answer every arg shape) — but a future arm
+                    // change must degrade to a DECLINE, not a silent
+                    // wrong answer: restore the operands and fall
+                    // through to the canonical cascade.
+                    self.stack.push(Value::Hash(id));
+                    self.stack.extend(args);
+                    Ok(false)
+                }
+            }
+        }
+
         pub(crate) fn try_walk_fast_buckets(
             &mut self,
             name_id: SymId,
@@ -9110,6 +9181,46 @@ impl Vm {
                             }
                         }
                         self.stack.push(Value::Array(id));
+                        return Ok(true);
+                    }
+                }
+                // Hash#merge / #slice / #except — the canonical
+                // collection arms, served AT the arm (campaign P4;
+                // AM fallback census: merge 11.4 + slice 10.7 +
+                // except 15.7/iter, all slow-cascade — they arrive
+                // via CallKw/ApplyCall, which funnel into do_call).
+                // Unlike the mirrored-code buckets above, these
+                // three CALL `hash_collection_call` itself — the
+                // exact function the cascade's `collection_call`
+                // reaches for a plain Hash — so the fast and
+                // canonical answers cannot drift (coercion,
+                // TypeError shapes, user-`hash`-key handling and
+                // the arms' own pin/maybe_gc discipline all ride
+                // along). Guards:
+                //   - `fast_hash_msx_safe` (method_gen-revalidated):
+                //     no user merge/slice/except on the Hash chain
+                //     (the cascade would dispatch such a method
+                //     only for tagged subclass instances, but the
+                //     lumped flag is strictly conservative);
+                //   - no `class_tag` (subclass override precedence
+                //     stays in the canonical cascade);
+                //   - any argc (the arms are variadic; merge's
+                //     re-entrant `to_hash` coercion runs inside the
+                //     arm exactly as the cascade would run it).
+                // Stack discipline mirrors do_call's slow path:
+                // args drained + receiver popped into Rust locals
+                // BEFORE the arm (the arms pin what they hold
+                // across their own GC points — they were written
+                // for exactly this popped-operands convention).
+                // Receiver-typed gate FIRST (one indexed load) so
+                // the walk's massive non-Hash bucket-miss traffic
+                // pays a single compare, not three name probes; the
+                // name checks + serve live out-of-line
+                // (`try_hash_msx_bucket`) to keep this zone's
+                // I-cache footprint flat.
+                if let Value::Hash(id) = &self.stack[ridx] {
+                    let id = *id;
+                    if self.try_hash_msx_bucket(id, name_id, ridx)? {
                         return Ok(true);
                     }
                 }
@@ -14214,9 +14325,18 @@ impl Vm {
             let cv_id = self.resolve_cvar_name_arg(&args[0])?;
             let value = args[1].clone();
             // Write to the owning ancestor (shared-hierarchy semantics),
-            // else create on the receiver — mirrors Op::StoreCvar.
-            let owner = self.cvar_owner_class(&cls, cv_id).unwrap_or(cls);
-            owner.class_vars.borrow_mut().insert(cv_id, value.clone());
+            // else create on the receiver — mirrors Op::StoreCvar,
+            // including the create path's `cvar_gen` bump (ownership
+            // shape changed → per-site owner caches go stale).
+            match self.cvar_owner_class(&cls, cv_id) {
+                Some(owner) => {
+                    owner.class_vars.borrow_mut().insert(cv_id, value.clone());
+                }
+                None => {
+                    cls.class_vars.borrow_mut().insert(cv_id, value.clone());
+                    self.cvar_gen = self.cvar_gen.wrapping_add(1);
+                }
+            }
             self.stack.push(value);
             return Ok(());
         }

@@ -1896,6 +1896,24 @@ pub(crate) struct Vm {
     /// the toplevel-only `@@x` writes scripts occasionally use
     /// for cache-like state at file scope.
     pub(crate) toplevel_cvars: HashMap<SymId, Value>,
+    /// Per-`@@cvar`-site owner caches, dense by the
+    /// `Op::LoadCvar`/`StoreCvar` cid (`CidGen::cvar` space).
+    /// Validated against `cvar_gen`; see `CvarSiteCache`.
+    pub(crate) cvar_caches: Vec<crate::vm::lookup::CvarSiteCache>,
+    /// Generation for `cvar_caches`: bumped whenever cvar OWNERSHIP
+    /// resolution can change — a `@@name` created on a class that
+    /// didn't own it (StoreCvar / class_variable_set create path),
+    /// a superclass rewire (reopen-with-parent), and the
+    /// snapshot/reset restore paths (which rewrite `class_vars`
+    /// tables wholesale). Value overwrites on the existing owner
+    /// do NOT bump (the owner is unchanged — that's what makes the
+    /// cache profitable for the `@@x ||= …` read/write pattern).
+    pub(crate) cvar_gen: u32,
+    /// Per-`super`-site resolved-method caches, dense by the
+    /// `Op::Super`/`ApplySuper`/`ApplySuperBlock` cid
+    /// (`CidGen::sup` space). Validated against `method_gen`; see
+    /// `SuperSiteCache`.
+    pub(crate) super_caches: Vec<crate::vm::lookup::SuperSiteCache>,
     /// Heap-allocated `$LOAD_PATH` / `$:` Array. Lazily
     /// initialised on first read so cold-eval scripts that
     /// never touch it pay zero startup cost. Scripts can
@@ -2430,6 +2448,9 @@ pub(crate) struct Vm {
     /// paying the full slow cascade).
     pub(crate) sym_drop: SymId,
     pub(crate) sym_fetch: SymId,
+    pub(crate) sym_merge: SymId,
+    pub(crate) sym_slice: SymId,
+    pub(crate) sym_except: SymId,
     /// Pre-interned `hash` / `eql?` for the Hash user-key funnel gates
     /// (`key_needs_ruby_hash` scans run per merge/insert — an interner
     /// probe per call site showed up on the merge! micro).
@@ -2556,6 +2577,10 @@ pub(crate) struct Vm {
     ///   - `fast_str_dup_safe`: no user `dup` on the String chain.
     pub(crate) fast_arr_misc_safe: bool,
     pub(crate) fast_hash_fetch_safe: bool,
+    /// Campaign-P4 bucket twin: no user `merge` / `slice` /
+    /// `except` on the Hash chain (lumped — any one reopen turns
+    /// all three buckets off; perf-only, never correctness).
+    pub(crate) fast_hash_msx_safe: bool,
     pub(crate) fast_str_dup_safe: bool,
     /// 2026-07 P2 (AM fallback census) bucket twins, same
     /// method_gen-revalidated discipline:
@@ -3098,6 +3123,9 @@ impl Vm {
         let sym_to_sym = interner.intern("to_sym");
         let sym_drop = interner.intern("drop");
         let sym_fetch = interner.intern("fetch");
+        let sym_merge = interner.intern("merge");
+        let sym_slice = interner.intern("slice");
+        let sym_except = interner.intern("except");
         let sym_key_hash = interner.intern("hash");
         let sym_key_eql = interner.intern("eql?");
         let sym_freeze = interner.intern("freeze");
@@ -3466,6 +3494,9 @@ impl Vm {
             max_value_bytes: None,
             call_caches: Vec::new(),
             ivar_caches: Vec::new(),
+            cvar_caches: Vec::new(),
+            cvar_gen: 0,
+            super_caches: Vec::new(),
             method_gen: 0,
             const_cache_flat: FxHashMap::default(),
             const_cache_chain: FxHashMap::default(),
@@ -3499,6 +3530,9 @@ impl Vm {
             sym_to_sym,
             sym_drop,
             sym_fetch,
+            sym_merge,
+            sym_slice,
+            sym_except,
             sym_key_hash,
             sym_key_eql,
             sym_freeze,
@@ -3535,6 +3569,7 @@ impl Vm {
             fast_eq_nil_safe: false,
             fast_arr_misc_safe: false,
             fast_hash_fetch_safe: false,
+            fast_hash_msx_safe: false,
             fast_str_dup_safe: false,
             fast_is_a_prim_safe: false,
             fast_kernel_array_prim_safe: false,

@@ -296,6 +296,57 @@ pub(crate) fn ivar_slot_cached(
     }
     slot
 }
+/// Per-`@@cvar`-site owner cache (campaign P4). The cached verdict is
+/// the result of `cvar_owner_class(start, name)` — the ancestor that
+/// OWNS `@@name` for this site's surrounding class (`None` = no
+/// ancestor owns it yet, a real verdict too: the read serves Nil and
+/// the write knows to create-on-current). Keyed on the START class
+/// pointer (the site's surrounding class can differ per invocation —
+/// blocks, subclass-shared bodies) and validated against
+/// `Vm::cvar_gen`, which bumps on every ownership-shape event
+/// (new-name creation, superclass rewire, snapshot/reset restore).
+/// Values are read through the owner's `class_vars` map at access
+/// time, so value overwrites need no invalidation. `class_ptr == 0`
+/// = unfilled; the class-ptr-reuse hazard is the same one
+/// `CallCacheEntry` / `IvarSiteCache` accept.
+#[derive(Clone, Default)]
+pub(crate) struct CvarSiteCache {
+    pub(crate) class_ptr: usize,
+    pub(crate) cgen: u32,
+    pub(crate) owner: Option<Rc<Class>>,
+}
+
+/// Per-`super`-site resolved-method cache (campaign P4). Caches
+/// `super_lookup`'s INSTANCE-branch resolution: for a given
+/// (receiver class, defining class, runtime name) the "next method
+/// after `defining` in the receiver's MRO" is a pure function of the
+/// method tables, so `method_gen` validation (the same generation
+/// `ancestors_cached` keys on) makes a hit answer-identical to the
+/// walk. `name` is part of the key because a shared `define_method`
+/// body can `super` under different runtime names from the same op
+/// site. The class-method branch (`Value::Class` self) never fills
+/// or serves this cache. `recv_class_ptr == 0` = unfilled.
+#[derive(Clone)]
+pub(crate) struct SuperSiteCache {
+    pub(crate) recv_class_ptr: usize,
+    pub(crate) defining_ptr: usize,
+    pub(crate) name: SymId,
+    pub(crate) generation: u32,
+    pub(crate) method: Option<Rc<Method>>,
+}
+
+impl Default for SuperSiteCache {
+    fn default() -> Self {
+        SuperSiteCache {
+            recv_class_ptr: 0,
+            defining_ptr: 0,
+            name: SymId(0),
+            generation: 0,
+            method: None,
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct CallCache {
     pub(crate) ways: [CallCacheEntry; IC_WAYS],
@@ -319,6 +370,59 @@ impl Vm {
         if self.ivar_caches.len() < n {
             self.ivar_caches.resize(n, IvarSiteCache::default());
         }
+    }
+
+    /// Twin of `ensure_call_caches` for the cvar-site cache vector
+    /// (`CidGen::cvar` id space, campaign P4).
+    pub(crate) fn ensure_cvar_caches(&mut self, n: usize) {
+        if self.cvar_caches.len() < n {
+            self.cvar_caches.resize(n, CvarSiteCache::default());
+        }
+    }
+
+    /// Twin of `ensure_call_caches` for the super-site cache vector
+    /// (`CidGen::sup` id space, campaign P4).
+    pub(crate) fn ensure_super_caches(&mut self, n: usize) {
+        if self.super_caches.len() < n {
+            self.super_caches.resize(n, SuperSiteCache::default());
+        }
+    }
+
+    /// Per-site cached `cvar_owner_class` (campaign P4): the owning
+    /// ancestor of `@@name` for surrounding class `start` at cvar
+    /// site `cid`. Hit = same start-class pointer AND `cvar_gen`
+    /// unchanged since fill; miss = the canonical superclass walk +
+    /// refill. `cid == u32::MAX` = uncached site. Answer-identical
+    /// to `cvar_owner_class` by the `cvar_gen` contract (every
+    /// ownership-shape event bumps it — see the field doc).
+    #[inline]
+    pub(crate) fn cvar_owner_cached(
+        &mut self,
+        start: &Rc<Class>,
+        name_id: SymId,
+        cid: u32,
+    ) -> Option<Rc<Class>> {
+        let ptr = Rc::as_ptr(start) as usize;
+        if cid != u32::MAX
+            && let Some(e) = self.cvar_caches.get(cid as usize)
+            && e.class_ptr == ptr
+            && e.cgen == self.cvar_gen
+        {
+            return e.owner.clone();
+        }
+        let owner = self.cvar_owner_class(start, name_id);
+        if cid != u32::MAX {
+            let idx = cid as usize;
+            if idx >= self.cvar_caches.len() {
+                self.cvar_caches.resize(idx + 1, CvarSiteCache::default());
+            }
+            self.cvar_caches[idx] = CvarSiteCache {
+                class_ptr: ptr,
+                cgen: self.cvar_gen,
+                owner: owner.clone(),
+            };
+        }
+        owner
     }
 
     /// Frame-free getter serve read (ADR 0035 Ph4/5): the per-proto
@@ -3321,6 +3425,7 @@ impl Vm {
     pub(crate) fn super_lookup(
         &mut self,
         name_id: SymId,
+        cid: u32,
     ) -> Result<(Rc<crate::value::Method>, Value), crate::error::Trap> {
         let frame = self.frames.last().expect("ICE: super with empty frames");
         let self_val = frame.self_val.clone();
@@ -3504,6 +3609,26 @@ impl Vm {
                 }
             },
         };
+        // Per-site super IC (campaign P4): the "next method after
+        // `defining` in recv's MRO" verdict is keyed on the exact
+        // walk inputs — (recv class, defining class, runtime name) —
+        // and `method_gen`-validated (the same generation
+        // `ancestors_cached` keys on), so a hit is answer-identical
+        // to the walk below. Only successful resolutions fill (the
+        // error path stays uncached — it re-walks, which keeps the
+        // builtin-substitution intercepts in the callers exact).
+        let recv_ptr = Rc::as_ptr(&recv_cls) as usize;
+        let def_ptr = Rc::as_ptr(&defining) as usize;
+        if cid != u32::MAX
+            && let Some(e) = self.super_caches.get(cid as usize)
+            && e.recv_class_ptr == recv_ptr
+            && e.defining_ptr == def_ptr
+            && e.name == name_id
+            && e.generation == self.method_gen
+            && let Some(m) = &e.method
+        {
+            return Ok((m.clone(), self_val));
+        }
         let ancs = self.ancestors_cached(&recv_cls);
         let m = ancs
             .iter()
@@ -3515,7 +3640,22 @@ impl Vm {
                     .find_map(|a| a.methods.borrow().get(&name_id).cloned())
             });
         match m {
-            Some(m) => Ok((m, self_val)),
+            Some(m) => {
+                if cid != u32::MAX {
+                    let idx = cid as usize;
+                    if idx >= self.super_caches.len() {
+                        self.super_caches.resize(idx + 1, SuperSiteCache::default());
+                    }
+                    self.super_caches[idx] = SuperSiteCache {
+                        recv_class_ptr: recv_ptr,
+                        defining_ptr: def_ptr,
+                        name: name_id,
+                        generation: self.method_gen,
+                        method: Some(m.clone()),
+                    };
+                }
+                Ok((m, self_val))
+            }
             None => Err(self.trap(crate::error::RubyError::NoMethodError {
                 kind: crate::error::NoMethodErrorKind::SuperNoSuperclass,
                 method: self.interner.resolve(name_id).to_string(),
@@ -3632,10 +3772,11 @@ impl Vm {
         &mut self,
         name_id: SymId,
         args: Vec<Value>,
+        cid: u32,
     ) -> Result<(), crate::error::Trap> {
         // define_method bodies super under their RUNTIME name.
         let name_id = self.super_runtime_name(name_id);
-        match self.super_lookup(name_id) {
+        match self.super_lookup(name_id, cid) {
             // Bare `super` / `super(args)` (Op::Super / Op::ApplySuper)
             // forward the CURRENT method's block by default — CRuby
             // passes the calling frame's block to the superclass

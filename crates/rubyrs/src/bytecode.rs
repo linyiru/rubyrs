@@ -152,12 +152,21 @@ pub(crate) enum Op {
     /// Value::Object; toplevel falls through to `Vm.toplevel_cvars`
     /// — a single fallback table so toplevel `@@foo` warnings
     /// don't trap). Missing names return `Value::Nil` (lenient
-    /// default, like ivars).
-    LoadCvar(SymId),
-    /// `@@name = expr` write. Stores into the surrounding
-    /// class's `class_vars` table or the toplevel fallback
-    /// when no class is on the stack.
-    StoreCvar(SymId),
+    /// default, like ivars). The `u32` is a per-site inline-cache
+    /// slot id into `Vm::cvar_caches` (its OWN `CidGen::cvar` space,
+    /// same separation rationale as `LoadIvar`): the cached verdict
+    /// is the OWNING ancestor of `@@name` for the site's surrounding
+    /// class, validated against `Vm::cvar_gen` (bumped on cvar-table
+    /// SHAPE changes — new-name creation — and superclass rewires;
+    /// value overwrites keep the owner, so they don't bump).
+    /// `u32::MAX` = uncached.
+    LoadCvar(SymId, u32),
+    /// `@@name = expr` write. Stores into the owning ancestor's
+    /// `class_vars` table (creating on the surrounding class when
+    /// no ancestor owns the name) or the toplevel fallback when no
+    /// class is on the stack; cid as in `LoadCvar` (one cache slot
+    /// serves the site's owner resolution).
+    StoreCvar(SymId, u32),
     /// Fast path for `@name = @name + 1`. Same shape as IncLocal but on
     /// self's ivar table; cid as in `LoadIvar` (one cache serves the
     /// read and the write — same slot).
@@ -325,16 +334,24 @@ pub(crate) enum Op {
     /// argc are baked in at compile time. Lookup starts at the
     /// SUPERCLASS of `self.class`, so the current method is
     /// skipped — letting overrides delegate "up" the chain.
-    /// IC slot isn't used (super resolves via class chain, not
-    /// the per-site cache).
-    Super(SymId, u8),
+    /// The `u32` is a per-site inline-cache slot id into
+    /// `Vm::super_caches` (its OWN `CidGen::sup` space): the
+    /// cached verdict is the resolved super METHOD for the site's
+    /// (receiver class, defining class, runtime name) triple,
+    /// validated against `method_gen` — exactly the inputs of
+    /// `super_lookup`'s instance-branch ancestor walk. The
+    /// class-method branch (`def self.foo; super`) stays uncached
+    /// (its chain isn't ancestors_cached-shaped). `u32::MAX` =
+    /// uncached.
+    Super(SymId, u8, u32),
     /// `super(*args)` — apply-style super dispatch. Pops one
     /// Array off the stack and uses its elements as the
     /// positional args. Mirrors `Op::ApplyCall`'s shape but
     /// the receiver is implicit (self) and lookup starts at
     /// the defining-class's superclass per CRuby's "module
-    /// of definition" rule. Same name_id resolves the method.
-    ApplySuper(SymId),
+    /// of definition" rule. Same name_id resolves the method;
+    /// cid as in `Op::Super`.
+    ApplySuper(SymId, u32),
     /// `super(*args, &block)` — splat-super with explicit block.
     /// Stack: `[block, array]`. Pops both, expands the array's
     /// elements as positional args, and runs the same super-
@@ -342,7 +359,8 @@ pub(crate) enum Op {
     /// the dispatched frame so `def foo(*a, &b); super(*a, &b);
     /// end` forwards both channels through the inheritance chain
     /// (sinatra-contrib/MultiRoute uses this on every HTTP verb).
-    ApplySuperBlock(SymId),
+    /// cid as in `Op::Super`.
+    ApplySuperBlock(SymId, u32),
     DefMethod(SymId, u32),         // name, proto_idx
     /// `def self.foo` inside a class body — installs `foo` on
     /// the surrounding class's `singleton_methods` table (not

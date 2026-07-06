@@ -409,8 +409,8 @@ fn t2_census_note_op(vm: &mut crate::vm::Vm, op: &Op) {
         | ApplyCallBlock(n, ..)
         | ApplyCallNoRecvBlock(n, ..)
         | Super(n, ..)
-        | ApplySuper(n)
-        | ApplySuperBlock(n)
+        | ApplySuper(n, ..)
+        | ApplySuperBlock(n, ..)
         | CallBuiltinDirect(n)
         | CallBlock(n, ..)
         | CallNoRecvBlock(n, ..)
@@ -2622,6 +2622,25 @@ unsafe extern "C" fn t2_load_ivar(vm: *mut crate::vm::Vm, name_id: i64, _cid: i6
     vm.stack.push(v);
 }
 
+/// Lean `Op::LoadCvar` serve (campaign P4): the interpreter arm verbatim
+/// (`Vm::cvar_load` — surrounding-class resolve + per-site owner cache +
+/// value read). Never traps, never pushes frames, never allocates on the
+/// GC heap → no ip stamp / status needed (same contract as t2_load_ivar).
+unsafe extern "C" fn t2_load_cvar(vm: *mut crate::vm::Vm, name_id: i64, cid: i64) {
+    let vm = unsafe { &mut *vm };
+    let v = vm.cvar_load(SymId(name_id as u32), cid as u32);
+    vm.stack.push(v);
+}
+
+/// Lean `Op::StoreCvar` serve: pops the stored value from the REAL
+/// operand stack (the codegen flushes first) and runs `Vm::cvar_store`.
+/// Same no-trap/no-frame/no-alloc contract as the load above.
+unsafe extern "C" fn t2_store_cvar(vm: *mut crate::vm::Vm, name_id: i64, cid: i64) {
+    let vm = unsafe { &mut *vm };
+    let v = vm.stack.pop().expect("ICE: StoreCvar stack underflow");
+    vm.cvar_store(SymId(name_id as u32), cid as u32, v);
+}
+
 unsafe extern "C" fn t2_dup(vm: *mut crate::vm::Vm) {
     let vm = unsafe { &mut *vm };
     let v = vm.stack.last().expect("ICE: Dup stack underflow").clone();
@@ -3001,6 +3020,8 @@ struct HelperRefs {
     load_local: cranelift_codegen::ir::FuncRef,
     store_local: cranelift_codegen::ir::FuncRef,
     load_ivar: cranelift_codegen::ir::FuncRef,
+    load_cvar: cranelift_codegen::ir::FuncRef,
+    store_cvar: cranelift_codegen::ir::FuncRef,
     dup: cranelift_codegen::ir::FuncRef,
     pop: cranelift_codegen::ir::FuncRef,
     swap: cranelift_codegen::ir::FuncRef,
@@ -4735,6 +4756,27 @@ fn emit_op(cg: &mut Cg, fb: &mut FunctionBuilder, i: usize) -> bool {
             cg.invalidate_mem();
             false
         }
+        // Cvar family (campaign P4): the AM census's largest generic-op
+        // family (LoadCvar+StoreCvar 255/iter through t2_op). Lean
+        // helpers ride the interpreter's own per-site owner cache and
+        // skip the generic boundary (op fetch + step match + t2_finish
+        // — neither op can trap, push a frame, or GC-allocate).
+        Op::LoadCvar(sym, cid) => {
+            cg.flush(fb);
+            let c = fb.ins().iconst(types::I64, sym.0 as i64);
+            let cidc = fb.ins().iconst(types::I64, cid as i64);
+            fb.ins().call(cg.h.load_cvar, &[vm, c, cidc]);
+            cg.invalidate_mem();
+            false
+        }
+        Op::StoreCvar(sym, cid) => {
+            cg.flush(fb);
+            let c = fb.ins().iconst(types::I64, sym.0 as i64);
+            let cidc = fb.ins().iconst(types::I64, cid as i64);
+            fb.ins().call(cg.h.store_cvar, &[vm, c, cidc]);
+            cg.invalidate_mem();
+            false
+        }
         // --- everything else: full interpreter semantics ---
         _ => cg.emit_generic(fb, i),
     }
@@ -5027,6 +5069,8 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize, ctx: &T2Ctx) -> Opt
     builder.symbol("t2_load_local", t2_load_local as *const u8);
     builder.symbol("t2_store_local", t2_store_local as *const u8);
     builder.symbol("t2_load_ivar", t2_load_ivar as *const u8);
+    builder.symbol("t2_load_cvar", t2_load_cvar as *const u8);
+    builder.symbol("t2_store_cvar", t2_store_cvar as *const u8);
     builder.symbol("t2_dup", t2_dup as *const u8);
     builder.symbol("t2_pop", t2_pop as *const u8);
     builder.symbol("t2_swap", t2_swap as *const u8);
@@ -5153,6 +5197,8 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize, ctx: &T2Ctx) -> Opt
     let f_load_local = decl(&mut module, "t2_load_local", "i", false)?;
     let f_store_local = decl(&mut module, "t2_store_local", "i", false)?;
     let f_load_ivar = decl(&mut module, "t2_load_ivar", "ii", false)?;
+    let f_load_cvar = decl(&mut module, "t2_load_cvar", "ii", false)?;
+    let f_store_cvar = decl(&mut module, "t2_store_cvar", "ii", false)?;
     let f_dup = decl(&mut module, "t2_dup", "", false)?;
     let f_pop = decl(&mut module, "t2_pop", "", false)?;
     let f_swap = decl(&mut module, "t2_swap", "", false)?;
@@ -5206,6 +5252,8 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize, ctx: &T2Ctx) -> Opt
             load_local: module.declare_func_in_func(f_load_local, func),
             store_local: module.declare_func_in_func(f_store_local, func),
             load_ivar: module.declare_func_in_func(f_load_ivar, func),
+            load_cvar: module.declare_func_in_func(f_load_cvar, func),
+            store_cvar: module.declare_func_in_func(f_store_cvar, func),
             dup: module.declare_func_in_func(f_dup, func),
             pop: module.declare_func_in_func(f_pop, func),
             swap: module.declare_func_in_func(f_swap, func),

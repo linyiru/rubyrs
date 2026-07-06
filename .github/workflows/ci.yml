@@ -983,7 +983,11 @@ jobs:
           # `is_some()` arm guard). A trip is an emitter bug, not
           # script-reachable; unsupported shapes decline to the
           # interpreter before these paths.
-          check crates/rubyrs/src/jit_tier2.rs       71
+          # 2026-07-06 +1 (P4): t2_store_cvar's ICE-class stack-pop
+          # expect — mirrors the interpreter StoreCvar arm's exact
+          # invariant (the codegen flushes the operand stack before
+          # the call, so an empty stack is an emitter bug).
+          check crates/rubyrs/src/jit_tier2.rs       72
           # prism_wq (prism→whitequark lexer/AST bridge, rubocop
           # campaign): processes script-derived source, so each site
           # was audited for user-input reachability — all 14 are

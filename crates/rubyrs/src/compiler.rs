@@ -207,14 +207,18 @@ pub(crate) fn alloc_cid(cc: &mut u32) -> u32 {
 /// compile path (one per `Vm`, persisted across evals + preamble cache +
 /// snapshot). `call` numbers method-call sites (`Vm::call_caches`);
 /// `ivar` numbers ivar-access sites (`Vm::ivar_caches`, ADR 0035
-/// Ph4/5). SEPARATE spaces so each side's dense cache vector is sized
-/// by its own site count — sharing one counter would inflate both
-/// (`call_caches` is ~128B/slot; interleaved ivar sites would cost
-/// megabytes of dead slots on a RuboCop-sized program).
+/// Ph4/5); `cvar` numbers `@@name` access sites (`Vm::cvar_caches`);
+/// `sup` numbers `super` sites (`Vm::super_caches`). SEPARATE spaces
+/// so each side's dense cache vector is sized by its own site count —
+/// sharing one counter would inflate both (`call_caches` is
+/// ~128B/slot; interleaved ivar sites would cost megabytes of dead
+/// slots on a RuboCop-sized program).
 #[derive(Clone, Copy, Default, Debug)]
 pub(crate) struct CidGen {
     pub(crate) call: u32,
     pub(crate) ivar: u32,
+    pub(crate) cvar: u32,
+    pub(crate) sup: u32,
 }
 
 /// Each intercept short-circuits only when every relevant arg
@@ -1902,7 +1906,7 @@ pub(crate) fn compile_expr(
         }
         Expr::CvarRead(name) => {
             let id = interner.intern(name);
-            b.emit(Op::LoadCvar(id));
+            b.emit(Op::LoadCvar(id, alloc_cid(&mut cc.cvar)));
         }
         Expr::CvarWrite(name, val) => {
             compile_expr(b, val, protos, interner, cc);
@@ -1911,7 +1915,7 @@ pub(crate) fn compile_expr(
             // `(@@foo = 1)` is a usable expression — same as
             // CRuby (assignment expressions return their RHS).
             b.emit(Op::Dup);
-            b.emit(Op::StoreCvar(id));
+            b.emit(Op::StoreCvar(id, alloc_cid(&mut cc.cvar)));
         }
         Expr::ConstRead(name) => {
             // Absolute paths (`::Foo::Bar`, marked with a leading
@@ -2095,7 +2099,7 @@ pub(crate) fn compile_expr(
                 Some(args) => {
                     for a in args { compile_expr(b, a, protos, interner, cc); }
                     let argc = args.len() as u8;
-                    b.emit(Op::Super(name_id, argc));
+                    b.emit(Op::Super(name_id, argc, alloc_cid(&mut cc.sup)));
                 }
                 None => {
                     // Forwarding form (bare `super`) — re-pass the
@@ -2116,9 +2120,9 @@ pub(crate) fn compile_expr(
                         }
                         emit_super_forward_array(b, interner, rs);
                         if b.method_block_slot.is_some() {
-                            b.emit(Op::ApplySuperBlock(name_id));
+                            b.emit(Op::ApplySuperBlock(name_id, alloc_cid(&mut cc.sup)));
                         } else {
-                            b.emit(Op::ApplySuper(name_id));
+                            b.emit(Op::ApplySuper(name_id, alloc_cid(&mut cc.sup)));
                         }
                     } else if simple && let Some(bs) = b.method_block_slot {
                         // No rest, but a `&block`: forward positionals
@@ -2129,7 +2133,7 @@ pub(crate) fn compile_expr(
                             b.emit(Op::LoadLocal(i));
                         }
                         b.emit(Op::NewArray(b.method_n_positional as u32));
-                        b.emit(Op::ApplySuperBlock(name_id));
+                        b.emit(Op::ApplySuperBlock(name_id, alloc_cid(&mut cc.sup)));
                     } else if b.method_has_kw
                         && b.method_rest_slot.is_some()
                         && b.method_n_post_rest == 0
@@ -2195,9 +2199,9 @@ pub(crate) fn compile_expr(
                         b.emit(Op::Call(plus_id, 1, u32::MAX));
                         b.patch_jump(j_done, b.pos());
                         if block_present {
-                            b.emit(Op::ApplySuperBlock(name_id));
+                            b.emit(Op::ApplySuperBlock(name_id, alloc_cid(&mut cc.sup)));
                         } else {
-                            b.emit(Op::ApplySuper(name_id));
+                            b.emit(Op::ApplySuper(name_id, alloc_cid(&mut cc.sup)));
                         }
                     } else if b.method_has_kw
                         && b.method_rest_slot.is_none()
@@ -2254,9 +2258,9 @@ pub(crate) fn compile_expr(
                         }
                         b.emit(Op::NewArray((n_pos + 1) as u32));
                         if block_present {
-                            b.emit(Op::ApplySuperBlock(name_id));
+                            b.emit(Op::ApplySuperBlock(name_id, alloc_cid(&mut cc.sup)));
                         } else {
-                            b.emit(Op::ApplySuper(name_id));
+                            b.emit(Op::ApplySuper(name_id, alloc_cid(&mut cc.sup)));
                         }
                     } else {
                         // Positional slot-dump. Pure positional uses the
@@ -2267,7 +2271,7 @@ pub(crate) fn compile_expr(
                         for i in 0..n {
                             b.emit(Op::LoadLocal(i));
                         }
-                        b.emit(Op::Super(name_id, n as u8));
+                        b.emit(Op::Super(name_id, n as u8, alloc_cid(&mut cc.sup)));
                     }
                 }
             }
@@ -2287,9 +2291,9 @@ pub(crate) fn compile_expr(
             if let Some(ba) = block_arg { compile_expr(b, ba, protos, interner, cc); }
             compile_expr(b, args_expr, protos, interner, cc);
             if block_arg.is_some() {
-                b.emit(Op::ApplySuperBlock(name_id));
+                b.emit(Op::ApplySuperBlock(name_id, alloc_cid(&mut cc.sup)));
             } else {
-                b.emit(Op::ApplySuper(name_id));
+                b.emit(Op::ApplySuper(name_id, alloc_cid(&mut cc.sup)));
             }
         }
         Expr::SuperWithBlock { args, block_params, block_body } => {
@@ -2332,7 +2336,7 @@ pub(crate) fn compile_expr(
                     }
                 }
             }
-            b.emit(Op::ApplySuperBlock(name_id));
+            b.emit(Op::ApplySuperBlock(name_id, alloc_cid(&mut cc.sup)));
         }
         Expr::Class { name, superclass, body, is_module, absolute } => {
             compile_class_arm(b, name, superclass, body, *is_module, *absolute, protos, interner, cc);
