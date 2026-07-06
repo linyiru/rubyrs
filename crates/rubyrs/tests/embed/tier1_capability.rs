@@ -1731,14 +1731,22 @@ fn exit_raises_system_exit_caught_with_status() {
     rt.set_stdout(Box::new(buf.clone()));
     rt.eval(
         r##"
-        # exit(true) → 0, exit(false) → 1, exit(nil) → 0,
-        # exit(N) → N. All shapes verified together.
-        [true, false, nil, 7].each do |x|
+        # exit(true) → 0, exit(false) → 1, exit(N) → N, and the
+        # num2long coercions (S8, probed CRuby 3.4.8): exit(nil) →
+        # TypeError "no implicit conversion from nil to integer"
+        # (pre-S8 rubyrs accepted it as status 0), exit(Float) →
+        # to_int truncation. All shapes verified together.
+        [true, false, 7, 2.5].each do |x|
           begin
             exit x
           rescue SystemExit => e
             puts "#{x.inspect} -> status=#{e.status} success?=#{e.success?}"
           end
+        end
+        begin
+          exit nil
+        rescue TypeError => e
+          puts "nil -> #{e.class}: #{e.message}"
         end
         "##,
         "exit_basic.rb",
@@ -1747,8 +1755,9 @@ fn exit_raises_system_exit_caught_with_status() {
         buf.snapshot(),
         "true -> status=0 success?=true\n\
          false -> status=1 success?=false\n\
-         nil -> status=0 success?=true\n\
-         7 -> status=7 success?=false\n",
+         7 -> status=7 success?=false\n\
+         2.5 -> status=2 success?=false\n\
+         nil -> TypeError: no implicit conversion from nil to integer\n",
     );
 }
 
