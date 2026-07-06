@@ -1124,7 +1124,14 @@ dual-oracle fixture, byte-identical to CRuby 3.4.8 AND 3.4.1):
   protected class method (rouge `Lexer.register` pattern); external
   callers and INSTANCES of the class raise. `respond_to?` /
   `protected_instance_methods(false)` reflect the visibility.
-  Test: `eigenclass_protected.rb`.
+  Protected methods acquired via `extend` (a module's protected
+  INSTANCE method surfacing as a class method — the AS::Callbacks
+  `set_callbacks`/`get_callbacks` shape) follow CRuby's full
+  `caller.is_a?(M)` rule instead: the caller's SINGLETON chain counts
+  (fellow extenders, subclasses of an extender, `extend`-ed objects,
+  and includer instances are kin); a module's own eigenclass-protected
+  class methods keep the strict metaclass rule even for its
+  includers/extenders. Test: `eigenclass_protected.rb`.
 
 Remaining eigenclass declines (documented, not silent):
 

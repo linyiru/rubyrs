@@ -52,6 +52,13 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Fixed
 
+- **Protected class methods acquired via `extend` honour the caller's
+  singleton chain** — `Person.extend(CM)` makes `CM`'s protected instance
+  methods callable class-side by kin per CRuby's full `is_a?` rule
+  (unblocks ActiveModel boot through `AS::Callbacks`' protected
+  `set_callbacks`/`get_callbacks`, which S3's class-chain-only kin check
+  had regressed); a module's own eigenclass-protected class methods keep
+  the strict metaclass rule. (`eigenclass_protected.rb`)
 - **`break`/`next` escaping an ensure crossed by a local `return` now
   matches CRuby ≥ 3.4.2** — the break lands at the loop join and cancels the
   pending return (rubyrs previously mimicked CRuby 3.4.0/3.4.1's prism bug

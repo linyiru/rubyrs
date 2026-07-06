@@ -5301,30 +5301,63 @@ impl Vm {
             let defining = m.defining_class.as_ref().and_then(|w| w.upgrade());
             let allowed = if matches!(recv, Value::Class(_)) {
                 // Protected CLASS method (S3 item e). CRuby's rule is
-                // caller-self `is_a?` the defining scope — here the
-                // defining scope is conceptually the eigenclass
-                // #<Class:D>, whose instances are exactly D and its
-                // subclasses. `defining_class` records the REAL class
-                // D (effective_install_class), so the equivalent
-                // test is: the caller is itself a Class C with
-                // C ≤ D. An instance caller is never an instance of
-                // a class's metaclass — `W.new` calling `W.prot`
-                // raises (probed CRuby 3.4.8) — so non-Class callers
-                // are denied outright.
+                // caller-self `is_a?` the defining scope. Two defining
+                // shapes reach this arm:
+                //
+                //  - Eigenclass-installed (`class << X` protected /
+                //    `protected :name`): the defining scope is
+                //    conceptually the eigenclass #<Class:D>, whose
+                //    instances are exactly D and its subclasses.
+                //    `defining_class` records the REAL class D
+                //    (effective_install_class), so the equivalent
+                //    test is: the caller is itself a Class C with
+                //    C ≤ D. An instance caller is never an instance
+                //    of a class's metaclass — `W.new` calling
+                //    `W.prot` raises (probed CRuby 3.4.8) — and even
+                //    `include`-ing / `extend`-ing a MODULE's
+                //    eigenclass-protected method's module does not
+                //    unlock it (also probed).
+                //
+                //  - `extend`-acquired: a module's protected INSTANCE
+                //    method surfacing as a class method
+                //    (`Person.extend(CM)` — the AS::Callbacks
+                //    set/get_callbacks shape). The defining scope IS
+                //    the module CM, and CRuby's check is the full
+                //    `caller.is_a?(CM)` — the caller's SINGLETON
+                //    chain counts (`Person.is_a?(CM)` is true via
+                //    extend), as do an includer's instances and an
+                //    `extend`-ed instance caller (probed CRuby
+                //    3.4.8/3.4.1). Distinguished from the first
+                //    shape by the record living in the defining
+                //    MODULE's instance-method table.
                 match (&caller_self, &defining) {
-                    (Value::Class(cc), Some(d)) => super::class_is_a(cc, d),
+                    (Value::Class(cc), Some(d)) if super::class_is_a(cc, d) => true,
+                    (_, Some(d)) => {
+                        self.method_is_module_instance_record(m, d, name)
+                            && self.caller_kind_of_module(&caller_self, d)
+                    }
                     _ => false,
                 }
             } else {
                 // Protected INSTANCE method: caller's class must be
                 // an instance of (or descendant of) the method's
-                // defining class.
+                // defining class. `heap.class_of` is singleton-aware,
+                // so an Object caller `extend`-ed with the defining
+                // module passes via its eigenclass. A CLASS caller
+                // that `extend`s the defining module also passes in
+                // CRuby (`B.extend(M)` makes `B.is_a?(M)` true —
+                // probed 3.4.8/3.4.1) — same module-instance-record
+                // gate + singleton-chain walk as the Class arm.
                 let caller_cls = match &caller_self {
                     Value::Object(id) => Some(self.heap.class_of(*id)),
                     _ => None,
                 };
                 match (&caller_cls, &defining) {
                     (Some(c), Some(d)) => super::class_is_a(c, d),
+                    (None, Some(d)) => {
+                        self.method_is_module_instance_record(m, d, name)
+                            && self.caller_kind_of_module(&caller_self, d)
+                    }
                     _ => false,
                 }
             };
@@ -5337,6 +5370,64 @@ impl Vm {
             }
         }
         Ok(())
+    }
+
+    /// True when `m` is the record stored under `name` in `d`'s
+    /// INSTANCE-method table and `d` is a module — i.e. a module
+    /// method reaching the receiver through `include` / `extend` /
+    /// `singleton_class.include`. The protected-kin check widens to
+    /// full `is_a?` semantics ONLY for this shape: an
+    /// eigenclass-installed record (living in `singleton_methods`,
+    /// `defining_class` = the real target) keeps the strict
+    /// metaclass rule even when the target is a module someone
+    /// includes (probed CRuby 3.4.8/3.4.1 — `include Reg` does NOT
+    /// unlock `Reg`'s own protected class methods). Identity is by
+    /// record pointer so a same-named method elsewhere can't
+    /// false-positive; `get_id` (read-only intern probe) never
+    /// misses in practice because the dispatch that got here interned
+    /// `name` to find `m`.
+    fn method_is_module_instance_record(&self, m: &Method, d: &Rc<Class>, name: &str) -> bool {
+        d.is_module
+            && self
+                .interner
+                .get_id(name)
+                .and_then(|mid| d.methods.borrow().get(&mid).cloned())
+                .is_some_and(|rec| std::ptr::eq(std::rc::Rc::as_ptr(&rec), m))
+    }
+
+    /// Full `caller.is_a?(module)` semantics for the protected-kin
+    /// check: the regular ancestor walk PLUS the singleton chain. A
+    /// Class caller walks `singleton_includes` up its superclass
+    /// chain (extend inherits: Sub's metaclass sits under Person's —
+    /// mirrors the `is_a?` dispatch arm); an Object caller goes
+    /// through the singleton-aware `heap.class_of`, so
+    /// `obj.extend(M)` counts. Other caller shapes (primitive /
+    /// toplevel-nil `self`) keep the historical deny.
+    fn caller_kind_of_module(&self, caller: &Value, target: &Rc<Class>) -> bool {
+        match caller {
+            Value::Class(cc) => {
+                if self.class_is_a_cached(cc, target) {
+                    return true;
+                }
+                let mut visited: crate::intern::FxHashSet<*const crate::value::Class> =
+                    crate::intern::FxHashSet::default();
+                let mut walker = Some(cc.clone());
+                while let Some(c) = walker {
+                    if !visited.insert(Rc::as_ptr(&c)) {
+                        break;
+                    }
+                    for inc in c.singleton_includes.borrow().iter() {
+                        if Rc::ptr_eq(inc, target) || super::class_is_a(inc, target) {
+                            return true;
+                        }
+                    }
+                    walker = c.superclass.borrow().clone();
+                }
+                false
+            }
+            Value::Object(id) => self.class_is_a_cached(&self.heap.class_of(*id), target),
+            _ => false,
+        }
     }
 
     /// CRuby-shape receiver description for NoMethodError-style
