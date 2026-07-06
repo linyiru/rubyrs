@@ -384,6 +384,10 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn condition_variable() { run_diff("condition_variable"); }
 #[test] fn logger_basic() { run_diff("logger_basic"); }
 #[test] fn logger_severity() { run_diff("logger_severity"); }
+// Logger::LogDevice wrapper shape (`@logdev.dev`/filename/write/close/
+// reopen) — what AS 7.0's `logger_outputs_to?` and its
+// LoggerThreadSafeLevel#add override actually touch (S4).
+#[test] fn logger_logdev() { run_diff("logger_logdev"); }
 #[test] fn for_loop() { run_diff("for_loop"); }
 #[test] fn enumerable_find_ifnone() { run_diff("enumerable_find_ifnone"); }
 #[test] fn backtick_sandbox() { run_diff("backtick_sandbox"); }

@@ -36,7 +36,11 @@
 #   * read returns UTF-8-lossy chars, not raw bytes (inherits
 #     the Tier-1 `File.read` behaviour — binary files get
 #     U+FFFD substitution)
-#   * no write/append/seek surface (read-only veneer)
+#   * writes are BUFFERED in memory and hit the disk on
+#     flush/close (whole-buffer rewrite via the Tier-1
+#     `File.write` primitive), not incrementally; open itself
+#     does create ("a") / create+truncate ("w") the file like
+#     CRuby's open(2)
 #   * #fileno never returns a real descriptor — rubyrs is
 #     sandboxed and has no fd table
 
@@ -78,6 +82,19 @@ class File
       # Tier-1 `File.write` primitive on close. A read failure for the
       # append case (missing file) just starts empty.
       buf = flags.include?("a") ? (read_now.call rescue "") : ""
+      # CRuby's open(2) semantics: a write-mode open CREATES the file
+      # ("a" on a missing path) or creates-and-TRUNCATES it ("w") at
+      # OPEN time, not at first flush. Materialize eagerly so
+      # `File.exist?` right after open agrees with CRuby — logger's
+      # LogDevice#set_dev adopts a user-File's #path as `filename`
+      # only when the file already exists on disk (S4 discovery), and
+      # "w"-truncation must not wait for close. An existing file
+      # opened "a" is left untouched (no rewrite, no mtime churn).
+      if flags.include?("w")
+        File.write(path, "")
+      elsif !File.exist?(path.to_s)
+        File.write(path, "")
+      end
       f = allocate
       f.__io_init(path.to_s, buf, write: true, read: reading)
     else
