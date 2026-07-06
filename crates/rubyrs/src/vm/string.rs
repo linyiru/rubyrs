@@ -307,6 +307,43 @@ fn gsub_str_str_core(a: &str, pat: &str, repl: &str) -> String {
     }
 }
 
+/// Coerce an index-style argument to i64 with CRuby's num2long
+/// shape (probed vs 3.4.8): Int passes through; Float truncates
+/// toward zero, with NaN/±Inf raising RangeError ("float NaN out
+/// of range of integer" — the same wording as
+/// `Vm::float_to_int_arg`, duplicated here because `string_call`
+/// is stateless and can't build a Trap); anything else raises the
+/// num2long TypeError (nil → "from nil to integer"). Same
+/// documented tradeoff as `float_to_int_arg`: a finite
+/// out-of-i64-range Float saturates instead of raising CRuby's
+/// `"float <%g> out of range of integer"`.
+fn num2long_arg(v: &Value) -> Result<i64, RubyError> {
+    match v {
+        Value::Int(n) => Ok(*n),
+        Value::Float(f) if f.is_nan() => Err(RubyError::RangeError {
+            msg: "float NaN out of range of integer".to_string(),
+        }),
+        Value::Float(f) if f.is_infinite() => Err(RubyError::RangeError {
+            msg: format!(
+                "float {} out of range of integer",
+                if *f > 0.0 { "Inf" } else { "-Inf" },
+            ),
+        }),
+        Value::Float(f) => Ok(*f as i64),
+        // Any heap BigInt is outside i64 by construction (Value::Int
+        // covers all of i64, unlike CRuby's 62-bit Fixnum) — CRuby's
+        // NUM2LONG overflow RangeError, straight-quoted since 3.4
+        // (probed 3.4.8: `"hello"[/e(l+)/, 2**64]`).
+        #[cfg(feature = "bignum")]
+        Value::BigInt(_) => Err(RubyError::RangeError {
+            msg: "bignum too big to convert into 'long'".to_string(),
+        }),
+        other => Err(RubyError::TypeError {
+            msg: other.num2int_conv_msg(),
+        }),
+    }
+}
+
 /// Try the Str primitive arms. Returns `Ok(Some(v))` on a
 /// handled call, `Ok(None)` if the receiver/method shape
 /// doesn't match.
@@ -517,16 +554,30 @@ pub(crate) fn string_call(
         // encoding preserved (CRuby contract; the result may be
         // broken in that encoding — that's the caller's business,
         // mirrored by valid_encoding?). Negative start counts from
-        // the end; out-of-range → nil.
-        (Value::Str(a), "byteslice", [Value::Int(st)])
-        | (Value::Str(a), "byteslice", [Value::Int(st), _]) => {
+        // the end; out-of-range → nil. CRuby coerces BOTH args
+        // (num2long) BEFORE any range logic — `byteslice(99, nil)`
+        // is TypeError, not nil; `byteslice(nil)` / `byteslice("a")`
+        // are TypeError; Float truncates toward zero (probed 3.4.8).
+        // The one-Range form stays in `string_collection_call`
+        // (needs heap access for the bounds) — the guard lets it
+        // fall through; a Range in the TWO-arg form is CRuby's
+        // num2long TypeError here.
+        (Value::Str(a), "byteslice", [first])
+        | (Value::Str(a), "byteslice", [first, _])
+            if !matches!(args, [Value::Range(_)]) =>
+        {
+            let st = num2long_arg(first)?;
+            let take = match args.get(1) {
+                None => None,
+                Some(v) => Some(num2long_arg(v)?),
+            };
             let b = a.borrow();
             let len_total = b.len() as i64;
-            let start = if *st < 0 { len_total + *st } else { *st };
+            let start = if st < 0 { len_total + st } else { st };
             if start < 0 || start > len_total {
                 return Ok(Some(Value::Nil));
             }
-            let take = match args.get(1) {
+            let take = match take {
                 // One-arg form returns a SINGLE byte (CRuby), not
                 // the rest of the string — and nil at the very end
                 // (start == bytesize is only valid for the two-arg
@@ -537,26 +588,32 @@ pub(crate) fn string_call(
                     }
                     1
                 }
-                Some(Value::Int(n)) => {
-                    if *n < 0 {
+                Some(n) => {
+                    if n < 0 {
                         return Ok(Some(Value::Nil));
                     }
-                    *n
-                }
-                Some(other) => {
-                    return Err(RubyError::TypeError {
-                        // CRuby num2long shape: nil gets "from nil to integer"
-                        // (probed vs 3.4.1); others value-word "of X into Integer".
-                        msg: other.num2int_conv_msg(),
-                    });
+                    n
                 }
             };
             let start = start as usize;
-            let end = (start + take as usize).min(b.len());
+            let end = start.saturating_add(take as usize).min(b.len());
             Some(with_tag(
                 Value::new_str_bytes(b[start..end].to_vec()),
                 a.encoding.get(),
             ))
+        }
+        // `byteslice` wrong arity — CRuby's "expected 1..2" (probed
+        // 3.4.8: both the 0-arg and 3-arg shapes were NoMethodError
+        // here before S8). The guard keeps every 1/2-arg shape out,
+        // so the single-Range form (skipped by the arm above) still
+        // falls through to the `string_collection_call` Range arm.
+        (Value::Str(_), "byteslice", rest) if rest.is_empty() || rest.len() > 2 => {
+            return Err(RubyError::ArgumentError {
+                msg: format!(
+                    "wrong number of arguments (given {}, expected 1..2)",
+                    rest.len(),
+                ),
+            });
         }
         (Value::Str(a), "empty?", []) => Some(Value::Bool(a.borrow().is_empty())),
         // `String#ascii_only?` — byte-level (Tier 1 strings are
@@ -1057,7 +1114,9 @@ pub(crate) fn string_call(
                     .nth(cpos as usize)
                     .map(|(b, _)| b)
                     .unwrap_or(lossy.len());
-                re.is_match_from(&lossy[byte_off..])
+                // Positioned search over the FULL subject (S8) — the
+                // old tail slice let `^`/`\A`/`\b` anchor at `pos`.
+                re.is_match_at(&lossy, byte_off)
                     .map_err(|e| e.to_ruby_error(re.as_str()))?
             };
             Some(Value::Bool(matched))
@@ -1962,16 +2021,20 @@ pub(crate) fn string_call(
         // character offset `pos` (negative counts from the end). No
         // `$~` update. Searches the suffix from `pos`; out-of-range pos
         // is no match. (rack's request parser probes with a position.)
+        // The pos arg is num2long-shaped (probed 3.4.8): Float
+        // truncates toward zero (`match?(s, 1.5)` → the pos-1 probe),
+        // nil/String → TypeError.
         #[cfg(feature = "regex")]
-        (Value::Regex(re), "match?", [Value::Str(s), Value::Int(pos)]) => {
-            if let Some(m) = is_match_at_char_pos(s, *pos, re) {
+        (Value::Regex(re), "match?", [Value::Str(s), pos_arg]) => {
+            let pos = num2long_arg(pos_arg)?;
+            if let Some(m) = is_match_at_char_pos(s, pos, re) {
                 return Ok(Some(Value::Bool(
                     m.map_err(|e| e.to_ruby_error(re.as_str()))?,
                 )));
             }
             let lossy = s.to_string_lossy();
             let char_len = lossy.chars().count() as i64;
-            let cpos = if *pos < 0 { char_len + *pos } else { *pos };
+            let cpos = if pos < 0 { char_len + pos } else { pos };
             let matched = if cpos < 0 || cpos > char_len {
                 false
             } else {
@@ -1980,10 +2043,50 @@ pub(crate) fn string_call(
                     .nth(cpos as usize)
                     .map(|(b, _)| b)
                     .unwrap_or(lossy.len());
-                re.is_match_from(&lossy[byte_off..])
+                // Positioned search over the FULL subject (S8) — the
+                // old tail slice let `^`/`\A`/`\b` anchor at `pos`.
+                re.is_match_at(&lossy, byte_off)
                     .map_err(|e| e.to_ruby_error(re.as_str()))?
             };
             Some(Value::Bool(matched))
+        }
+        // `Regexp#match?(nil, pos)` — the pos converts FIRST (CRuby's
+        // rb_check_arity + NUM2LONG run before reg_operand sees the
+        // nil): `match?(nil, nil)` is TypeError, `match?(nil, 2)` is
+        // false (probed 3.4.8).
+        #[cfg(feature = "regex")]
+        (Value::Regex(_), "match?", [Value::Nil, pos_arg]) => {
+            num2long_arg(pos_arg)?;
+            Some(Value::Bool(false))
+        }
+        // `Regexp#match?` — remaining shapes: wrong arity is CRuby's
+        // "expected 1..2"; a non-String/Symbol/nil subject is the
+        // reg_operand TypeError (probed 3.4.8: `match?(123)` → "no
+        // implicit conversion of Integer into String"), with a
+        // present pos still converting first. Symbol subjects FALL
+        // THROUGH — the dispatch layer coerces them to their name
+        // String (it owns the interner) and re-enters here.
+        #[cfg(feature = "regex")]
+        (Value::Regex(_), "match?", rest)
+            if !matches!(rest.first(), Some(Value::Sym(_))) =>
+        {
+            if rest.is_empty() || rest.len() > 2 {
+                return Err(RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 1..2)",
+                        rest.len(),
+                    ),
+                });
+            }
+            if let Some(p) = rest.get(1) {
+                num2long_arg(p)?;
+            }
+            return Err(RubyError::TypeError {
+                msg: format!(
+                    "no implicit conversion of {} into String",
+                    rest[0].conv_type_name(),
+                ),
+            });
         }
         // Regex#source — the raw pattern string.
         #[cfg(feature = "regex")]
@@ -2664,8 +2767,11 @@ impl Vm {
                 // `String#[](regexp, name)` — String/Symbol second arg
                 // is a NAMED capture reference (CRuby), resolved to its
                 // group index so str_bracket_regex's Integer path runs.
-                // Unknown name → IndexError, validated against the
-                // pattern before the match.
+                // Unknown name → IndexError, but only when the pattern
+                // MATCHES: CRuby resolves the backref against the match
+                // (rb_reg_backref_number runs after rb_reg_search), so a
+                // non-matching pattern returns nil even for a bogus name
+                // (probed 3.4.8: `"hello"[/zz(?<g>x)/, "nope"]` → nil).
                 #[cfg(feature = "regex")]
                 if (name == "[]" || name == "slice") && args.len() == 2
                     && let Value::Regex(re) = &args[0]
@@ -2682,12 +2788,41 @@ impl Vm {
                     {
                         Some(i) => i as i64,
                         None => {
+                            // Match-first ordering: a miss is nil (with
+                            // `$~` cleared, like every miss); only a hit
+                            // raises the unknown-name IndexError.
+                            let re = re.clone();
+                            let matched = {
+                                let bound = s.to_string_lossy();
+                                re.captures_owned(&bound)
+                                    .map_err(|e| self.trap(e.to_ruby_error(re.as_str())))?
+                                    .is_some()
+                            };
+                            if !matched {
+                                self.save_match_scope_on_write();
+                                self.last_match = None;
+                                return Ok(Some(Value::Nil));
+                            }
                             return Err(self.trap(RubyError::IndexError {
                                 msg: format!("undefined group name reference: {gname}"),
                             }));
                         }
                     };
                     return Ok(Some(self.str_bracket_regex(&s, re, idx)?));
+                }
+                // `String#[](regexp, idx)` — remaining index shapes
+                // after the Int and Str/Sym arms above: Float routes
+                // through num2long truncation (CRuby to_int; NaN/±Inf
+                // → RangeError), everything else (nil, true, ...) is
+                // the num2long TypeError (probed 3.4.8: nil → "no
+                // implicit conversion from nil to integer").
+                #[cfg(feature = "regex")]
+                if (name == "[]" || name == "slice") && args.len() == 2
+                    && let Value::Regex(re) = &args[0]
+                {
+                    let idx = num2long_arg(&args[1]).map_err(|e| self.trap(e))?;
+                    let re = re.clone();
+                    return Ok(Some(self.str_bracket_regex(&s, &re, idx)?));
                 }
                 // `String#[](substr)` / `slice(substr)` — the SUBSTRING-
                 // SEARCH form: returns a new String equal to `substr`
@@ -3366,6 +3501,143 @@ impl Vm {
                 // lossy UTF-8 (documented tradeoff — CRuby's
                 // char-index semantics aren't defined for binary
                 // content; use setbyte for byte-level writes).
+                // `s[/re/] = repl` / `s[/re/, nth] = repl` /
+                // `s[/re/, name] = repl` — replace the matched span
+                // (or the nth group's span) in place. CRuby's
+                // rb_str_subpat_set ORDER, probed vs 3.4.8:
+                //   1. run the match — a miss is IndexError "regexp
+                //      not matched" even when the backref/value args
+                //      are ALSO bad (`s[/zz/, nil] = 5` → the miss
+                //      IndexError, not TypeError);
+                //   2. resolve the backref: Int / Float→to_int /
+                //      String / Symbol group name (unknown name →
+                //      IndexError "undefined group name reference");
+                //      negative counts from the last group and can
+                //      never reach the whole match; out-of-range →
+                //      IndexError "index N out of regexp" naming the
+                //      ORIGINAL index; a resolved group that didn't
+                //      participate → IndexError "regexp group N not
+                //      matched" naming the RESOLVED index; nil/other
+                //      → the num2long TypeError;
+                //   3. the replacement must be a String — TypeError
+                //      "no implicit conversion of X into String";
+                //   4. frozen check, then splice.
+                // Sets `$~` from the pre-mutation subject like the
+                // read form (probed: `$1` == "ll" after
+                // `s[/e(l+)/, 1] = "X"`). Discovery: S8 arg-shape
+                // probes (every regexp `[]=` shape was NoMethodError).
+                #[cfg(feature = "regex")]
+                if name == "[]=" && (args.len() == 2 || args.len() == 3)
+                    && let Value::Regex(re) = &args[0]
+                {
+                    let re = re.clone();
+                    // 1. Match against the current content.
+                    let bound = s.to_string_lossy();
+                    let owned = re
+                        .captures_owned(&bound)
+                        .map_err(|e| self.trap(e.to_ruby_error(re.as_str())))?;
+                    let Some(oc) = owned else {
+                        self.save_match_scope_on_write();
+                        self.last_match = None;
+                        return Err(self.trap(RubyError::IndexError {
+                            msg: "regexp not matched".to_string(),
+                        }));
+                    };
+                    // `$~` reflects the successful search even when a
+                    // later step raises (CRuby sets the backref inside
+                    // rb_reg_search, before the nth/value checks).
+                    let m_span = (oc.m_start, oc.m_end);
+                    let group_spans = oc.group_spans.clone();
+                    let num_regs = group_spans.len() as i64 + 1;
+                    let cap_names = re.capture_group_names();
+                    self.save_match_scope_on_write();
+                    self.last_match = Some(crate::vm::LastMatch {
+                        whole: oc.whole,
+                        caps: oc.groups,
+                        input: bound.clone(),
+                        m_start: oc.m_start,
+                        m_end: oc.m_end,
+                        named: oc.named,
+                        group_spans: group_spans.clone(),
+                        cap_names,
+                        binary: None,
+                    });
+                    // 2. Resolve the backref to a span.
+                    let nth: i64 = if args.len() == 2 {
+                        0
+                    } else {
+                        match &args[1] {
+                            Value::Int(n) => *n,
+                            Value::Float(f) => self.float_to_int_arg(*f)?,
+                            Value::Str(_) | Value::Sym(_) => {
+                                let gname = match &args[1] {
+                                    Value::Str(rs) => rs.to_string_lossy(),
+                                    Value::Sym(sid) => {
+                                        self.interner.resolve(*sid).to_string()
+                                    }
+                                    _ => unreachable!(),
+                                };
+                                match re
+                                    .capture_name_index(&gname)
+                                    .map_err(|e| self.trap(e.to_ruby_error(re.as_str())))?
+                                {
+                                    Some(i) => i as i64,
+                                    None => {
+                                        return Err(self.trap(RubyError::IndexError {
+                                            msg: format!(
+                                                "undefined group name reference: {gname}",
+                                            ),
+                                        }));
+                                    }
+                                }
+                            }
+                            other => {
+                                return Err(self.trap(RubyError::TypeError {
+                                    msg: other.num2int_conv_msg(),
+                                }));
+                            }
+                        }
+                    };
+                    let resolved = if nth < 0 { nth + num_regs } else { nth };
+                    if (nth < 0 && resolved <= 0) || !(0..num_regs).contains(&resolved) {
+                        return Err(self.trap(RubyError::IndexError {
+                            msg: format!("index {nth} out of regexp"),
+                        }));
+                    }
+                    let span = if resolved == 0 {
+                        Some(m_span)
+                    } else {
+                        group_spans[resolved as usize - 1]
+                    };
+                    let Some((sp_start, sp_end)) = span else {
+                        return Err(self.trap(RubyError::IndexError {
+                            msg: format!("regexp group {resolved} not matched"),
+                        }));
+                    };
+                    // 3. The replacement must be a String.
+                    let repl = match args.last() {
+                        Some(Value::Str(r)) => r.to_string_lossy(),
+                        Some(other) => {
+                            return Err(self.trap(RubyError::TypeError {
+                                msg: format!(
+                                    "no implicit conversion of {} into String",
+                                    other.conv_type_name(),
+                                ),
+                            }));
+                        }
+                        None => unreachable!(),
+                    };
+                    // 4. Frozen check, then splice the span.
+                    check_unfrozen(self)?;
+                    let mut buf = String::with_capacity(
+                        bound.len() - (sp_end - sp_start) + repl.len(),
+                    );
+                    buf.push_str(&bound[..sp_start]);
+                    buf.push_str(&repl);
+                    buf.push_str(&bound[sp_end..]);
+                    *s.borrow_mut() = buf.into_bytes();
+                    return Ok(Some(args.last().cloned().unwrap_or(Value::Nil)));
+                }
                 // Float→Int coerce on `[]=` index forms — same
                 // pattern as the read path above. CRuby treats Float
                 // indices via to_int; without this rubyrs raised
@@ -4386,10 +4658,12 @@ impl Vm {
     /// CRuby (which also returns nil — `String#[regex, n]` does NOT
     /// raise on out-of-range indices).
     ///
-    /// Divergence: negative `n` (CRuby supports `-1` for "last
-    /// group", `-2` for next-to-last, etc.) is not modeled — any
-    /// `n < 0` falls through to the Nil branch instead of indexing
-    /// from the end.
+    /// Negative `n` counts from the LAST group, CRuby's
+    /// rb_reg_nth_match shape (probed 3.4.8): `nth += num_regs`
+    /// where `num_regs == groups + 1`; a still-nonpositive result is
+    /// nil — so `-1` is the last group and a negative index can
+    /// never reach the whole match (`"hello"[/e(l+)/, -2]` → nil,
+    /// NOT "ell").
     ///
     /// Side-effect: mirrors `String#match` in updating `last_match`
     /// so `$~`, `$&`, `$1..$N`, `` $` ``, `$'`, `$+` stay correct.
@@ -4419,12 +4693,16 @@ impl Vm {
             }
             Some(oc) => oc,
         };
-        let picked = if n == 0 {
-            Some(oc.whole.clone())
-        } else if n > 0 && (n as usize) <= oc.groups.len() {
-            oc.groups[(n as usize) - 1].clone()
-        } else {
-            None
+        let picked = {
+            let num_regs = oc.groups.len() as i64 + 1;
+            let nth = if n < 0 { n + num_regs } else { n };
+            if (n < 0 && nth <= 0) || !(0..num_regs).contains(&nth) {
+                None
+            } else if nth == 0 {
+                Some(oc.whole.clone())
+            } else {
+                oc.groups[nth as usize - 1].clone()
+            }
         };
         let cap_names = re.capture_group_names();
         self.save_match_scope_on_write();
@@ -4711,7 +4989,10 @@ fn is_match_at_char_pos(
     // through `borrow_mut`, which resets the cache); `byte_off` is a
     // char-boundary offset (ASCII identity or `char_starts` entry).
     let view = unsafe { std::str::from_utf8_unchecked(&bytes) };
-    Some(re.is_match_from(&view[byte_off..]))
+    // Positioned search over the FULL subject (S8) — the old tail
+    // slice let `^`/`\A`/`\b` anchor at `pos` (CRuby: only real
+    // line/string starts match; probed 3.4.8).
+    Some(re.is_match_at(view, byte_off))
 }
 
 #[cfg(feature = "regex")]

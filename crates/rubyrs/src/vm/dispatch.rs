@@ -11376,9 +11376,16 @@ impl Vm {
         #[cfg(feature = "regex")]
         let coerced_args: Option<Vec<Value>> = if matches!(&recv, Value::Regex(_))
             && matches!(&*name, "match?" | "===")
-            && let [Value::Sym(s)] = &args[..]
+            && let [Value::Sym(s), rest @ ..] = &args[..]
+            // `match?` also takes an optional pos after the subject
+            // (`/l+/.match?(:hello, 3)` — probed 3.4.8); `===` stays
+            // 1-arg only. The pos rides along uncoerced — the
+            // primitive arm num2long-checks it.
+            && (rest.is_empty() || (&*name == "match?" && rest.len() == 1))
         {
-            Some(vec![Value::new_str(self.interner.resolve(*s).to_string())])
+            let mut v = vec![Value::new_str(self.interner.resolve(*s).to_string())];
+            v.extend(rest.iter().cloned());
+            Some(v)
         } else {
             None
         };
@@ -15136,48 +15143,42 @@ impl Vm {
             self.stack.push(Value::Hash(hid));
             return Ok(());
         }
-        // `Regexp#match(str)` — symmetric with `String#match(regex)`.
-        // Returns a MatchData (setting `$~`) or nil. A nil arg is a
-        // no-match (CRuby returns nil and clears `$~`). Discovery: P3
-        // Jekyll spike — kramdown's header parser does
-        // `HEADER_ID.match(text)`.
+        // `Regexp#match(str[, pos])` — symmetric with
+        // `String#match(regex[, pos])`. Returns a MatchData (setting
+        // `$~`) or nil. Discovery: P3 Jekyll spike — kramdown's
+        // header parser does `HEADER_ID.match(text)`.
         #[cfg(feature = "regex")]
-        if &*name == "match" && args.len() == 1
+        if &*name == "match"
             && let Value::Regex(re) = &recv
         {
-            let result = match &args[0] {
-                Value::Str(s) => {
-                    let re = re.clone();
-                    let is_binary =
-                        matches!(s.encoding.get(), crate::value::EncodingTag::Binary);
-                    // Known-valid-UTF-8 subject: borrowed-view match —
-                    // no subject copy on a miss (same fast path as
-                    // `String#match`).
-                    if !is_binary && s.content.is_utf8_cached() {
-                        self.do_regexp_match_at(&re, s, 0)?
-                    }
-                    // BINARY subject: byte engine + byte-faithful captures
-                    // (symmetric with the String#match arm).
-                    else if is_binary
-                        && let Some(v) = self.do_regexp_match_binary(&re, s)?
-                    {
-                        v
-                    } else {
-                        let bound = s.to_string_lossy();
-                        self.do_regexp_match(&re, bound)?
-                    }
-                }
+            // S8: the 2-arg `match(str, pos)` form + CRuby arity shape
+            // (probed 3.4.8: 0-arg/3-arg → ArgumentError "expected
+            // 1..2"). The subject/pos legwork is `string_match_run` —
+            // the SAME runner `String#match` uses — so pos semantics
+            // (char index, negative from the end, out-of-range → nil,
+            // Float→to_int, nil/other → num2long TypeError) and the
+            // binary/UTF-8 fast paths stay one source of truth.
+            if args.is_empty() || args.len() > 2 {
+                return Err(self.trap(RubyError::ArgumentError {
+                    msg: format!(
+                        "wrong number of arguments (given {}, expected 1..2)",
+                        args.len(),
+                    ),
+                }));
+            }
+            let re = re.clone();
+            let subject: Option<std::rc::Rc<crate::value::RStr>> = match &args[0] {
+                Value::Str(s) => Some(s.clone()),
                 // CRuby coerces a Symbol subject to its name String.
                 Value::Sym(s) => {
-                    let re = re.clone();
-                    let bound = self.interner.resolve(*s).to_string();
-                    self.do_regexp_match(&re, bound)?
+                    let Value::Str(rs) =
+                        Value::new_str(self.interner.resolve(*s).to_string())
+                    else {
+                        unreachable!("Value::new_str builds Value::Str")
+                    };
+                    Some(rs)
                 }
-                Value::Nil => {
-                    self.save_match_scope_on_write();
-                    self.last_match = None;
-                    Value::Nil
-                }
+                Value::Nil => None,
                 other => {
                     return Err(self.trap(RubyError::TypeError {
                         msg: format!(
@@ -15185,6 +15186,23 @@ impl Vm {
                             other.conv_type_name()
                         ),
                     }));
+                }
+            };
+            let result = match subject {
+                Some(s) => {
+                    let mut run_args = vec![Value::Regex(re)];
+                    run_args.extend(args.iter().skip(1).cloned());
+                    self.string_match_run(&s, &run_args)?
+                }
+                // A nil subject is a no-match (returns nil, clears
+                // `$~`) — but a PRESENT pos still type-checks first
+                // (probed 3.4.8: `/l/.match(nil, nil)` → TypeError,
+                // `/l/.match(nil, 2)` → nil).
+                None => {
+                    self.match_pos_arg(args.get(1))?;
+                    self.save_match_scope_on_write();
+                    self.last_match = None;
+                    Value::Nil
                 }
             };
             self.stack.push(result);

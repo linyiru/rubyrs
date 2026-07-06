@@ -6350,12 +6350,18 @@ impl Vm {
 }
 
 /// ADR 0025 Phase 0.5b: shared exit-status parser used by
-/// `exit` and `exit!`. Accepts the CRuby shapes:
+/// `exit` and `exit!`. Accepts the CRuby shapes (probed 3.4.8 —
+/// `exit`/`exit!` agree on all of them):
 /// - no args   → 0
 /// - true      → 0
 /// - false     → 1
-/// - nil       → 0
 /// - Integer   → as-is (truncated to i32)
+/// - Float     → to_int truncation toward zero (`exit(2.5)` →
+///   status 2, `exit(-3.9)` → -3); NaN/±Inf → RangeError "float
+///   NaN out of range of integer" (a finite out-of-range Float
+///   saturates — same documented tradeoff as `float_to_int_arg`)
+/// - nil       → TypeError "no implicit conversion from nil to
+///   integer" (NOT status 0 — pre-S8 rubyrs accepted it)
 /// - anything else → TypeError
 ///
 /// Returns `Result<i32, Option<Result<Value, Trap>>>` — the outer
@@ -6366,8 +6372,23 @@ fn parse_exit_status(args: &[Value]) -> Result<i32, Option<Result<Value, Trap>>>
         [] => Ok(0),
         [Value::Bool(true)] => Ok(0),
         [Value::Bool(false)] => Ok(1),
-        [Value::Nil] => Ok(0),
         [Value::Int(n)] => Ok(*n as i32),
+        [Value::Float(f)] if f.is_finite() => Ok(*f as i32),
+        [Value::Float(f)] => Err(Some(Err(Trap {
+            err: RubyError::RangeError {
+                msg: format!(
+                    "float {} out of range of integer",
+                    if f.is_nan() {
+                        "NaN"
+                    } else if *f > 0.0 {
+                        "Inf"
+                    } else {
+                        "-Inf"
+                    },
+                ),
+            },
+            backtrace: vec![],
+        }))),
         [other] => Err(Some(Err(Trap {
             err: RubyError::TypeError {
                 msg: other.num2int_conv_msg(),

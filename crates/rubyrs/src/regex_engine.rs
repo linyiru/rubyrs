@@ -1019,6 +1019,29 @@ impl CompiledRegex {
         }
     }
 
+    /// Positioned sibling of `is_match_from`: predicate match starting
+    /// at byte offset `start` of the FULL haystack, keeping the whole
+    /// string as anchor context (see `captures_owned_at` — `\A`/`^`/
+    /// `\b`/lookbehind behave like CRuby's onig `pos`, where the old
+    /// tail-slice callers made `/^l/.match?("hello", 2)` a hit). A
+    /// leading `\G` still means "match exactly AT the position" via
+    /// the anchored engine on the tail, mirroring `is_match_from`.
+    #[inline]
+    pub(crate) fn is_match_at(&self, haystack: &str, start: usize) -> Result<bool, RegexOpError> {
+        if self.g_anchored
+            && let Some(inner) = self.captures_owned_str_anchored(&haystack[start..])
+        {
+            return Ok(inner.is_some());
+        }
+        match self.engine()? {
+            Engine::Native(r) => Ok(r.is_match_at(haystack, start)),
+            Engine::Fancy(r) => match r.find_from_pos(haystack, start) {
+                Ok(m) => Ok(m.is_some()),
+                Err(e) => Err(RegexOpError::match_time(e.to_string())),
+            },
+        }
+    }
+
     /// Ruby flag bitmask (`RB_IGNORECASE | RB_EXTENDED |
     /// RB_MULTILINE`) — what `Regexp#options` returns. `0` for a
     /// flagless regexp.
@@ -1612,8 +1635,25 @@ impl CompiledRegex {
         &self,
         haystack: &str,
     ) -> Result<Option<OwnedCaptures>, RegexOpError> {
+        self.captures_owned_at(haystack, 0)
+    }
+
+    /// `captures_owned` with a real search-start offset: the engines
+    /// search from `start` while keeping the FULL haystack as anchor
+    /// context — `\A` matches only when `start == 0`, `^` only at
+    /// true line starts, `\b` sees the actual preceding char, and a
+    /// lookbehind (fancy) can inspect text BEFORE `start`. That is
+    /// CRuby's onig semantics for the `pos` argument of the match
+    /// family; the old tail-slicing callers made
+    /// `/^l/.match("hello", 2)` a hit (probed 3.4.8: nil). Spans in
+    /// the result are FULL-haystack byte offsets (no shifting).
+    pub(crate) fn captures_owned_at(
+        &self,
+        haystack: &str,
+        start: usize,
+    ) -> Result<Option<OwnedCaptures>, RegexOpError> {
         match self.engine()? {
-            Engine::Native(r) => match r.captures(haystack) {
+            Engine::Native(r) => match r.captures_at(haystack, start) {
                 None => Ok(None),
                 Some(caps) => {
                     let m0 = match caps.get(0) {
@@ -1641,7 +1681,7 @@ impl CompiledRegex {
                     }))
                 }
             },
-            Engine::Fancy(r) => match r.captures(haystack) {
+            Engine::Fancy(r) => match r.captures_from_pos(haystack, start) {
                 Err(e) => Err(RegexOpError::match_time(e.to_string())),
                 Ok(None) => Ok(None),
                 Ok(Some(caps)) => {

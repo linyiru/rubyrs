@@ -2424,3 +2424,14 @@ fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 // patterns — dual-engine migration of the block arm. Surfaced by
 // rubocop 1.88's MagicCommentFormat / percent-literal Layout cops.
 #[test] fn string_scan_block_fancy() { run_diff("string_scan_block_fancy"); }
+// S8 argument-shape crumbs (all probed vs CRuby 3.4.8): byteslice
+// num2long coercion + arity, String#[]/[]= regexp-index family
+// (negative/named/Float/nil backrefs, subpat splice + `$~`),
+// Regexp#match(str, pos) + block/arity + match? shapes, the
+// anchors-vs-pos fix (`^`/`\A`/`\b` anchor against the FULL subject
+// — the old tail-slice matched `/^l/` AT pos), Kernel#exit status
+// coercion (nil → TypeError, Float → to_int), and Encoding.find's
+// to_str-only contract. Needs regex (match family) + bignum (the
+// 2**64 backref line).
+#[cfg(all(feature = "regex", feature = "bignum"))]
+#[test] fn s8_arg_shapes() { run_diff("s8_arg_shapes"); }

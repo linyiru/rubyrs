@@ -1601,6 +1601,32 @@ class Encoding
   end
 
   def self.find(name)
+    ## S8: CRuby's argument contract (probed 3.4.8) — an Encoding
+    ## passes through; a non-String converts via to_str ONLY
+    ## (`find(:utf8)` / `find(nil)` / `find(123)` are TypeError
+    ## "no implicit conversion of Symbol/nil/Integer into String",
+    ## with the nil/true/false singletons spelled as their literal
+    ## value words, not their class names). A to_str that returns
+    ## a non-String gets CRuby's two-class TypeError. Pre-S8 this
+    ## to_s'd everything into "unknown encoding name - utf8".
+    return name if name.is_a?(Encoding)
+    unless name.is_a?(String)
+      if name.respond_to?(:to_str)
+        converted = name.to_str
+        unless converted.is_a?(String)
+          raise TypeError, "can't convert #{name.class} to String (#{name.class}#to_str gives #{converted.class})"
+        end
+        name = converted
+      else
+        word = case name
+               when nil then "nil"
+               when true then "true"
+               when false then "false"
+               else name.class.to_s
+               end
+        raise TypeError, "no implicit conversion of #{word} into String"
+      end
+    end
     # Case-insensitive only — match CRuby's actual behaviour.
     # ERB and similar consumers feed values from magic-comment
     # regex captures ("utf-8", "UTF-8", ...); without
@@ -1617,7 +1643,7 @@ class Encoding
     ## 3.4.1 one by one — CRuby REJECTS "KOI8R", "SHIFT-JIS",
     ## "UTF16LE"/"UTF16"/"UTF32…" (no un-hyphenated UTF forms),
     ## so those stay unknown here too.
-    case name.to_s.upcase
+    case name.upcase
     when "UTF-8" then UTF_8
     when "US-ASCII", "ASCII" then US_ASCII
     when "ASCII-8BIT", "BINARY" then ASCII_8BIT

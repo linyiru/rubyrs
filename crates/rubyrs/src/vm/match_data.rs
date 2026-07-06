@@ -239,49 +239,40 @@ impl Vm {
         }
     }
 
-    /// Run `re` against `bound`, set the `$~` side-channel, and return
-    /// a materialised `MatchData` (or `Nil` on no match, which also
-    /// clears `$~` — CRuby parity). Shared by `String#match` and
-    /// `Regexp#match` so both expose identical capture / `$~`
-    /// behaviour. Discovery: P3 Jekyll spike — kramdown's header
-    /// parser does `HEADER_ID.match(text)` (Regexp receiver).
-    pub(crate) fn do_regexp_match(
-        &mut self,
-        re: &std::rc::Rc<crate::regex_engine::CompiledRegex>,
-        bound: String,
-    ) -> Result<Value, Trap> {
-        self.do_regexp_match_pos(re, bound, 0)
-    }
+    // NOTE: the old `do_regexp_match(re, bound)` pos-0 shorthand was
+    // retired in S8 — `Regexp#match` now delegates to
+    // `string_match_run` (the same runner `String#match` uses), so
+    // every caller reaches `do_regexp_match_pos` / `_at` directly.
 
     /// `String#match(re, pos)` / `Regexp#match(str, pos)` — match
-    /// starting at byte offset `byte_start` within `bound`. The regex
-    /// engine matches the tail slice `bound[byte_start..]`, so the
-    /// returned spans are shifted back by `byte_start` and pre/post are
-    /// recomputed against the FULL string — `$~`, `#begin`, `#pre_match`
-    /// stay relative to the whole subject, matching CRuby. `byte_start
-    /// == 0` is the plain whole-string match (`do_regexp_match`).
+    /// starting at byte offset `byte_start` within `bound`, with the
+    /// FULL string as anchor context (`captures_owned_at`): `\A`/`^`/
+    /// `\b`/lookbehind behave like CRuby's onig `pos` — S8 fix, the
+    /// old tail-slice made `/^l/.match("hello", 2)` a hit (probed
+    /// 3.4.8: nil). Spans come back absolute, so `$~`, `#begin`,
+    /// `#pre_match` are relative to the whole subject with no
+    /// shifting. `byte_start == 0` is the plain whole-string match.
     pub(crate) fn do_regexp_match_pos(
         &mut self,
         re: &std::rc::Rc<crate::regex_engine::CompiledRegex>,
         bound: String,
         byte_start: usize,
     ) -> Result<Value, Trap> {
-        let tail = &bound[byte_start..];
         // A `\G`-anchored pattern (stripped at compile time) must match
-        // EXACTLY at the search position — i.e. at the start of `tail`. Use
-        // the anchored engine (`\A(?:…)` over the slice); fall back to the
-        // forward search if no anchored engine could be built. Non-`\G`
-        // patterns keep the forward-search-from-pos semantics CRuby uses.
-        let owned = if re.g_anchored() {
-            match re.captures_owned_str_anchored(tail) {
-                Some(inner) => inner,
-                None => re
-                    .captures_owned(tail)
-                    .map_err(|e| self.trap(e.to_ruby_error(re.as_str())))?,
-            }
+        // EXACTLY at the search position. Use the anchored engine
+        // (`\A(?:…)` over the tail slice — its spans are tail-relative,
+        // hence span_base = byte_start); fall back to the positioned
+        // forward search if no anchored engine could be built.
+        let (owned, span_base) = if re.g_anchored()
+            && let Some(inner) = re.captures_owned_str_anchored(&bound[byte_start..])
+        {
+            (inner, byte_start)
         } else {
-            re.captures_owned(tail)
-                .map_err(|e| self.trap(e.to_ruby_error(re.as_str())))?
+            (
+                re.captures_owned_at(&bound, byte_start)
+                    .map_err(|e| self.trap(e.to_ruby_error(re.as_str())))?,
+                0,
+            )
         };
         match owned {
             None => {
@@ -289,31 +280,33 @@ impl Vm {
                 self.last_match = None;
                 Ok(Value::Nil)
             }
-            Some(oc) => self.finish_regexp_match_hit(re, bound, byte_start, oc),
+            Some(oc) => self.finish_regexp_match_hit(re, bound, span_base, oc),
         }
     }
 
-    /// Shared HIT tail for the match-at-pos family: shift the
-    /// tail-relative spans by `byte_start`, set `$~`, and materialize
-    /// the MatchData. `bound` is the FULL subject string (ownership
+    /// Shared HIT tail for the match-at-pos family: shift spans by
+    /// `span_base` (nonzero ONLY for the `\G` anchored-engine path,
+    /// whose spans are tail-relative; the positioned search returns
+    /// absolute spans and passes 0), set `$~`, and materialize the
+    /// MatchData. `bound` is the FULL subject string (ownership
     /// moves into `last_match.input`).
     fn finish_regexp_match_hit(
         &mut self,
         re: &std::rc::Rc<crate::regex_engine::CompiledRegex>,
         bound: String,
-        byte_start: usize,
+        span_base: usize,
         mut oc: crate::regex_engine::OwnedCaptures,
     ) -> Result<Value, Trap> {
         // Shift the whole-match span from tail-relative to
         // full-string-relative; group substrings/names are
         // position-independent and need no adjustment.
-        oc.m_start += byte_start;
-        oc.m_end += byte_start;
+        oc.m_start += span_base;
+        oc.m_end += span_base;
         // Shift group spans from tail-relative to full-string
         // coordinates too (parallel to the whole-match shift).
         let group_spans: Vec<Option<(usize, usize)>> = oc.group_spans
             .iter()
-            .map(|sp| sp.map(|(b, e)| (b + byte_start, e + byte_start)))
+            .map(|sp| sp.map(|(b, e)| (b + span_base, e + span_base)))
             .collect();
         let cap_names = re.capture_group_names();
         let pre = bound[..oc.m_start].to_string();
@@ -376,19 +369,19 @@ impl Vm {
             // (see the method doc); `byte_start` is a char-boundary
             // offset produced by the ASCII identity or `char_starts`.
             let view = unsafe { std::str::from_utf8_unchecked(&bytes) };
-            let tail = &view[byte_start..];
             // Same `\G` discipline as `do_regexp_match_pos`: anchored
-            // engine first, forward search as the fallback.
-            if re.g_anchored() {
-                match re.captures_owned_str_anchored(tail) {
-                    Some(inner) => Ok(inner),
-                    None => re.captures_owned(tail),
-                }
+            // engine over the tail (tail-relative spans → span_base =
+            // byte_start), positioned full-context search otherwise
+            // (absolute spans → span_base = 0).
+            if re.g_anchored()
+                && let Some(inner) = re.captures_owned_str_anchored(&view[byte_start..])
+            {
+                Ok((inner, byte_start))
             } else {
-                re.captures_owned(tail)
+                re.captures_owned_at(view, byte_start).map(|o| (o, 0))
             }
         };
-        let owned = owned.map_err(|e| self.trap(e.to_ruby_error(re.as_str())))?;
+        let (owned, span_base) = owned.map_err(|e| self.trap(e.to_ruby_error(re.as_str())))?;
         match owned {
             None => {
                 self.save_match_scope_on_write();
@@ -403,8 +396,26 @@ impl Vm {
                     // SAFETY: same guard as above.
                     unsafe { std::str::from_utf8_unchecked(&bytes) }.to_string()
                 };
-                self.finish_regexp_match_hit(re, bound, byte_start, oc)
+                self.finish_regexp_match_hit(re, bound, span_base, oc)
             }
+        }
+    }
+
+    /// Resolve the optional `pos` argument of the match family with
+    /// CRuby's num2long shape (probed 3.4.8): absent → `None`; Int
+    /// passes through; Float truncates toward zero via
+    /// `float_to_int_arg` (NaN/±Inf → RangeError — CRuby accepts
+    /// `match(s, 1.9)`); anything else raises the num2long TypeError
+    /// (nil → "no implicit conversion from nil to integer").
+    #[cfg(feature = "regex")]
+    pub(crate) fn match_pos_arg(&self, pos: Option<&Value>) -> Result<Option<i64>, Trap> {
+        match pos {
+            None => Ok(None),
+            Some(Value::Int(p)) => Ok(Some(*p)),
+            Some(Value::Float(f)) => Ok(Some(self.float_to_int_arg(*f)?)),
+            Some(other) => Err(self.trap(crate::error::RubyError::TypeError {
+                msg: other.num2int_conv_msg(),
+            })),
         }
     }
 
@@ -464,30 +475,23 @@ impl Vm {
         // (`source.match(/\G\s/, end_pos)` on a 21KB buffer) 165×
         // CRuby. Invalid-UTF-8 / BINARY receivers keep the paths below.
         if !is_binary && s.content.is_utf8_cached() {
-            let byte_start = match args.get(1) {
+            let byte_start = match self.match_pos_arg(args.get(1))? {
                 None => Some(0usize),
-                Some(Value::Int(p)) => {
+                Some(p) => {
                     if s.content.is_ascii_cached() {
                         let char_len = s.content.borrow().len() as i64;
-                        let idx = if *p < 0 { *p + char_len } else { *p };
+                        let idx = if p < 0 { p + char_len } else { p };
                         if idx < 0 || idx > char_len { None } else { Some(idx as usize) }
                     } else {
                         let starts = s.content.char_starts();
                         let char_len = (starts.len() - 1) as i64;
-                        let idx = if *p < 0 { *p + char_len } else { *p };
+                        let idx = if p < 0 { p + char_len } else { p };
                         if idx < 0 || idx > char_len {
                             None
                         } else {
                             Some(starts[idx as usize] as usize)
                         }
                     }
-                }
-                Some(other) => {
-                    return Err(self.trap(RubyError::TypeError {
-                        // CRuby num2long shape (probed: `/a/.match("abc", nil)` →
-                        // "no implicit conversion from nil to integer").
-                        msg: other.num2int_conv_msg(),
-                    }));
                 }
             };
             return match byte_start {
@@ -504,23 +508,16 @@ impl Vm {
         let char_len = bound.chars().count();
         // Resolve the optional char-index `pos`. Negative counts from
         // the end; out-of-range → no match (nil), matching CRuby.
-        let byte_start = match args.get(1) {
+        let byte_start = match self.match_pos_arg(args.get(1))? {
             None => 0,
-            Some(Value::Int(p)) => {
-                let idx = if *p < 0 { *p + char_len as i64 } else { *p };
+            Some(p) => {
+                let idx = if p < 0 { p + char_len as i64 } else { p };
                 if idx < 0 || idx > char_len as i64 {
                     self.save_match_scope_on_write();
                     self.last_match = None;
                     return Ok(Value::Nil);
                 }
                 bound.char_indices().nth(idx as usize).map(|(b, _)| b).unwrap_or(bound.len())
-            }
-            Some(other) => {
-                return Err(self.trap(RubyError::TypeError {
-                    // CRuby num2long shape (probed: `/a/.match("abc", nil)` →
-                    // "no implicit conversion from nil to integer").
-                    msg: other.num2int_conv_msg(),
-                }));
             }
         };
         // BINARY subject (only at pos 0): byte engine + byte-faithful

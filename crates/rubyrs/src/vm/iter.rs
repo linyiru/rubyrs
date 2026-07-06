@@ -1278,6 +1278,59 @@ impl Vm {
                 BlockStep::Break(r) | BlockStep::Value(r) => Ok(Some(r)),
             };
         }
+        // `re.match(str[, pos]) { |m| ... }` — Regexp-receiver mirror
+        // of the block form above (probed 3.4.8: yields the MatchData
+        // on a hit, returns nil WITHOUT calling the block on a miss).
+        // A Symbol subject coerces to its name String (reg_operand);
+        // a nil subject is a miss — with a present pos still
+        // type-checking first, same as the no-block arm.
+        #[cfg(feature = "regex")]
+        if let Value::Regex(re) = recv
+            && name == "match"
+            && (1..=2).contains(&args.len())
+        {
+            let re = re.clone();
+            let subject: std::rc::Rc<crate::value::RStr> = match &args[0] {
+                Value::Str(s) => s.clone(),
+                Value::Sym(sid) => {
+                    let Value::Str(rs) =
+                        Value::new_str(self.interner.resolve(*sid).to_string())
+                    else {
+                        unreachable!("Value::new_str builds Value::Str")
+                    };
+                    rs
+                }
+                Value::Nil => {
+                    self.match_pos_arg(args.get(1))?;
+                    self.save_match_scope_on_write();
+                    self.last_match = None;
+                    return Ok(Some(Value::Nil));
+                }
+                other => {
+                    return Err(self.trap(crate::error::RubyError::TypeError {
+                        msg: format!(
+                            "no implicit conversion of {} into String",
+                            other.conv_type_name(),
+                        ),
+                    }));
+                }
+            };
+            let mut run_args = vec![Value::Regex(re)];
+            run_args.extend(args.iter().skip(1).cloned());
+            // Same pin discipline as the String-receiver arm above.
+            let mut g = PinGuard::new(self);
+            g.pin(Value::Block(block));
+            let md = g.vm.string_match_run(&subject, &run_args)?;
+            if matches!(md, Value::Nil) {
+                return Ok(Some(Value::Nil));
+            }
+            g.pin(md.clone());
+            let pre_frames = g.vm.frames.len();
+            return match g.vm.step_block1(block, md, pre_frames)? {
+                BlockStep::MethodReturn => Ok(Some(Value::Nil)),
+                BlockStep::Break(r) | BlockStep::Value(r) => Ok(Some(r)),
+            };
+        }
         // `s.scan(/pat/) { |m| ... }` / `s.scan(string) { |m| ... }`
         // — yield each match to the block (capture-group Array if
         // the regex has groups, the matched substring otherwise).
