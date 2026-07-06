@@ -945,7 +945,7 @@ impl Heap {
                 );
                 return Some(tbl);
             }
-            return self.class_ptr_of_slab(id);
+            self.class_ptr_of_slab(id)
         }
         #[cfg(not(feature = "jit-native"))]
         self.class_ptr_of_slab(id)

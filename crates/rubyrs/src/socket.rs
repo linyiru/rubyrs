@@ -7,10 +7,12 @@
 //!     ≈ per-Vm), mirroring the `_sqlite` handle-table pattern.
 //!   - 4 host fns (the surface the net/http discovery spike measured —
 //!     `poc/net-http-spike/FINDINGS.md` §1):
-//!       __rubyrs_socket_connect(host, port[, open_timeout]) → handle
-//!       __rubyrs_socket_write(handle, bytes)               → bytes written
-//!       __rubyrs_socket_read(handle, maxlen[, read_timeout]) → String(BINARY) | nil(EOF)
-//!       __rubyrs_socket_close(handle)                       → nil
+//!     ```text
+//!     __rubyrs_socket_connect(host, port[, open_timeout]) → handle
+//!     __rubyrs_socket_write(handle, bytes)               → bytes written
+//!     __rubyrs_socket_read(handle, maxlen[, read_timeout]) → String(BINARY) | nil(EOF)
+//!     __rubyrs_socket_close(handle)                       → nil
+//!     ```
 //!   - The pure-Ruby `TCPSocket` veneer + `Socket` sockopt constants +
 //!     `SocketError`, loaded from `preamble/socket.rb`.
 //!
@@ -99,8 +101,8 @@ fn map_io_err(e: &std::io::Error, ctx: &str) -> Trap {
 }
 
 /// Capability gate (ADR 0028 §2): the `allow_network_io` master switch
-/// + the optional `socket_allow_hosts` allowlist. Both read from the Vm
-/// mirror of `Config`. A null Vm pointer (raw embedder context) lets the
+/// plus the optional `socket_allow_hosts` allowlist. Both read from the
+/// Vm mirror of `Config`. A null Vm pointer (raw embedder context) lets the
 /// connect through — same stance as `_sqlite`'s `check_path_allowed`.
 fn check_connect_allowed(host: &str, port: i64) -> Result<(), Trap> {
     let ptr = current_vm_ptr();
@@ -178,7 +180,7 @@ pub fn register_host_fns(rt: &mut crate::Runtime) {
             Some(s) => s,
             None => {
                 let e = last_err.unwrap_or_else(|| {
-                    std::io::Error::new(std::io::ErrorKind::Other, "no address resolved")
+                    std::io::Error::other("no address resolved")
                 });
                 return Err(map_io_err(&e, "connect"));
             }

@@ -18029,16 +18029,17 @@ impl Vm {
                     let e = np.entry();
                     let class_ok =
                         e.guard_class == 0 || e.guard_class == std::rc::Rc::as_ptr(&cls) as usize;
-                    if !e.dead && class_ok {
-                        if let Some(x) = crate::jit_native::as_int(&self.stack[recv_idx + 1]) {
-                            let res = e.call(vm_ptr, &self.stack[recv_idx], x);
-                            let boxed = res.map(|r| e.box_ret(r));
-                            self.jstat_serve(pidx, 0, boxed.is_none());
-                            if let Some(boxed) = boxed {
-                                self.stack[recv_idx] = boxed;
-                                self.stack.truncate(recv_idx + 1);
-                                return Ok(true);
-                            }
+                    if !e.dead
+                        && class_ok
+                        && let Some(x) = crate::jit_native::as_int(&self.stack[recv_idx + 1])
+                    {
+                        let res = e.call(vm_ptr, &self.stack[recv_idx], x);
+                        let boxed = res.map(|r| e.box_ret(r));
+                        self.jstat_serve(pidx, 0, boxed.is_none());
+                        if let Some(boxed) = boxed {
+                            self.stack[recv_idx] = boxed;
+                            self.stack.truncate(recv_idx + 1);
+                            return Ok(true);
                         }
                     }
                 }
@@ -19380,10 +19381,9 @@ impl Vm {
         if let (Some(np), false) = (
             &compiled,
             callees.is_empty() && float_callees.is_empty() && getters.is_empty(),
-        ) {
-            if let Some(cls) = recv_cls {
-                np.guard_class.set(std::rc::Rc::as_ptr(cls) as usize);
-            }
+        ) && let Some(cls) = recv_cls
+        {
+            np.guard_class.set(std::rc::Rc::as_ptr(cls) as usize);
         }
         self.jstat_compile(fam, compiled.is_some(), false);
         compiled
@@ -19592,7 +19592,7 @@ impl Vm {
                     let nt = map_ip(t);
                     Op::JumpIfFalse((nt - ni - 1) as i32)
                 }
-                other => other.clone(),
+                other => *other,
             };
             out.push(op2);
         }
@@ -19727,10 +19727,9 @@ impl Vm {
         // Compile the whole-loop driver around that block's machine address. The
         // baked address stays valid: jit_native_block entries are insert-once and
         // never replaced for a proto's lifetime, so the block code outlives this.
-        if !self.jit_native_sum_loop.contains_key(&proto_idx) {
-            let compiled = crate::jit_native::compile_native_loop(block_addr, crate::jit_native::LoopKind::Sum);
-            self.jit_native_sum_loop.insert(proto_idx, compiled);
-        }
+        self.jit_native_sum_loop.entry(proto_idx).or_insert_with(|| {
+            crate::jit_native::compile_native_loop(block_addr, crate::jit_native::LoopKind::Sum)
+        });
         let sl = match self.jit_native_sum_loop.get(&proto_idx) {
             Some(Some(sl)) => sl,
             _ => return None,
@@ -19828,12 +19827,11 @@ impl Vm {
         // Specialized whole-loop driver, keyed by (block, class, callee proto) so a
         // method redefinition (new proto) recompiles rather than reusing a stale addr.
         let key = (block_proto_idx, class_ptr, callee_proto);
-        if !self.jit_native_objmethod_sum_loop.contains_key(&key) {
-            let compiled = crate::jit_native::compile_native_objmethod_sum_loop(
+        self.jit_native_objmethod_sum_loop.entry(key).or_insert_with(|| {
+            crate::jit_native::compile_native_objmethod_sum_loop(
                 method_addr, class_ptr, arg_const,
-            );
-            self.jit_native_objmethod_sum_loop.insert(key, compiled);
-        }
+            )
+        });
         let sl = match self.jit_native_objmethod_sum_loop.get(&key) {
             Some(Some(sl)) => sl,
             _ => return None,
@@ -19882,10 +19880,9 @@ impl Vm {
             Some(Some(np)) => np.addr(),
             _ => return None,
         };
-        if !self.jit_native_floatsum_loop.contains_key(&proto_idx) {
-            let compiled = crate::jit_native::compile_native_floatsum_loop(block_addr);
-            self.jit_native_floatsum_loop.insert(proto_idx, compiled);
-        }
+        self.jit_native_floatsum_loop.entry(proto_idx).or_insert_with(|| {
+            crate::jit_native::compile_native_floatsum_loop(block_addr)
+        });
         let sl = match self.jit_native_floatsum_loop.get(&proto_idx) {
             Some(Some(sl)) => sl,
             _ => return None,
@@ -19928,10 +19925,9 @@ impl Vm {
             Some(Some(np)) => np.addr(),
             _ => return None,
         };
-        if !self.jit_native_floatint_sum_loop.contains_key(&proto_idx) {
-            let compiled = crate::jit_native::compile_native_floatloop(block_addr, crate::jit_native::LoopKind::Sum);
-            self.jit_native_floatint_sum_loop.insert(proto_idx, compiled);
-        }
+        self.jit_native_floatint_sum_loop.entry(proto_idx).or_insert_with(|| {
+            crate::jit_native::compile_native_floatloop(block_addr, crate::jit_native::LoopKind::Sum)
+        });
         let sl = match self.jit_native_floatint_sum_loop.get(&proto_idx) {
             Some(Some(sl)) => sl,
             _ => return None,
@@ -19976,10 +19972,9 @@ impl Vm {
             Some(Some(np)) => np.addr(),
             _ => return None,
         };
-        if !self.jit_native_floatint_map_loop.contains_key(&proto_idx) {
-            let compiled = crate::jit_native::compile_native_floatloop(block_addr, crate::jit_native::LoopKind::Map);
-            self.jit_native_floatint_map_loop.insert(proto_idx, compiled);
-        }
+        self.jit_native_floatint_map_loop.entry(proto_idx).or_insert_with(|| {
+            crate::jit_native::compile_native_floatloop(block_addr, crate::jit_native::LoopKind::Map)
+        });
         if !matches!(self.jit_native_floatint_map_loop.get(&proto_idx), Some(Some(_))) {
             return None;
         }
@@ -20042,10 +20037,9 @@ impl Vm {
             Some(Some(np)) => np.addr(),
             _ => return None,
         };
-        if !self.jit_native_intelem_floatsum_loop.contains_key(&proto_idx) {
-            let compiled = crate::jit_native::compile_native_floatsum_loop_inner(block_addr, true);
-            self.jit_native_intelem_floatsum_loop.insert(proto_idx, compiled);
-        }
+        self.jit_native_intelem_floatsum_loop.entry(proto_idx).or_insert_with(|| {
+            crate::jit_native::compile_native_floatsum_loop_inner(block_addr, true)
+        });
         let sl = match self.jit_native_intelem_floatsum_loop.get(&proto_idx) {
             Some(Some(sl)) => sl,
             _ => return None,
@@ -20123,10 +20117,9 @@ impl Vm {
             Some(Some(np)) => np.addr(),
             _ => return None,
         };
-        if !self.jit_native_map_loop.contains_key(&proto_idx) {
-            let compiled = crate::jit_native::compile_native_loop(block_addr, crate::jit_native::LoopKind::Map);
-            self.jit_native_map_loop.insert(proto_idx, compiled);
-        }
+        self.jit_native_map_loop.entry(proto_idx).or_insert_with(|| {
+            crate::jit_native::compile_native_loop(block_addr, crate::jit_native::LoopKind::Map)
+        });
         if !matches!(self.jit_native_map_loop.get(&proto_idx), Some(Some(_))) {
             return None;
         }
@@ -20182,10 +20175,9 @@ impl Vm {
             Some(Some(np)) => np.addr(),
             _ => return None,
         };
-        if !self.jit_native_floatmap_loop.contains_key(&proto_idx) {
-            let compiled = crate::jit_native::compile_native_floatmap_loop(block_addr);
-            self.jit_native_floatmap_loop.insert(proto_idx, compiled);
-        }
+        self.jit_native_floatmap_loop.entry(proto_idx).or_insert_with(|| {
+            crate::jit_native::compile_native_floatmap_loop(block_addr)
+        });
         if !matches!(self.jit_native_floatmap_loop.get(&proto_idx), Some(Some(_))) {
             return None;
         }
@@ -20237,10 +20229,9 @@ impl Vm {
             Some(Some(np)) => np.addr(),
             _ => return None,
         };
-        if !self.jit_native_intelem_floatmap_loop.contains_key(&proto_idx) {
-            let compiled = crate::jit_native::compile_native_floatmap_loop_inner(block_addr, true);
-            self.jit_native_intelem_floatmap_loop.insert(proto_idx, compiled);
-        }
+        self.jit_native_intelem_floatmap_loop.entry(proto_idx).or_insert_with(|| {
+            crate::jit_native::compile_native_floatmap_loop_inner(block_addr, true)
+        });
         if !matches!(self.jit_native_intelem_floatmap_loop.get(&proto_idx), Some(Some(_))) {
             return None;
         }
@@ -20293,10 +20284,9 @@ impl Vm {
             Some(Some(np)) => np.addr(),
             _ => return None,
         };
-        if !self.jit_native_count_loop.contains_key(&proto_idx) {
-            let compiled = crate::jit_native::compile_native_loop(block_addr, crate::jit_native::LoopKind::Sum);
-            self.jit_native_count_loop.insert(proto_idx, compiled);
-        }
+        self.jit_native_count_loop.entry(proto_idx).or_insert_with(|| {
+            crate::jit_native::compile_native_loop(block_addr, crate::jit_native::LoopKind::Sum)
+        });
         let sl = match self.jit_native_count_loop.get(&proto_idx) {
             Some(Some(sl)) => sl,
             _ => return None,
@@ -20340,10 +20330,9 @@ impl Vm {
             _ => return None,
         };
         let key = (proto_idx, keep_when_true);
-        if !self.jit_native_filter_loop.contains_key(&key) {
-            let compiled = crate::jit_native::compile_native_loop(block_addr, crate::jit_native::LoopKind::Filter { keep: keep_when_true });
-            self.jit_native_filter_loop.insert(key, compiled);
-        }
+        self.jit_native_filter_loop.entry(key).or_insert_with(|| {
+            crate::jit_native::compile_native_loop(block_addr, crate::jit_native::LoopKind::Filter { keep: keep_when_true })
+        });
         if !matches!(self.jit_native_filter_loop.get(&key), Some(Some(_))) {
             return None;
         }
@@ -20398,10 +20387,9 @@ impl Vm {
             Some(Some(np)) => np.addr(),
             _ => return None,
         };
-        if !self.jit_native_find_loop.contains_key(&proto_idx) {
-            let compiled = crate::jit_native::compile_native_loop(block_addr, crate::jit_native::LoopKind::Find);
-            self.jit_native_find_loop.insert(proto_idx, compiled);
-        }
+        self.jit_native_find_loop.entry(proto_idx).or_insert_with(|| {
+            crate::jit_native::compile_native_loop(block_addr, crate::jit_native::LoopKind::Find)
+        });
         if !matches!(self.jit_native_find_loop.get(&proto_idx), Some(Some(_))) {
             return None;
         }
@@ -20453,10 +20441,9 @@ impl Vm {
             Some(Some(np)) => np.addr(),
             _ => return None,
         };
-        if !self.jit_native_floatcount_loop.contains_key(&proto_idx) {
-            let compiled = crate::jit_native::compile_native_floatloop(block_addr, crate::jit_native::LoopKind::Sum);
-            self.jit_native_floatcount_loop.insert(proto_idx, compiled);
-        }
+        self.jit_native_floatcount_loop.entry(proto_idx).or_insert_with(|| {
+            crate::jit_native::compile_native_floatloop(block_addr, crate::jit_native::LoopKind::Sum)
+        });
         let sl = match self.jit_native_floatcount_loop.get(&proto_idx) {
             Some(Some(sl)) => sl,
             _ => return None,
@@ -20495,10 +20482,9 @@ impl Vm {
             _ => return None,
         };
         let key = (proto_idx, keep_when_true);
-        if !self.jit_native_floatfilter_loop.contains_key(&key) {
-            let compiled = crate::jit_native::compile_native_floatloop(block_addr, crate::jit_native::LoopKind::Filter { keep: keep_when_true });
-            self.jit_native_floatfilter_loop.insert(key, compiled);
-        }
+        self.jit_native_floatfilter_loop.entry(key).or_insert_with(|| {
+            crate::jit_native::compile_native_floatloop(block_addr, crate::jit_native::LoopKind::Filter { keep: keep_when_true })
+        });
         if !matches!(self.jit_native_floatfilter_loop.get(&key), Some(Some(_))) {
             return None;
         }
@@ -20546,10 +20532,9 @@ impl Vm {
             Some(Some(np)) => np.addr(),
             _ => return None,
         };
-        if !self.jit_native_floatfind_loop.contains_key(&proto_idx) {
-            let compiled = crate::jit_native::compile_native_floatloop(block_addr, crate::jit_native::LoopKind::Find);
-            self.jit_native_floatfind_loop.insert(proto_idx, compiled);
-        }
+        self.jit_native_floatfind_loop.entry(proto_idx).or_insert_with(|| {
+            crate::jit_native::compile_native_floatloop(block_addr, crate::jit_native::LoopKind::Find)
+        });
         if !matches!(self.jit_native_floatfind_loop.get(&proto_idx), Some(Some(_))) {
             return None;
         }
@@ -20601,10 +20586,9 @@ impl Vm {
             Some(Some(np)) => np.addr(),
             _ => return None,
         };
-        if !self.jit_native_inject_loop.contains_key(&proto_idx) {
-            let compiled = crate::jit_native::compile_native_inject_loop(block_addr);
-            self.jit_native_inject_loop.insert(proto_idx, compiled);
-        }
+        self.jit_native_inject_loop.entry(proto_idx).or_insert_with(|| {
+            crate::jit_native::compile_native_inject_loop(block_addr)
+        });
         let il = match self.jit_native_inject_loop.get(&proto_idx) {
             Some(Some(il)) => il,
             _ => return None,
@@ -20659,15 +20643,14 @@ impl Vm {
             Some(Some(np)) => np.addr(),
             _ => return None,
         };
-        if !self.jit_native_finject_loop.contains_key(&key) {
+        self.jit_native_finject_loop.entry(key).or_insert_with(|| {
             // int_elem -> int element reader; else float reader. The acc is opaque bits.
-            let compiled = if int_elem {
+            if int_elem {
                 crate::jit_native::compile_native_inject_loop(block_addr)
             } else {
                 crate::jit_native::compile_native_floatinject_loop(block_addr)
-            };
-            self.jit_native_finject_loop.insert(key, compiled);
-        }
+            }
+        });
         let il = match self.jit_native_finject_loop.get(&key) {
             Some(Some(il)) => il,
             _ => return None,
@@ -20767,10 +20750,9 @@ impl Vm {
             Some(Some(np)) => np.addr(),
             _ => return None,
         };
-        if !self.jit_native_each_acc_loop.contains_key(&proto_idx) {
-            let compiled = crate::jit_native::compile_native_inject_loop(block_addr);
-            self.jit_native_each_acc_loop.insert(proto_idx, compiled);
-        }
+        self.jit_native_each_acc_loop.entry(proto_idx).or_insert_with(|| {
+            crate::jit_native::compile_native_inject_loop(block_addr)
+        });
         let il = match self.jit_native_each_acc_loop.get(&proto_idx) {
             Some(Some(il)) => il,
             _ => return None,
@@ -20861,10 +20843,9 @@ impl Vm {
             Some(Some(np)) => np.addr(),
             _ => return None,
         };
-        if !self.jit_native_floateach_acc_loop.contains_key(&proto_idx) {
-            let compiled = crate::jit_native::compile_native_floatinject_loop(block_addr);
-            self.jit_native_floateach_acc_loop.insert(proto_idx, compiled);
-        }
+        self.jit_native_floateach_acc_loop.entry(proto_idx).or_insert_with(|| {
+            crate::jit_native::compile_native_floatinject_loop(block_addr)
+        });
         let il = match self.jit_native_floateach_acc_loop.get(&proto_idx) {
             Some(Some(il)) => il,
             _ => return None,
@@ -20954,10 +20935,9 @@ impl Vm {
             Some(Some(np)) => np.addr(),
             _ => return None,
         };
-        if !self.jit_native_intelem_floateach_acc_loop.contains_key(&proto_idx) {
-            let compiled = crate::jit_native::compile_native_inject_loop(block_addr);
-            self.jit_native_intelem_floateach_acc_loop.insert(proto_idx, compiled);
-        }
+        self.jit_native_intelem_floateach_acc_loop.entry(proto_idx).or_insert_with(|| {
+            crate::jit_native::compile_native_inject_loop(block_addr)
+        });
         let il = match self.jit_native_intelem_floateach_acc_loop.get(&proto_idx) {
             Some(Some(il)) => il,
             _ => return None,
@@ -21054,10 +21034,9 @@ impl Vm {
             Some(Some(np)) => np.addr(),
             _ => return None,
         };
-        if !self.jit_native_eachidx_loop_k.contains_key(&key) {
-            let compiled = crate::jit_native::compile_native_eachidx_loop(block_addr);
-            self.jit_native_eachidx_loop_k.insert(key, compiled);
-        }
+        self.jit_native_eachidx_loop_k.entry(key).or_insert_with(|| {
+            crate::jit_native::compile_native_eachidx_loop(block_addr)
+        });
         let il = match self.jit_native_eachidx_loop_k.get(&key) {
             Some(Some(il)) => il,
             _ => return None,
@@ -21112,10 +21091,9 @@ impl Vm {
             _ => return None,
         };
         let key = (proto_idx, is_min);
-        if !self.jit_native_minmax_loop.contains_key(&key) {
-            let compiled = crate::jit_native::compile_native_minmax_loop(block_addr, is_min);
-            self.jit_native_minmax_loop.insert(key, compiled);
-        }
+        self.jit_native_minmax_loop.entry(key).or_insert_with(|| {
+            crate::jit_native::compile_native_minmax_loop(block_addr, is_min)
+        });
         let ml = match self.jit_native_minmax_loop.get(&key) {
             Some(Some(ml)) => ml,
             _ => return None,
@@ -21158,10 +21136,9 @@ impl Vm {
             _ => return None,
         };
         let key = (proto_idx, is_min);
-        if !self.jit_native_floatminmax_loop.contains_key(&key) {
-            let compiled = crate::jit_native::compile_native_floatminmax_loop(block_addr, is_min);
-            self.jit_native_floatminmax_loop.insert(key, compiled);
-        }
+        self.jit_native_floatminmax_loop.entry(key).or_insert_with(|| {
+            crate::jit_native::compile_native_floatminmax_loop(block_addr, is_min)
+        });
         let ml = match self.jit_native_floatminmax_loop.get(&key) {
             Some(Some(ml)) => ml,
             _ => return None,
@@ -21207,10 +21184,9 @@ impl Vm {
             _ => return None,
         };
         let key = (proto_idx, is_min);
-        if !self.jit_native_intelem_floatminmax_loop.contains_key(&key) {
-            let compiled = crate::jit_native::compile_native_intelem_floatminmax_loop(block_addr, is_min);
-            self.jit_native_intelem_floatminmax_loop.insert(key, compiled);
-        }
+        self.jit_native_intelem_floatminmax_loop.entry(key).or_insert_with(|| {
+            crate::jit_native::compile_native_intelem_floatminmax_loop(block_addr, is_min)
+        });
         let ml = match self.jit_native_intelem_floatminmax_loop.get(&key) {
             Some(Some(ml)) => ml,
             _ => return None,
@@ -21547,10 +21523,9 @@ impl Vm {
             Some(Some(np)) => np.addr(),
             _ => return None,
         };
-        if !self.jit_native_eachobj_loop.contains_key(&proto_idx) {
-            let compiled = crate::jit_native::compile_native_eachobj_loop(block_addr);
-            self.jit_native_eachobj_loop.insert(proto_idx, compiled);
-        }
+        self.jit_native_eachobj_loop.entry(proto_idx).or_insert_with(|| {
+            crate::jit_native::compile_native_eachobj_loop(block_addr)
+        });
         let el = match self.jit_native_eachobj_loop.get(&proto_idx) {
             Some(Some(el)) => el,
             _ => return None,
@@ -21600,10 +21575,9 @@ impl Vm {
             Some(Some(np)) => np.addr(),
             _ => return None,
         };
-        if !self.jit_native_eachobj_loop_f.contains_key(&proto_idx) {
-            let compiled = crate::jit_native::compile_native_eachobj_loop_float(block_addr);
-            self.jit_native_eachobj_loop_f.insert(proto_idx, compiled);
-        }
+        self.jit_native_eachobj_loop_f.entry(proto_idx).or_insert_with(|| {
+            crate::jit_native::compile_native_eachobj_loop_float(block_addr)
+        });
         let el = match self.jit_native_eachobj_loop_f.get(&proto_idx) {
             Some(Some(el)) => el,
             _ => return None,
@@ -21669,10 +21643,9 @@ impl Vm {
             Some(Some(np)) => np.addr(),
             _ => return None,
         };
-        if !self.jit_native_eachobjhash_loop.contains_key(&key) {
-            let compiled = crate::jit_native::compile_native_eachobjhash_loop(block_addr, float_elem);
-            self.jit_native_eachobjhash_loop.insert(key, compiled);
-        }
+        self.jit_native_eachobjhash_loop.entry(key).or_insert_with(|| {
+            crate::jit_native::compile_native_eachobjhash_loop(block_addr, float_elem)
+        });
         let el = match self.jit_native_eachobjhash_loop.get(&key) {
             Some(Some(el)) => el,
             _ => return None,
@@ -21724,10 +21697,9 @@ impl Vm {
             Some(Some(np)) => np.addr(),
             _ => return None,
         };
-        if !self.jit_native_groupby_loop.contains_key(&proto_idx) {
-            let compiled = crate::jit_native::compile_native_groupby_loop(block_addr);
-            self.jit_native_groupby_loop.insert(proto_idx, compiled);
-        }
+        self.jit_native_groupby_loop.entry(proto_idx).or_insert_with(|| {
+            crate::jit_native::compile_native_groupby_loop(block_addr)
+        });
         let gl = match self.jit_native_groupby_loop.get(&proto_idx) {
             Some(Some(gl)) => gl,
             _ => return None,
@@ -21772,10 +21744,9 @@ impl Vm {
             Some(Some(np)) => np.addr(),
             _ => return None,
         };
-        if !self.jit_native_floatint_groupby_loop.contains_key(&proto_idx) {
-            let compiled = crate::jit_native::compile_native_floatint_groupby_loop(block_addr);
-            self.jit_native_floatint_groupby_loop.insert(proto_idx, compiled);
-        }
+        self.jit_native_floatint_groupby_loop.entry(proto_idx).or_insert_with(|| {
+            crate::jit_native::compile_native_floatint_groupby_loop(block_addr)
+        });
         let gl = match self.jit_native_floatint_groupby_loop.get(&proto_idx) {
             Some(Some(gl)) => gl,
             _ => return None,
@@ -21820,10 +21791,9 @@ impl Vm {
             Some(Some(np)) => np.addr(),
             _ => return None,
         };
-        if !self.jit_native_floatkey_groupby_loop.contains_key(&proto_idx) {
-            let compiled = crate::jit_native::compile_native_floatkey_groupby_loop(block_addr);
-            self.jit_native_floatkey_groupby_loop.insert(proto_idx, compiled);
-        }
+        self.jit_native_floatkey_groupby_loop.entry(proto_idx).or_insert_with(|| {
+            crate::jit_native::compile_native_floatkey_groupby_loop(block_addr)
+        });
         let gl = match self.jit_native_floatkey_groupby_loop.get(&proto_idx) {
             Some(Some(gl)) => gl,
             _ => return None,

@@ -43,6 +43,12 @@ pub(crate) struct JitObjView {
 const _: () = assert!(std::mem::offset_of!(JitObjView, class_ptrs) == 0);
 const _: () = assert!(std::mem::offset_of!(JitObjView, class_ptrs_len) == 8);
 
+/// One `is_a?(Const)` inline-cache cell (ADR 0034 piece 6):
+/// `(const_sym, const_ptr, tag_memo, result_memo)` — memoizes the answer for a
+/// non-Object value by its type tag. Boxed wherever it's held: the cell's heap
+/// address is baked into the native code as a constant.
+type IsACacheCell = std::cell::Cell<(usize, usize, usize, usize)>;
+
 /// A compiled native 1-param integer method. The convention is
 /// `(vm, self, i64_arg) -> (i64, ovf)`: `vm` + `self` are threaded so the body
 /// can call primitives that touch the heap (e.g. read an `Int` ivar) — unused
@@ -88,20 +94,29 @@ pub(crate) struct NativeProto {
     /// `(element_class_ptr, ivar_sym)`; their stable heap addresses are baked
     /// into the native code as constants, so the `Box`es must outlive the code —
     /// they're owned here and dropped with the proto (and its module).
+    // clippy::vec_box: each Box is load-bearing — its heap address is baked into
+    // the machine code, so the cells must NOT live inline in the Vec's buffer
+    // (a Vec regrow would move them and dangle the baked pointers).
+    #[allow(clippy::vec_box)]
     _caches: Vec<Box<std::cell::Cell<(usize, u32)>>>,
     /// Monomorphic inline caches for explicit-recv object-method call sites
     /// (`@h.method(args)`, ADR 0034 Step 1). Each holds `(receiver_class_ptr,
     /// callee_native_addr)`, filled at runtime on first call by `jit_obj_call`; their
     /// addresses are baked into the code, so the `Box`es outlive it here.
+    // clippy::vec_box: same as `_caches` — the Box addresses are baked constants.
+    #[allow(clippy::vec_box)]
     _obj_call_caches: Vec<Box<std::cell::Cell<(usize, usize)>>>,
     /// Inline caches for Bool-predicate obj-call sites (`node.send_type?`, ADR 0034
     /// piece 5). `(class_ptr, addr, packed)`: `addr==0` ⇒ an inlined `@ivar == :sym`
     /// predicate (`packed = ivar<<32 | sym`); else `addr` is a native Bool callee.
+    // clippy::vec_box: same as `_caches` — the Box addresses are baked constants.
+    #[allow(clippy::vec_box)]
     _bool_caches: Vec<Box<std::cell::Cell<(usize, usize, usize)>>>,
-    /// Inline caches for `is_a?(Const)` sites (`name.is_a?(Symbol)`, ADR 0034 piece 6).
-    /// `(const_sym, const_ptr, tag_memo, result_memo)` — memoizes the answer for a
-    /// non-Object value by its type tag.
-    _value_is_a_caches: Vec<Box<std::cell::Cell<(usize, usize, usize, usize)>>>,
+    /// Inline caches for `is_a?(Const)` sites (`name.is_a?(Symbol)`, ADR 0034 piece 6);
+    /// see [`IsACacheCell`].
+    // clippy::vec_box: same as `_caches` — the Box addresses are baked constants.
+    #[allow(clippy::vec_box)]
+    _value_is_a_caches: Vec<Box<IsACacheCell>>,
     /// ADR 0035 Ph4/5 — the ivar-frame block for `jit_self_ivars` (`[n, syms.., memo_cls,
     /// slot per sym]`). Its address is baked into the code, so it must outlive it here.
     _ivar_frame: Option<Box<[std::cell::Cell<i64>]>>,
@@ -765,6 +780,11 @@ pub(crate) fn pregate(
     true
 }
 
+// clippy::too_many_arguments: the body-compiler entry point takes one parameter
+// per compilation input (callee tables, driver shape, element kinds). Bundling
+// them into a struct would be pure ceremony for a single-call-site internal fn
+// (same call as the prism_wq codegen helpers).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn compile(
     proto: &Proto,
     self_name_id: SymId,
@@ -1019,9 +1039,7 @@ pub(crate) fn compile(
             if let Some(hi) = detect_hash_incr(code, s, syms) {
                 let end = hi.end;
                 fused[s] = Some(hi);
-                for ip in (s + 1)..=end {
-                    fused_interior[ip] = true;
-                }
+                fused_interior[(s + 1)..=end].fill(true);
                 s = end + 1;
             } else {
                 s += 1;
@@ -1043,7 +1061,7 @@ pub(crate) fn compile(
             if t <= n {
                 leader[t.min(n)] = true;
             }
-            if ip + 1 <= n {
+            if ip < n {
                 leader[ip + 1] = true;
             }
         }
@@ -1463,7 +1481,7 @@ pub(crate) fn compile(
     // Bool-predicate obj-call caches (3-field; ADR 0034 piece 5).
     let mut bool_caches: Vec<Box<std::cell::Cell<(usize, usize, usize)>>> = Vec::new();
     // is_a? caches (4-field; ADR 0034 piece 6).
-    let mut value_is_a_caches: Vec<Box<std::cell::Cell<(usize, usize, usize, usize)>>> = Vec::new();
+    let mut value_is_a_caches: Vec<Box<IsACacheCell>> = Vec::new();
     // ADR 0035 Ph4/5 — the per-compilation ivar-frame block ([n, syms.., memo_cls,
     // slots..]) `jit_self_ivars` reads/memoizes; its address is baked into the code, so it
     // lives on the NativeProto. Slot values are read back into SSA immediately after the
@@ -1695,10 +1713,10 @@ pub(crate) fn compile(
                 if float_acc {
                     local_kinds[arg2_slot as usize] = Kind::Float;
                 }
-                if float_elem {
-                    if let Some(s) = arg3_slot {
-                        local_kinds[s as usize] = Kind::Float;
-                    }
+                if float_elem
+                    && let Some(s) = arg3_slot
+                {
+                    local_kinds[s as usize] = Kind::Float;
                 }
             }
             AccKind::None | AccKind::EachObj | AccKind::EachObjHash => {
@@ -2873,7 +2891,7 @@ pub(crate) fn compile(
     module.finalize_definitions().ok()?;
     let code_ptr = module.get_finalized_function(fid);
     let ptr = unsafe {
-        std::mem::transmute::<_, extern "C" fn(*const crate::vm::Vm, *const Value, i64) -> NRet>(
+        std::mem::transmute::<*const u8, extern "C" fn(*const crate::vm::Vm, *const Value, i64) -> NRet>(
             code_ptr,
         )
     };
@@ -2881,7 +2899,7 @@ pub(crate) fn compile(
     // signature — expose the same code under the 4-arg fn-ptr type for `call2`.
     let ptr2 = if obj_param2 && is_method {
         Some(unsafe {
-            std::mem::transmute::<_, extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet>(
+            std::mem::transmute::<*const u8, extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet>(
                 code_ptr,
             )
         })
@@ -2966,8 +2984,8 @@ impl NativeLoop {
 /// Compile a native whole-loop driver of `kind` around an already-compiled block
 /// (`block_addr` from `NativeProto::addr`; a PREDICATE block for `Filter`, a value
 /// block for `Sum`/`Map`). A FIXED template (not data-driven): wire `jit_array_len`
-/// + a per-element `jit_array_elem_int` + a native call to the block + the kind's
-/// per-element action, with one shared `deopt` exit. Only the action and the
+/// plus a per-element `jit_array_elem_int`, a native call to the block, and the
+/// kind's per-element action, with one shared `deopt` exit. Only the action and the
 /// carried accumulator vary by `kind`; the head always carries `(i, acc)` (the
 /// array-producing kinds leave `acc` at 0).
 pub(crate) fn compile_native_loop(block_addr: usize, kind: LoopKind) -> Option<NativeLoop> {
@@ -3201,7 +3219,7 @@ fn compile_native_loop_inner(
     module.finalize_definitions().ok()?;
     let code_ptr = module.get_finalized_function(fid);
     let ptr = unsafe {
-        std::mem::transmute::<_, extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet>(
+        std::mem::transmute::<*const u8, extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet>(
             code_ptr,
         )
     };
@@ -3367,7 +3385,7 @@ pub(crate) fn compile_native_objmethod_sum_loop(
     module.finalize_definitions().ok()?;
     let code_ptr = module.get_finalized_function(fid);
     let ptr = unsafe {
-        std::mem::transmute::<_, extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet>(
+        std::mem::transmute::<*const u8, extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet>(
             code_ptr,
         )
     };
@@ -3529,7 +3547,7 @@ fn compile_native_inject_loop_inner(block_addr: usize, float_elem: bool) -> Opti
     module.finalize_definitions().ok()?;
     let code_ptr = module.get_finalized_function(fid);
     let ptr = unsafe {
-        std::mem::transmute::<_, extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet>(
+        std::mem::transmute::<*const u8, extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet>(
             code_ptr,
         )
     };
@@ -3719,7 +3737,7 @@ fn compile_native_eachobj_loop_inner(
     module.finalize_definitions().ok()?;
     let code_ptr = module.get_finalized_function(fid);
     let ptr = unsafe {
-        std::mem::transmute::<_, extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet>(
+        std::mem::transmute::<*const u8, extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet>(
             code_ptr,
         )
     };
@@ -3922,7 +3940,7 @@ fn compile_native_groupby_loop_inner(
     module.finalize_definitions().ok()?;
     let code_ptr = module.get_finalized_function(fid);
     let ptr = unsafe {
-        std::mem::transmute::<_, extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet>(
+        std::mem::transmute::<*const u8, extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet>(
             code_ptr,
         )
     };
@@ -4068,7 +4086,7 @@ pub(crate) fn compile_native_eachidx_loop(block_addr: usize) -> Option<NativeLoo
     module.finalize_definitions().ok()?;
     let code_ptr = module.get_finalized_function(fid);
     let ptr = unsafe {
-        std::mem::transmute::<_, extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet>(
+        std::mem::transmute::<*const u8, extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet>(
             code_ptr,
         )
     };
@@ -4234,7 +4252,7 @@ pub(crate) fn compile_native_floatsum_loop_inner(
     module.finalize_definitions().ok()?;
     let code_ptr = module.get_finalized_function(fid);
     let ptr = unsafe {
-        std::mem::transmute::<_, extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet>(
+        std::mem::transmute::<*const u8, extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet>(
             code_ptr,
         )
     };
@@ -4393,7 +4411,7 @@ pub(crate) fn compile_native_floatmap_loop_inner(
     module.finalize_definitions().ok()?;
     let code_ptr = module.get_finalized_function(fid);
     let ptr = unsafe {
-        std::mem::transmute::<_, extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet>(
+        std::mem::transmute::<*const u8, extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet>(
             code_ptr,
         )
     };
@@ -4619,7 +4637,7 @@ fn compile_native_minmax_loop_inner(
     module.finalize_definitions().ok()?;
     let code_ptr = module.get_finalized_function(fid);
     let ptr = unsafe {
-        std::mem::transmute::<_, extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet>(
+        std::mem::transmute::<*const u8, extern "C" fn(*const crate::vm::Vm, *const Value, i64, i64) -> NRet>(
             code_ptr,
         )
     };
@@ -4761,6 +4779,10 @@ fn emit_int_unary(
 /// `fcvt_from_sint`-coerced to F64 and the float op runs. A non-numeric operand
 /// (Bool/Nil/Array) declines. This is what lets `floats.sum { |x| x * 2 }` (Float
 /// element, Int literal) go native.
+// clippy::too_many_arguments: codegen helper — each parameter is one lowering
+// input (builder, op, both operands + kinds, stack, overflow var); a params
+// struct would obscure the emit-site data flow (prism_wq precedent).
+#[allow(clippy::too_many_arguments)]
 fn emit_numeric_binop(
     fb: &mut FunctionBuilder,
     k: BinOpKind,
@@ -5262,12 +5284,11 @@ pub(crate) unsafe extern "C" fn jit_value_is_a(
     }
     // Fast path: an Object whose EXACT class is the target — `class_ptr_of` (clone-free),
     // no `class_of`/ancestry. Covers the common `c.is_a?(Node)` on a Node element.
-    if let Value::Object(oid) = v {
-        if let Some(p) = unsafe { &*vm }.heap.class_ptr_of(*oid) {
-            if p == const_ptr {
-                return NRet { res: 1, ovf: 0 };
-            }
-        }
+    if let Value::Object(oid) = v
+        && let Some(p) = unsafe { &*vm }.heap.class_ptr_of(*oid)
+        && p == const_ptr
+    {
+        return NRet { res: 1, ovf: 0 };
     }
     // Type tag for a NON-Object builtin (its class is fixed, so the result is memoizable).
     // 0 = an Object (classes vary by instance → never tag-memo).
@@ -6807,9 +6828,11 @@ pub(crate) unsafe extern "C" fn jit_ivar_len(
 
 /// Compile a value-method whose body is a single ivar read, to a native call
 /// into `jit_ivar_get`. Two recognised shapes (else `None`):
-///   - getter:        `[LoadIvar(s), Return]`                       → read recv's `@s`
-///   - ivar_get wrap: `[LoadLocal(0), LoadSymbol(s), Call(ivg,1), Return]`
-///                                                                  → read arg0's `@s`
+/// ```text
+/// getter:        [LoadIvar(s), Return]                       → read recv's @s
+/// ivar_get wrap: [LoadLocal(0), LoadSymbol(s), Call(ivg,1), Return]
+///                                                            → read arg0's @s
+/// ```
 /// The latter is the AR-shaped, NON-fast-pathed win: the interpreter pays a full
 /// `instance_variable_get` dispatch + a frame; native code pays one direct call.
 /// Native primitive: `recv.@name[key]` returning the Hash value (ANY type) by
@@ -6971,7 +6994,7 @@ pub(crate) fn compile_value(
     let code = module.get_finalized_function(fid);
     let ptr = unsafe {
         std::mem::transmute::<
-            _,
+            *const u8,
             extern "C" fn(*const crate::vm::Vm, *const Value, *const Value, *mut Value),
         >(code)
     };

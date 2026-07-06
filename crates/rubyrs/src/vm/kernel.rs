@@ -3061,7 +3061,7 @@ impl Vm {
                             msg: format!("invalid normalization form {form}"),
                         }))),
                     };
-                    return Some(Ok(Value::new_str(out)));
+                    Some(Ok(Value::new_str(out)))
                 }
                 #[cfg(not(feature = "_encoding_full"))]
                 {
@@ -3093,7 +3093,7 @@ impl Vm {
                             msg: format!("invalid normalization form {form}"),
                         }))),
                     };
-                    return Some(Ok(Value::Bool(norm == text)));
+                    Some(Ok(Value::Bool(norm == text)))
                 }
                 #[cfg(not(feature = "_encoding_full"))]
                 {
@@ -3121,7 +3121,7 @@ impl Vm {
                         return Some(Err(t));
                     }
                     let id = self.heap.alloc(HeapObj::Array(parts.into()));
-                    return Some(Ok(Value::Array(id)));
+                    Some(Ok(Value::Array(id)))
                 }
                 #[cfg(not(feature = "_encoding_full"))]
                 {
@@ -4590,7 +4590,7 @@ impl Vm {
         // patch. The shim is `defined?`-guarded — inert without the host
         // fns or a kramdown document class.
         #[cfg(feature = "_kramdown_native")]
-        if path_str == "kramdown-parser-gfm" && matches!(result, Ok(_)) {
+        if path_str == "kramdown-parser-gfm" && result.is_ok() {
             self.eval_string(
                 crate::kramdown_native::SHIM,
                 "<rubyrs:kramdown_native_shim>",

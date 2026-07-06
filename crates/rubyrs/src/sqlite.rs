@@ -6,15 +6,17 @@
 //!     by opaque integer handles. The rubyrs VM is
 //!     single-threaded so per-thread = per-Vm in practice.
 //!   - 9 host fns registered via `register_host_fns`:
-//!       __rubyrs_sqlite_open(path, opts) → handle
-//!       __rubyrs_sqlite_close(handle) → nil
-//!       __rubyrs_sqlite_execute(handle, sql, params) → rows_changed
-//!       __rubyrs_sqlite_execute_cached(handle, sql, params) → rows_changed
-//!       __rubyrs_sqlite_query(handle, sql, params) → Array<Array<Value>>
-//!       __rubyrs_sqlite_query_cached(handle, sql, params) → ditto
-//!       __rubyrs_sqlite_busy_timeout(handle, ms) → nil
-//!       __rubyrs_sqlite_cache_hits(handle) → Integer
-//!       __rubyrs_sqlite_cache_misses(handle) → Integer
+//!     ```text
+//!     __rubyrs_sqlite_open(path, opts) → handle
+//!     __rubyrs_sqlite_close(handle) → nil
+//!     __rubyrs_sqlite_execute(handle, sql, params) → rows_changed
+//!     __rubyrs_sqlite_execute_cached(handle, sql, params) → rows_changed
+//!     __rubyrs_sqlite_query(handle, sql, params) → Array<Array<Value>>
+//!     __rubyrs_sqlite_query_cached(handle, sql, params) → ditto
+//!     __rubyrs_sqlite_busy_timeout(handle, ms) → nil
+//!     __rubyrs_sqlite_cache_hits(handle) → Integer
+//!     __rubyrs_sqlite_cache_misses(handle) → Integer
+//!     ```
 //!   - The 25-class `SQLite3::Exception` hierarchy + the
 //!     Ruby-side `SQLite3::Database` class loaded from
 //!     `preamble/sqlite_database.rb` at host-fn-registration
@@ -38,7 +40,6 @@ use rusqlite::{Connection, ErrorCode, OpenFlags, Statement};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
 use std::time::Duration;
 
 const DEFAULT_BUSY_TIMEOUT_MS: u32 = 5000;
@@ -375,7 +376,7 @@ fn parse_stmt_args(args: &[Value], op: &str) -> Result<(i64, Vec<Value>), Trap> 
 }
 
 /// Borrow a Statement by handle, run a closure that mutates it
-/// + the Vm, return the result. Centralises the
+/// plus the Vm, return the result. Centralises the
 /// STMT_HANDLES → Vm-borrow dance so the per-host-fn closures
 /// don't repeat it.
 ///
@@ -441,10 +442,10 @@ fn hash_get_int(hash_id: crate::value::ObjId, key: &str) -> Option<i64> {
             Value::Str(s) => s.to_string_lossy() == key,
             _ => false,
         };
-        if matches_key {
-            if let Value::Int(n) = v {
-                return Some(*n);
-            }
+        if matches_key
+            && let Value::Int(n) = v
+        {
+            return Some(*n);
         }
     }
     None
@@ -488,8 +489,7 @@ fn check_path_allowed(path: &str) -> Result<(), Trap> {
             backtrace: vec![],
         });
     }
-    let allowed = vm.sqlite_allow_paths.as_ref();
-    let prefixes: Option<&Vec<PathBuf>> = allowed.map(|v| v.as_ref());
+    let prefixes = vm.sqlite_allow_paths.as_ref();
     if let Some(prefixes) = prefixes {
         let resolved = crate::lexically_resolve_path(std::path::Path::new(path));
         if !prefixes.iter().any(|p| resolved.starts_with(p)) {
@@ -650,7 +650,7 @@ fn query_cached_inner(
 /// SQLite). Type marshalling per ADR 0027 §5.
 fn bind_params(stmt: &mut Statement<'_>, params: &[Value], vm: &crate::vm::Vm) -> Result<(), Trap> {
     for (i, v) in params.iter().enumerate() {
-        let idx = (i + 1) as usize;
+        let idx = i + 1;
         match v {
             Value::Nil => stmt
                 .raw_bind_parameter(idx, rusqlite::types::Null)

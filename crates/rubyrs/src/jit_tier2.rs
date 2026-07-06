@@ -440,11 +440,11 @@ fn t2_census_note_op(vm: &mut crate::vm::Vm, op: &Op) {
 /// `depth` = `frames.len()` BEFORE the op ran.
 #[inline]
 fn t2_finish(vm: &mut crate::vm::Vm, depth: usize) -> i64 {
-    if vm.frames.len() > depth {
-        if let Err(t) = vm.dispatch_until(depth) {
-            vm.t2_trap = Some(t);
-            return T2_TRAP;
-        }
+    if vm.frames.len() > depth
+        && let Err(t) = vm.dispatch_until(depth)
+    {
+        vm.t2_trap = Some(t);
+        return T2_TRAP;
     }
     if vm.frames.len() < depth {
         return T2_DONE;
@@ -2115,10 +2115,11 @@ fn t2_call_impl(
         vm.trailing_hash_positional = false;
         match served {
             Ok(true) => {
-                if site_v != 0 && cache_id != u32::MAX {
-                    if let Some(v) = vm.t2_site_verdict.get_mut(cache_id as usize) {
-                        *v = 0;
-                    }
+                if site_v != 0
+                    && cache_id != u32::MAX
+                    && let Some(v) = vm.t2_site_verdict.get_mut(cache_id as usize)
+                {
+                    *v = 0;
                 }
                 if vm.jit_stats_on {
                     vm.t2_call_stats[0] += 1;
@@ -2678,10 +2679,10 @@ pub(crate) fn t2_admit(proto: &Proto) -> Result<(), String> {
                     return Err(format!("jump target out of range at {}", i));
                 }
             }
-            Op::JumpIfFalse(off) | Op::JumpIfArgGiven(_, off) | Op::JumpIfKwArgGiven(_, off) => {
-                if jump_target(i, *off) >= n || i + 1 >= n {
-                    return Err(format!("cond target out of range at {}", i));
-                }
+            Op::JumpIfFalse(off) | Op::JumpIfArgGiven(_, off) | Op::JumpIfKwArgGiven(_, off)
+                if jump_target(i, *off) >= n || i + 1 >= n =>
+            {
+                return Err(format!("cond target out of range at {}", i));
             }
             _ => {}
         }
@@ -4211,7 +4212,7 @@ fn emit_op(cg: &mut Cg, fb: &mut FunctionBuilder, i: usize) -> bool {
         // LITE t2_call: the IC-cached bare-constant read (frameless on a
         // cache hit; cold/invalidated → materialize + interpreted refill).
         Op::LoadConstChain(ci) if cg.lite => {
-            return cg.emit_lite_ext(fb, i, cg.h.lite_const, &[ci as i64]);
+            cg.emit_lite_ext(fb, i, cg.h.lite_const, &[ci as i64])
         }
         // FRAMED IC-hit const reads (ADR 0037 tail): serve the
         // interpreter's own inline constant caches without the generic
@@ -4229,7 +4230,7 @@ fn emit_op(cg: &mut Cg, fb: &mut FunctionBuilder, i: usize) -> bool {
             false
         }
         Op::LoadConst(sym) if cg.lite => {
-            return cg.emit_lite_ext(fb, i, cg.h.lite_const_flat, &[sym.0 as i64]);
+            cg.emit_lite_ext(fb, i, cg.h.lite_const_flat, &[sym.0 as i64])
         }
         Op::LoadConst(sym) if !cg.nocall => {
             cg.flush(fb);
@@ -4994,10 +4995,8 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize, ctx: &T2Ctx) -> Opt
                 leader[jump_target(i, *off)] = true;
                 leader[i + 1] = true;
             }
-            Op::Return => {
-                if i + 1 < n {
-                    leader[i + 1] = true;
-                }
+            Op::Return if i + 1 < n => {
+                leader[i + 1] = true;
             }
             _ => {}
         }

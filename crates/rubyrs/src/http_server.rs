@@ -3348,10 +3348,10 @@ mod tests {
     #[test]
     fn expect_bool_flag_accepts_bool_and_int() {
         use crate::value::Value;
-        assert_eq!(expect_bool_flag("k", &Value::Bool(true)).unwrap(), true);
-        assert_eq!(expect_bool_flag("k", &Value::Bool(false)).unwrap(), false);
-        assert_eq!(expect_bool_flag("k", &Value::Int(1)).unwrap(), true);
-        assert_eq!(expect_bool_flag("k", &Value::Int(0)).unwrap(), false);
+        assert!(expect_bool_flag("k", &Value::Bool(true)).unwrap());
+        assert!(!expect_bool_flag("k", &Value::Bool(false)).unwrap());
+        assert!(expect_bool_flag("k", &Value::Int(1)).unwrap());
+        assert!(!expect_bool_flag("k", &Value::Int(0)).unwrap());
         assert!(expect_bool_flag("k", &Value::Int(2)).is_err());
         assert!(expect_bool_flag("k", &Value::Nil).is_err());
     }

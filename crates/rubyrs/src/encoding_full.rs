@@ -255,7 +255,7 @@ pub(crate) fn decode_to_utf8(idx: u8, bytes: &[u8]) -> Option<String> {
     // UTF-16LE/BE: an odd byte count or a lone/ill-formed surrogate
     // is invalid (None → InvalidByteSequenceError at the call site).
     if let Some(le) = utf16_endianness(idx) {
-        if bytes.len() % 2 != 0 {
+        if !bytes.len().is_multiple_of(2) {
             return None;
         }
         let units = bytes.chunks_exact(2).map(|c| {
@@ -284,7 +284,7 @@ pub(crate) fn decode_to_utf8(idx: u8, bytes: &[u8]) -> Option<String> {
     // UTF-32LE/BE: a non-multiple-of-4 length, a surrogate, or a
     // codepoint > U+10FFFF is invalid (None).
     if let Some(le) = utf32_endianness(idx) {
-        if bytes.len() % 4 != 0 {
+        if !bytes.len().is_multiple_of(4) {
             return None;
         }
         let mut out = String::with_capacity(bytes.len() / 4);

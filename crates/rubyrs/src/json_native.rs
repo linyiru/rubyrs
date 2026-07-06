@@ -645,6 +645,7 @@ const NEG_ZERO_BITS: u64 = 0x8000_0000_0000_0000;
 ///     literal may have been an exact bigint (CRuby: Integer);
 ///   - negative zero — the literal may have been `-0` (CRuby:
 ///     Integer 0) or a float spelling (CRuby: Float -0.0).
+///
 /// Three predictable compares; the fast-path cost replaces the
 /// old `n == 0.0 && n.is_sign_negative()` negative-zero decline.
 #[inline]
@@ -975,8 +976,8 @@ impl ParseCtx<'_> {
             Act::Big(_text) => {
                 #[cfg(feature = "bignum")]
                 {
-                    return bigint_value_from_text(self.vm, &_text)
-                        .ok_or("exact-number bigint parse");
+                    bigint_value_from_text(self.vm, &_text)
+                        .ok_or("exact-number bigint parse")
                 }
                 #[cfg(not(feature = "bignum"))]
                 {
@@ -1499,11 +1500,12 @@ mod tests {
     // ---- serde <-> from_str f64 equivalence (pairing soundness) ---------
 
     enum Num {
-        // Payload captured to mirror serde's visit_i64 delivery; the
-        // bigint sweep only asserts on U/F (an I is out-of-range-proof
-        // by construction), so the i64 itself is never read.
+        // Payloads captured to mirror serde's visit_i64/visit_u64
+        // delivery; the bigint sweep only asserts on F (an I is
+        // out-of-range-proof and a U exact by construction), so the
+        // integer payloads themselves are never read.
         I(#[allow(dead_code)] i64),
-        U(u64),
+        U(#[allow(dead_code)] u64),
         F(f64),
     }
 
@@ -1540,7 +1542,7 @@ mod tests {
         state.wrapping_mul(0x2545F4914F6CDD1D)
     }
 
-    /// >=1M-sample equivalence: format a random finite f64 with the
+    /// 1M+-sample equivalence: format a random finite f64 with the
     /// canonical fpconv writer (`json_float`), reparse through BOTH
     /// serde_json's visitor path and Rust's `str::parse::<f64>` —
     /// all three bit-identical. This is the float half of the
@@ -1592,10 +1594,10 @@ mod tests {
                     expected.to_bits(),
                     "serde/from_str disagree on {text:?}"
                 ),
-                Num::U(u) => assert!(
-                    u <= u64::MAX,
-                    "in-range literal {text:?} stays exact"
-                ),
+                // A literal serde parses into the u64 lane is exact by
+                // construction (every u64 is in range) — nothing to check,
+                // same as the i64 lane below.
+                Num::U(_) => {}
                 Num::I(_) => {}
             }
         };

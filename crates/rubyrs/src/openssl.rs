@@ -3,8 +3,8 @@
 //! The minimal TLS surface `Net::HTTP` https drives: wrap a connected
 //! `_socket` `TcpStream` in a rustls client session and expose the same
 //! blocking `read`/`write` contract as `_socket`. Backed by rustls 0.23
-//! + the `ring` provider + bundled `webpki-roots` (no C OpenSSL link, no
-//! system-cert dependency).
+//! plus the `ring` provider and bundled `webpki-roots` (no C OpenSSL
+//! link, no system-cert dependency).
 //!
 //! Cross-battery seam (ADR 0029 §2, ADR 0019 Rule 5): `connect` TAKES the
 //! TcpStream from the `_socket` handle table via `socket::take_stream`
@@ -347,9 +347,12 @@ fn validate_aes_key(key: &[u8]) -> Result<(), Trap> {
     }
 }
 
+/// The `(key, iv, data)` triple every CBC host fn validates out of its args.
+type CbcArgs = (Vec<u8>, [u8; 16], Vec<u8>);
+
 /// Shared arg validation for the CBC host fns: AES key (16/24/32),
 /// 16-byte IV, and a block-aligned data buffer.
-fn cbc_args(args: &[Value], op: &str) -> Result<(Vec<u8>, [u8; 16], Vec<u8>), Trap> {
+fn cbc_args(args: &[Value], op: &str) -> Result<CbcArgs, Trap> {
     let (key, iv, data) = match args {
         [Value::Str(k), Value::Str(v), Value::Str(d)] => {
             (k.borrow().clone(), v.borrow().clone(), d.borrow().clone())

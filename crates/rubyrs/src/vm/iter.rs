@@ -4553,10 +4553,10 @@ impl Vm {
                 // in native code. A deopt (non-Int element / block result /
                 // overflow) falls through to the generic loop.
                 #[cfg(feature = "jit-native")]
-                if let Value::Int(n) = init {
-                    if let Some(acc) = g.vm.try_native_inject_loop(block, id, *n) {
-                        return Ok(Some(Value::Int(acc)));
-                    }
+                if let Value::Int(n) = init
+                    && let Some(acc) = g.vm.try_native_inject_loop(block, id, *n)
+                {
+                    return Ok(Some(Value::Int(acc)));
                 }
                 // Float-accumulator inject (ADR 0034 layer 3d): a numeric init + a
                 // Float-producing block folds in f64. Tries after the Int loop

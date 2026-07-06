@@ -177,6 +177,10 @@ pub fn aes_ctr_xor(key: &[u8], iv: &[u8; 16], byte_offset: u64, data: &[u8]) -> 
     let mut consumed = byte_offset;
     let mut keystream = [0u8; 16];
     let mut ks_valid_from = u64::MAX; // block index currently in `keystream`
+    // clippy::explicit_counter_loop: `consumed` is a u64 keystream POSITION
+    // starting at `byte_offset`, not a 0-based element index — an
+    // enumerate() index cannot replace it.
+    #[allow(clippy::explicit_counter_loop)]
     for &byte in data {
         let block_index = consumed / 16;
         let within = (consumed % 16) as usize;
@@ -230,9 +234,9 @@ fn gcm_mult(x: &[u8; 16], y: &[u8; 16]) -> [u8; 16] {
         // V >>= 1 over the full 128-bit word, then fold in R on underflow.
         let lsb = v[15] & 1;
         let mut carry = 0u8;
-        for j in 0..16 {
-            let next = v[j] & 1;
-            v[j] = (v[j] >> 1) | (carry << 7);
+        for vj in v.iter_mut() {
+            let next = *vj & 1;
+            *vj = (*vj >> 1) | (carry << 7);
             carry = next;
         }
         if lsb == 1 {
@@ -288,7 +292,7 @@ fn gcm_setup(w: &[[u8; 4]], nr: usize, iv: &[u8]) -> ([u8; 16], [u8; 16]) {
         j
     } else {
         let mut data = iv.to_vec();
-        while data.len() % 16 != 0 {
+        while !data.len().is_multiple_of(16) {
             data.push(0);
         }
         data.extend_from_slice(&[0u8; 8]);

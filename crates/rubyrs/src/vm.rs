@@ -1311,6 +1311,16 @@ impl ConstLoc {
 /// shape-bit layout.
 pub(crate) type NfaStatsMap = FxHashMap<(SymId, u16, u32, bool), u64>;
 
+/// Backing map for [`Vm::t2_fb_stats`] — key is `(reason code, method
+/// name, receiver-shape code, min(argc,15))`; see the field doc.
+#[cfg(feature = "jit-native")]
+pub(crate) type T2FbStatsMap = FxHashMap<(u8, SymId, u8, u8), u64>;
+
+/// Backing map for [`Vm::t2_op_stats`] — key is `(op variant tag,
+/// call name when one exists)`; see the field doc.
+#[cfg(feature = "jit-native")]
+pub(crate) type T2OpStatsMap = FxHashMap<(String, Option<SymId>), u64>;
+
 pub(crate) struct Vm {
     pub(crate) protos: Vec<Proto>,
     #[cfg(feature = "jit-native")]
@@ -2571,13 +2581,13 @@ pub(crate) struct Vm {
     /// decode table lives on `Runtime::t2_fallback_stats_rows`.
     /// `None` (the default) costs one branch per t2_call fallback.
     #[cfg(feature = "jit-native")]
-    pub(crate) t2_fb_stats: Option<Box<FxHashMap<(u8, SymId, u8, u8), u64>>>,
+    pub(crate) t2_fb_stats: Option<Box<T2FbStatsMap>>,
     /// Companion census (same gate): every op a tier-2 body executes
     /// through the GENERIC helper (`t2_op`) — i.e. the op forms with
     /// no specialized serve, including the kw/splat/super call
     /// family. Key = (op variant tag, call name when one exists).
     #[cfg(feature = "jit-native")]
-    pub(crate) t2_op_stats: Option<Box<FxHashMap<(String, Option<SymId>), u64>>>,
+    pub(crate) t2_op_stats: Option<Box<T2OpStatsMap>>,
     /// One-shot marker: the NEXT `do_call`/`do_call_kw`/
     /// `do_call_block` entry is the direct fallback dispatch of a
     /// tier-2 in-body call (set at the fallback edges, taken at the
@@ -4245,8 +4255,8 @@ impl Vm {
                 );
             }
         }
-        let mut rows: Vec<(&(usize, u8), &(u64, u64))> = self.jit_stats.exec.iter().collect();
-        rows.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+        let mut rows: Vec<_> = self.jit_stats.exec.iter().collect();
+        rows.sort_by_key(|r| std::cmp::Reverse(r.1 .0));
         let total_calls: u64 = rows.iter().map(|r| r.1 .0).sum();
         let total_deopts: u64 = rows.iter().map(|r| r.1 .1).sum();
         eprintln!(

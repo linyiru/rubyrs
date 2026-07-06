@@ -1666,8 +1666,10 @@ mod tests {
     /// when at the cap.
     #[test]
     fn max_live_fibers_cap_blocks_alloc() {
-        let mut cfg = crate::Config::default();
-        cfg.max_live_fibers = Some(2);
+        let cfg = crate::Config {
+            max_live_fibers: Some(2),
+            ..Default::default()
+        };
         let mut rt = crate::Runtime::with_config(cfg);
         super::register_host_fns(&mut rt);
         let err = rt.eval(r##"
@@ -1688,12 +1690,14 @@ mod tests {
     /// "heap scan counts only live slots" path.
     #[test]
     fn max_live_fibers_releases_after_gc() {
-        let mut cfg = crate::Config::default();
-        cfg.max_live_fibers = Some(1);
-        // Aggressive GC to make collection observable in
-        // a small test — stress_gc fires a collect at
-        // every allocation.
-        cfg.stress_gc = true;
+        let cfg = crate::Config {
+            max_live_fibers: Some(1),
+            // Aggressive GC to make collection observable in
+            // a small test — stress_gc fires a collect at
+            // every allocation.
+            stress_gc: true,
+            ..Default::default()
+        };
         let mut rt = crate::Runtime::with_config(cfg);
         super::register_host_fns(&mut rt);
         // Allocate first fiber, then immediately drop the
@@ -1729,12 +1733,14 @@ mod tests {
     /// goes through the regular `max_frames` cap.
     #[test]
     fn max_fiber_frame_depth_traps_runaway_recursion() {
-        let mut cfg = crate::Config::default();
-        // Tight cap so the trap fires after just a few
-        // frames. Plenty of headroom for the body's outer
-        // proc frame (counts as 1) + the rec method
-        // frames (counts as +1 per call).
-        cfg.max_fiber_frame_depth = Some(10);
+        let cfg = crate::Config {
+            // Tight cap so the trap fires after just a few
+            // frames. Plenty of headroom for the body's outer
+            // proc frame (counts as 1) + the rec method
+            // frames (counts as +1 per call).
+            max_fiber_frame_depth: Some(10),
+            ..Default::default()
+        };
         let mut rt = crate::Runtime::with_config(cfg);
         super::register_host_fns(&mut rt);
         let err = rt.eval(r##"
@@ -1759,8 +1765,10 @@ mod tests {
     /// specific trap.
     #[test]
     fn max_fiber_frame_depth_does_not_trip_outside_fiber() {
-        let mut cfg = crate::Config::default();
-        cfg.max_fiber_frame_depth = Some(5);
+        let cfg = crate::Config {
+            max_fiber_frame_depth: Some(5),
+            ..Default::default()
+        };
         let mut rt = crate::Runtime::with_config(cfg);
         super::register_host_fns(&mut rt);
         // Outside any fiber: shallow recursion is fine.
