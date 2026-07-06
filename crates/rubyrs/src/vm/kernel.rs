@@ -1084,6 +1084,11 @@ impl Vm {
                 let sc = self.heap.ensure_singleton_class(oid);
                 for sid in sids {
                     sc.undefed.borrow_mut().insert(sid);
+                    // Name-keyed union for the walk-bucket gate (see
+                    // the `undef_names` field doc) — this host-helper
+                    // tombstone path never set `any_undefs`, so the
+                    // buckets need the union to decline these names.
+                    self.undef_names.insert(sid);
                 }
                 self.method_gen = self.method_gen.wrapping_add(1);
                 Some(Ok(Value::Nil))

@@ -593,7 +593,7 @@ jobs:
           # instance_eval-definee `frames.last_mut().unwrap()`
           # (afb7257c, dispatch always runs with a frame). All
           # ICE-class; not user-reachable.
-          check crates/rubyrs/src/vm/dispatch.rs     85  # 2026-07-05 +4/-2: M5 singleton-shell redirect unwraps (guard-adjacent) net of M4 message-rewrite removals
+          check crates/rubyrs/src/vm/dispatch.rs     87  # 2026-07-06 +2: P2 walk buckets — two ICE-class stack-pop expects (Kernel#Array wrap arm, class-self bare-call arg drain), both guard-adjacent shape invariants
           # Bumped 52 → 64 by PRs #78 (break/next through ensure —
           # loop-transfer landing arms + frame/stack assertions in
           # the new control-flow ops) and #79 (GlobalVariableRead /

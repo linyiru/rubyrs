@@ -2557,6 +2557,18 @@ pub(crate) struct Vm {
     pub(crate) fast_arr_misc_safe: bool,
     pub(crate) fast_hash_fetch_safe: bool,
     pub(crate) fast_str_dup_safe: bool,
+    /// 2026-07 P2 (AM fallback census) bucket twins, same
+    /// method_gen-revalidated discipline:
+    ///   - `fast_is_a_prim_safe`: no user `is_a?` / `kind_of?` on
+    ///     ANY of the Integer / Float / String / TrueClass /
+    ///     FalseClass chains (lumped — a reopen on one turns the
+    ///     whole primitive-receiver `is_a?` bucket off; perf-only).
+    ///   - `fast_kernel_array_prim_safe`: no user `to_ary` / `to_a`
+    ///     on ANY of those chains nor on Symbol — the exact pair of
+    ///     probes the canonical `Kernel#Array` builtin's `_` arm
+    ///     makes before wrapping `[obj]`.
+    pub(crate) fast_is_a_prim_safe: bool,
+    pub(crate) fast_kernel_array_prim_safe: bool,
     /// TEMPORARY diagnostics (env-gated, `RUBYRS_CASCADE_STATS=1`):
     /// per-(name, receiver-shape) counters of do_call sends that
     /// reach the slow cascade (i.e. fell through every fast bucket
@@ -2638,6 +2650,19 @@ pub(crate) struct Vm {
     /// tombstone walk in `do_call` so programs that never undef
     /// pay a single bool test (same pattern as `prim_reopen_mask`).
     pub(crate) any_undefs: bool,
+    /// Union of every name EVER passed to an `undef_method`
+    /// tombstone insert (both the Module arm and the
+    /// `singleton_class.undef_method` host helper). Name-keyed
+    /// refinement of `any_undefs` for the walk fast buckets: a
+    /// tombstone can only intercept a name present in some
+    /// `Class::undefed` set, so a name absent from this union can
+    /// never hit one and the buckets stay live for it (previously
+    /// ONE `undef_method` anywhere — ActiveSupport does several at
+    /// load — turned every walk bucket off for the whole program).
+    /// Insert-only; never cleared (a stale entry after
+    /// redefine-over-undef only declines a bucket, the cascade
+    /// re-resolves identically).
+    pub(crate) undef_names: crate::intern::FxHashSet<SymId>,
     pub(crate) prim_reopen_mask: u8,
     /// Stack of Array/Hash ObjIds currently being rendered by
     /// `inspect_value`. A re-entry on an id already present is a cycle
@@ -3511,6 +3536,8 @@ impl Vm {
             fast_arr_misc_safe: false,
             fast_hash_fetch_safe: false,
             fast_str_dup_safe: false,
+            fast_is_a_prim_safe: false,
+            fast_kernel_array_prim_safe: false,
             cascade_stats: if std::env::var_os("RUBYRS_CASCADE_STATS").is_some() {
                 Some(Box::default())
             } else {
@@ -3541,6 +3568,7 @@ impl Vm {
             #[cfg(feature = "jit-native")]
             rest_pred_stats: (0, 0),
             any_undefs: false,
+            undef_names: crate::intern::FxHashSet::default(),
             prim_reopen_mask: 0,
             inspect_stack: Vec::new(),
             builtin_class_cache: Default::default(),

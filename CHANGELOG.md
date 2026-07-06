@@ -46,6 +46,16 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   `define_method(:nil?)` / `(:!)` overrides now win over the built-in
   truthiness arms exactly like their `def` twins.
   (`define_method_ic_serve.rb`)
+- **Dispatch-campaign P2: builtin/universal sends on primitive and Class
+  receivers skip the slow cascade** — new walk fast buckets for
+  Class-receiver `respond_to?`, primitive-receiver `is_a?`/`kind_of?`,
+  Symbol `equal?`/`inspect`, the `Kernel#Array` nil/wrap arms, and bare
+  sibling calls inside `def self.` / module-function bodies (previously the
+  only fast-path-less dispatch shape); the old program-global
+  `any_undefs` bucket kill-switch is now a per-receiver tombstone mirror,
+  so one `undef_method` anywhere (ActiveSupport does several at load) no
+  longer disables every bucket — ActiveModel `valid?` loop 601 → 202
+  slow-cascade fallbacks/iter, +15% throughput. (`p2_walk_buckets.rb`)
 - **Generational mark-sweep GC** — young/old regions with minor/major
   collections and a write barrier, replacing the flat mark-sweep
   (substantially less collection churn on object-heavy workloads).

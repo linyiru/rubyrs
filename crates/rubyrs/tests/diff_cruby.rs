@@ -879,6 +879,15 @@ fn tier2_restblock_lite() { run_diff("tier2_restblock_lite"); }
 #[test] fn stringio_line_methods() { run_diff("stringio_line_methods"); }
 #[test] fn comparable_is_module() { run_diff("comparable_is_module"); }
 #[test] fn numeric_remainder_ceildiv() { run_diff("numeric_remainder_ceildiv"); }
+// Dispatch-campaign P2 walk fast buckets (AM fallback census): the
+// AS DeprecationProxy undef-everything shape (receiver-aware
+// tombstone gate), redefine-after-undef, Symbol equal?/inspect (+
+// reopen precedence), Kernel#Array Nil/wrap arms (+ to_a reopen
+// decline), primitive-receiver is_a?, Class-receiver respond_to?
+// (incl. class-level respond_to_missing?), and the class-self
+// bare-call serve (module-function siblings, private class methods,
+// extended-module resolution, bare block_given? in `def self.`).
+#[test] fn p2_walk_buckets() { run_diff("p2_walk_buckets"); }
 #[test] fn lazy_each_with_index() { run_diff("lazy_each_with_index"); }
 #[cfg(feature = "stdlib")]
 #[test] fn set_subtract_divide() { run_diff("set_subtract_divide"); }
