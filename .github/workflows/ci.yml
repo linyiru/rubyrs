@@ -63,6 +63,16 @@ jobs:
         # `// allow: doc-orientation` to suppress.
         run: bash scripts/lint-doc-orientation.sh
 
+      - name: Clippy (standard measurement set, -D warnings)
+        # S6 (2026-07-06) cleared the feature-gated debt (95 errors) —
+        # this leg keeps it cleared; deps are shared with the workspace
+        # leg so the incremental cost is seconds.
+        run: cargo clippy --release --all-targets -p rubyrs --locked --features stdlib,jit-native,_fiber,_json_native,mimalloc -- -D warnings
+
+      - name: Clippy (everything combo, -D warnings)
+        # The only leg that lints battery files (36 errors cleared in S6).
+        run: cargo clippy --release --all-targets -p rubyrs --locked --features everything,jit-native -- -D warnings
+
       - name: Clippy (workspace, -D warnings)
         # Catches the style / pedantic lints that `cargo build`
         # won't notice. The workspace is at zero warnings as of
