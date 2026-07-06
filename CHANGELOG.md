@@ -50,6 +50,17 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   registration only wires the host-fn backend — and survive
   `Runtime::reset()` as part of the post-preamble baseline.
 
+### Fixed
+
+- **`break`/`next` escaping an ensure crossed by a local `return` now
+  matches CRuby ≥ 3.4.2** — the break lands at the loop join and cancels the
+  pending return (rubyrs previously mimicked CRuby 3.4.0/3.4.1's prism bug
+  window, [Bug #21001](https://bugs.ruby-lang.org/issues/21001), where the
+  method returned the break value); 15 shapes re-mainlined into
+  `ensure_walk_break_return.rb`, leaving only the walk-survives-block-`next`
+  family (D3/K1/K4, where modern CRuby hangs forever) pinned in
+  `tests/embed/ensure_walk_divergences.rs`.
+
 ### Internal
 
 - **Dispatch-core fast paths** — primitive / index / `Proc#call` fast paths

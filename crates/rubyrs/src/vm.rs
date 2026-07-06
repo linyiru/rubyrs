@@ -533,14 +533,17 @@ pub(crate) struct SuspendCoord {
     /// this depth; an exception-path entry sits one higher.
     pub(crate) stack_len: usize,
     /// `frame.loop_depth()` at suspension — the ensure body's
-    /// "region" discriminator for `Op::BreakLoop`. A `while`/`until`
-    /// entered INSIDE the suspended body pushes `loop_rescue_depths`
-    /// entries above this mark, so a break whose target-loop index
-    /// is `>= loop_depth` is contained in the body (normal transfer,
-    /// walk resumes at the body's tail), while an index `< loop_depth`
-    /// targets a loop the body is lexically inside — the break is
-    /// jumping OUT of the body. Time-based rather than ip-range-based
-    /// region modeling: it needs no compiler-layout knowledge and is
+    /// "region" discriminator for `begin_loop_transfer`'s supersede
+    /// sweep. A `while`/`until` entered INSIDE the suspended body
+    /// pushes `loop_rescue_depths` entries above this mark, so a
+    /// break whose target-loop index is `>= loop_depth` is contained
+    /// in the body (normal transfer, walk resumes at the body's
+    /// tail), while an index `< loop_depth` targets a loop the body
+    /// is lexically inside — the break is jumping OUT of the body
+    /// and the walk must be cancelled (a stale suspended walk here
+    /// would later be mis-replayed by `Op::Return`'s abandoned-walk
+    /// branch). Time-based rather than ip-range-based region
+    /// modeling: it needs no compiler-layout knowledge and is
     /// immune to the second-copy placement of ensure bodies.
     pub(crate) loop_depth: usize,
     /// Monotonic suspension counter (`Vm::suspend_seq`) — total
@@ -588,55 +591,48 @@ pub(crate) struct MethodBreak {
     /// [`SuspendCoord`] identifies the suspension for EndEnsure
     /// matching and escape cancellation — see its doc.
     pub(crate) suspended: Option<SuspendCoord>,
-    /// What started this walk — see [`WalkOrigin`]. Drives the two
-    /// CRuby corner behaviours that depend on HOW the walk began
-    /// (`break`-in-ensure artifact, `next`-abandonment replay);
-    /// everything else ignores it.
+    /// What started this walk — see [`WalkOrigin`]. Drives the one
+    /// CRuby corner behaviour that depends on HOW the walk began
+    /// (the `next`-abandonment replay in `Op::Return`); everything
+    /// else ignores it.
     pub(crate) origin: WalkOrigin,
 }
 
-/// How a [`MethodBreak`] walk began. CRuby compiles the ensure
-/// bodies a `return` crosses in two different ways, and the two
-/// compilations OBSERVABLY diverge when the suspended body performs
-/// its own control transfer — so the walk must remember its origin.
+/// How a [`MethodBreak`] walk began. A `break`/`next` in an ensure
+/// body the walk crosses lands at the loop join and CANCELS the walk
+/// regardless of origin — CRuby >= 3.4.2 / parse.y / 3.3.x agree
+/// (`break` compiles to `throw TAG_BREAK` in the exceptional ensure
+/// copy). That's rubyrs's structural default; no origin consulted.
+/// (CRuby 3.4.0/3.4.1's Prism compiler diverged for syntactically-
+/// local returns — the [Bug #21001] window, fixed upstream by
+/// ruby/ruby 31905d9e and backported into 3.4.2. rubyrs's probe
+/// matrix predates the fix and mimicked it via a `LocalMethodReturn`
+/// variant + an `Op::BreakLoop` artifact branch until S1 removed
+/// both; see SUBSET.md "break/next inside a suspended ensure walk".)
 ///
-/// Probed matrix (CRuby 3.4.1, see tests/diff/ensure_walk_break_return.rb
-/// and SUBSET.md "break/next inside a suspended ensure walk"):
-///
-/// - A syntactically-local `return` in a `def` body (or `-e` main)
-///   INLINES the ensure body at the return site (disasm: the break
-///   value replaces the pending return value and falls through to
-///   `leave`). A `while`/`until` `break` inside that inline copy
-///   whose loop lies OUTSIDE the body therefore makes the METHOD
-///   return the break value — it never consults the loop's
-///   catch-table entry. That's `LocalMethodReturn` + the
-///   `Op::BreakLoop` artifact branch.
-/// - Every OTHER walk (non-local return from a block/proc — even
-///   when the walk is at its own target frame; lambda return;
-///   define_method return; block-break; exception unwind) runs the
-///   ensure via the exceptional second copy, where `break` compiles
-///   to `throw TAG_BREAK` and lands at the loop join, CANCELLING the
-///   in-flight walk. That's rubyrs's structural default — no flag
-///   consulted.
+/// The origin that still matters: a BLOCK-frame `next` abandoning a
+/// suspended walk goes the other way — the walk wins, not the `next`
+/// (see `Op::Return`'s abandoned-walk branch and the doc on each
+/// variant below).
 pub(crate) enum WalkOrigin {
-    /// `Op::Return` in a non-block frame with pending ensures — a
-    /// local method return. The only origin eligible for the
-    /// break-in-ensure artifact above.
-    LocalMethodReturn,
     /// Walk begun by consuming the `method_return` signal (a
     /// non-local `return` crossing frames). Carries the lexical
     /// owner's locals Rc (the same identity `method_return_locals`
     /// held) so a block-frame `next` that abandons the suspended
     /// body can convert the walk BACK to the `method_return`
-    /// signal: CRuby resumes the return in that shape (`[..].each {
-    /// begin return v ensure next end }` returns v from the
-    /// enclosing method), and replaying the signal re-uses the
-    /// whole established crossing protocol (dispatch levels, iter
-    /// drivers) instead of teaching every driver about in-flight
-    /// walks. See `Op::Return`'s abandoned-walk branch.
+    /// signal: `[..].each { begin return v ensure next end }`
+    /// returns v from the enclosing method — a DELIBERATE
+    /// divergence (modern CRuby discards the pending walk, which
+    /// hangs forever on the bytecode-yielder K4 shape; see
+    /// tests/embed/ensure_walk_divergences.rs). Replaying the
+    /// signal re-uses the whole established crossing protocol
+    /// (dispatch levels, iter drivers) instead of teaching every
+    /// driver about in-flight walks. See `Op::Return`'s
+    /// abandoned-walk branch.
     MethodReturnSignal(Rc<RefCell<Vec<Value>>>),
     /// Everything else: block-break landing on the yielding method,
-    /// block value-return with ensures, fiber-recovery breaks.
+    /// local method return / block value-return with ensures,
+    /// fiber-recovery breaks.
     Block,
 }
 

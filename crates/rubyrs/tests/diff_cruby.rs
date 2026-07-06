@@ -860,12 +860,13 @@ fn tier2_restblock_lite() { run_diff("tier2_restblock_lite"); }
 #[test] fn ensure_walk_contained_raise() { run_diff("ensure_walk_contained_raise"); }
 #[test] fn ensure_walk_supersede() { run_diff("ensure_walk_supersede"); }
 // break/next executing INSIDE a suspended ensure walk (the b4/b4c
-// family): join-landing walk cancellation and the while-loop next
-// supersede — only the shapes stable across every CRuby 3.4.x patch
-// version (CI's oracle floats on "3.4"-latest). The shapes that sat
-// in CRuby 3.4.0/3.4.1's prism bug window ([Bug #21001], flipped in
-// 3.4.2) plus the deliberate divergences live as pinned goldens in
-// tests/embed/ensure_walk_divergences.rs.
+// family): join-landing walk cancellation for every walk origin and
+// the while-loop next supersede. ORACLE FLOOR >= 3.4.2: CRuby
+// 3.4.0/3.4.1-prism had a bug window here ([Bug #21001], fixed in
+// 3.4.2) and diverges on ~15 shapes — see the fixture header. The
+// one deliberate rubyrs divergence (walk survives a block-`next`,
+// kept because modern CRuby HANGS on the K4 shape) lives as pinned
+// goldens in tests/embed/ensure_walk_divergences.rs.
 #[test] fn ensure_walk_break_return() { run_diff("ensure_walk_break_return"); }
 #[test] fn raise_class_runs_initialize() { run_diff("raise_class_runs_initialize"); }
 #[test] fn time_components() { run_diff("time_components"); }

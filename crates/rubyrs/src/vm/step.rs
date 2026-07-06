@@ -5670,46 +5670,20 @@ impl Vm {
                     .stack
                     .pop()
                     .expect("ICE: BreakLoop with no value on stack");
-                // CRuby local-return × break artifact (probed matrix in
-                // tests/diff/ensure_walk_break_return.rb; mechanism in
-                // WalkOrigin's doc): when this break executes INSIDE an
-                // ensure body in which a LOCAL method-return walk is
-                // suspended, and its target loop lies OUTSIDE that body
-                // (the loop was already open at suspension time —
-                // f.loop_depth() <= coord.loop_depth), CRuby's inlined
-                // ensure copy makes the METHOD return the break value:
-                // `def m; while true; begin return :ret; ensure; break
-                // :brk; end; end; :after; end` returns :brk, never
-                // reaching the loop join. Replace the suspended walk's
-                // value and resume it — remaining ensures (handlers
-                // still open above the suspension baseline, and any
-                // below it) run exactly once on the way out. A loop
-                // entered inside the body (loop_depth above the mark)
-                // is a contained transfer and takes the normal path,
-                // as does every non-LocalMethodReturn walk (block
-                // breaks, non-local returns — CRuby lands those at the
-                // loop join, cancelling the walk, which the default
-                // path already implements).
-                if !self.pending_method_breaks.is_empty() {
-                    let fidx = self.frames.len() - 1;
-                    let cur_loop_depth = self
-                        .frames
-                        .last()
-                        .map_or(0, |fr| fr.loop_depth());
-                    let artifact = self.pending_method_breaks.last().is_some_and(|mb| {
-                        matches!(mb.origin, crate::vm::WalkOrigin::LocalMethodReturn)
-                            && mb.suspended.is_some_and(|s| {
-                                s.frame_idx == fidx && cur_loop_depth <= s.loop_depth
-                            })
-                    });
-                    if artifact {
-                        if let Some(mb) = self.pending_method_breaks.last_mut() {
-                            mb.value = value;
-                        }
-                        self.continue_method_break()?;
-                        return Ok(!self.frames.is_empty());
-                    }
-                }
+                // A break executing INSIDE an ensure body that a
+                // suspended walk (method return / block break /
+                // exception unwind) crosses lands at the loop join and
+                // CANCELS the walk — `begin_loop_transfer`'s supersede
+                // sweep does the cancelling (rescue-depth + loop-depth
+                // region tests, see SuspendCoord::loop_depth). That
+                // matches CRuby >= 3.4.2 / parse.y / 3.3.x for EVERY
+                // walk origin. (CRuby 3.4.0/3.4.1's Prism compiler
+                // instead made a syntactically-local `return`'s ensure
+                // return the break value from the METHOD — a bug
+                // window fixed upstream by ruby/ruby 31905d9e
+                // [Bug #21001]; rubyrs mimicked it via a
+                // `WalkOrigin::LocalMethodReturn` special case here
+                // until S1 removed it. History: 985ada8b.)
                 self.begin_loop_transfer(
                     LoopTransferKind::Break { value },
                     target_ip,
@@ -6081,19 +6055,13 @@ impl Vm {
                 if has_ensure {
                     let ret = self.stack.pop().unwrap_or(Value::Nil);
                     let target = self.frames.len() - 1;
-                    // A local `return` in a METHOD frame is the one walk
-                    // origin CRuby compiles by INLINING the ensure bodies
-                    // at the return site — the scope of the break-in-
-                    // ensure artifact (see WalkOrigin's doc). A block
-                    // frame reaching Op::Return with ensures (its
-                    // terminal value crossing a begin/ensure) matches
-                    // CRuby's thrown TAG path instead.
-                    let origin = if self.frames.last().is_some_and(|fr| !fr.is_block) {
-                        crate::vm::WalkOrigin::LocalMethodReturn
-                    } else {
-                        crate::vm::WalkOrigin::Block
-                    };
-                    self.begin_method_break(ret, target, origin)?;
+                    // Origin `Block`: a walk begun at the returning
+                    // frame itself (local return / block terminal
+                    // value) never needs the `MethodReturnSignal`
+                    // replay — that replay only fires when a BLOCK
+                    // frame abandons a walk whose target lies BELOW
+                    // it, which can't be this frame's own walk.
+                    self.begin_method_break(ret, target, crate::vm::WalkOrigin::Block)?;
                     // Either suspended into an ensure body (frame still
                     // present, ip at the handler) or landed (frame
                     // popped). Continue unless the stack is now empty.

@@ -675,7 +675,11 @@ jobs:
           # asserts plus a length-check-guarded `rescues` expect —
           # net +3 after removed sites. Same frame-stack ICE class
           # as the ADR 0024 machinery; not user-reachable.
-          check crates/rubyrs/src/vm/raise.rs        20
+          # Ratcheted 20 → 19 (-1) on 2026-07-05 (ticket S1): the
+          # count had sat at 19 since the ensure-walk suspension
+          # rounds kept their new sites expect-free; locking the
+          # headroom out.
+          check crates/rubyrs/src/vm/raise.rs        19
           # Ratcheted 3 → 1 (-2) on 2026-07-04: two sites removed
           # (lookup cycle-guard rework); locking the win in.
           check crates/rubyrs/src/vm/lookup.rs        1
