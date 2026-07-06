@@ -424,25 +424,25 @@ void MessagePack_Unpacker_module_init(VALUE mMessagePack)
 
     rb_define_alloc_func(cMessagePack_Unpacker, MessagePack_Unpacker_alloc);
 
-    rb_define_method(cMessagePack_Unpacker, "initialize", MessagePack_Unpacker_initialize, -1);
-    rb_define_method(cMessagePack_Unpacker, "symbolize_keys?", Unpacker_symbolized_keys_p, 0);
-    rb_define_method(cMessagePack_Unpacker, "freeze?", Unpacker_freeze_p, 0);
-    rb_define_method(cMessagePack_Unpacker, "allow_unknown_ext?", Unpacker_allow_unknown_ext_p, 0);
-    rb_define_method(cMessagePack_Unpacker, "buffer", Unpacker_buffer, 0);
-    rb_define_method(cMessagePack_Unpacker, "read", Unpacker_read, 0);
+    rb_define_method(cMessagePack_Unpacker, "initialize", RUBY_METHOD_FUNC(MessagePack_Unpacker_initialize), -1);
+    rb_define_method(cMessagePack_Unpacker, "symbolize_keys?", RUBY_METHOD_FUNC(Unpacker_symbolized_keys_p), 0);
+    rb_define_method(cMessagePack_Unpacker, "freeze?", RUBY_METHOD_FUNC(Unpacker_freeze_p), 0);
+    rb_define_method(cMessagePack_Unpacker, "allow_unknown_ext?", RUBY_METHOD_FUNC(Unpacker_allow_unknown_ext_p), 0);
+    rb_define_method(cMessagePack_Unpacker, "buffer", RUBY_METHOD_FUNC(Unpacker_buffer), 0);
+    rb_define_method(cMessagePack_Unpacker, "read", RUBY_METHOD_FUNC(Unpacker_read), 0);
     rb_define_alias(cMessagePack_Unpacker, "unpack", "read");
-    rb_define_method(cMessagePack_Unpacker, "skip", Unpacker_skip, 0);
-    rb_define_method(cMessagePack_Unpacker, "skip_nil", Unpacker_skip_nil, 0);
-    rb_define_method(cMessagePack_Unpacker, "read_array_header", Unpacker_read_array_header, 0);
-    rb_define_method(cMessagePack_Unpacker, "read_map_header", Unpacker_read_map_header, 0);
-    rb_define_method(cMessagePack_Unpacker, "feed", Unpacker_feed_reference, 1);
+    rb_define_method(cMessagePack_Unpacker, "skip", RUBY_METHOD_FUNC(Unpacker_skip), 0);
+    rb_define_method(cMessagePack_Unpacker, "skip_nil", RUBY_METHOD_FUNC(Unpacker_skip_nil), 0);
+    rb_define_method(cMessagePack_Unpacker, "read_array_header", RUBY_METHOD_FUNC(Unpacker_read_array_header), 0);
+    rb_define_method(cMessagePack_Unpacker, "read_map_header", RUBY_METHOD_FUNC(Unpacker_read_map_header), 0);
+    rb_define_method(cMessagePack_Unpacker, "feed", RUBY_METHOD_FUNC(Unpacker_feed_reference), 1);
     rb_define_alias(cMessagePack_Unpacker, "feed_reference", "feed");
-    rb_define_method(cMessagePack_Unpacker, "each", Unpacker_each, 0);
-    rb_define_method(cMessagePack_Unpacker, "feed_each", Unpacker_feed_each, 1);
-    rb_define_method(cMessagePack_Unpacker, "reset", Unpacker_reset, 0);
+    rb_define_method(cMessagePack_Unpacker, "each", RUBY_METHOD_FUNC(Unpacker_each), 0);
+    rb_define_method(cMessagePack_Unpacker, "feed_each", RUBY_METHOD_FUNC(Unpacker_feed_each), 1);
+    rb_define_method(cMessagePack_Unpacker, "reset", RUBY_METHOD_FUNC(Unpacker_reset), 0);
 
-    rb_define_private_method(cMessagePack_Unpacker, "registered_types_internal", Unpacker_registered_types_internal, 0);
-    rb_define_private_method(cMessagePack_Unpacker, "register_type_internal", Unpacker_register_type_internal, 3);
+    rb_define_private_method(cMessagePack_Unpacker, "registered_types_internal", RUBY_METHOD_FUNC(Unpacker_registered_types_internal), 0);
+    rb_define_private_method(cMessagePack_Unpacker, "register_type_internal", RUBY_METHOD_FUNC(Unpacker_register_type_internal), 3);
 
-    rb_define_method(cMessagePack_Unpacker, "full_unpack", Unpacker_full_unpack, 0);
+    rb_define_method(cMessagePack_Unpacker, "full_unpack", RUBY_METHOD_FUNC(Unpacker_full_unpack), 0);
 }

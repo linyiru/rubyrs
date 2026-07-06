@@ -595,22 +595,22 @@ void MessagePack_Buffer_module_init(VALUE mMessagePack)
 
     rb_define_alloc_func(cMessagePack_Buffer, Buffer_alloc);
 
-    rb_define_method(cMessagePack_Buffer, "initialize", Buffer_initialize, -1);
-    rb_define_method(cMessagePack_Buffer, "clear", Buffer_clear, 0);
-    rb_define_method(cMessagePack_Buffer, "size", Buffer_size, 0);
-    rb_define_method(cMessagePack_Buffer, "empty?", Buffer_empty_p, 0);
-    rb_define_method(cMessagePack_Buffer, "write", Buffer_write, 1);
-    rb_define_method(cMessagePack_Buffer, "<<", Buffer_append, 1);
-    rb_define_method(cMessagePack_Buffer, "skip", Buffer_skip, 1);
-    rb_define_method(cMessagePack_Buffer, "skip_all", Buffer_skip_all, 1);
-    rb_define_method(cMessagePack_Buffer, "read", Buffer_read, -1);
-    rb_define_method(cMessagePack_Buffer, "read_all", Buffer_read_all, -1);
-    rb_define_method(cMessagePack_Buffer, "io", Buffer_io, 0);
-    rb_define_method(cMessagePack_Buffer, "flush", Buffer_flush, 0);
-    rb_define_method(cMessagePack_Buffer, "close", Buffer_close, 0);
-    rb_define_method(cMessagePack_Buffer, "write_to", Buffer_write_to, 1);
-    rb_define_method(cMessagePack_Buffer, "to_str", Buffer_to_str, 0);
+    rb_define_method(cMessagePack_Buffer, "initialize", RUBY_METHOD_FUNC(Buffer_initialize), -1);
+    rb_define_method(cMessagePack_Buffer, "clear", RUBY_METHOD_FUNC(Buffer_clear), 0);
+    rb_define_method(cMessagePack_Buffer, "size", RUBY_METHOD_FUNC(Buffer_size), 0);
+    rb_define_method(cMessagePack_Buffer, "empty?", RUBY_METHOD_FUNC(Buffer_empty_p), 0);
+    rb_define_method(cMessagePack_Buffer, "write", RUBY_METHOD_FUNC(Buffer_write), 1);
+    rb_define_method(cMessagePack_Buffer, "<<", RUBY_METHOD_FUNC(Buffer_append), 1);
+    rb_define_method(cMessagePack_Buffer, "skip", RUBY_METHOD_FUNC(Buffer_skip), 1);
+    rb_define_method(cMessagePack_Buffer, "skip_all", RUBY_METHOD_FUNC(Buffer_skip_all), 1);
+    rb_define_method(cMessagePack_Buffer, "read", RUBY_METHOD_FUNC(Buffer_read), -1);
+    rb_define_method(cMessagePack_Buffer, "read_all", RUBY_METHOD_FUNC(Buffer_read_all), -1);
+    rb_define_method(cMessagePack_Buffer, "io", RUBY_METHOD_FUNC(Buffer_io), 0);
+    rb_define_method(cMessagePack_Buffer, "flush", RUBY_METHOD_FUNC(Buffer_flush), 0);
+    rb_define_method(cMessagePack_Buffer, "close", RUBY_METHOD_FUNC(Buffer_close), 0);
+    rb_define_method(cMessagePack_Buffer, "write_to", RUBY_METHOD_FUNC(Buffer_write_to), 1);
+    rb_define_method(cMessagePack_Buffer, "to_str", RUBY_METHOD_FUNC(Buffer_to_str), 0);
     rb_define_alias(cMessagePack_Buffer, "to_s", "to_str");
-    rb_define_method(cMessagePack_Buffer, "to_a", Buffer_to_a, 0);
+    rb_define_method(cMessagePack_Buffer, "to_a", RUBY_METHOD_FUNC(Buffer_to_a), 0);
 }
 

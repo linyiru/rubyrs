@@ -264,13 +264,13 @@ void MessagePack_Factory_module_init(VALUE mMessagePack)
 
     rb_define_alloc_func(cMessagePack_Factory, Factory_alloc);
 
-    rb_define_method(cMessagePack_Factory, "initialize", Factory_initialize, -1);
-    rb_define_method(cMessagePack_Factory, "dup", Factory_dup, 0);
-    rb_define_method(cMessagePack_Factory, "freeze", Factory_freeze, 0);
+    rb_define_method(cMessagePack_Factory, "initialize", RUBY_METHOD_FUNC(Factory_initialize), -1);
+    rb_define_method(cMessagePack_Factory, "dup", RUBY_METHOD_FUNC(Factory_dup), 0);
+    rb_define_method(cMessagePack_Factory, "freeze", RUBY_METHOD_FUNC(Factory_freeze), 0);
 
-    rb_define_method(cMessagePack_Factory, "packer", MessagePack_Factory_packer, -1);
-    rb_define_method(cMessagePack_Factory, "unpacker", MessagePack_Factory_unpacker, -1);
+    rb_define_method(cMessagePack_Factory, "packer", RUBY_METHOD_FUNC(MessagePack_Factory_packer), -1);
+    rb_define_method(cMessagePack_Factory, "unpacker", RUBY_METHOD_FUNC(MessagePack_Factory_unpacker), -1);
 
-    rb_define_private_method(cMessagePack_Factory, "registered_types_internal", Factory_registered_types_internal, 0);
-    rb_define_private_method(cMessagePack_Factory, "register_type_internal", Factory_register_type_internal, 3);
+    rb_define_private_method(cMessagePack_Factory, "registered_types_internal", RUBY_METHOD_FUNC(Factory_registered_types_internal), 0);
+    rb_define_private_method(cMessagePack_Factory, "register_type_internal", RUBY_METHOD_FUNC(Factory_register_type_internal), 3);
 }

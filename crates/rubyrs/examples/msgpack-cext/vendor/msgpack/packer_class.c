@@ -402,41 +402,41 @@ void MessagePack_Packer_module_init(VALUE mMessagePack)
 
     rb_define_alloc_func(cMessagePack_Packer, MessagePack_Packer_alloc);
 
-    rb_define_method(cMessagePack_Packer, "initialize", MessagePack_Packer_initialize, -1);
-    rb_define_method(cMessagePack_Packer, "compatibility_mode?", Packer_compatibility_mode_p, 0);
-    rb_define_method(cMessagePack_Packer, "buffer", Packer_buffer, 0);
-    rb_define_method(cMessagePack_Packer, "write", Packer_write, 1);
+    rb_define_method(cMessagePack_Packer, "initialize", RUBY_METHOD_FUNC(MessagePack_Packer_initialize), -1);
+    rb_define_method(cMessagePack_Packer, "compatibility_mode?", RUBY_METHOD_FUNC(Packer_compatibility_mode_p), 0);
+    rb_define_method(cMessagePack_Packer, "buffer", RUBY_METHOD_FUNC(Packer_buffer), 0);
+    rb_define_method(cMessagePack_Packer, "write", RUBY_METHOD_FUNC(Packer_write), 1);
     rb_define_alias(cMessagePack_Packer, "pack", "write");
-    rb_define_method(cMessagePack_Packer, "write_nil", Packer_write_nil, 0);
-    rb_define_method(cMessagePack_Packer, "write_true", Packer_write_true, 0);
-    rb_define_method(cMessagePack_Packer, "write_false", Packer_write_false, 0);
-    rb_define_method(cMessagePack_Packer, "write_float", Packer_write_float, 1);
-    rb_define_method(cMessagePack_Packer, "write_string", Packer_write_string, 1);
-    rb_define_method(cMessagePack_Packer, "write_bin", Packer_write_bin, 1);
-    rb_define_method(cMessagePack_Packer, "write_array", Packer_write_array, 1);
-    rb_define_method(cMessagePack_Packer, "write_hash", Packer_write_hash, 1);
-    rb_define_method(cMessagePack_Packer, "write_symbol", Packer_write_symbol, 1);
-    rb_define_method(cMessagePack_Packer, "write_int", Packer_write_int, 1);
-    rb_define_method(cMessagePack_Packer, "write_extension", Packer_write_extension, 1);
-    rb_define_method(cMessagePack_Packer, "write_array_header", Packer_write_array_header, 1);
-    rb_define_method(cMessagePack_Packer, "write_map_header", Packer_write_map_header, 1);
-    rb_define_method(cMessagePack_Packer, "write_bin_header", Packer_write_bin_header, 1);
-    rb_define_method(cMessagePack_Packer, "write_ext", Packer_write_ext, 2);
-    rb_define_method(cMessagePack_Packer, "write_float32", Packer_write_float32, 1);
-    rb_define_method(cMessagePack_Packer, "flush", Packer_flush, 0);
+    rb_define_method(cMessagePack_Packer, "write_nil", RUBY_METHOD_FUNC(Packer_write_nil), 0);
+    rb_define_method(cMessagePack_Packer, "write_true", RUBY_METHOD_FUNC(Packer_write_true), 0);
+    rb_define_method(cMessagePack_Packer, "write_false", RUBY_METHOD_FUNC(Packer_write_false), 0);
+    rb_define_method(cMessagePack_Packer, "write_float", RUBY_METHOD_FUNC(Packer_write_float), 1);
+    rb_define_method(cMessagePack_Packer, "write_string", RUBY_METHOD_FUNC(Packer_write_string), 1);
+    rb_define_method(cMessagePack_Packer, "write_bin", RUBY_METHOD_FUNC(Packer_write_bin), 1);
+    rb_define_method(cMessagePack_Packer, "write_array", RUBY_METHOD_FUNC(Packer_write_array), 1);
+    rb_define_method(cMessagePack_Packer, "write_hash", RUBY_METHOD_FUNC(Packer_write_hash), 1);
+    rb_define_method(cMessagePack_Packer, "write_symbol", RUBY_METHOD_FUNC(Packer_write_symbol), 1);
+    rb_define_method(cMessagePack_Packer, "write_int", RUBY_METHOD_FUNC(Packer_write_int), 1);
+    rb_define_method(cMessagePack_Packer, "write_extension", RUBY_METHOD_FUNC(Packer_write_extension), 1);
+    rb_define_method(cMessagePack_Packer, "write_array_header", RUBY_METHOD_FUNC(Packer_write_array_header), 1);
+    rb_define_method(cMessagePack_Packer, "write_map_header", RUBY_METHOD_FUNC(Packer_write_map_header), 1);
+    rb_define_method(cMessagePack_Packer, "write_bin_header", RUBY_METHOD_FUNC(Packer_write_bin_header), 1);
+    rb_define_method(cMessagePack_Packer, "write_ext", RUBY_METHOD_FUNC(Packer_write_ext), 2);
+    rb_define_method(cMessagePack_Packer, "write_float32", RUBY_METHOD_FUNC(Packer_write_float32), 1);
+    rb_define_method(cMessagePack_Packer, "flush", RUBY_METHOD_FUNC(Packer_flush), 0);
 
     /* delegation methods */
-    rb_define_method(cMessagePack_Packer, "reset", Packer_reset, 0);
+    rb_define_method(cMessagePack_Packer, "reset", RUBY_METHOD_FUNC(Packer_reset), 0);
     rb_define_alias(cMessagePack_Packer, "clear", "reset");
-    rb_define_method(cMessagePack_Packer, "size", Packer_size, 0);
-    rb_define_method(cMessagePack_Packer, "empty?", Packer_empty_p, 0);
-    rb_define_method(cMessagePack_Packer, "write_to", Packer_write_to, 1);
-    rb_define_method(cMessagePack_Packer, "to_str", Packer_to_str, 0);
+    rb_define_method(cMessagePack_Packer, "size", RUBY_METHOD_FUNC(Packer_size), 0);
+    rb_define_method(cMessagePack_Packer, "empty?", RUBY_METHOD_FUNC(Packer_empty_p), 0);
+    rb_define_method(cMessagePack_Packer, "write_to", RUBY_METHOD_FUNC(Packer_write_to), 1);
+    rb_define_method(cMessagePack_Packer, "to_str", RUBY_METHOD_FUNC(Packer_to_str), 0);
     rb_define_alias(cMessagePack_Packer, "to_s", "to_str");
-    rb_define_method(cMessagePack_Packer, "to_a", Packer_to_a, 0);
+    rb_define_method(cMessagePack_Packer, "to_a", RUBY_METHOD_FUNC(Packer_to_a), 0);
 
-    rb_define_private_method(cMessagePack_Packer, "registered_types_internal", Packer_registered_types_internal, 0);
-    rb_define_method(cMessagePack_Packer, "register_type_internal", Packer_register_type_internal, 3);
+    rb_define_private_method(cMessagePack_Packer, "registered_types_internal", RUBY_METHOD_FUNC(Packer_registered_types_internal), 0);
+    rb_define_method(cMessagePack_Packer, "register_type_internal", RUBY_METHOD_FUNC(Packer_register_type_internal), 3);
 
-    rb_define_method(cMessagePack_Packer, "full_pack", Packer_full_pack, 0);
+    rb_define_method(cMessagePack_Packer, "full_pack", RUBY_METHOD_FUNC(Packer_full_pack), 0);
 }

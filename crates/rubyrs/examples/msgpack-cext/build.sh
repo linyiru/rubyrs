@@ -1,8 +1,19 @@
 #!/usr/bin/env bash
 # Build msgpack-ruby cext (Spike L3-E).
-# Same shape as flori-json-cext/build.sh — vendored sources unchanged,
-# rubyrs-cext shim header on -I, -undefined dynamic_lookup so missing
-# rb_* defer to dlopen-time resolution against the host binary.
+# Same shape as flori-json-cext/build.sh — rubyrs-cext shim header on
+# -I, -undefined dynamic_lookup so missing rb_* defer to dlopen-time
+# resolution against the host binary.
+#
+# Vendored-source delta (S8): every rb_define_method /
+# rb_define_private_method callback arg is wrapped in
+# RUBY_METHOD_FUNC(...) — under C23 (GCC 15/16 default -std=gnu23) an
+# empty parameter list means (void), so the shim's
+# `VALUE (*)(ANYARGS)` no longer implicitly accepts typed callbacks
+# and GCC 16 hard-errors with -Wincompatible-pointer-types. The macro
+# is CRuby's own portable idiom; upstream msgpack-ruby instead relies
+# on CRuby's _Generic rb_define_method overloads, which the shim
+# deliberately doesn't carry. Plus two explicit (char*) casts in
+# buffer.c where the shim's const RSTRING_PTR discards qualifiers.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

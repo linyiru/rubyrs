@@ -309,7 +309,7 @@ static inline void _msgpack_buffer_append_reference(msgpack_buffer_t* b, VALUE s
 
     _msgpack_buffer_add_new_chunk(b);
 
-    char* data = RSTRING_PTR(mapped_string);
+    char* data = (char*) RSTRING_PTR(mapped_string);
     size_t length = RSTRING_LEN(mapped_string);
 
     b->tail.first = (char*) data;
@@ -511,7 +511,7 @@ VALUE msgpack_buffer_all_as_string(msgpack_buffer_t* b)
 
     size_t length = msgpack_buffer_all_readable_size(b);
     VALUE string = rb_str_new(NULL, length);
-    char* buffer = RSTRING_PTR(string);
+    char* buffer = (char*) RSTRING_PTR(string);
 
     size_t avail = msgpack_buffer_top_readable_size(b);
     memcpy(buffer, b->read_buffer, avail);
