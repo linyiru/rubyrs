@@ -60,7 +60,7 @@ jobs:
             host_triple: x86_64-unknown-linux-gnu
             wasi_sdk_triple: x86_64-linux
             wasmtime_triple: x86_64-linux
-            wasmtime_sha256: 9d92e6dc04630f617e0e5d532327a5a917ac4898587e07f4fb7a5fc7fffef760
+            wasmtime_sha256: ca1fc22b676412ed1983fc2d2266c53285ac5c60954df0eeb1502abe718fd923
             wizer_triple: x86_64-linux
             wizer_sha256: 36016e7f846f38ad09f22eb4bafb99068f038c431eb9613ddf59e31ad8a21414
             wasm3_url: https://github.com/wasm3/wasm3/releases/download/v0.5.0/wasm3-linux-x64.elf
@@ -70,7 +70,7 @@ jobs:
             host_triple: aarch64-unknown-linux-gnu
             wasi_sdk_triple: arm64-linux
             wasmtime_triple: aarch64-linux
-            wasmtime_sha256: 4a27083ba8d3c64526b2d469f50e6539cb4c1dd9d08336e0d8953bca616737e3
+            wasmtime_sha256: a407cd17741d1e0dc51304b3d2c16b8d9e286afeb608aff7e403e7d3dcce9cea
             wizer_triple: aarch64-linux
             wizer_sha256: 73bffcbaf736ef24109a48cac431d070c43cb2ee8a14a840576f7aec0133d8d6
             # No prebuilt wasm3 for linux-arm64 in v0.5.0; the row
@@ -83,7 +83,7 @@ jobs:
             host_triple: aarch64-apple-darwin
             wasi_sdk_triple: arm64-macos
             wasmtime_triple: aarch64-macos
-            wasmtime_sha256: 8c589a1feb6578ddfd76d4ee07bac551d7f3069d6cef9b2ae5e87e630b5198db
+            wasmtime_sha256: 5596bc7dd2f99246a8384ca4eba7d4ccf6b1f3514ac82b2ffa3ce8d11a840cb2
             wizer_triple: aarch64-macos
             wizer_sha256: 7c54896b456b6ca024af6005ebc5538282dee7cd9f0c9c1155855d29b9c461b1
             # wasm3 macOS arm64 prebuilt also unavailable.
@@ -160,7 +160,7 @@ jobs:
       - name: Install wasmtime
         run: |
           set -euo pipefail
-          WASMTIME_VERSION=v45.0.0
+          WASMTIME_VERSION=v45.0.3
           TARBALL="wasmtime-${WASMTIME_VERSION}-${{ matrix.wasmtime_triple }}.tar.xz"
           URL="https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VERSION}/${TARBALL}"
           curl -sSLo "$TARBALL" "$URL"

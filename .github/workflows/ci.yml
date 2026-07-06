@@ -245,8 +245,8 @@ jobs:
         # proposals.
         run: |
           set -euo pipefail
-          WASMTIME_VERSION=v45.0.0
-          WASMTIME_SHA256=9d92e6dc04630f617e0e5d532327a5a917ac4898587e07f4fb7a5fc7fffef760
+          WASMTIME_VERSION=v45.0.3
+          WASMTIME_SHA256=ca1fc22b676412ed1983fc2d2266c53285ac5c60954df0eeb1502abe718fd923
           TARBALL="wasmtime-${WASMTIME_VERSION}-x86_64-linux.tar.xz"
           URL="https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VERSION}/${TARBALL}"
           curl -sSLo "$TARBALL" "$URL"

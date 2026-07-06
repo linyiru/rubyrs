@@ -29,17 +29,17 @@ path = "src/main.rs"
 # `cranelift` is the one feature we need HERE that we don't need
 # in `[dependencies]`: build.rs runs the compiler;
 # `Module::deserialize` in main.rs only needs the runtime side.
-# `=45.0.0` (exact) rather than `"45.0"` (compatible-with caret
+# `=45.0.3` (exact) rather than `"45.0"` (compatible-with caret
 # semantics, accepting 45.0.x). CI's `.github/workflows/ci.yml`
-# pins the wasmtime CLI to v45.0.0 with a sha256 over that exact
+# pins the wasmtime CLI to v45.0.3 with a sha256 over that exact
 # tarball; the embedder's build-side wasmtime is what determines
 # the cwasm format the runtime side has to deserialize. Letting
-# cargo drift to a 45.0.x patch while CI's CLI stays on 45.0.0
+# cargo drift to a different 45.0.x patch while CI's CLI stays put
 # would mean local-vs-CI cwasm comparisons drift silently — and
 # any deserialize-failure surface area we worked to close with
 # the feature-match plumbing above re-opens at the patch level.
 [build-dependencies]
-wasmtime = { version = "=45.0.0", default-features = false, features = [
+wasmtime = { version = "=45.0.3", default-features = false, features = [
     "runtime",
     "std",
     "cranelift",
@@ -47,7 +47,7 @@ wasmtime = { version = "=45.0.0", default-features = false, features = [
 
 [dependencies]
 # Match the version `perf/wasm_check.sh` already validates in CI
-# (.github/workflows/ci.yml installs wasmtime v45.0.0 from the
+# (.github/workflows/ci.yml installs wasmtime v45.0.3 from the
 # release tarball with a pinned sha256). cwasm format
 # compatibility requires BOTH:
 #   - matching wasmtime version (cwasm is version-stamped;
@@ -72,11 +72,11 @@ wasmtime = { version = "=45.0.0", default-features = false, features = [
 # This matches wasmtime-wasi 45's own dep config exactly (see
 # its Cargo.toml). Local PoC shrinks the embedder binary from
 # ~19 MB (defaults) to ~7 MB (90% wasmtime crate code stripped).
-# `=45.0.0` exact pin matches the build-dependency above and
+# `=45.0.3` exact pin matches the build-dependency above and
 # `.github/workflows/ci.yml`'s CLI tarball pin — see the
 # [build-dependencies] block for the full rationale.
-wasmtime = { version = "=45.0.0", default-features = false, features = [
+wasmtime = { version = "=45.0.3", default-features = false, features = [
     "runtime",
     "std",
 ] }
-wasmtime-wasi = "=45.0.0"
+wasmtime-wasi = "=45.0.3"

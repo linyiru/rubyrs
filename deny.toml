@@ -58,21 +58,12 @@ ignore = [
     # when an advisory is acknowledged but can't be fixed
     # immediately (e.g., waiting on upstream patch).
     #
-    # wasmtime-wasi 45.0.0 (RUSTSEC-2026-0182 fd_renumber fd leak,
-    # RUSTSEC-2026-0188 hard-link/rename FilePerms bypass): both are
-    # guest-escapes-sandbox / guest-exhausts-host issues in the WASI
-    # host layer. The sole consumer is `rubyrs-wasm-embed`, a
-    # `publish = false` PoC embedder whose only guest is the
-    # first-party rubyrs.cwasm baked in at build time — no untrusted
-    # wasm ever runs on this host layer, so neither advisory is
-    # reachable. The patched releases (45.0.2/45.0.3) drag the whole
-    # wasmtime family past the `=45.0.0` pin that
-    # crates/rubyrs-wasm-embed/Cargo.toml sha256-locks against CI's
-    # wasmtime CLI tarball (cwasm format + feature-config stamping);
-    # bumping that family is a separate, deliberate change. REMOVE
-    # both entries when the wasmtime pin moves off 45.0.0.
-    { id = "RUSTSEC-2026-0182", reason = "wasmtime-wasi fd_renumber leak — only guest is the first-party rubyrs.cwasm in the publish=false PoC embedder; fix requires bumping the =45.0.0 CI-tarball-locked wasmtime family" },
-    { id = "RUSTSEC-2026-0188", reason = "wasmtime-wasi FilePerms bypass — only guest is the first-party rubyrs.cwasm in the publish=false PoC embedder; fix requires bumping the =45.0.0 CI-tarball-locked wasmtime family" },
+    # (Empty — the wasmtime-wasi RUSTSEC-2026-0182/0188 entries were
+    # retired when the wasmtime family moved to =45.0.3, the in-family
+    # release that patches both. The CI wasmtime CLI tarball pins in
+    # .github/workflows/ci.yml + wasm-breakdown.yml moved in lockstep,
+    # per the cwasm version-stamping contract documented in
+    # crates/rubyrs-wasm-embed/Cargo.toml.)
 ]
 
 # ============================================================
