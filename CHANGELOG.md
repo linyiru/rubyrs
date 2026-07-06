@@ -38,6 +38,14 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Changed
 
+- **`define_method`-installed methods dispatch through the monomorphic
+  inline-cache fast paths** — simple fixed-arity closure-backed methods
+  (the `obj.dm_method(args)` / implicit-self shapes) no longer walk the
+  full dispatch cascade per call (~1.5× on a hot `define_method` accessor
+  loop, now at `def`-dispatch parity); as a consequence
+  `define_method(:nil?)` / `(:!)` overrides now win over the built-in
+  truthiness arms exactly like their `def` twins.
+  (`define_method_ic_serve.rb`)
 - **Generational mark-sweep GC** — young/old regions with minor/major
   collections and a write barrier, replacing the flat mark-sweep
   (substantially less collection churn on object-heavy workloads).

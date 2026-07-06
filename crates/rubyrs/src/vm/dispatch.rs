@@ -9467,12 +9467,14 @@ impl Vm {
             return Ok(());
         }
         // Explicit-receiver monomorphic fast path: an `obj.method(args)`
-        // call on a user Object whose cached method is public, fixed-arity
-        // and non-closure invokes stack-direct (no args Vec, pooled
-        // locals), short-circuiting the full dispatch preamble. Everything
-        // else (private/protected, method_missing, the send-forms,
-        // primitives, non-fixed arity) falls through to the path below,
-        // which resolves identically (same class_of + lookup_method_cached).
+        // call on a user Object whose cached method is public and
+        // fixed-arity — a plain `def` proto, an NFA-plan shape, or (P1) a
+        // simple `define_method` closure — invokes stack-direct (no args
+        // Vec, pooled locals), short-circuiting the full dispatch preamble.
+        // Everything else (private/protected, method_missing, the
+        // send-forms, primitives, kwargs/rest closure shapes) falls through
+        // to the path below, which resolves identically (same class_of +
+        // lookup_method_cached).
         // `!force_primitive`: a force-primitive call (alias forwarder, or
         // `super` to a builtin the user method overrides) must NOT re-invoke
         // that same user method via the cache — otherwise `def freeze; …;
@@ -18053,10 +18055,11 @@ impl Vm {
     /// `do_call`. Resolves via the SAME `class_of` + `lookup_method_cached`
     /// the slow path uses, so method resolution (including the
     /// eigenclass/singleton chain, prepends, and the cext fall-through) is
-    /// identical; only PUBLIC, fixed-arity, non-closure methods are invoked
-    /// stack-direct here, and everything else returns `Ok(false)` to fall
-    /// through. A public method always passes `check_method_visibility`, so
-    /// skipping it for the fast path is safe.
+    /// identical; only PUBLIC methods are invoked stack-direct here —
+    /// fixed-arity `def` protos, the NFA-plan shapes, and (P1) simple
+    /// fixed-arity `define_method` closures — and everything else returns
+    /// `Ok(false)` to fall through. A public method always passes
+    /// `check_method_visibility`, so skipping it for the fast path is safe.
     /// `pub(crate)`: also the IC-fast serve target of the tier-2 `t2_call`
     /// helper (ADR 0037 wave 2, `jit_tier2.rs`), which front-loads exactly
     /// this path for call ops inside compiled bodies.
@@ -18081,15 +18084,18 @@ impl Vm {
         let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) else {
             return Ok(false);
         };
-        // Only plain `def`-style proto methods are stack-direct here.
-        // Closures (define_method) share captured locals; builtins carry a
-        // dummy `proto_idx` and re-dispatch in `invoke_method_with_block`;
-        // both must take the full path.
-        if m.visibility.get() != Visibility::Public
-            || m.closure.is_some()
-            || m.builtin.is_some()
-        {
+        // Builtins carry a dummy `proto_idx` and re-dispatch in
+        // `invoke_method_with_block`; non-public methods keep the slow
+        // path's method_missing/NoMethodError shape. Both fall through.
+        if m.visibility.get() != Visibility::Public || m.builtin.is_some() {
             return Ok(false);
+        }
+        // Closure-backed (`define_method`) methods: serve the simple
+        // fixed-arity shape stack-direct (dispatch-campaign P1 — the
+        // dm_bench 2M-send shape previously walked the whole cascade);
+        // complex shapes decline inside, stack untouched.
+        if m.closure.is_some() {
+            return self.try_invoke_closure_method_from_stack(&m, None, argc);
         }
         // D Layer 4 (inline-cache step 1): if this method is ALREADY compiled,
         // dispatch the native code RIGHT HERE — no slow-path round-trip through
@@ -18447,6 +18453,13 @@ impl Vm {
         if m.builtin.is_some() {
             return Ok(false);
         }
+        // Closure-backed (`define_method`) methods: serve the simple
+        // fixed-arity shape stack-direct (dispatch-campaign P1). No
+        // visibility gate — implicit-self legally reaches private and
+        // protected methods, same asymmetry as the fixed path below.
+        if m.closure.is_some() {
+            return self.try_invoke_closure_method_from_stack(&m, Some(self_val), argc);
+        }
         // Frame-free getter serve — the implicit-self twin of the
         // explicit-recv path's "PoC getter fast path": a bare `foo`
         // on an Object self whose resolution is a trivial attr_reader
@@ -18735,6 +18748,201 @@ impl Vm {
         // TIER-2 (ADR 0037): run the just-pushed frame natively when compiled.
         #[cfg(feature = "jit-native")]
         self.t2_enter()?;
+        Ok(true)
+    }
+
+    /// Closure-backed (`define_method`) monomorphic serve — the
+    /// dispatch-campaign P1 extension of the explicit-recv / self-recv
+    /// IC fast paths. The `dm_bench` shape (`define_method(:bump)
+    /// { … }`, 2M sends) previously fell through the ENTIRE slow
+    /// cascade because both IC paths declined on `m.closure.is_some()`
+    /// (and every pre-cascade probe added since taxed it further).
+    ///
+    /// Serves ONLY the simple fixed-arity shape — no rest / block-arg /
+    /// kw-rest / named-kw params, no optionals, exact positional arity
+    /// — and mirrors `invoke_method_with_block_inner`'s closure branch
+    /// for that subset step-for-step (same dm-share/copy cell
+    /// discipline, same own-region Nil reset, same Frame fields
+    /// including the `invoked_name` aux stamp and NO trailing
+    /// `t2_enter`, matching the canonical branch), binding args
+    /// stack-direct instead of through an args Vec. Everything else
+    /// (kwargs peel, rest gather, `|&blk|`, optionals, arity miss →
+    /// the canonical ArgumentError) returns `Ok(false)` with the stack
+    /// untouched so the cascade's canonical binder runs unchanged.
+    ///
+    /// Soundness:
+    /// - resolution: the caller resolved `m` via the SAME method_gen-
+    ///   validated `lookup_method_cached` the cascade's user-table arm
+    ///   uses; redefinition invalidates by generation bump (all
+    ///   `define_method`/`define_singleton_method` install sites bump
+    ///   `method_gen`), and the cached-lookup miss path re-walks the
+    ///   chain, so serve decisions are deterministic per call shape.
+    /// - captures: the frame enters the captured cell exactly like the
+    ///   slow branch — share-direct when the cell canonically owns
+    ///   every outer slot (`creator_start == 0`, no outer chain, body
+    ///   creates no inner block) with the `dm_share_depth` re-entrancy
+    ///   gate, else the pooled copy cell + `(outer_cell, outer_rest)`
+    ///   routing. Writes to outer locals propagate identically.
+    /// - visibility: the explicit-recv caller gates on Public before
+    ///   calling; the self-recv caller passes any visibility
+    ///   (implicit-self legally reaches private/protected) — the same
+    ///   asymmetry as the fixed-arity paths.
+    /// - interception exactness: for a `Value::Object` receiver the
+    ///   only cascade arms between the IC sites and the user-table arm
+    ///   that can answer a name RESOLVING to a user method are the
+    ///   universal `!`/`!@`/`nil?` arms (walk bucket + primitive_call
+    ///   catch-alls) and the reserved `__send__` re-aim — for those
+    ///   names this serve now honours a `define_method` override
+    ///   exactly as the IC already honours a `def` override (CRuby
+    ///   honours both, so where behaviour shifts at all it shifts
+    ///   toward CRuby and toward def/define_method consistency).
+    /// - GC: no heap allocation between the gates and the frame push
+    ///   (the copy cell is a pooled Rust-side alloc), and args stay
+    ///   rooted on the operand stack until moved into the cell.
+    ///
+    /// `self_val_norecv`: `Some(self)` for the implicit-self form
+    /// (stack is `[.., a1..aN]`); `None` for explicit-recv (stack is
+    /// `[.., recv, a1..aN]`, receiver popped only on a serve).
+    ///
+    /// `#[inline(never)] #[cold]`: keeps this body OUT of the IC fast
+    /// paths' hot text — inlined (or even outlined but hot-placed) it
+    /// shifted `try_invoke_explicit_recv_cached`'s code layout enough
+    /// to cost the non-closure hot path 3–6% wall on static_bench
+    /// (paired-interleave; instructions-retired +0.04%, i.e. pure
+    /// fetch/alignment, cycles the arbiter per the increment-1
+    /// MEASUREMENT NOTE above). Cold placement keeps the residual at
+    /// ~1–2% cycles while the call itself is one predicted branch for
+    /// non-closure serves and noise for the closure serve (dm_bench
+    /// −35% wall, −37% instructions).
+    #[inline(never)]
+    #[cold]
+    fn try_invoke_closure_method_from_stack(
+        &mut self,
+        m: &Rc<Method>,
+        self_val_norecv: Option<Value>,
+        argc: usize,
+    ) -> Result<bool, Trap> {
+        let Some(cl) = m.closure.as_ref() else {
+            return Ok(false);
+        };
+        // Strict positional arity — the no-optionals/no-rest accept
+        // condition of the canonical binder. A mismatch declines so
+        // the cascade raises the canonical ArgumentError.
+        if cl.n_params as usize != argc {
+            return Ok(false);
+        }
+        let proto_idx = m.proto_idx;
+        let (param_start, need, creates_block) = {
+            let proto = &self.protos[proto_idx];
+            if proto.rest_param.is_some()
+                || proto.block_param.is_some()
+                || proto.kw_rest_param.is_some()
+                || !proto.block_kw_params.is_empty()
+                || !proto.kw_param_defaults.is_empty()
+                || proto.n_optional_params != 0
+            {
+                return Ok(false);
+            }
+            let param_start = cl.param_start as usize;
+            (
+                param_start,
+                param_start.max(proto.n_locals as usize),
+                proto.creates_block,
+            )
+        };
+        let split = match self.stack.len().checked_sub(argc) {
+            Some(s) => s,
+            None => return Ok(false),
+        };
+        if self_val_norecv.is_none() && split == 0 {
+            return Ok(false);
+        }
+        self.check_frames()?;
+        // SHARE-DIRECT vs COPY — the exact gate the canonical branch
+        // uses (see the `dm_share` comment there): share only when the
+        // captured cell canonically owns every outer slot, the body
+        // can't leak this call's slots via an inner block, and no live
+        // dm-share frame is already running on a shared cell.
+        let dm_share = cl.creator_start == 0
+            && cl.outer_chain.is_none()
+            && !creates_block
+            && self.dm_share_depth == 0;
+        let dm_cell = if dm_share {
+            {
+                let mut caps = cl.captured.borrow_mut();
+                if caps.len() < need {
+                    caps.resize(need, Value::Nil);
+                }
+                // Own-region reset — per-call freshness on the shared
+                // cell (params + body locals start Nil every call).
+                for slot in param_start..need {
+                    caps[slot] = Value::Nil;
+                }
+            }
+            cl.captured.clone()
+        } else {
+            self.block_locals_fresh(need)
+        };
+        {
+            let mut caps = dm_cell.borrow_mut();
+            for (i, a) in self.stack.drain(split..).enumerate() {
+                caps[param_start + i] = a;
+            }
+        }
+        let self_val = match self_val_norecv {
+            Some(v) => v,
+            // The `split == 0` gate above guarantees a receiver slot.
+            None => match self.stack.pop() {
+                Some(v) => v,
+                None => unreachable!("ICE: closure fast path recv underflow"),
+            },
+        };
+        if dm_share {
+            self.dm_share_depth += 1;
+        }
+        self.frames.push(Frame {
+            proto_idx,
+            ip: 0,
+            locals: crate::vm::Locals::Shared(dm_cell),
+            self_val,
+            base_sp: self.stack.len(),
+            is_class_body: false,
+            swap_return: None,
+            // CRuby treats a `define_method` body as a Proc: the
+            // caller's block is NOT exposed via `yield`/`block_given?`
+            // (and this path never has one to expose).
+            block_arg: None,
+            defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
+            lexical_cvar_class: None,
+            #[cfg(feature = "regex")] saved_last_match: None,
+            is_block: false, is_lambda: false,
+            n_given_positional: argc as u16,
+            kw_given_mask: 0,
+            // Stamp the installed name so super()/__method__ resolve
+            // against the RUNTIME name — same aux box as the canonical
+            // branch.
+            aux: m.original_name.map(|nm| {
+                Box::new(crate::vm::FrameAux {
+                    invoked_name: Some(nm),
+                    ..Default::default()
+                })
+            }),
+            pending_yield: false,
+            block_writeback: None,
+            dm_share,
+            own_start: if dm_share { 0 } else { cl.param_start },
+            outer_cell_start: cl.creator_start,
+            outer_cell: if dm_share { None } else { Some(cl.captured.clone()) },
+            outer_rest: cl.outer_chain.clone(),
+            // Lexically-captured yield-block (the block active where
+            // the define_method body was created) — `yield` inside the
+            // body reaches IT, not the caller's block.
+            captured_yield_block: cl.captured_yield_block,
+        });
+        // $~ scoping is LAZY — save_match_scope_on_write fires on the
+        // first last_match write inside this method scope. No t2_enter:
+        // block protos aren't tier-2 method bodies (matches the
+        // canonical closure branch, which also returns frame-pushed).
         Ok(true)
     }
 

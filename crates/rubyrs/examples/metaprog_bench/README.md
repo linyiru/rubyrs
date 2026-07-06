@@ -19,12 +19,12 @@ standard measurement feature set (see docs/BENCHMARKS.md —
 
 | | rubyrs | CRuby 3.4.8 | CRuby + YJIT |
 |---|---|---|---|
-| `method_missing` (mm) | 542 ms | 88 ms | **82 ms** |
-| `define_method` (dm)  | 409 ms | 74 ms | **51 ms** |
-| `def + ivar` (static) | 269 ms | 73 ms | **51 ms** |
+| `method_missing` (mm) | 530 ms | 88 ms | **82 ms** |
+| `define_method` (dm)  | 268 ms | 74 ms | **51 ms** |
+| `def + ivar` (static) | 275 ms | 73 ms | **51 ms** |
 
-CRuby's interpreter is **3.7×–6.2× faster per-iteration** in steady
-state (YJIT 5.2×–8.0×). That gap *is* the loop body — boot is
+CRuby's interpreter is **3.6×–6.0× faster per-iteration** in steady
+state (YJIT 5.3×–6.5×). That gap *is* the loop body — boot is
 amortised. None of these scripts are within striking distance of
 CRuby's interpreter; the opt-in `jit-native` tier doesn't cover
 these plain `while`-loop + method-call shapes (measured: the
@@ -46,21 +46,25 @@ the gem-compat + JIT campaigns (see docs/BENCHMARKS.md "Memory").
 ## What this tells us (updated 2026-07-06)
 
 1. **Steady-state dispatch is the bottleneck, not metaprogramming.**
-   The `def + ivar` (no metaprog at all) case is *also* 3.7× slower
+   The `def + ivar` (no metaprog at all) case is *also* 3.8× slower
    than CRuby. The gap is rubyrs' baseline dispatch cost — the PoC
    features themselves don't add order-of-magnitude overhead.
-2. **The 2026-06 "define_method beats def + ivar" finding has
-   reversed.** Back then dm won (271 ms vs 382 ms) because `@state`
-   went through a per-Instance `HashMap` on every access. Since
-   then the ivar path gained fast-paths (`Op::IncIvar`, inline
-   caches), and `def` dispatch is now the fastest rubyrs shape
-   (269 ms); the closure-capture method installed by
-   `define_method` is the slower one (409 ms).
+2. **`define_method` dispatch is now at `def` parity.** The 2026-06
+   arc saw this flip twice: dm first won (271 ms vs 382 ms) because
+   `@state` went through a per-Instance `HashMap`, then lost
+   (409 ms vs 269 ms) once the ivar path gained fast-paths while
+   closure-backed methods still fell through the ENTIRE `do_call`
+   slow cascade. Dispatch-campaign P1 (2026-07) extended the
+   explicit-recv/self-recv monomorphic IC serves to simple
+   fixed-arity closure methods (`try_invoke_closure_method_from_stack`),
+   so dm now binds stack-direct like `def` does: 268 ms vs 275 ms
+   (−35% wall, −37% instructions on dm; the shared-cell arg bind is
+   marginally cheaper than the arena+ivar path).
 3. **`method_missing` adds one failed lookup along the class chain
    before every dispatch.** In an "every call misses" loop this
-   doubles the per-call cost vs `def` dispatch (542 ms vs 269 ms).
-   A real workload — DSL with maybe-1%-miss rate — would barely
-   notice.
+   roughly doubles the per-call cost vs `def` dispatch (530 ms vs
+   275 ms). A real workload — DSL with maybe-1%-miss rate — would
+   barely notice.
 4. **The memory advantage on this shape is real but modest** (see
    the honesty note above): the heap stays tiny either way; what
    differs is each runtime's fixed footprint.

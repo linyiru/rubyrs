@@ -346,6 +346,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn define_method_lexical_yield() { run_diff("define_method_lexical_yield"); }
 #[test] fn encoding_defaults() { run_diff("encoding_defaults"); }
 #[test] fn define_method_runtime_name() { run_diff("define_method_runtime_name"); }
+#[test] fn define_method_ic_serve() { run_diff("define_method_ic_serve"); }
 #[test] fn undef_listing_and_sym_blockpass() { run_diff("undef_listing_and_sym_blockpass"); }
 #[cfg(feature = "stdlib")]
 #[test] fn remove_const_forwardable_proc() { run_diff("remove_const_forwardable_proc"); }
