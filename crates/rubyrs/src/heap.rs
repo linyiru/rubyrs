@@ -967,20 +967,44 @@ impl Heap {
     ///   - `Instance` / `Array` / `Hash` / `Range` — deep-copied
     ///     (owned buffers; `Rc<Class>` tags shared — classes are
     ///     restored separately via `ClassStateSnapshot`).
-    ///   - `BigInt` / `Rational` — SKIPPED: immutable after
-    ///     construction, nothing to rewind.
-    ///   - `Block` / `TypedData` / `Fiber` — SKIPPED (documented
-    ///     residual): captured cells / native state can't be
-    ///     deep-copied. A baseline Block whose captured cell is
-    ///     mutated to hold a user object can still dangle; no
-    ///     preamble installs such state today.
+    ///   - `BigInt` / `Rational` — deep-copied too. Their CONTENT
+    ///     is immutable (nothing to rewind in place), but capture
+    ///     makes the restore re-materialise a baseline slot that
+    ///     was swept mid-eval and recycled into a user object —
+    ///     the same below-high-water shape the mutable variants
+    ///     already covered.
+    ///   - `Block` / `TypedData` / `Fiber` / `BoundMethod` /
+    ///     `UnboundMethod` / `CurriedProc` — NOT covered, enforced
+    ///     by the debug_assert below rather than left as a silent
+    ///     residual. The 2026-07 M7 census (default, standard
+    ///     `stdlib,jit-native,_fiber,_json_native,mimalloc`, and
+    ///     `everything` battery builds) found ZERO baseline
+    ///     instances of any of these: the post-preamble baseline
+    ///     is Instance/Array/Hash only (the pre-capture forced
+    ///     major GC sweeps every un-rooted preamble temporary,
+    ///     and the preamble roots no proc/fiber/cext values).
+    ///     Deep-copying a Block would also be semantically wrong —
+    ///     its `captured` cells are SHARED mutable state (cloning
+    ///     severs the sharing) — so if a future preamble change
+    ///     trips the assert, the fix is type-appropriate capture
+    ///     (snapshot cell CONTENTS and write them back into the
+    ///     same `Rc` cells on reset), not a naive clone.
     pub(crate) fn capture_baseline_contents(&self, upto: usize) -> Vec<(u32, HeapObj)> {
         let mut out = Vec::new();
         for (i, slot) in self.slots.iter().enumerate().take(upto) {
-            if let Slot::Live(obj) = slot
-                && let Some(copy) = Self::baseline_clone(obj)
-            {
-                out.push((i as u32, copy));
+            if let Slot::Live(obj) = slot {
+                match Self::baseline_clone(obj) {
+                    Some(copy) => out.push((i as u32, copy)),
+                    None => debug_assert!(
+                        false,
+                        "post-preamble baseline slot {i} holds a HeapObj variant \
+                         reset() cannot rewind (Block/TypedData/Fiber/BoundMethod/\
+                         UnboundMethod/CurriedProc). A preamble change introduced \
+                         baseline state the deep-copy image doesn't cover — extend \
+                         Heap::baseline_clone with type-appropriate semantics (see \
+                         capture_baseline_contents docs) before shipping it.",
+                    ),
+                }
             }
         }
         out
@@ -996,12 +1020,30 @@ impl Heap {
     /// Keeps the ADR-0035 `class_ptrs` table in step per slot (a
     /// user eval may have promoted an entry to an eigenclass
     /// pointer that no longer exists after the rewind).
-    pub(crate) fn restore_baseline_contents(&mut self, saved: &[(u32, HeapObj)]) {
+    ///
+    /// A recycled-slot occupant being overwritten can be a user
+    /// `TypedData` (a cext allocation that landed on a swept
+    /// baseline slot): its `dfree` is pushed to `pending_frees`
+    /// for the caller to invoke AFTER the heap surgery — same
+    /// borrow-hygiene contract as [`Heap::collect`]'s sweep
+    /// (dropping the slot in place would leak the C-side
+    /// resource; calling `dfree` mid-surgery would alias the
+    /// heap with any cext code the callback reaches).
+    pub(crate) fn restore_baseline_contents(
+        &mut self,
+        saved: &[(u32, HeapObj)],
+        pending_frees: &mut Vec<(unsafe extern "C" fn(*mut std::ffi::c_void), *mut std::ffi::c_void)>,
+    ) {
         for (i, obj) in saved {
             let idx = *i as usize;
             let Some(fresh) = Self::baseline_clone(obj) else {
                 continue;
             };
+            if let Slot::Live(HeapObj::TypedData(d)) = &self.slots[idx]
+                && let Some(f) = d.dfree
+            {
+                pending_frees.push((f, d.data_ptr));
+            }
             self.slots[idx] = Slot::Live(fresh);
             #[cfg(feature = "jit-native")]
             {
@@ -1013,7 +1055,8 @@ impl Heap {
 
     /// The deep-copy behind `capture_baseline_contents` /
     /// `restore_baseline_contents`; `None` = variant not covered
-    /// (immutable or un-copyable — see the capture doc).
+    /// (un-copyable — see the capture doc; the capture-time
+    /// debug_assert enforces that no baseline slot hits `None`).
     fn baseline_clone(obj: &HeapObj) -> Option<HeapObj> {
         Some(match obj {
             HeapObj::Instance(inst) => HeapObj::Instance(crate::value::Instance {
@@ -1030,6 +1073,12 @@ impl Heap {
             }),
             HeapObj::Hash(h) => HeapObj::Hash(h.baseline_deep_clone()),
             HeapObj::Range(r) => HeapObj::Range(r.clone()),
+            // Content-immutable variants: the clone exists so the
+            // restore can re-materialise a swept-and-recycled
+            // baseline slot, not to rewind interior mutation.
+            #[cfg(feature = "bignum")]
+            HeapObj::BigInt(b) => HeapObj::BigInt(b.clone()),
+            HeapObj::Rational(r) => HeapObj::Rational(r.clone()),
             _ => return None,
         })
     }

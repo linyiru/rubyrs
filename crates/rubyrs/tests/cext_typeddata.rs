@@ -103,3 +103,61 @@ puts Counter.free_count
         expected, stdout, stderr,
     );
 }
+
+/// M7: `Runtime::reset()` must run the dfree of every TypedData a
+/// rolled-back eval allocated — the public-API twin of the in-crate
+/// zombie-shape tests (src/lib.rs `reset_typeddata_dfree_tests`).
+/// Uses the same counter cext, but IN-PROCESS through an embedded
+/// Runtime (reset() is an embedding API; the CLI never calls it):
+///
+///   1. `require` the bundle, create Counters, keep them rooted in
+///      globals so no GC sweeps them early.
+///   2. `reset()` — drops the user heap slots; the fix under test
+///      invokes `counter_free` on each wrapped struct.
+///   3. Re-`require` (reset cleared `loaded_features`; the dylib
+///      stays loaded via the bridge's `mem::forget`, so the C
+///      static `g_free_count` PERSISTS) and read
+///      `Counter.free_count` back.
+#[test]
+fn cext_typeddata_reset_runs_dfree() {
+    let bundle = ensure_counter_bundle_built();
+    let bundle_no_ext = bundle.with_extension("");
+    let mut rt = rubyrs::Runtime::with_config(rubyrs::Config {
+        // `require` of the bundle path needs script-level fs IO.
+        allow_filesystem_io: true,
+        // Honour the repo's STRESS_GC=1 rerun convention (the
+        // library default never reads env; this test opts in the
+        // same way the reset soak does).
+        stress_gc: std::env::var_os("STRESS_GC").is_some_and(|v| v == "1"),
+        ..Default::default()
+    });
+    let req = format!(r#"require "{}""#, bundle_no_ext.display());
+    rt.eval(&req, "req.rb").expect("first require");
+    let v = rt
+        .eval(
+            r#"
+            $a = Counter.create
+            $b = Counter.create
+            Counter.inc($a)
+            [Counter.value($a), Counter.value($b), Counter.free_count].inspect
+            "#,
+            "make.rb",
+        )
+        .expect("create counters");
+    assert!(
+        matches!(&v, rubyrs::Value::Str(s) if &*s.borrow() == b"[1, 0, 0]"),
+        "pre-reset state, got {v:?}",
+    );
+    rt.reset();
+    // Post-reset: the Counter class (user-eval state) is gone; the
+    // dylib and its g_free_count static are not. Re-require and
+    // read the count: both wrapped structs must have been freed by
+    // reset(), exactly once each.
+    rt.eval(&req, "req2.rb").expect("re-require after reset");
+    let v = rt.eval("Counter.free_count", "count.rb").expect("free_count");
+    assert_eq!(
+        format!("{v:?}"),
+        "Int(2)",
+        "reset() must have run counter_free for both rolled-back Counters",
+    );
+}

@@ -1161,9 +1161,10 @@ struct PostPreambleSnapshot {
     consumed_autoloads: std::collections::HashSet<intern::SymId>,
     autoload_paths: std::collections::HashMap<std::path::PathBuf, Vec<intern::SymId>>,
     private_consts: std::collections::HashSet<intern::SymId>,
-    /// Deep copies of every live baseline heap slot's mutable
-    /// content (Instance / Array / Hash / Range variants) —
-    /// captured by `Heap::capture_baseline_contents` and rewound
+    /// Deep copies of every live baseline heap slot's content
+    /// (Instance / Array / Hash / Range, plus content-immutable
+    /// BigInt / Rational for re-materialisation) — captured by
+    /// `Heap::capture_baseline_contents` and rewound
     /// in place by every reset(). Closes the residual 87d2f1d1
     /// deferred as "full fidelity needs a deep preamble-heap image
     /// restore": user evals mutate preamble-era objects IN PLACE
@@ -2652,7 +2653,10 @@ impl Runtime {
     ///
     /// What's cleared:
     /// - Heap slots allocated after the preamble (user instances,
-    ///   Arrays, Hashes, ...).
+    ///   Arrays, Hashes, ...). A dropped cext `TypedData` gets its
+    ///   `dfree` callback invoked — same contract as a GC sweep —
+    ///   so per-request embedders don't leak C-side resources
+    ///   across resets.
     /// - Interner entries past the preamble high-water (user
     ///   `String#to_sym`, user method-name interning, ...).
     /// - User-defined classes, constants, toplevel methods.
@@ -2721,15 +2725,42 @@ impl Runtime {
         //
         // `Vec::truncate` / the `Slot::Dead` overwrite drop the
         // HeapObj enum variants (including their Rc<...> inner
-        // data), releasing their ref counts. (`HeapObj::TypedData`
-        // dfree hooks are NOT invoked on either path — pre-existing
-        // posture of the truncate; a cext resource allocated by a
-        // rolled-back eval leaks its native side. Sweep-order
-        // parity for reset is a separate concern.)
+        // data), releasing their ref counts. A dropped user
+        // `HeapObj::TypedData` additionally owes its cext a
+        // `dfree(data_ptr)` call — the GC sweep's contract
+        // (`Heap::collect`) — otherwise every reset cycle leaks
+        // the C-side resource of any TypedData the rolled-back
+        // eval allocated. All three shapes a user TypedData can
+        // occupy are covered: (1) a slot past the high-water mark
+        // (the truncate below), (2) one recycled from the
+        // snapshot's free list (this deaden walk), and (3) one
+        // recycled from a swept BASELINE slot (the content-restore
+        // pass below). Callbacks are gathered here and invoked at
+        // the END of reset(), mirroring the sweep's "run dfree
+        // after the &mut Heap borrow is gone" posture (vm/gc.rs) —
+        // by then the Runtime is back to a fully consistent
+        // baseline, so even a misbehaving dfree that re-enters
+        // observes no half-reset state.
+        let mut pending_frees: Vec<(
+            unsafe extern "C" fn(*mut std::ffi::c_void),
+            *mut std::ffi::c_void,
+        )> = Vec::new();
         for &idx in &snapshot.heap_free {
             let slot = &mut self.vm.heap.slots[idx as usize];
             if !matches!(slot, crate::heap::Slot::Dead) {
+                if let crate::heap::Slot::Live(crate::heap::HeapObj::TypedData(d)) = &*slot
+                    && let Some(f) = d.dfree
+                {
+                    pending_frees.push((f, d.data_ptr));
+                }
                 *slot = crate::heap::Slot::Dead;
+            }
+        }
+        for slot in &self.vm.heap.slots[snapshot.heap_slot_count..] {
+            if let crate::heap::Slot::Live(crate::heap::HeapObj::TypedData(d)) = slot
+                && let Some(f) = d.dfree
+            {
+                pending_frees.push((f, d.data_ptr));
             }
         }
         self.vm.heap.slots.truncate(snapshot.heap_slot_count);
@@ -2789,7 +2820,7 @@ impl Runtime {
         // `Heap::capture_baseline_contents` for variant coverage.
         self.vm
             .heap
-            .restore_baseline_contents(&snapshot.heap_baseline_contents);
+            .restore_baseline_contents(&snapshot.heap_baseline_contents, &mut pending_frees);
         // --- Interner: drop user-interned symbols, but never
         //     truncate past any SymId referenced by long-lived
         //     tables. ---
@@ -3068,6 +3099,20 @@ impl Runtime {
         self.vm.const_gen = snapshot.const_gen.wrapping_add(1);
         self.vm.const_cache_flat.clear();
         self.vm.const_cache_chain.clear();
+        // --- TypedData dfree callbacks, gathered during the heap
+        //     surgery above ---
+        // Run LAST, once every table is back to baseline —
+        // mirrors `Vm::maybe_gc`'s "after `collect` returns and
+        // the &mut Heap borrow is gone" convention (vm/gc.rs).
+        for (f, p) in pending_frees {
+            // SAFETY: `f`/`p` came off a user-allocated TypedData
+            // slot this reset just dropped (truncated, deadened,
+            // or overwritten by the baseline restore); no GC root
+            // or baseline slot can reach `p` again. The cext's
+            // `dfree` contract is to release ownership of `p` —
+            // identical to the sweep-path invocation.
+            unsafe { f(p) };
+        }
     }
 
     /// Set the per-eval fuel counter, optionally re-anchoring
@@ -4966,5 +5011,143 @@ mod preamble_lift_guard_tests {
             weak.upgrade().is_none(),
             "class graph leaked: DropProbe still alive after Runtime drop"
         );
+    }
+}
+
+/// M7: `reset()` × `HeapObj::TypedData` dfree + baseline-image
+/// coverage guards. In-crate (not tests/embed) because crafting the
+/// three user-TypedData zombie shapes deterministically requires
+/// direct heap-slot access; the public-API twin (a real counter
+/// cext through `require` + `reset()`) lives in
+/// tests/cext_typeddata.rs.
+#[cfg(test)]
+mod reset_typeddata_dfree_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Counting dfree: `data_ptr` IS the counter (per-test local,
+    /// so parallel tests can't interfere through a shared static).
+    unsafe extern "C" fn counting_dfree(p: *mut std::ffi::c_void) {
+        unsafe { &*(p as *const AtomicUsize) }.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn alloc_counted_typeddata(
+        rt: &mut crate::Runtime,
+        ctr: &AtomicUsize,
+    ) -> crate::value::ObjId {
+        let sym = rt.vm.interner.intern("Object");
+        let class = rt.vm.classes.get(&sym).expect("Object class").clone();
+        rt.vm.heap.alloc(crate::heap::HeapObj::TypedData(crate::heap::TypedDataObj {
+            class,
+            data_ptr: ctr as *const AtomicUsize as *mut std::ffi::c_void,
+            type_ptr: std::ptr::null(),
+            dfree: Some(counting_dfree),
+        }))
+    }
+
+    /// Shapes (1) + (2): user TypedData past the high-water mark
+    /// (dropped by the truncate) and recycled into a preamble-era
+    /// free-list slot (dropped by the deaden walk) both get their
+    /// dfree invoked by reset() — and exactly once (a second
+    /// reset must not double-free).
+    #[test]
+    fn reset_runs_dfree_for_truncated_and_freelist_recycled_typeddata() {
+        let mut rt = crate::Runtime::new();
+        let snapshot = rt.post_preamble.as_ref().expect("snapshot");
+        let high_water = snapshot.heap_slot_count;
+        assert!(
+            !snapshot.heap_free.is_empty(),
+            "baseline free list unexpectedly empty — the below-high-water \
+             zombie shape needs at least one recyclable baseline slot",
+        );
+        let ctr = AtomicUsize::new(0);
+        // Enough allocations to drain the baseline free list and
+        // grow past the high-water mark.
+        let n = rt.post_preamble.as_ref().unwrap().heap_free.len() + 4;
+        let ids: Vec<_> = (0..n).map(|_| alloc_counted_typeddata(&mut rt, &ctr)).collect();
+        assert!(
+            ids.iter().any(|id| (id.0 as usize) < high_water),
+            "expected at least one TypedData recycled below the high-water mark",
+        );
+        assert!(
+            ids.iter().any(|id| (id.0 as usize) >= high_water),
+            "expected at least one TypedData past the high-water mark",
+        );
+        rt.reset();
+        assert_eq!(
+            ctr.load(Ordering::SeqCst),
+            n,
+            "reset() must invoke dfree exactly once per dropped TypedData",
+        );
+        // Idempotence: nothing left to free on a second reset.
+        rt.reset();
+        assert_eq!(ctr.load(Ordering::SeqCst), n, "second reset must not double-free");
+        // Post-reset Runtime is healthy.
+        let v = rt.eval("[1, 2, 3].sum", "post.rb").expect("post-reset eval");
+        assert_eq!(format!("{v:?}"), "Int(6)");
+        assert_eq!(ctr.load(Ordering::SeqCst), n, "post-reset eval must not re-free");
+    }
+
+    /// Shape (3): user TypedData recycled into a slot the BASELINE
+    /// image owns (a baseline object swept mid-eval, its slot
+    /// reused). `restore_baseline_contents` overwrites the slot
+    /// back to the captured baseline object — and must surface the
+    /// evicted TypedData's dfree instead of silently dropping it.
+    #[test]
+    fn reset_runs_dfree_for_typeddata_recycled_into_baseline_slot() {
+        let mut rt = crate::Runtime::new();
+        let idx = rt.post_preamble.as_ref().expect("snapshot").heap_baseline_contents[0].0
+            as usize;
+        let ctr = AtomicUsize::new(0);
+        let sym = rt.vm.interner.intern("Object");
+        let class = rt.vm.classes.get(&sym).expect("Object class").clone();
+        // Simulate the mid-eval sweep + recycle directly: the
+        // baseline occupant is gone, a user TypedData sits in its
+        // slot. (Bookkeeping consistency doesn't matter here —
+        // reset() restores it wholesale from the snapshot.)
+        rt.vm.heap.slots[idx] =
+            crate::heap::Slot::Live(crate::heap::HeapObj::TypedData(crate::heap::TypedDataObj {
+                class,
+                data_ptr: &ctr as *const AtomicUsize as *mut std::ffi::c_void,
+                type_ptr: std::ptr::null(),
+                dfree: Some(counting_dfree),
+            }));
+        rt.reset();
+        assert_eq!(ctr.load(Ordering::SeqCst), 1, "baseline-restore overwrite must dfree");
+        assert!(
+            !matches!(
+                &rt.vm.heap.slots[idx],
+                crate::heap::Slot::Live(crate::heap::HeapObj::TypedData(_)),
+            ),
+            "slot {idx} must be rewound to its baseline occupant",
+        );
+        let v = rt.eval("'ok'.upcase.length", "post.rb").expect("post-reset eval");
+        assert_eq!(format!("{v:?}"), "Int(2)");
+    }
+
+    /// The M7 census, pinned as a test: every live post-preamble
+    /// baseline slot must be covered by the deep-copy image (i.e.
+    /// no baseline Block / TypedData / Fiber / BoundMethod /
+    /// UnboundMethod / CurriedProc — variants reset() cannot
+    /// rewind). `capture_baseline_contents` debug_asserts the same
+    /// invariant at every construction; this release-mode-visible
+    /// twin documents the census finding (2026-07: baseline is
+    /// Instance/Array/Hash only across default, standard, and
+    /// `everything` builds) and fails loudly if a preamble change
+    /// introduces uncovered baseline state.
+    #[test]
+    fn baseline_image_covers_every_live_baseline_slot() {
+        let rt = crate::Runtime::new();
+        let snapshot = rt.post_preamble.as_ref().expect("snapshot");
+        let captured: std::collections::HashSet<u32> =
+            snapshot.heap_baseline_contents.iter().map(|(i, _)| *i).collect();
+        for i in 0..snapshot.heap_slot_count {
+            if matches!(rt.vm.heap.slots[i], crate::heap::Slot::Live(_)) {
+                assert!(
+                    captured.contains(&(i as u32)),
+                    "live baseline slot {i} is not in the reset() baseline image — \
+                     extend Heap::baseline_clone (see capture_baseline_contents docs)",
+                );
+            }
+        }
     }
 }
