@@ -391,7 +391,11 @@ crates/rubyrs/benches/string_interp.rb	10600	700	200k InterpolatedStr; Op::Inter
 # workloads measured 8048-8112 and still have headroom; only
 # hash_mutate (highest heap peak) crossed. 8700 gives ~290 KB / 3.4%
 # headroom over the observed peak for run-to-run jitter.
-crates/rubyrs/benches/hash_mutate.rb	10600	880	200k Hash[]= overwrites + 1k Hash[] reads
+# 2026-07-07 hash_mutate 10600 -> 10750: the dispatch campaign's IC
+# infrastructure (P4 cvar/super site-cache tables, P5 probe name mask,
+# P3 block ICs) adds ~52 KB of per-Vm side tables; CI observed 10,652.
+# Same one-page-straddle row as the 2026-06-10 note.
+crates/rubyrs/benches/hash_mutate.rb	10750	880	200k Hash[]= overwrites + 1k Hash[] reads
 # boot — base/startup RSS isolation (added 2026-06-29). Boot RSS is the
 # FLOOR of all workloads (no per-workload churn), so its budget sits
 # below the workload cluster: observed workload min was ~9096 (static_bench)
