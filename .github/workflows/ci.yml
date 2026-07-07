@@ -987,7 +987,12 @@ jobs:
           # expect — mirrors the interpreter StoreCvar arm's exact
           # invariant (the codegen flushes the operand stack before
           # the call, so an empty stack is an emitter bug).
-          check crates/rubyrs/src/jit_tier2.rs       72
+          # 2026-07-06 +2 (P5a): t2_store_ivar's ICE-class pair —
+          # the empty-frame-stack expect (t2_ivar_set_v's exact
+          # invariant: a framed tier-2 body always runs against its
+          # own frame) and the stack-pop expect (the t2_store_cvar
+          # invariant above: the codegen flushes before the call).
+          check crates/rubyrs/src/jit_tier2.rs       74
           # prism_wq (prism→whitequark lexer/AST bridge, rubocop
           # campaign): processes script-derived source, so each site
           # was audited for user-input reachability — all 14 are

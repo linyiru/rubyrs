@@ -912,6 +912,24 @@ fn tier2_restblock_lite() { run_diff("tier2_restblock_lite"); }
 // send-family re-aims to mask-miss targets, and the class-self
 // bare-call exemption (shape-keyed bucket stays unmasked).
 #[test] fn p5_probe_name_filter() { run_diff("p5_probe_name_filter"); }
+// Dispatch-campaign P5a census tail, part 1: NfaPlan
+// kw-literal-defaults serve (bare-Call-only gate incl. send re-aim +
+// empty-kwsplat, fresh-per-call Str defaults, splat identity,
+// brace-hash-positional arity error, ineligible required/computed/
+// kwrest shapes, private implicit-self, super/CallKw declines,
+// redefinition).
+#[test] fn p5a_nfa_kw_literal() { run_diff("p5a_nfa_kw_literal"); }
+// The frozen_string_literal magic comment applies to kw literal Str
+// defaults (file-scoped, hence its own fixture).
+#[test] fn p5a_nfa_kw_frozen() { run_diff("p5a_nfa_kw_frozen"); }
+// Dispatch-campaign P5a census tail, part 2: the Hash merge!/update
+// walk bucket (fast plain shape + overwrite-in-place order, zero/
+// multi arg, to_hash coercion + TypeError shape, FrozenError, user
+// hash/eql? keys, tagged-subclass decline, reopen-off incl.
+// alias-only override) and the tier-2 lean StoreIvar/Super serves
+// (call-fed stores, frozen-receiver trap, Class/Hash-subclass/
+// Str-subclass receivers, hot super shapes + redefinition).
+#[test] fn p5a_merge_bang_leanops() { run_diff("p5a_merge_bang_leanops"); }
 #[test] fn lazy_each_with_index() { run_diff("lazy_each_with_index"); }
 #[cfg(feature = "stdlib")]
 #[test] fn set_subtract_divide() { run_diff("set_subtract_divide"); }

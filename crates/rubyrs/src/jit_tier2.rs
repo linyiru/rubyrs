@@ -664,6 +664,36 @@ unsafe extern "C" fn t2_ivar_set_v(
     T2_CONTINUE
 }
 
+/// Lean `Op::StoreIvar` serve for STACK-borne values (campaign P5a):
+/// the stored value was materialized on the real operand stack (a
+/// call-fed store, an interpolation result, or an `inline_on`-off
+/// body) — the shapes that previously crossed the generic `t2_op`
+/// boundary (op decode + `Vm::step` match + `t2_finish` frame probe;
+/// the AM census's StoreIvar 55.7/iter row). Pops and runs the
+/// interpreter arm's own body (`Vm::store_ivar_value` — the frozen
+/// guard, the receiver-kind match, and the ADR 0035 Ph4/5 cid slot
+/// cache, shared so the two cannot drift). The op cannot push a
+/// frame and cannot GC-allocate on the success path, so no
+/// `t2_finish`; `ip` is
+/// stamped first so a FrozenError's backtrace line is the store
+/// op's, exactly as `step()` would report it (the `t2_ivar_set_v`
+/// contract).
+unsafe extern "C" fn t2_store_ivar(vm: *mut crate::vm::Vm, sym: i64, cid: i64, ip: i64) -> i64 {
+    let vm = unsafe { &mut *vm };
+    vm.frames
+        .last_mut()
+        .expect("ICE: t2_store_ivar with empty frame stack")
+        .ip = ip as usize + 1;
+    let v = vm.stack.pop().expect("ICE: StoreIvar stack underflow");
+    match vm.store_ivar_value(SymId(sym as u32), cid as u32, v) {
+        Ok(()) => T2_CONTINUE,
+        Err(t) => {
+            vm.t2_trap = Some(t);
+            T2_TRAP
+        }
+    }
+}
+
 /// `Op::CaseEqLit` fast core, shared by the register-arg and stack-arg
 /// variants. `kind`/`payload` describe the baked literal (0=Sym 1=Int
 /// 2=Bool 3=Nil 4=Float). Mirrors the step arm's safe path exactly —
@@ -2240,6 +2270,39 @@ unsafe extern "C" fn t2_call_local(
     t2_call_impl(vm, SymId(name as u32), 0, cid as u32, false)
 }
 
+/// Lean `Op::Super(name, argc, cid)` serve (campaign P5a): the step
+/// arm's body — drain the argc args, run
+/// `Vm::super_call_with_lifecycle_noop` (the P4 super-site-cached
+/// resolve + invoke, error shapes and the lifecycle-noop intercept
+/// included) — behind the t2_call family's own boundary instead of
+/// the generic `t2_op` (op decode + `Vm::step` match; the AM
+/// census's Super 71/iter row). The frame push is CONTAINED exactly
+/// as for the call family: `t2_call_prologue` stamps `ip` past the
+/// op + charges the fuel tick `step()` would have charged, and
+/// `t2_finish` drives any pushed callee frame to completion /
+/// reports bail statuses — byte for byte the machinery `t2_op` used
+/// for this op.
+unsafe extern "C" fn t2_super(
+    vm: *mut crate::vm::Vm,
+    name: i64,
+    argc: i64,
+    cid: i64,
+    ip: i64,
+) -> i64 {
+    let vm = unsafe { &mut *vm };
+    if t2_call_prologue(vm, ip).is_err() {
+        return T2_TRAP;
+    }
+    let depth = vm.frames.len();
+    let split = vm.stack.len() - argc as usize;
+    let args: Vec<Value> = vm.stack.drain(split..).collect();
+    if let Err(t) = vm.super_call_with_lifecycle_noop(SymId(name as u32), args, cid as u32) {
+        vm.t2_trap = Some(t);
+        return T2_TRAP;
+    }
+    t2_finish(vm, depth)
+}
+
 /// Shared miss path for the framed const helpers: exactly one generic-
 /// helper iteration (`t2_op`'s body with the op value rebuilt — no baked
 /// pointer needed): stamp `ip` past the op, run the interpreter's own arm
@@ -3022,6 +3085,9 @@ struct HelperRefs {
     load_ivar: cranelift_codegen::ir::FuncRef,
     load_cvar: cranelift_codegen::ir::FuncRef,
     store_cvar: cranelift_codegen::ir::FuncRef,
+    // Campaign P5a lean serves: stack-value StoreIvar + Op::Super.
+    store_ivar: cranelift_codegen::ir::FuncRef,
+    super_: cranelift_codegen::ir::FuncRef,
     dup: cranelift_codegen::ir::FuncRef,
     pop: cranelift_codegen::ir::FuncRef,
     swap: cranelift_codegen::ir::FuncRef,
@@ -4233,6 +4299,26 @@ fn emit_op(cg: &mut Cg, fb: &mut FunctionBuilder, i: usize) -> bool {
             cg.invalidate_mem();
             false
         }
+        // `Op::Super(name, argc, cid)` — lean serve (campaign P5a): the
+        // step arm's drain + `super_call_with_lifecycle_noop` behind the
+        // call family's own boundary (prologue fuel/ip + `t2_finish`)
+        // instead of the generic `t2_op`. Same discipline as the call
+        // arms: the callee cannot write this frame's `Locals::Stack`
+        // slots, so the local read cache survives. `!cg.nocall` keeps
+        // the debug knob's "route every call through the interpreter"
+        // contract; lite bodies never admit Super (default arm bails).
+        Op::Super(name, argc, cid) if !cg.nocall && !cg.lite => {
+            cg.flush(fb);
+            let nc = fb.ins().iconst(types::I64, name.0 as i64);
+            let a = fb.ins().iconst(types::I64, argc as i64);
+            let c = fb.ins().iconst(types::I64, cid as i64);
+            let ipc = fb.ins().iconst(types::I64, i as i64);
+            let call = fb.ins().call(cg.h.super_, &[vm, nc, a, c, ipc]);
+            let st = fb.inst_results(call)[0];
+            cg.check_status(fb, st);
+            cg.invalidate_mem();
+            false
+        }
         // LITE t2_call: the IC-cached bare-constant read (frameless on a
         // cache hit; cold/invalidated → materialize + interpreted refill).
         Op::LoadConstChain(ci) if cg.lite => {
@@ -4639,6 +4725,27 @@ fn emit_op(cg: &mut Cg, fb: &mut FunctionBuilder, i: usize) -> bool {
             let call = fb
                 .ins()
                 .call(cg.h.ivar_set_v, &[vm, symc, cidc, v.w0, v.w1, ipc]);
+            let st = fb.inst_results(call)[0];
+            cg.check_status(fb, st);
+            cg.invalidate_mem();
+            false
+        }
+        // Lean stack-value serve (campaign P5a): the stored value is on
+        // the REAL operand stack (call-fed stores, `!inline_on` bodies)
+        // — previously the generic `t2_op` boundary (the AM census's
+        // StoreIvar 55.7/iter row). The flush lands any remaining
+        // virtuals first, so the helper's pop sees exactly the
+        // interpreter's stack. StoreIvar never writes locals, so the
+        // local read cache survives (unlike `emit_generic`'s
+        // `clear_cache`). LITE keeps its materialize-bail via the
+        // default arm (a lite body has no frame for the helper's ip
+        // stamp / trap discipline).
+        Op::StoreIvar(sym, cid) if !cg.lite => {
+            cg.flush(fb);
+            let symc = fb.ins().iconst(types::I64, sym.0 as i64);
+            let cidc = fb.ins().iconst(types::I64, cid as i64);
+            let ipc = fb.ins().iconst(types::I64, i as i64);
+            let call = fb.ins().call(cg.h.store_ivar, &[vm, symc, cidc, ipc]);
             let st = fb.inst_results(call)[0];
             cg.check_status(fb, st);
             cg.invalidate_mem();
@@ -5071,6 +5178,8 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize, ctx: &T2Ctx) -> Opt
     builder.symbol("t2_load_ivar", t2_load_ivar as *const u8);
     builder.symbol("t2_load_cvar", t2_load_cvar as *const u8);
     builder.symbol("t2_store_cvar", t2_store_cvar as *const u8);
+    builder.symbol("t2_store_ivar", t2_store_ivar as *const u8);
+    builder.symbol("t2_super", t2_super as *const u8);
     builder.symbol("t2_dup", t2_dup as *const u8);
     builder.symbol("t2_pop", t2_pop as *const u8);
     builder.symbol("t2_swap", t2_swap as *const u8);
@@ -5199,6 +5308,8 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize, ctx: &T2Ctx) -> Opt
     let f_load_ivar = decl(&mut module, "t2_load_ivar", "ii", false)?;
     let f_load_cvar = decl(&mut module, "t2_load_cvar", "ii", false)?;
     let f_store_cvar = decl(&mut module, "t2_store_cvar", "ii", false)?;
+    let f_store_ivar = decl(&mut module, "t2_store_ivar", "iii", true)?;
+    let f_super = decl(&mut module, "t2_super", "iiii", true)?;
     let f_dup = decl(&mut module, "t2_dup", "", false)?;
     let f_pop = decl(&mut module, "t2_pop", "", false)?;
     let f_swap = decl(&mut module, "t2_swap", "", false)?;
@@ -5254,6 +5365,8 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize, ctx: &T2Ctx) -> Opt
             load_ivar: module.declare_func_in_func(f_load_ivar, func),
             load_cvar: module.declare_func_in_func(f_load_cvar, func),
             store_cvar: module.declare_func_in_func(f_store_cvar, func),
+            store_ivar: module.declare_func_in_func(f_store_ivar, func),
+            super_: module.declare_func_in_func(f_super, func),
             dup: module.declare_func_in_func(f_dup, func),
             pop: module.declare_func_in_func(f_pop, func),
             swap: module.declare_func_in_func(f_swap, func),

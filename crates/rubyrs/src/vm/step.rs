@@ -696,6 +696,68 @@ impl Vm {
         None
     }
 
+    /// `Op::StoreIvar`'s body after the value pop — shared verbatim
+    /// by the interpreter arm and the tier-2 lean stack-value serve
+    /// (`jit_tier2::t2_store_ivar`, campaign P5a) so the two cannot
+    /// drift: frozen guard (the one trap), then the receiver-kind
+    /// match with the ADR 0035 Ph4/5 guarded slot cache for Object
+    /// receivers. Cannot push a frame; no GC-heap alloc on the
+    /// success path. `#[inline(always)]` keeps the interpreter arm's
+    /// generated code identical to the pre-extraction inline body
+    /// (the P4 perf-guard lesson: `step` rides LLVM's inline budget).
+    #[inline(always)]
+    pub(crate) fn store_ivar_value(
+        &mut self,
+        name_id: crate::intern::SymId,
+        cid: u32,
+        v: Value,
+    ) -> Result<(), Trap> {
+        let self_val = self
+            .frames
+            .last()
+            .expect("ICE: StoreIvar no frame")
+            .self_val
+            .clone();
+        self.frozen_ivar_guard(&self_val)?;
+        match &self_val {
+            // ADR 0035 Ph4/5 — guarded slot cache → direct
+            // slot store (write_slot handles lazy growth +
+            // first-assignment order tracking).
+            Value::Object(id) => {
+                let inst = self.heap.instance_mut(*id);
+                let slot = crate::vm::lookup::ivar_slot_cached(
+                    &mut self.ivar_caches, inst, name_id, cid,
+                );
+                inst.ivars.write_slot(slot, v);
+            }
+            Value::Class(c) => { c.ivars.borrow_mut().insert(name_id, v); }
+            // Hash-subclass instances carry their own ivar table.
+            Value::Hash(id) => {
+                self.heap.hash_ivar_set(*id, name_id, v);
+            }
+            // Array-subclass instances likewise.
+            Value::Array(id) => {
+                self.heap.array_ivar_set(*id, name_id, v);
+            }
+            // String-subclass instances → `str_ivars` side table
+            // (the frozen guard above already handled a frozen
+            // receiver). Keyed by Rc identity; the strong Rc keeps
+            // the string alive (same leak tradeoff as str_singletons).
+            Value::Str(s) => {
+                let key = std::rc::Rc::as_ptr(s) as usize;
+                let keep = s.clone();
+                self.str_ivars
+                    .entry(key)
+                    .or_insert_with(|| (keep, crate::intern::FxHashMap::default()))
+                    .1
+                    .insert(name_id, v);
+                self.any_str_ivars = true;
+            }
+            _ => { /* drop — CRuby raises but the toplevel/primitive cases are rare */ }
+        }
+        Ok(())
+    }
+
     /// `Op::ApplySuperBlock` body, extracted out of `step`'s match
     /// (campaign P4): the splat-super-with-block shape is the rarest
     /// super form but carried the largest inline arm — keeping it a
@@ -2139,49 +2201,7 @@ impl Vm {
             }
             Op::StoreIvar(name_id, cid) => {
                 let v = self.stack.pop().expect("ICE: StoreIvar stack underflow");
-                let self_val = self
-                    .frames
-                    .last()
-                    .expect("ICE: StoreIvar no frame")
-                    .self_val
-                    .clone();
-                self.frozen_ivar_guard(&self_val)?;
-                match &self_val {
-                    // ADR 0035 Ph4/5 — guarded slot cache → direct
-                    // slot store (write_slot handles lazy growth +
-                    // first-assignment order tracking).
-                    Value::Object(id) => {
-                        let inst = self.heap.instance_mut(*id);
-                        let slot = crate::vm::lookup::ivar_slot_cached(
-                            &mut self.ivar_caches, inst, name_id, cid,
-                        );
-                        inst.ivars.write_slot(slot, v);
-                    }
-                    Value::Class(c) => { c.ivars.borrow_mut().insert(name_id, v); }
-                    // Hash-subclass instances carry their own ivar table.
-                    Value::Hash(id) => {
-                        self.heap.hash_ivar_set(*id, name_id, v);
-                    }
-                    // Array-subclass instances likewise.
-                    Value::Array(id) => {
-                        self.heap.array_ivar_set(*id, name_id, v);
-                    }
-                    // String-subclass instances → `str_ivars` side table
-                    // (the frozen guard above already handled a frozen
-                    // receiver). Keyed by Rc identity; the strong Rc keeps
-                    // the string alive (same leak tradeoff as str_singletons).
-                    Value::Str(s) => {
-                        let key = std::rc::Rc::as_ptr(s) as usize;
-                        let keep = s.clone();
-                        self.str_ivars
-                            .entry(key)
-                            .or_insert_with(|| (keep, crate::intern::FxHashMap::default()))
-                            .1
-                            .insert(name_id, v);
-                        self.any_str_ivars = true;
-                    }
-                    _ => { /* drop — CRuby raises but the toplevel/primitive cases are rare */ }
-                }
+                self.store_ivar_value(name_id, cid, v)?;
             }
             Op::LoadCvar(name_id, cid) => {
                 let v = self.cvar_load(name_id, cid);

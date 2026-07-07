@@ -3373,10 +3373,14 @@ impl Vm {
             && !chain_has(self, &arr_cls, self.sym_freeze)
             && !chain_has(self, &arr_cls, self.sym_dup);
         self.fast_hash_fetch_safe = !chain_has(self, &hash_cls, self.sym_fetch);
-        // Campaign-P4 bucket twin: Hash merge/slice/except.
+        // Campaign-P4 bucket twin: Hash merge/slice/except — P5a adds
+        // merge!/update (the same lumped-conservative contract: any
+        // user override of ANY bucket name turns the whole bucket off).
         self.fast_hash_msx_safe = !chain_has(self, &hash_cls, self.sym_merge)
             && !chain_has(self, &hash_cls, self.sym_slice)
-            && !chain_has(self, &hash_cls, self.sym_except);
+            && !chain_has(self, &hash_cls, self.sym_except)
+            && !chain_has(self, &hash_cls, self.sym_merge_bang)
+            && !chain_has(self, &hash_cls, self.sym_update);
         let str_cls = self.classes.get(&str_sym).cloned();
         self.fast_str_dup_safe = !chain_has(self, &str_cls, self.sym_dup);
         // Rest-predicate serve deps (see `Vm::rest_pred_deps_ok`):
@@ -8340,20 +8344,27 @@ impl Vm {
         }
 
         /// Hash#merge / #slice / #except walk bucket, out-of-line
-        /// (campaign P4). Serves the canonical collection arms AT the
-        /// arm: it CALLS `hash_collection_call` — the exact function
-        /// the cascade's `collection_call` reaches for a plain Hash —
-        /// so the fast and canonical answers cannot drift (coercion,
-        /// TypeError shapes, user-`hash`-key handling and the arms'
-        /// own pin/maybe_gc discipline all ride along). Guards:
+        /// (campaign P4; P5a adds `merge!` + its alias `update` — the
+        /// same census family's 1,065/3K-iter residual). Serves the
+        /// canonical collection arms AT the arm: it CALLS
+        /// `hash_collection_call` — the exact function the cascade's
+        /// `collection_call` reaches for a plain Hash — so the fast
+        /// and canonical answers cannot drift (coercion, TypeError
+        /// shapes, user-`hash`-key handling, the central
+        /// frozen-mutator FrozenError, and the arms' own pin/maybe_gc
+        /// discipline all ride along). The bucket only fronts the
+        /// BLOCKLESS `do_call` route, so `merge!`'s block-form
+        /// conflict resolver keeps `do_call_block`'s paths untouched.
+        /// Guards:
         ///   - `fast_hash_msx_safe` (method_gen-revalidated by the
-        ///     caller's zone entry): no user merge/slice/except on
-        ///     the Hash chain (lumped, strictly conservative);
+        ///     caller's zone entry): no user merge/slice/except/
+        ///     merge!/update on the Hash chain (lumped, strictly
+        ///     conservative);
         ///   - no `class_tag` (subclass override precedence stays in
         ///     the canonical cascade);
-        ///   - any argc (the arms are variadic; merge's re-entrant
-        ///     `to_hash` coercion runs inside the arm exactly as the
-        ///     cascade would run it).
+        ///   - any argc (the arms are variadic; merge/merge!'s
+        ///     re-entrant `to_hash` coercion runs inside the arm
+        ///     exactly as the cascade would run it).
         ///
         /// Stack discipline mirrors do_call's slow path: args
         /// drained and receiver popped into Rust locals BEFORE the
@@ -8380,6 +8391,10 @@ impl Vm {
                 "slice"
             } else if name_id == self.sym_except {
                 "except"
+            } else if name_id == self.sym_merge_bang {
+                "merge!"
+            } else if name_id == self.sym_update {
+                "update"
             } else {
                 return Ok(false);
             };
@@ -9201,13 +9216,15 @@ impl Vm {
                         return Ok(true);
                     }
                 }
-                // Hash#merge / #slice / #except — the canonical
-                // collection arms, served AT the arm (campaign P4;
-                // AM fallback census: merge 11.4 + slice 10.7 +
-                // except 15.7/iter, all slow-cascade — they arrive
-                // via CallKw/ApplyCall, which funnel into do_call).
+                // Hash#merge / #slice / #except (campaign P4) +
+                // #merge!/#update (P5a; the census family's
+                // 1,065/3K-iter residual) — the canonical collection
+                // arms, served AT the arm (AM fallback census:
+                // merge 11.4 + slice 10.7 + except 15.7/iter, all
+                // slow-cascade — they arrive via CallKw/ApplyCall,
+                // which funnel into do_call).
                 // Unlike the mirrored-code buckets above, these
-                // three CALL `hash_collection_call` itself — the
+                // names CALL `hash_collection_call` itself — the
                 // exact function the cascade's `collection_call`
                 // reaches for a plain Hash — so the fast and
                 // canonical answers cannot drift (coercion,
@@ -18151,16 +18168,54 @@ impl Vm {
         }
     }
 
+    /// Materialize a LITERAL keyword default at bind time — the
+    /// moral equivalent of evaluating the default expression at body
+    /// entry (CRuby re-evaluates per call). Immutable scalars (Int /
+    /// Float / Sym / Bool / Nil — everything
+    /// `expr_is_compile_time_literal` admits except strings) clone
+    /// as plain Values. A Str literal gets a FRESH `RStr`: handing
+    /// out the snapshot's `Rc` shared one buffer across calls, so
+    /// `def f(s: "x"); s << "y"; end` leaked each call's mutation
+    /// into the next default (probed vs CRuby 3.4.8: "xy"/"xy"
+    /// there, "xy"/"xyy" here — the P5a fixture pins it). The fresh
+    /// cell is built the way `Op::LoadConstStr` builds the same
+    /// literal in this proto: content copy + source-encoding retag +
+    /// `frozen_string_literal` stamp (probed: the magic comment
+    /// freezes kw literal defaults in CRuby too — `s.frozen?` is
+    /// true and `<<` raises FrozenError). Shared by the general
+    /// binder's literal-default arm and the NfaPlan kw serve so the
+    /// two cannot drift. `Rc`-backed — never a GC-heap alloc.
+    pub(crate) fn kw_literal_default_fresh(&self, d: &Value, proto_idx: usize) -> Value {
+        let Value::Str(rs) = d else { return d.clone() };
+        let v = Value::new_str_bytes(rs.borrow().clone());
+        if let Value::Str(fresh) = &v {
+            let proto = &self.protos[proto_idx];
+            if let Some(enc) = proto.source_encoding {
+                self.retag_literal_to_source_encoding(fresh, enc);
+            }
+            if proto.frozen_string_literal {
+                fresh.frozen.set(true);
+            }
+        }
+        v
+    }
+
     /// Fetch (computing + caching on first touch) the ADR-0031
     /// increment-2 binding plan for `proto_idx`. `None` = ineligible:
-    /// any keyword param or `**kwrest` in the signature (the trailing-
-    /// Hash peel + per-name kw binding + kw_given_mask bookkeeping
-    /// stay on the general binder), or a shape that doesn't fit the
-    /// packed u16 fields. Optionals / `*rest` / post-required / `&blk`
-    /// are all plan-eligible. The cache is sound forever: a Proto's
-    /// param shape is immutable after compile, and the plan carries
-    /// no per-class or per-method state (method redefinition swaps
-    /// the METHOD the IC resolves, which brings its own proto_idx).
+    /// a required or computed-default keyword param or `**kwrest` in
+    /// the signature (the trailing-Hash peel + per-name kw binding +
+    /// kw_given_mask bookkeeping stay on the general binder), or a
+    /// shape that doesn't fit the packed u16 fields. Optionals /
+    /// `*rest` / post-required / `&blk` are all plan-eligible, and so
+    /// (campaign P5a) is a kw region whose EVERY param is optional
+    /// with a LITERAL default — the binder's kw job for a
+    /// zero-kwargs call site is then exactly "clone the literals,
+    /// mask 0", which the serve reproduces (kwargs-carrying sites
+    /// decline there; see `try_invoke_nfa_method_from_stack`). The
+    /// cache is sound forever: a Proto's param shape is immutable
+    /// after compile, and the plan carries no per-class or
+    /// per-method state (method redefinition swaps the METHOD the IC
+    /// resolves, which brings its own proto_idx).
     fn nfa_plan_for(&mut self, proto_idx: usize) -> Option<crate::vm::NfaPlan> {
         use crate::vm::{NfaPlan, NfaPlanSlot};
         if proto_idx >= self.nfa_plans.len() {
@@ -18174,12 +18229,24 @@ impl Vm {
         let proto = &self.protos[proto_idx];
         let has_rest = proto.rest_param.is_some();
         let has_blk = proto.block_param.is_some();
+        let kw_count = proto.kw_param_defaults.len();
+        // Keyword eligibility: every kw param optional with a LITERAL
+        // default (`Some` snapshot, no computed-default prologue), no
+        // `**kwrest`. A required kwarg (`None` + computed=false) or a
+        // computed default (`None` + computed=true) keeps the whole
+        // proto on the general binder — the serve has no
+        // missing-keyword ArgumentError and no prologue-mask story.
+        // (`kw_has_computed_default` may be empty when every default
+        // is a literal — the compiler's space-saving contract.)
+        let kw_lit_ok = proto.kw_rest_param.is_none()
+            && proto.kw_param_defaults.iter().enumerate().all(|(i, d)| {
+                d.is_some() && !proto.kw_has_computed_default.get(i).copied().unwrap_or(false)
+            });
         let positional_max = proto
             .params
             .len()
-            .saturating_sub(has_rest as usize + has_blk as usize);
-        let eligible = proto.kw_param_defaults.is_empty()
-            && proto.kw_rest_param.is_none()
+            .saturating_sub(has_rest as usize + has_blk as usize + kw_count);
+        let eligible = kw_lit_ok
             && proto.params.len() <= u16::MAX as usize
             && proto.n_locals as usize >= proto.params.len()
             && positional_max
@@ -18194,6 +18261,7 @@ impl Vm {
             required_post: proto.n_required_post,
             positional_max: positional_max as u16,
             has_rest,
+            kw_count: kw_count as u16,
             has_block_param: has_blk,
             n_locals: proto.n_locals,
             stack_eligible: !proto.creates_block,
@@ -18434,13 +18502,24 @@ impl Vm {
     ///
     /// Semantics mirrored from the general binder
     /// (`invoke_method_with_block_inner`), specialised to the
-    /// kw-free shapes the plan admits:
+    /// shapes the plan admits:
     ///   - arity MISS declines (`Ok(false)`) — the cascade re-resolves
     ///     and raises the canonical ArgumentError (same contract as
     ///     the fixed-arity fast path's argc gate);
-    ///   - trailing-Hash peel: skipped — the binder only peels when
-    ///     the callee declares kwparams/kwrest, which the plan gate
-    ///     excludes, so a trailing Hash stays positional either way;
+    ///   - trailing-Hash peel: skipped — for a kw-free plan the
+    ///     binder only peels when the callee declares kwparams/
+    ///     kwrest, so a trailing Hash stays positional either way;
+    ///     a kw-carrying plan (campaign P5a) serves ONLY when
+    ///     `trailing_hash_positional` is set — the bare-`Op::Call`-
+    ///     family signal under which the binder also never peels
+    ///     (explicit-brace trailing Hash = positional, Ruby 3) —
+    ///     so both paths bind zero kwargs; every kwargs-carrying
+    ///     route (`CallKw` with a non-empty hash via `do_call_kw`'s
+    ///     fall-through, `ApplyCallKw`, `super`, block forms,
+    ///     reflective invokes) leaves the flag false and declines
+    ///     here into the binder's peel + per-name bind. Read-only
+    ///     (no `mem::take`): the op arm resets the flag after the
+    ///     dispatch — same discipline as `kernel_integer`'s gate;
     ///   - post-required bind from the arg TAIL, then leading args,
     ///     then the middle gathers into a FRESH rest Array per call
     ///     (splat identity), `[]` when empty;
@@ -18449,6 +18528,12 @@ impl Vm {
     ///     `JumpIfArgGiven` default prologue — default expressions
     ///     (literal or computed) evaluate in the same scope, order,
     ///     and exactly-once-per-call as every other path;
+    ///   - kw slots (all optional-with-literal-default, the plan
+    ///     gate) fill from the proto's literal snapshot — each a
+    ///     FRESH materialization (`kw_literal_default_fresh`: a Str
+    ///     literal can't leak one call's mutation into the next) —
+    ///     with `kw_given_mask = 0`, exactly the binder's
+    ///     zero-kwargs outcome;
     ///   - `&blk` slot binds Nil (this is the no-block `do_call`
     ///     form; a block call takes `do_call_block`'s paths).
     ///
@@ -18506,6 +18591,13 @@ impl Vm {
         if m.params.len() != plan.params_len as usize {
             return Ok(false);
         }
+        // Kw-shaped plan (campaign P5a): bare-Call sites only — the
+        // flag is the "zero kwargs passed / trailing Hash is
+        // positional" signal (see the doc above). Kw-free plans
+        // serve every route, as before.
+        if plan.kw_count != 0 && !self.trailing_hash_positional {
+            return Ok(false);
+        }
         let positional_max = plan.positional_max as usize;
         let post_n = plan.required_post as usize;
         let required = plan.required_pre as usize + post_n;
@@ -18557,6 +18649,20 @@ impl Vm {
             if let Some(id) = rest_id {
                 self.locals_arena.push(Value::Array(id));
             }
+            // Kw slots: literal defaults, FRESH per call (`Rc`-backed
+            // Str materialization — no GC-heap alloc, so the "no
+            // further alloc between the rest alloc and the frame
+            // push" rooting contract above still holds). The `None`
+            // arm is unreachable by the plan gate (all-literal proven
+            // at plan build); Nil keeps a hypothetical drift
+            // observable rather than adding a panic-budget entry.
+            for i in 0..plan.kw_count as usize {
+                let v = match &self.protos[m.proto_idx].kw_param_defaults[i] {
+                    Some(d) => self.kw_literal_default_fresh(d, m.proto_idx),
+                    None => Value::Nil,
+                };
+                self.locals_arena.push(v);
+            }
             if plan.has_block_param {
                 self.locals_arena.push(Value::Nil);
             }
@@ -18580,6 +18686,16 @@ impl Vm {
                 }
                 if let Some(id) = rest_id {
                     l[positional_max] = Value::Array(id);
+                }
+                // Kw slots: literal defaults, FRESH per call (the
+                // `RefMut` on the cell is independent of `&self`;
+                // same unreachable-`None` contract as the arena path).
+                let kw_start = positional_max + plan.has_rest as usize;
+                for i in 0..plan.kw_count as usize {
+                    l[kw_start + i] = match &self.protos[m.proto_idx].kw_param_defaults[i] {
+                        Some(d) => self.kw_literal_default_fresh(d, m.proto_idx),
+                        None => Value::Nil,
+                    };
                 }
                 // `&blk` slot stays Nil (cell is Nil-filled).
             }
@@ -23525,9 +23641,16 @@ impl Vm {
                         }
                     }
                     // Literal-default optional kwarg, caller missing
-                    // → fill from the snapshot. No prologue runs for
-                    // this slot — same fast path as before.
-                    (None, Some(d), false) => locals[kw_start + i] = d.clone(),
+                    // → fill from the snapshot, FRESH per call
+                    // (`kw_literal_default_fresh`: a plain `d.clone()`
+                    // handed every call the SAME `Rc<RStr>`, so a
+                    // body mutation of a Str default leaked into
+                    // later calls' defaults — CRuby re-evaluates the
+                    // literal per call). No prologue runs for this
+                    // slot.
+                    (None, Some(d), false) => {
+                        locals[kw_start + i] = self.kw_literal_default_fresh(d, m.proto_idx);
+                    }
                     // Computed-default optional kwarg, caller missing
                     // → leave nil; the body's prologue evaluates the
                     // default expression and stores into the slot.

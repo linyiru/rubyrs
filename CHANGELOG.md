@@ -46,6 +46,18 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   `define_method(:nil?)` / `(:!)` overrides now win over the built-in
   truthiness arms exactly like their `def` twins.
   (`define_method_ic_serve.rb`)
+- **Dispatch-campaign P5a: all-literal-default keyword methods bind
+  through the NfaPlan fast path; Hash `merge!`/`update` join the msx
+  walk bucket; tier-2 serves stack-value `StoreIvar` and `super`
+  through lean helpers** — a bare call passing zero kwargs to a method
+  whose every kwarg is optional-with-a-literal-default (the i18n
+  `translations(do_init: false)` shape, ActiveModel `valid?`'s #1
+  remaining fallback row) now binds stack-direct instead of walking
+  the slow cascade + general binder, and the four AM census rows the
+  strike targeted (`translations` ×2, `merge!`, tier-2 StoreIvar/Super
+  generic-op crossings) drop to zero — ActiveModel `valid?` +1.0–1.8%
+  (tier-2) / +0.7–1.5% (interp), `hash_micro` merge! row −13%.
+  (`p5a_nfa_kw_literal.rb`, `p5a_merge_bang_leanops.rb`)
 - **Dispatch-campaign P4: `@@cvar` and `super` sites get inline caches;
   Hash `merge`/`slice`/`except` get walk fast buckets** — per-site owner
   caches for `Op::LoadCvar`/`StoreCvar` (their own `CidGen::cvar` id
@@ -82,6 +94,13 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Fixed
 
+- **Keyword literal `String` defaults are fresh per call and honour
+  `# frozen_string_literal: true`** — `def f(s: "x"); s << "y"; end`
+  no longer leaks one call's mutation into the next call's default
+  (CRuby re-evaluates the default expression per call: "xy"/"xy", not
+  "xy"/"xyy"), and under the magic comment the default is frozen so
+  mutating it raises FrozenError. (`p5a_nfa_kw_literal.rb`,
+  `p5a_nfa_kw_frozen.rb`)
 - **Protected class methods acquired via `extend` honour the caller's
   singleton chain** — `Person.extend(CM)` makes `CM`'s protected instance
   methods callable class-side by kin per CRuby's full `is_a?` rule

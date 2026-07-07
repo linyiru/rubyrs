@@ -638,7 +638,8 @@ pub(crate) enum WalkOrigin {
 
 /// ADR 0031 increment 2 — precomputed argument-binding plan for a
 /// NON-fixed-arity method proto (optional positionals / `*rest` /
-/// post-required / `&blk`; kwargs and kw-rest are INELIGIBLE — see
+/// post-required / `&blk` / all-literal-default keywords; required
+/// or computed-default kwargs and `**kwrest` are INELIGIBLE — see
 /// `Vm::nfa_plan_for`). The variadic sibling of `FixedArity`: every
 /// field the general binder re-derives from the Proto per call
 /// (`invoke_method_with_block_inner`'s tail-layout arithmetic) is
@@ -650,7 +651,14 @@ pub(crate) enum WalkOrigin {
 /// `n_given_positional`), so the binder's only default job is
 /// leaving unfilled slots Nil and stamping the given-count —
 /// evaluation order/scope/once-per-call semantics ride on the same
-/// bytecode the general binder relies on.
+/// bytecode the general binder relies on. Keyword LITERAL defaults
+/// (campaign P5a) are the one default family the binder itself
+/// fills (no prologue exists for them): the serve clones each
+/// literal FRESH from the proto row — see
+/// `Vm::kw_literal_default_fresh` for the mutation/frozen contract
+/// — and only on bare-`Op::Call`-family sites passing zero kwargs
+/// (`kw_given_mask = 0`; every kwargs-carrying route declines to
+/// the general binder's peel + per-name bind).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct NfaPlan {
     /// `proto.params.len()` — cross-checked against `m.params.len()`
@@ -668,8 +676,17 @@ pub(crate) struct NfaPlan {
     /// `positional_max`, mirroring the general binder's layout.
     pub(crate) positional_max: u16,
     pub(crate) has_rest: bool,
-    /// `&blk` param present: its slot is `positional_max + has_rest`
-    /// (kw slots can't intervene — kwargs are ineligible).
+    /// Number of keyword params — non-zero ONLY when every one is
+    /// optional with a LITERAL default (`kw_param_defaults[i]` all
+    /// `Some` + no computed-default prologue + no `**kwrest`). Their
+    /// slots sit at `[positional_max + has_rest, .. + kw_count)`,
+    /// mirroring the general binder's tail layout; the serve fills
+    /// them from the proto's literal snapshot (fresh per call) with
+    /// `kw_given_mask = 0`.
+    pub(crate) kw_count: u16,
+    /// `&blk` param present: its slot is
+    /// `positional_max + has_rest + kw_count` (after the kw region,
+    /// mirroring the general binder's layout).
     pub(crate) has_block_param: bool,
     pub(crate) n_locals: u16,
     /// Cached `!proto.creates_block` — same contract as
@@ -2458,6 +2475,10 @@ pub(crate) struct Vm {
     pub(crate) sym_merge: SymId,
     pub(crate) sym_slice: SymId,
     pub(crate) sym_except: SymId,
+    /// Campaign P5a: `merge!` + its CRuby alias `update` join the
+    /// msx bucket (the AM census's 1,065/3K-iter residual).
+    pub(crate) sym_merge_bang: SymId,
+    pub(crate) sym_update: SymId,
     /// Pre-interned `hash` / `eql?` for the Hash user-key funnel gates
     /// (`key_needs_ruby_hash` scans run per merge/insert — an interner
     /// probe per call site showed up on the merge! micro).
@@ -3133,6 +3154,8 @@ impl Vm {
         let sym_merge = interner.intern("merge");
         let sym_slice = interner.intern("slice");
         let sym_except = interner.intern("except");
+        let sym_merge_bang = interner.intern("merge!");
+        let sym_update = interner.intern("update");
         let sym_key_hash = interner.intern("hash");
         let sym_key_eql = interner.intern("eql?");
         let sym_freeze = interner.intern("freeze");
@@ -3578,6 +3601,8 @@ impl Vm {
             sym_merge,
             sym_slice,
             sym_except,
+            sym_merge_bang,
+            sym_update,
             sym_key_hash,
             sym_key_eql,
             sym_freeze,
