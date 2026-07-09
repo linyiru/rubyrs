@@ -124,6 +124,21 @@ jobs:
           # a silently deopted @h[k] fusion). Pre-checked clean on
           # Linux x86_64 and macOS arm64 before removing the hatch.
 
+      - name: Diff parity under tier-2 JIT (interpreter == tier-2 == CRuby)
+        # 2026-07-09: CI ran diff_cruby only in interpreter + native-JIT
+        # modes; NEITHER enables the tier-2 baseline JIT (jit_tier2_on
+        # gates solely on RUBYRS_JIT_TIER2). A tier-2-ONLY correctness
+        # bug therefore shipped latently green — the zsuper-kwargs
+        # forwarding bug (a0487d9c): a compiled body ran inline inside
+        # do_call before the Op::Call arm reset trailing_hash_positional,
+        # so a force-compiled bare `super` forwarded kwargs positionally.
+        # THRESHOLD=1 compiles EVERY method (not just hot ones), so this
+        # leg exercises the tier-2 serve for the whole diff suite.
+        run: cargo test --release --locked --features jit-native --test diff_cruby
+        env:
+          RUBYRS_JIT_TIER2: "1"
+          RUBYRS_JIT_TIER2_THRESHOLD: "1"
+
       - name: Verify cext example bundles build
         # Belt-and-suspenders: even if the integration tests changed
         # paths or were skipped, this step independently runs each
