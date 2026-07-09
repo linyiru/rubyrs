@@ -18202,16 +18202,20 @@ impl Vm {
 
     /// Fetch (computing + caching on first touch) the ADR-0031
     /// increment-2 binding plan for `proto_idx`. `None` = ineligible:
-    /// a required or computed-default keyword param or `**kwrest` in
-    /// the signature (the trailing-Hash peel + per-name kw binding +
-    /// kw_given_mask bookkeeping stay on the general binder), or a
-    /// shape that doesn't fit the packed u16 fields. Optionals /
-    /// `*rest` / post-required / `&blk` are all plan-eligible, and so
-    /// (campaign P5a) is a kw region whose EVERY param is optional
-    /// with a LITERAL default — the binder's kw job for a
-    /// zero-kwargs call site is then exactly "clone the literals,
-    /// mask 0", which the serve reproduces (kwargs-carrying sites
-    /// decline there; see `try_invoke_nfa_method_from_stack`). The
+    /// a REQUIRED keyword param or `**kwrest` in the signature (the
+    /// trailing-Hash peel + per-name kw binding + missing-keyword
+    /// ArgumentError stay on the general binder), or a shape that
+    /// doesn't fit the packed u16 fields. Optionals / `*rest` /
+    /// post-required / `&blk` are all plan-eligible, and so is a kw
+    /// region whose EVERY param is OPTIONAL — with a LITERAL default
+    /// (campaign P5a) or a COMPUTED default (campaign P6b). The
+    /// binder's kw job for a zero-kwargs call site is then exactly
+    /// "clone each literal fresh, leave each computed slot Nil,
+    /// mask 0" — the mask-0 body prologue (`Op::JumpIfKwArgGiven`)
+    /// then evaluates every computed default, which is precisely the
+    /// general binder's zero-kwargs outcome and what the serve
+    /// reproduces (kwargs-carrying sites decline there; see
+    /// `try_invoke_nfa_method_from_stack`). The
     /// cache is sound forever: a Proto's param shape is immutable
     /// after compile, and the plan carries no per-class or
     /// per-method state (method redefinition swaps the METHOD the IC
@@ -18230,17 +18234,24 @@ impl Vm {
         let has_rest = proto.rest_param.is_some();
         let has_blk = proto.block_param.is_some();
         let kw_count = proto.kw_param_defaults.len();
-        // Keyword eligibility: every kw param optional with a LITERAL
-        // default (`Some` snapshot, no computed-default prologue), no
-        // `**kwrest`. A required kwarg (`None` + computed=false) or a
-        // computed default (`None` + computed=true) keeps the whole
-        // proto on the general binder — the serve has no
-        // missing-keyword ArgumentError and no prologue-mask story.
-        // (`kw_has_computed_default` may be empty when every default
-        // is a literal — the compiler's space-saving contract.)
+        // Keyword eligibility (campaign P5a literal + P6b computed):
+        // every kw param must be OPTIONAL — either a LITERAL default
+        // (`Some` snapshot) or a COMPUTED default (`None` snapshot +
+        // `kw_has_computed_default[i]`, a body prologue
+        // `Op::JumpIfKwArgGiven`) — and no `**kwrest`. A REQUIRED kwarg
+        // (`None` + computed=false) is the one shape kept on the
+        // general binder: it is the only route that raises the
+        // missing-keyword ArgumentError, which the zero-kwargs serve
+        // has no way to reproduce. The serve is bare-`Op::Call`-only
+        // (zero kwargs, mask 0 — see `try_invoke_nfa_method_from_stack`):
+        // it fills each LITERAL slot fresh and leaves each COMPUTED slot
+        // Nil for the mask-0 prologue to evaluate, exactly the general
+        // binder's zero-kwargs outcome. (`kw_has_computed_default` may
+        // be empty when every default is a literal — the compiler's
+        // space-saving contract, so the `.get(i)` is defensive.)
         let kw_lit_ok = proto.kw_rest_param.is_none()
             && proto.kw_param_defaults.iter().enumerate().all(|(i, d)| {
-                d.is_some() && !proto.kw_has_computed_default.get(i).copied().unwrap_or(false)
+                d.is_some() || proto.kw_has_computed_default.get(i).copied().unwrap_or(false)
             });
         let positional_max = proto
             .params
@@ -18528,12 +18539,17 @@ impl Vm {
     ///     `JumpIfArgGiven` default prologue — default expressions
     ///     (literal or computed) evaluate in the same scope, order,
     ///     and exactly-once-per-call as every other path;
-    ///   - kw slots (all optional-with-literal-default, the plan
-    ///     gate) fill from the proto's literal snapshot — each a
-    ///     FRESH materialization (`kw_literal_default_fresh`: a Str
-    ///     literal can't leak one call's mutation into the next) —
-    ///     with `kw_given_mask = 0`, exactly the binder's
-    ///     zero-kwargs outcome;
+    ///   - kw slots (all OPTIONAL — literal or computed default, the
+    ///     plan gate): a LITERAL slot fills from the proto snapshot,
+    ///     each a FRESH materialization (`kw_literal_default_fresh`:
+    ///     a Str literal can't leak one call's mutation into the
+    ///     next); a COMPUTED slot stays Nil so the mask-0 body
+    ///     prologue (`Op::JumpIfKwArgGiven`) evaluates its default
+    ///     expression — fresh per call, in the method's scope, after
+    ///     positionals bind (so `def f(a, b: a+1)` sees `a`), exactly
+    ///     the binder's `(None, None, computed)` zero-kwargs arm. All
+    ///     with `kw_given_mask = 0`, exactly the binder's zero-kwargs
+    ///     outcome;
     ///   - `&blk` slot binds Nil (this is the no-block `do_call`
     ///     form; a block call takes `do_call_block`'s paths).
     ///
@@ -18649,13 +18665,16 @@ impl Vm {
             if let Some(id) = rest_id {
                 self.locals_arena.push(Value::Array(id));
             }
-            // Kw slots: literal defaults, FRESH per call (`Rc`-backed
+            // Kw slots: LITERAL defaults FRESH per call (`Rc`-backed
             // Str materialization — no GC-heap alloc, so the "no
             // further alloc between the rest alloc and the frame
-            // push" rooting contract above still holds). The `None`
-            // arm is unreachable by the plan gate (all-literal proven
-            // at plan build); Nil keeps a hypothetical drift
-            // observable rather than adding a panic-budget entry.
+            // push" rooting contract above still holds); COMPUTED
+            // defaults (the `None` arm — reachable since campaign P6b)
+            // stay Nil for the mask-0 body prologue
+            // (`Op::JumpIfKwArgGiven`) to evaluate, exactly the general
+            // binder's `(None, None, computed=true)` zero-kwargs arm. A
+            // REQUIRED kwarg never reaches here (the plan gate rejects
+            // it), so a `None` slot is always a computed default.
             for i in 0..plan.kw_count as usize {
                 let v = match &self.protos[m.proto_idx].kw_param_defaults[i] {
                     Some(d) => self.kw_literal_default_fresh(d, m.proto_idx),
@@ -18687,9 +18706,10 @@ impl Vm {
                 if let Some(id) = rest_id {
                     l[positional_max] = Value::Array(id);
                 }
-                // Kw slots: literal defaults, FRESH per call (the
-                // `RefMut` on the cell is independent of `&self`;
-                // same unreachable-`None` contract as the arena path).
+                // Kw slots: LITERAL defaults FRESH per call (the
+                // `RefMut` on the cell is independent of `&self`);
+                // COMPUTED defaults stay Nil for the mask-0 prologue —
+                // same arm split as the arena path above.
                 let kw_start = positional_max + plan.has_rest as usize;
                 for i in 0..plan.kw_count as usize {
                     l[kw_start + i] = match &self.protos[m.proto_idx].kw_param_defaults[i] {

@@ -694,6 +694,88 @@ unsafe extern "C" fn t2_store_ivar(vm: *mut crate::vm::Vm, sym: i64, cid: i64, i
     }
 }
 
+/// Lean `Op::InterpToS` serve for a FRAMED tier-2 body (campaign P6b):
+/// string-interpolation `to_s` conversion — previously the generic
+/// `t2_op` boundary (op decode + `Vm::step` match; the AM census's
+/// InterpToS row, 100% Symbol receivers — interpolated attribute
+/// names). Mirrors the step arm exactly:
+///
+///  (1) A String receiver stays AS-IS — CRuby's `rb_obj_as_string`
+///      returns a `T_STRING` unchanged and NEVER consults a user
+///      `String#to_s` (CRuby-probed 3.4.8: `class String; def to_s;
+///      "X"; end` leaves `"#{s}"` == `s`; a `String` subclass instance
+///      interpolates to its own content). Pure no-op, no frame, no
+///      `t2_finish`.
+///  (2) Primitive `to_s` fast serve — Symbol / Integer, the same arms
+///      `do_call`'s own fast buckets run, under `do_call`'s exact
+///      gates: the `method_gen`-revalidated reopen flags
+///      (`prim_reopen_mask` bit 3 for Symbol — a `class Symbol; def
+///      to_s` reopen flips it, `to_s` being a universal arm name — and
+///      `fast_prim_int_safe` for Integer) PLUS the refinement gate
+///      `do_call` applies before those buckets. The Symbol conversion
+///      is byte-identical to the `Symbol#to_s` walk bucket (US-ASCII
+///      tag for an ascii-only name, else UTF-8); the Integer one is
+///      `integer_to_s_value`, shared with `try_fast_primitive`. Both
+///      produce an `Rc`-backed String (no GC-heap alloc → no
+///      `maybe_gc`).
+///  (3) Otherwise (a user `to_s`, a Float/Bool/Nil primitive, or a
+///      reopened/refined Symbol|Integer) → DECLINE to the full
+///      dispatch: exactly the step arm's `do_call(:to_s, 0)`, `ip`
+///      stamped to `ip + 1` FIRST so a raising `to_s`'s backtrace line
+///      matches `step()` / the interpreter loop (both stamp `ip + 1`
+///      before running the op) and `t2_op`. A user `to_s` pushes a
+///      callee frame, so `t2_finish` drives it — byte for byte the
+///      machinery `t2_op` used for this op. LITE bodies keep their
+///      materialize-bail via the emitter's default arm.
+unsafe extern "C" fn t2_interp_to_s(vm: *mut crate::vm::Vm, cid: i64, ip: i64) -> i64 {
+    let vm = unsafe { &mut *vm };
+    // (1) String passthrough.
+    if matches!(vm.stack.last(), Some(Value::Str(_))) {
+        return T2_CONTINUE;
+    }
+    // (2) Primitive fast serve — under do_call's refinement + reopen
+    // gates.
+    let to_s = vm.sym_to_s;
+    let refined = !vm.refined_method_names.is_empty() && vm.refined_method_names.contains(&to_s);
+    if !refined {
+        if vm.fast_index_checked_gen != vm.method_gen {
+            vm.fast_index_revalidate();
+        }
+        match vm.stack.last() {
+            Some(Value::Sym(s)) if vm.prim_reopen_mask & (1 << 3) == 0 => {
+                let n = vm.interner.resolve(*s).to_string();
+                let v = if n.is_ascii() {
+                    Value::new_str_us_ascii(n)
+                } else {
+                    Value::new_str(n)
+                };
+                vm.stack.pop();
+                vm.stack.push(v);
+                return T2_CONTINUE;
+            }
+            Some(Value::Int(n)) if vm.fast_prim_int_safe => {
+                let v = crate::vm::numeric::integer_to_s_value(*n);
+                vm.stack.pop();
+                vm.stack.push(v);
+                return T2_CONTINUE;
+            }
+            _ => {}
+        }
+    }
+    // (3) Decline to the full to_s dispatch (step arm), ip stamped
+    // first, frame driven with t2_finish.
+    vm.frames
+        .last_mut()
+        .expect("ICE: t2_interp_to_s with empty frame stack")
+        .ip = ip as usize + 1;
+    let depth = vm.frames.len();
+    if let Err(t) = vm.do_call(to_s, 0, false, cid as u32) {
+        vm.t2_trap = Some(t);
+        return T2_TRAP;
+    }
+    t2_finish(vm, depth)
+}
+
 /// `Op::CaseEqLit` fast core, shared by the register-arg and stack-arg
 /// variants. `kind`/`payload` describe the baked literal (0=Sym 1=Int
 /// 2=Bool 3=Nil 4=Float). Mirrors the step arm's safe path exactly —
@@ -3088,6 +3170,8 @@ struct HelperRefs {
     // Campaign P5a lean serves: stack-value StoreIvar + Op::Super.
     store_ivar: cranelift_codegen::ir::FuncRef,
     super_: cranelift_codegen::ir::FuncRef,
+    // Campaign P6b lean serve: Op::InterpToS.
+    interp_to_s: cranelift_codegen::ir::FuncRef,
     dup: cranelift_codegen::ir::FuncRef,
     pop: cranelift_codegen::ir::FuncRef,
     swap: cranelift_codegen::ir::FuncRef,
@@ -4751,6 +4835,29 @@ fn emit_op(cg: &mut Cg, fb: &mut FunctionBuilder, i: usize) -> bool {
             cg.invalidate_mem();
             false
         }
+        // Lean `Op::InterpToS` serve (campaign P6b): the step arm's
+        // interpolation `to_s` — String passthrough + Symbol/Integer
+        // primitive fast serve inline, declining to the full
+        // `do_call(:to_s)` only for a user `to_s` (or a non-fast
+        // primitive / reopened|refined shape) — instead of the generic
+        // `t2_op` boundary (the AM census's InterpToS row). The flush
+        // lands any virtuals so the helper's `stack.last()` sees the
+        // interpreter's stack. InterpToS never writes locals and the
+        // declined `to_s` runs in a fresh callee frame that can't touch
+        // this frame's `Locals::Stack` slots, so (like the call arms /
+        // stack StoreIvar) the local read cache survives; `invalidate_mem`
+        // covers a user `to_s`'s ivar side effects. LITE bails via the
+        // default arm (no frame for the decline's ip stamp / t2_finish).
+        Op::InterpToS(cid) if !cg.lite => {
+            cg.flush(fb);
+            let cidc = fb.ins().iconst(types::I64, cid as i64);
+            let ipc = fb.ins().iconst(types::I64, i as i64);
+            let call = fb.ins().call(cg.h.interp_to_s, &[vm, cidc, ipc]);
+            let st = fb.inst_results(call)[0];
+            cg.check_status(fb, st);
+            cg.invalidate_mem();
+            false
+        }
         // ------------------------------------------------------------------
         // Small-Int arithmetic / comparisons + Sym equality.
         // ------------------------------------------------------------------
@@ -5179,6 +5286,7 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize, ctx: &T2Ctx) -> Opt
     builder.symbol("t2_load_cvar", t2_load_cvar as *const u8);
     builder.symbol("t2_store_cvar", t2_store_cvar as *const u8);
     builder.symbol("t2_store_ivar", t2_store_ivar as *const u8);
+    builder.symbol("t2_interp_to_s", t2_interp_to_s as *const u8);
     builder.symbol("t2_super", t2_super as *const u8);
     builder.symbol("t2_dup", t2_dup as *const u8);
     builder.symbol("t2_pop", t2_pop as *const u8);
@@ -5309,6 +5417,7 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize, ctx: &T2Ctx) -> Opt
     let f_load_cvar = decl(&mut module, "t2_load_cvar", "ii", false)?;
     let f_store_cvar = decl(&mut module, "t2_store_cvar", "ii", false)?;
     let f_store_ivar = decl(&mut module, "t2_store_ivar", "iii", true)?;
+    let f_interp_to_s = decl(&mut module, "t2_interp_to_s", "ii", true)?;
     let f_super = decl(&mut module, "t2_super", "iiii", true)?;
     let f_dup = decl(&mut module, "t2_dup", "", false)?;
     let f_pop = decl(&mut module, "t2_pop", "", false)?;
@@ -5366,6 +5475,7 @@ pub(crate) fn compile_tier2(proto: &Proto, proto_idx: usize, ctx: &T2Ctx) -> Opt
             load_cvar: module.declare_func_in_func(f_load_cvar, func),
             store_cvar: module.declare_func_in_func(f_store_cvar, func),
             store_ivar: module.declare_func_in_func(f_store_ivar, func),
+            interp_to_s: module.declare_func_in_func(f_interp_to_s, func),
             super_: module.declare_func_in_func(f_super, func),
             dup: module.declare_func_in_func(f_dup, func),
             pop: module.declare_func_in_func(f_pop, func),

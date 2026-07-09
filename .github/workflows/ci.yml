@@ -992,7 +992,12 @@ jobs:
           # invariant: a framed tier-2 body always runs against its
           # own frame) and the stack-pop expect (the t2_store_cvar
           # invariant above: the codegen flushes before the call).
-          check crates/rubyrs/src/jit_tier2.rs       74
+          # 2026-07-08 +1 (P6b): t2_interp_to_s's empty-frame-stack
+          # expect on the decline path — same t2_ivar_set_v invariant
+          # (a framed tier-2 body always runs against its own frame;
+          # the ip stamp before the declined do_call is an emitter
+          # guarantee, not script-reachable).
+          check crates/rubyrs/src/jit_tier2.rs       75
           # prism_wq (prism→whitequark lexer/AST bridge, rubocop
           # campaign): processes script-derived source, so each site
           # was audited for user-input reachability — all 14 are

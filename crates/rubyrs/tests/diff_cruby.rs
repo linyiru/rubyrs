@@ -930,6 +930,22 @@ fn tier2_restblock_lite() { run_diff("tier2_restblock_lite"); }
 // (call-fed stores, frozen-receiver trap, Class/Hash-subclass/
 // Str-subclass receivers, hot super shapes + redefinition).
 #[test] fn p5a_merge_bang_leanops() { run_diff("p5a_merge_bang_leanops"); }
+// Dispatch-campaign P6b, Item 1: the tier-2 lean `Op::InterpToS` serve
+// (string-interpolation `to_s`) — String passthrough (incl. a user
+// `String#to_s` override NEVER consulted + a String subclass), Symbol
+// and Integer primitive fast serve inline, Float/Bool/Nil + user
+// objects declining to `do_call(:to_s)`, a raising `to_s`, the
+// Integer/Symbol reopen override paths, and a Symbol#to_s refinement.
+#[test] fn p6b_interp_to_s() { run_diff("p6b_interp_to_s"); }
+// Dispatch-campaign P6b, Item 2: NfaPlan COMPUTED-default kwargs serve
+// (the `validate_each(..., precision: Float::DIG)` shape) — bare-Call
+// zero-kwargs sites bind stack-direct (mask 0, the body prologue
+// evaluates every computed default fresh), computed defaults reading an
+// earlier positional / earlier kwarg, once-per-call + fresh + only-when
+// -absent evaluation, mixed literal+computed, implicit-self (NoRecv),
+// send/super routes, and the still-INELIGIBLE required-kwarg / **kwrest
+// shapes.
+#[test] fn p6b_nfa_kw_computed() { run_diff("p6b_nfa_kw_computed"); }
 #[test] fn lazy_each_with_index() { run_diff("lazy_each_with_index"); }
 #[cfg(feature = "stdlib")]
 #[test] fn set_subtract_divide() { run_diff("set_subtract_divide"); }

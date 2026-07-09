@@ -26,7 +26,11 @@ mod kernel;
 pub(crate) mod lookup;
 #[cfg(feature = "regex")]
 mod match_data;
-mod numeric;
+// `pub(crate)` so `jit_tier2`'s `t2_interp_to_s` can reuse the
+// shared `integer_to_s_value` (campaign P6b) — same
+// no-drift-between-entry-points contract the numeric_call arm and
+// do_call's primitive fast path already rely on.
+pub(crate) mod numeric;
 mod primitive;
 mod raise;
 mod range;
@@ -638,9 +642,9 @@ pub(crate) enum WalkOrigin {
 
 /// ADR 0031 increment 2 — precomputed argument-binding plan for a
 /// NON-fixed-arity method proto (optional positionals / `*rest` /
-/// post-required / `&blk` / all-literal-default keywords; required
-/// or computed-default kwargs and `**kwrest` are INELIGIBLE — see
-/// `Vm::nfa_plan_for`). The variadic sibling of `FixedArity`: every
+/// post-required / `&blk` / all-OPTIONAL keywords — literal OR
+/// computed defaults; REQUIRED kwargs and `**kwrest` are INELIGIBLE
+/// — see `Vm::nfa_plan_for`). The variadic sibling of `FixedArity`: every
 /// field the general binder re-derives from the Proto per call
 /// (`invoke_method_with_block_inner`'s tail-layout arithmetic) is
 /// captured once here, so the dispatch fast paths can bind a
@@ -651,14 +655,17 @@ pub(crate) enum WalkOrigin {
 /// `n_given_positional`), so the binder's only default job is
 /// leaving unfilled slots Nil and stamping the given-count —
 /// evaluation order/scope/once-per-call semantics ride on the same
-/// bytecode the general binder relies on. Keyword LITERAL defaults
-/// (campaign P5a) are the one default family the binder itself
-/// fills (no prologue exists for them): the serve clones each
-/// literal FRESH from the proto row — see
-/// `Vm::kw_literal_default_fresh` for the mutation/frozen contract
-/// — and only on bare-`Op::Call`-family sites passing zero kwargs
+/// bytecode the general binder relies on. Keyword defaults are
+/// served only on bare-`Op::Call`-family sites passing zero kwargs
 /// (`kw_given_mask = 0`; every kwargs-carrying route declines to
-/// the general binder's peel + per-name bind).
+/// the general binder's peel + per-name bind): a LITERAL default
+/// (campaign P5a) is the one family the binder itself fills (no
+/// prologue exists for it) — the serve clones each literal FRESH
+/// from the proto row (see `Vm::kw_literal_default_fresh` for the
+/// mutation/frozen contract) — while a COMPUTED default (campaign
+/// P6b) leaves its slot Nil for the mask-0 body prologue
+/// (`Op::JumpIfKwArgGiven`) to evaluate, exactly as the binder does
+/// for a zero-kwargs call.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct NfaPlan {
     /// `proto.params.len()` — cross-checked against `m.params.len()`
@@ -677,11 +684,13 @@ pub(crate) struct NfaPlan {
     pub(crate) positional_max: u16,
     pub(crate) has_rest: bool,
     /// Number of keyword params — non-zero ONLY when every one is
-    /// optional with a LITERAL default (`kw_param_defaults[i]` all
-    /// `Some` + no computed-default prologue + no `**kwrest`). Their
-    /// slots sit at `[positional_max + has_rest, .. + kw_count)`,
-    /// mirroring the general binder's tail layout; the serve fills
-    /// them from the proto's literal snapshot (fresh per call) with
+    /// OPTIONAL (a `Some` literal snapshot OR a `None` computed
+    /// default with a body prologue; no REQUIRED kwarg, no
+    /// `**kwrest`). Their slots sit at
+    /// `[positional_max + has_rest, .. + kw_count)`, mirroring the
+    /// general binder's tail layout; the serve fills each literal
+    /// slot from the proto snapshot (fresh per call) and leaves each
+    /// computed slot Nil for the mask-0 prologue, all with
     /// `kw_given_mask = 0`.
     pub(crate) kw_count: u16,
     /// `&blk` param present: its slot is

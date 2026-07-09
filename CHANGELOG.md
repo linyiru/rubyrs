@@ -143,6 +143,14 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Internal
 
+- **Tier-2 dispatch fast paths (campaign P6b)** — string-interpolation
+  `to_s` (`Op::InterpToS`: String passthrough + Symbol/Integer primitive
+  serve) runs a lean tier-2 helper instead of the generic op boundary, and
+  the `NfaPlan` binder now serves methods whose keyword defaults are
+  *computed* (e.g. `validate_each(..., precision: Float::DIG)`) on bare
+  zero-kwarg calls. (ADR [0031](docs/adr/0031-dispatch-core.md),
+  [0037](docs/adr/0037-baseline-jit-tier.md), `p6b_interp_to_s.rb`,
+  `p6b_nfa_kw_computed.rb`)
 - **Dispatch-core fast paths** — primitive / index / `Proc#call` fast paths
   that bypass the method-name cascade on hot framework dispatch. (ADR
   [0031](docs/adr/0031-dispatch-core.md))
