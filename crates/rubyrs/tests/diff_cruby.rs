@@ -856,6 +856,7 @@ fn tier2_restblock_lite() { run_diff("tier2_restblock_lite"); }
 #[test] fn block_arity_optional() { run_diff("block_arity_optional"); }
 #[test] fn block_arity_keywords() { run_diff("block_arity_keywords"); }
 #[test] fn lambda_local_return() { run_diff("lambda_local_return"); }
+#[test] fn proc_call_serve_hot() { run_diff("proc_call_serve_hot"); }
 #[test] fn lambda_strict_arity() { run_diff("lambda_strict_arity"); }
 #[test] fn symbol_proc_multiarg() { run_diff("symbol_proc_multiarg"); }
 #[test] fn ensure_on_return() { run_diff("ensure_on_return"); }

@@ -3655,33 +3655,16 @@ impl Vm {
                 // `.call(args)`, `.()` (already lowered to `call`
                 // by parsers but kept here defensively), `[args]`
                 // bracket form, and `.yield(args)` (mostly a
-                // documentation alias). All four route the same
-                // way: invoke the block, drive until its frame
-                // returns, leave the result on the stack.
-                let pre_frames = self.frames.len();
-                self.invoke_block(*bid, args.into_vec())?;
-                // TIER-2 wave 5 (ADR 0037): run the just-pushed block
-                // frame natively when compiled; the dispatch_until below
-                // no-ops on DONE and continues the frame on BAIL.
-                #[cfg(feature = "jit-native")]
-                self.t2_enter_block(false)?;
-                self.dispatch_until(pre_frames)?;
-                // ADR 0024 Phase A.6 round 2: stored Proc tried
-                // to `break` after returning to its caller. There
-                // was no Op::Yield wrapper above the block (it
-                // was invoked via `.call`, not `yield`), so
-                // `break_signaled` has no observer above. CRuby
-                // raises `LocalJumpError: break from proc-closure`.
-                if self.break_signaled {
-                    self.break_signaled = false;
-                    self.sync_control_signals();
-                    // Discard the break value the block left on
-                    // the stack — it won't be the call's result.
-                    self.stack.pop();
-                    return Err(self.trap(crate::error::RubyError::LocalJumpError {
-                        msg: "break from proc-closure".to_string(),
-                    }));
-                }
+                // documentation alias). All four route the same way:
+                // invoke the block, drive until its frame returns,
+                // leave the result on the stack. Shared with do_call's
+                // fast proc.call arm + the tier-2 in-body serve
+                // (campaign P7) via the helper — including the `break
+                // from proc-closure` LocalJumpError (ADR 0024 Phase A.6
+                // round 2: a stored Proc broke after returning to its
+                // caller, with no Op::Yield wrapper above to observe it).
+                let bid = *bid;
+                self.invoke_proc_call_body(bid, args.into_vec())?;
                 return Ok(CallableOutcome::Handled);
             }
         // `Proc#arity` — CRuby-shape arity for the block. Block
@@ -10011,21 +9994,9 @@ impl Vm {
                     Some(Value::Block(b)) => b,
                     _ => unreachable!("ICE: proc.call fast path recv vanished"),
                 };
-                let pre_frames = self.frames.len();
-                self.invoke_block(bid, args)?;
-                // TIER-2 wave 5: native block serve (see the Proc#call
-                // intrinsics arm).
-                #[cfg(feature = "jit-native")]
-                self.t2_enter_block(false)?;
-                self.dispatch_until(pre_frames)?;
-                if self.break_signaled {
-                    self.break_signaled = false;
-                    self.sync_control_signals();
-                    self.stack.pop();
-                    return Err(self.trap(RubyError::LocalJumpError {
-                        msg: "break from proc-closure".to_string(),
-                    }));
-                }
+                // Shared with the callable-intrinsics arm + the tier-2
+                // in-body serve (campaign P7) — see the helper doc.
+                self.invoke_proc_call_body(bid, args)?;
                 return Ok(());
             }
         }
@@ -24842,6 +24813,57 @@ impl Vm {
             self.block_prof.t[5] += bp_t5 - bp_t4;
         }
         Ok(false)
+    }
+
+    /// Shared core of the `Value::Block`-receiver invocation
+    /// (`proc.call` / `lambda.call` and — via the callable-intrinsics
+    /// arm — `[]` / `.()` / `.yield` / `.===`): push the block frame,
+    /// run it natively when a tier-2 compile exists, drive it to
+    /// completion, and leave the block's result on the operand stack.
+    ///
+    /// Single source of truth for `do_call`'s fast `proc.call` arm,
+    /// the callable-intrinsics arm, and the tier-2 in-body serve
+    /// (campaign P7) — so all three cannot drift apart. Semantics
+    /// preserved by construction — all invoke/bind work lives in
+    /// `invoke_block`, which already enforces lambda-STRICT vs
+    /// proc-LENIENT arity + auto-splat, kwargs peel, and `&blk` /
+    /// splat binding. A non-local `return` (proc → its defining
+    /// method, or a lambda-local return) leaves `method_return` set
+    /// for the caller's dispatch loop to observe — it is NOT consumed
+    /// here. A `break` escaping a `.call`-invoked proc has no yield
+    /// wrapper above it, so CRuby raises `LocalJumpError: break from
+    /// proc-closure`, converted here (the break value is popped — it
+    /// is not the call's result).
+    ///
+    /// The receiver + args are expected already popped by the caller
+    /// (`args` is owned; `block_id` was the receiver). GC: the same
+    /// operand-stack discipline as the arms it replaces — `args` is
+    /// consumed straight into `invoke_block`, which snapshots the
+    /// block's captured state before its first alloc.
+    pub(crate) fn invoke_proc_call_body(
+        &mut self,
+        block_id: ObjId,
+        args: Vec<Value>,
+    ) -> Result<(), Trap> {
+        let pre_frames = self.frames.len();
+        self.invoke_block(block_id, args)?;
+        // TIER-2 wave 5 (ADR 0037): run the just-pushed block frame
+        // natively when compiled; `dispatch_until` below no-ops on
+        // DONE and continues the frame on BAIL.
+        #[cfg(feature = "jit-native")]
+        self.t2_enter_block(false)?;
+        self.dispatch_until(pre_frames)?;
+        if self.break_signaled {
+            self.break_signaled = false;
+            self.sync_control_signals();
+            // Discard the break value the block left on the stack —
+            // it won't be the call's result.
+            self.stack.pop();
+            return Err(self.trap(RubyError::LocalJumpError {
+                msg: "break from proc-closure".to_string(),
+            }));
+        }
+        Ok(())
     }
 
     pub(crate) fn invoke_block(&mut self, block_id: ObjId, mut args: Vec<Value>) -> Result<(), Trap> {

@@ -2163,30 +2163,71 @@ fn t2_call_impl(
                 }
             }
         } else {
-            // Receiver-typed fast serves, in `do_call`'s exact order. The
-            // Str/Array/Block/Hash per-instance singleton gates and the
-            // `proc.call` arm sit BETWEEN the boundary gates and these
-            // helpers in the cascade; both are inert here by the guards
-            // below (no singletons of those kinds exist / the name isn't
-            // `call`), so skipping straight to the helpers is exact — and
-            // every helper is a no-op on miss.
-            let singleton_free = !vm.any_str_singletons
+            // `:call` is decided ONCE here and threaded through both the
+            // P7 proc.call serve and `singleton_free` (which already needed
+            // `name_id != sym_call`) — so the common non-`.call` explicit
+            // recv pays exactly the one SymId compare it paid before P7.
+            let is_call = name_id == vm.sym_call;
+            // P7: `proc.call` / `lambda.call` on a `Value::Block` receiver —
+            // do_call's fast proc.call arm (the AS callback-filter machinery:
+            // `invoke_sequence.call` + the filter lambdas). Served in-body so
+            // the tier-2 body stops falling back to the interpreter cascade
+            // for it (census `prim-recv call Block`). Mirrors do_call's
+            // ordering: the proc.call arm sits AFTER the per-instance
+            // singleton gates (`any_heap_singletons` — a Block eigenclass
+            // `def blk.call` would take precedence via that gate; when one
+            // exists we fall back so the interpreter honours it) and BEFORE
+            // `try_fast_primitive`. Arity (lambda-strict vs proc-lenient),
+            // kwargs peel, `&blk`/splat binding, non-local return, and the
+            // `break from proc-closure` LocalJumpError all live in the shared
+            // `invoke_proc_call_body` helper — byte-identical to interp.
+            if is_call
                 && !vm.any_heap_singletons
-                && !vm.any_hash_singletons
-                && name_id != vm.sym_call;
-            if singleton_free
-                && (vm.try_fast_primitive(name_id, argc, false)
-                    || vm.try_fast_index(name_id, argc, false))
+                && vm
+                    .stack
+                    .len()
+                    .checked_sub(argc + 1)
+                    .is_some_and(|i| matches!(vm.stack.get(i), Some(Value::Block(_))))
             {
-                Ok(true)
+                let split = vm.stack.len() - argc;
+                let args: Vec<Value> = vm.stack.drain(split..).collect();
+                match vm.stack.pop() {
+                    Some(Value::Block(bid)) => vm.invoke_proc_call_body(bid, args).map(|()| true),
+                    _ => unreachable!("ICE: t2 proc.call recv vanished"),
+                }
             } else {
-                // Object receiver → the explicit-recv monomorphic path;
-                // Class/Module receiver → the class-singleton sibling
-                // (each self-declines on receiver type, mirroring the
-                // cascade's ordering).
-                match vm.try_invoke_explicit_recv_cached(name_id, argc, cache_id) {
-                    Ok(false) => vm.try_invoke_class_singleton_cached(name_id, argc, cache_id),
-                    r => r,
+                // Receiver-typed fast serves, in `do_call`'s exact order. The
+                // Str/Array/Block/Hash per-instance singleton gates and the
+                // `proc.call` arm sit BETWEEN the boundary gates and these
+                // helpers in the cascade; the singleton gates are inert here
+                // by the per-KIND guard (no singletons of those kinds exist)
+                // and the `proc.call` arm was served just above (or fell to
+                // this fallback when a Block eigenclass exists / the receiver
+                // is not a Block), so skipping straight to the helpers is
+                // exact — and every helper is a no-op on miss. `!is_call`
+                // keeps a non-Block `:call` (e.g. an Object `def call`) off
+                // `try_fast_primitive` (which never serves `:call`), matching
+                // the cascade.
+                let singleton_free = !vm.any_str_singletons
+                    && !vm.any_heap_singletons
+                    && !vm.any_hash_singletons
+                    && !is_call;
+                if singleton_free
+                    && (vm.try_fast_primitive(name_id, argc, false)
+                        || vm.try_fast_index(name_id, argc, false))
+                {
+                    Ok(true)
+                } else {
+                    // Object receiver → the explicit-recv monomorphic path;
+                    // Class/Module receiver → the class-singleton sibling
+                    // (each self-declines on receiver type, mirroring the
+                    // cascade's ordering).
+                    match vm.try_invoke_explicit_recv_cached(name_id, argc, cache_id) {
+                        Ok(false) => {
+                            vm.try_invoke_class_singleton_cached(name_id, argc, cache_id)
+                        }
+                        r => r,
+                    }
                 }
             }
         };
