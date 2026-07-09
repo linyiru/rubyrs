@@ -61,13 +61,113 @@ pub(crate) fn format_prism_errors<'a>(
     source: &str,
     errors: impl Iterator<Item = ruby_prism::Diagnostic<'a>>,
 ) -> String {
-    errors
-        .map(|e| {
-            let (line, col) = line_col(source, e.location().start_offset() as u32);
-            format!("L{line}:{col}: {}", e.message())
-        })
-        .collect::<Vec<_>>()
-        .join("; ")
+    // Cap on how many individual diagnostics we render into the
+    // message. Prism can emit tens of thousands of *cascading*
+    // diagnostics for a single pathological input — e.g. a stray
+    // token repeated across a large file, or an over-long call-arg
+    // list the parser bails on partway through and then re-syncs on
+    // every subsequent comma. Rendering all of them is bad on two
+    // axes:
+    //
+    //   1. UX — a multi-megabyte SyntaxError message whose first
+    //      diagnostic is the only actionable one; no human reads
+    //      the other 26_869.
+    //
+    //   2. Cost — line/column for each diagnostic used to be resolved
+    //      by `line_col`, which rescans the source from offset 0 every
+    //      call. N diagnostics at offsets spread across an L-byte
+    //      source is O(N · L): a real quadratic blow-up. Crucially it
+    //      runs inside `Runtime::eval` *before* the VM starts, so it is
+    //      bounded by neither the fuel budget nor the wall-clock
+    //      `deadline` — both of those only gate bytecode execution. A
+    //      140 KB fuzz input with ~27k diagnostics took ~2 s locally
+    //      and >5 s on the ASan-instrumented CI runner, tripping the
+    //      nightly fuzz `-timeout=5` as a "timeout" (not a crash).
+    //      (Nightly Fuzz timeout triage, 2026-07.)
+    //
+    // The cap bounds axis 1; resolving the shown offsets in a single
+    // forward pass (below) bounds axis 2 to O(L) regardless of N.
+    const MAX_SHOWN: usize = 10;
+
+    // Collect the first `MAX_SHOWN` offsets + messages, but keep
+    // counting past the cap so we can report how many were elided.
+    // Iterating the diagnostic list is cheap (it's already
+    // materialised by the parse); only the old per-diagnostic
+    // `line_col` scan was expensive.
+    let mut offsets: Vec<u32> = Vec::new();
+    let mut msgs: Vec<String> = Vec::new();
+    let mut total = 0usize;
+    for e in errors {
+        total += 1;
+        if offsets.len() < MAX_SHOWN {
+            offsets.push(e.location().start_offset() as u32);
+            msgs.push(e.message().to_string());
+        }
+    }
+
+    // Resolve every shown offset's (line, col) in ONE forward pass
+    // over the source — O(L) total — instead of restarting the scan
+    // from 0 per diagnostic (the quadratic). Doesn't assume the
+    // diagnostics arrive in ascending-offset order: `resolve_line_cols`
+    // sorts internally and writes results back in the original order.
+    let line_cols = resolve_line_cols(source, &offsets);
+
+    let mut out = String::new();
+    for (i, msg) in msgs.iter().enumerate() {
+        if i > 0 {
+            out.push_str("; ");
+        }
+        let (line, col) = line_cols[i];
+        out.push_str(&format!("L{line}:{col}: {msg}"));
+    }
+    if total > offsets.len() {
+        out.push_str(&format!(
+            "; ... and {} more error(s)",
+            total - offsets.len()
+        ));
+    }
+    out
+}
+
+/// Resolve `offsets` to `(line, col)` pairs in a single forward scan
+/// of `source`, returning results in the SAME order as `offsets`.
+///
+/// `line_col` (above) is O(byte_offset) per call because it rescans
+/// from the start; calling it in a loop over N offsets is O(N · len).
+/// This walks the source once — sort the offsets, advance a single
+/// monotonic cursor, and scatter each answer back to its input
+/// position — for O(len + N·log N). Used by the multi-diagnostic
+/// error formatter, which is the only caller that resolves a batch of
+/// offsets against one source.
+fn resolve_line_cols(source: &str, offsets: &[u32]) -> Vec<(u32, u32)> {
+    let mut order: Vec<usize> = (0..offsets.len()).collect();
+    order.sort_by_key(|&i| offsets[i]);
+
+    let mut out = vec![(1u32, 1u32); offsets.len()];
+    let mut line = 1u32;
+    let mut col = 1u32;
+    let mut chars = source.char_indices();
+    let mut cur = chars.next();
+
+    for &i in &order {
+        let target = offsets[i];
+        // Advance the cursor up to (but not past) `target`, mirroring
+        // `line_col`'s per-char line/col accounting exactly.
+        while let Some((byte_idx, ch)) = cur {
+            if byte_idx as u32 >= target {
+                break;
+            }
+            if ch == '\n' {
+                line += 1;
+                col = 1;
+            } else {
+                col += 1;
+            }
+            cur = chars.next();
+        }
+        out[i] = (line, col);
+    }
+    out
 }
 
 /// A Ruby-visible error. Today this is the closed set rubyrs can produce;
@@ -582,5 +682,77 @@ impl Trap {
     /// caller's frames.
     pub fn new(err: RubyError) -> Self {
         Trap { err, backtrace: vec![] }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `resolve_line_cols` must agree with the naive per-offset
+    /// `line_col`, including for unsorted input and repeated offsets.
+    #[test]
+    fn resolve_line_cols_matches_line_col() {
+        let src = "abc\ndefg\n\nhij\nk";
+        // Deliberately unsorted, with a duplicate and an out-of-range
+        // offset (past EOF) to exercise the cursor's terminal state.
+        let offsets: Vec<u32> = vec![0, 9, 4, 4, 12, 200, 1];
+        let batch = resolve_line_cols(src, &offsets);
+        for (i, &off) in offsets.iter().enumerate() {
+            assert_eq!(batch[i], line_col(src, off), "offset {off} mismatch");
+        }
+    }
+
+    /// Regression: a pathological input with tens of thousands of
+    /// cascading parse diagnostics must not (a) produce a giant
+    /// message nor (b) take superlinear time to format — the O(N·L)
+    /// blow-up in the old formatter tripped the nightly fuzz timeout
+    /// pre-VM, where fuel/deadline don't apply. (Nightly Fuzz triage.)
+    #[test]
+    fn format_prism_errors_caps_pathological_diagnostic_flood() {
+        // `)` on its own line reliably yields one "unexpected )"
+        // diagnostic per line; 40k lines => ~40k diagnostics spread
+        // across an ~80 KB source. Pre-fix this took ~1s to format;
+        // post-fix it is a single O(L) pass over a capped set.
+        let n = 40_000usize;
+        let src: String = ")\n".repeat(n);
+
+        let t = std::time::Instant::now();
+        let parsed = ruby_prism::parse(src.as_bytes());
+        let msg = format_prism_errors(&src, parsed.errors());
+        let elapsed = t.elapsed();
+
+        // Cap: at most MAX_SHOWN (10) rendered diagnostics means at
+        // most 10 "; "-joined segments before the elision suffix.
+        let segments = msg.matches("; ").count();
+        assert!(
+            segments <= 10,
+            "expected <= 10 segment separators, got {segments}"
+        );
+        assert!(
+            msg.contains("more error(s)"),
+            "expected elision suffix in capped message"
+        );
+        // Bounded message size — was multi-MB before the cap.
+        assert!(msg.len() < 4096, "message too large: {} bytes", msg.len());
+        // Generous wall bound: the quadratic formatter needed seconds
+        // here; the linear one needs milliseconds. 1s leaves ample
+        // slack for a loaded CI runner while still failing loudly if
+        // the O(N·L) scan is ever reintroduced.
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "formatting {n} diagnostics took {elapsed:?} — quadratic regression?"
+        );
+    }
+
+    /// The single-diagnostic common case is byte-identical to the old
+    /// formatter: no cap, no elision suffix, plain `L<l>:<c>: <msg>`.
+    #[test]
+    fn format_prism_errors_single_error_unchanged() {
+        let src = "def x(";
+        let parsed = ruby_prism::parse(src.as_bytes());
+        let msg = format_prism_errors(src, parsed.errors());
+        assert!(msg.starts_with("L1:"), "missing prefix: {msg}");
+        assert!(!msg.contains("more error(s)"), "unexpected suffix: {msg}");
     }
 }
