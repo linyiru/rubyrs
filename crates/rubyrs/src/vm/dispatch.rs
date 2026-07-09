@@ -23609,6 +23609,9 @@ impl Vm {
         // → ArgumentError. Missing optional → use literal default.
         let kw_start = positional_max + if has_rest { 1 } else { 0 };
         if kw_count > 0 {
+            // Collect ALL missing required keywords (CRuby reports them
+            // together — `missing keywords: :a, :b` — not one at a time).
+            let mut missing: Vec<String> = Vec::new();
             for (i, (default, kw_name)) in kw_defaults_snapshot.iter()
                 .zip(m.params[kw_start..kw_start + kw_count].iter())
                 .enumerate()
@@ -23651,12 +23654,53 @@ impl Vm {
                     // `(None, Some, true)` is structurally impossible
                     // — computed defaults set the snapshot entry to
                     // `None` (compiler emission, ast.rs lowering).
-                    (None, None, false) => return Err(self.trap(RubyError::ArgumentError {
-                        msg: format!("missing keyword: :{}", kw_name),
-                    })),
+                    (None, None, false) => missing.push(kw_name.clone()),
                     (None, Some(_), true) => unreachable!(
                         "computed kwarg default must also have None literal snapshot"
                     ),
+                }
+            }
+            // CRuby reports missing keywords BEFORE unknown ones when
+            // both apply (`def m(x:, y:); m(x: 1, z: 2)` → "missing
+            // keyword: :y").
+            if !missing.is_empty() {
+                let msg = if missing.len() == 1 {
+                    format!("missing keyword: :{}", missing[0])
+                } else {
+                    format!("missing keywords: :{}", missing.join(", :"))
+                };
+                return Err(self.trap(RubyError::ArgumentError { msg }));
+            }
+            // Unknown-keyword check: a method with NAMED keyword params
+            // and NO `**kwrest` rejects any supplied key that names no
+            // declared kw param — CRuby raises `ArgumentError: unknown
+            // keyword: :z` (a common Rails/gem safety check). With a
+            // `**kwrest` the leftovers are absorbed below instead, so
+            // gate on `!has_kw_rest`. A bare positional Hash never
+            // reaches here (it stays positional — `kw_hash` is None
+            // when `trailing_hash_positional`). Non-Symbol keys (from
+            // `**h` with String keys) are inspected like CRuby
+            // (`unknown keyword: "y"`).
+            if !has_kw_rest && let Some(pairs) = &kw_hash {
+                let mut unknown: Vec<String> = Vec::new();
+                for (k, _) in pairs {
+                    let claimed = matches!(k, Value::Sym(s)
+                        if m.params[kw_start..kw_start + kw_count].iter()
+                            .any(|n| self.interner.resolve(*s).as_ref() == n.as_str()));
+                    if !claimed {
+                        unknown.push(match k {
+                            Value::Sym(s) => format!(":{}", self.interner.resolve(*s)),
+                            other => self.inspect_value(other)?,
+                        });
+                    }
+                }
+                if !unknown.is_empty() {
+                    let msg = if unknown.len() == 1 {
+                        format!("unknown keyword: {}", unknown[0])
+                    } else {
+                        format!("unknown keywords: {}", unknown.join(", "))
+                    };
+                    return Err(self.trap(RubyError::ArgumentError { msg }));
                 }
             }
         }
@@ -24856,6 +24900,18 @@ impl Vm {
         if self.break_signaled {
             self.break_signaled = false;
             self.sync_control_signals();
+            // `break` semantics split by proc vs lambda when invoked
+            // via `.call` / `.()` / `[]`:
+            //   - LAMBDA: `break` is a LOCAL return of the block value
+            //     (`-> { break 5 }.call` → 5). The break value the body
+            //     left on the operand stack IS the call's result, so
+            //     leave it in place and return normally.
+            //   - proc / Proc.new: `break` with no enclosing iterator
+            //     is a LocalJumpError ("break from proc-closure"); the
+            //     value is discarded.
+            if self.heap.block(block_id).is_lambda {
+                return Ok(());
+            }
             // Discard the break value the block left on the stack —
             // it won't be the call's result.
             self.stack.pop();

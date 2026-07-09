@@ -361,6 +361,19 @@ pub(crate) enum Op {
     /// (sinatra-contrib/MultiRoute uses this on every HTTP verb).
     /// cid as in `Op::Super`.
     ApplySuperBlock(SymId, u32),
+    /// Guard emitted immediately before a BARE (implicit-argument)
+    /// `super` / `super do…end` that lives in a BLOCK proto — i.e. a
+    /// proto that could, at runtime, be a `define_method` /
+    /// `define_singleton_method` body. CRuby forbids implicit super
+    /// forwarding from a method defined that way (`RuntimeError:
+    /// implicit argument passing of super from method defined by
+    /// define_method() is not supported. Specify all arguments
+    /// explicitly.`). At runtime this op raises iff the lexically
+    /// enclosing method frame was installed via `define_method`
+    /// (its `FrameAux::invoked_name` is set); inside a `def`-compiled
+    /// method's block it is a no-op. Explicit `super(...)` /
+    /// `super(*a)` never emit this guard, so they stay allowed.
+    ImplicitSuperGuard,
     DefMethod(SymId, u32),         // name, proto_idx
     /// `def self.foo` inside a class body — installs `foo` on
     /// the surrounding class's `singleton_methods` table (not

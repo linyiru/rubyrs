@@ -3906,6 +3906,27 @@ impl Vm {
                 let args: Vec<Value> = self.stack.drain(split..).collect();
                 self.super_call_with_lifecycle_noop(name_id, args, cid)?;
             }
+            Op::ImplicitSuperGuard => {
+                // Bare `super` / `super do…end` (implicit argument
+                // forwarding) is illegal from a `define_method`-defined
+                // method body. The enclosing METHOD frame carries
+                // `FrameAux::invoked_name` only when it was installed via
+                // define_method / define_singleton_method (see the stamp
+                // sites in dispatch.rs). Walk to that frame the same way
+                // `super_runtime_name` does — the guard also fires for a
+                // bare super nested in an ordinary block INSIDE such a
+                // body (`define_method(:m){|a| [1].each { super } }`).
+                let from_define_method = self
+                    .lexical_owner_of_top()
+                    .and_then(|idx| self.frames[idx].aux.as_ref())
+                    .and_then(|aux| aux.invoked_name)
+                    .is_some();
+                if from_define_method {
+                    return Err(self.trap(RubyError::RuntimeError {
+                        msg: "implicit argument passing of super from method defined by define_method() is not supported. Specify all arguments explicitly.".to_string(),
+                    }));
+                }
+            }
             Op::CreateBlock(p_idx, param_start, n_params, rest_slot_raw, kw_rest_slot_raw)
             | Op::CreateLambda(p_idx, param_start, n_params, rest_slot_raw, kw_rest_slot_raw) => {
                 // CreateLambda flags the resulting Proc as a lambda

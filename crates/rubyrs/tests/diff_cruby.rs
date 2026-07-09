@@ -1179,6 +1179,9 @@ fn tier2_restblock_lite() { run_diff("tier2_restblock_lite"); }
 #[test] fn object_singleton_super() { run_diff("object_singleton_super"); }
 #[test] fn bare_super_forwarding() { run_diff("bare_super_forwarding"); }
 #[test] fn bare_super_implicit_block() { run_diff("bare_super_implicit_block"); }
+#[test] fn unknown_keyword_argument() { run_diff("unknown_keyword_argument"); }
+#[test] fn define_method_implicit_super() { run_diff("define_method_implicit_super"); }
+#[test] fn lambda_break_via_call() { run_diff("lambda_break_via_call"); }
 #[test] fn super_lifecycle_hook_block() { run_diff("super_lifecycle_hook_block"); }
 #[test] fn super_to_native_class_method() { run_diff("super_to_native_class_method"); }
 #[test] fn class_self_nested_const() { run_diff("class_self_nested_const"); }

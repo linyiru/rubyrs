@@ -2108,6 +2108,16 @@ pub(crate) fn compile_expr(
                     // (NOT a positional). `simple` excludes the cases
                     // not yet modelled (kwargs, post-rest `*a, b`),
                     // which fall back to the legacy slot-dump.
+                    //
+                    // Implicit super from a `define_method` body is a
+                    // RuntimeError in CRuby. Only a BLOCK proto can BE
+                    // such a body (a `def`-compiled method never is), so
+                    // emit the runtime guard only there — a bare super in
+                    // a plain method (or a block nested in one) stays a
+                    // no-op guard. Explicit `super(...)` skips this.
+                    if !b.is_method_body {
+                        b.emit(Op::ImplicitSuperGuard);
+                    }
                     let simple = !b.method_has_kw && b.method_n_post_rest == 0;
                     if simple && let Some(rs) = b.method_rest_slot {
                         // Rest present → assemble `[pre…, *rest]` and
@@ -2324,6 +2334,14 @@ pub(crate) fn compile_expr(
                     // literal block). A lone `*rest` reduces to the
                     // rest Array itself. kw / post-rest fall back to
                     // the legacy slot-dump (rare).
+                    //
+                    // Implicit ARG forwarding (`super do…end` with no
+                    // explicit arg list) is illegal from a define_method
+                    // body — same RuntimeError as bare `super`. Guard
+                    // only in block protos (see `Expr::Super`).
+                    if !b.is_method_body {
+                        b.emit(Op::ImplicitSuperGuard);
+                    }
                     let simple = !b.method_has_kw && b.method_n_post_rest == 0;
                     if simple && let Some(rs) = b.method_rest_slot {
                         emit_super_forward_array(b, interner, rs);
