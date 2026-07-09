@@ -4015,6 +4015,21 @@ impl Vm {
         // changes between evals, so a per-serve recompute can never be
         // stale while native code runs.
         self.t2_poll_flags = (self.fuel.is_some() || self.deadline_at.is_some()) as u8;
+        // TIER-2 kwargs-super correctness (ADR 0037): the just-pushed frame's
+        // body runs INLINE here, still inside the caller's `do_call` — i.e.
+        // BEFORE the `Op::Call`-family arm's post-dispatch
+        // `trailing_hash_positional = false` reset (step.rs) that the
+        // read-only fast-path binders (`try_invoke_nfa_method_from_stack`)
+        // deliberately defer to. The interpreter's dispatch loop only reaches
+        // a method body AFTER that reset, so a bare `super` forwarding kwargs
+        // (compiler rebuilds a trailing kwargs Hash + `ApplySuper`, which
+        // peels iff `!trailing_hash_positional`) sees the flag FALSE there.
+        // Restore that invariant for the inline native run: clear the flag so
+        // the compiled body observes the same post-binder state. Without this
+        // a hot `def m(a:); super; end` tier-2-compiles and forwards the Hash
+        // as a POSITIONAL arg → "wrong number of arguments (given 1,
+        // expected 0)" (`super_forward_kwargs.rb`).
+        self.trailing_hash_positional = false;
         self.t2_depth += 1;
         let status = f(self as *mut Vm);
         self.t2_depth -= 1;

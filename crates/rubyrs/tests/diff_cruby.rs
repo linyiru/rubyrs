@@ -2182,6 +2182,7 @@ fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 // args. Surfaced by public_suffix's `Wildcard#initialize(value:,
 // length:, private:); super; end`.
 #[test] fn super_forward_kwargs() { run_diff("super_forward_kwargs"); }
+#[test] fn super_forward_kwargs_hot() { run_diff("super_forward_kwargs_hot"); }
 
 // `IO::SEEK_SET` / `SEEK_CUR` / `SEEK_END` whence constants, and
 // File#seek honoring them. Surfaced by mini_mime's PReadFile#pread.
