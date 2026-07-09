@@ -3449,6 +3449,28 @@ impl Vm {
             }
         }
         self.prim_reopen_mask = mask;
+        // Block-collection base-class reopen gate (see the
+        // `coll_base_reopen` field doc): set once the base
+        // Array/Hash/Range class holds a block-collection name in its
+        // OWN table. Same own-table-only scan as the mask above so a
+        // module `include`d into a collection class can't trip it.
+        self.coll_base_reopen = {
+            let mut any = false;
+            for cname in ["Array", "Hash", "Range"] {
+                let sym = self.interner.intern(cname);
+                if let Some(c) = self.classes.get(&sym) {
+                    let methods = c.methods.borrow();
+                    if methods
+                        .keys()
+                        .any(|nid| Self::is_collection_block_name(self.interner.resolve(*nid)))
+                    {
+                        any = true;
+                        break;
+                    }
+                }
+            }
+            any
+        };
     }
 
     /// `no_recv` builtin-or-host fast path. Tries the host-side
@@ -9517,8 +9539,24 @@ impl Vm {
                     && argc <= self.stack.len()
                 {
                     let name: &str = self.interner.resolve(name_id);
-                    let denied = Self::is_builtin_name(name)
-                        || matches!(
+                    // NOTE: `is_builtin_name` is deliberately NOT in
+                    // this denial. CRuby resolves a class's OWN
+                    // singleton method BEFORE Kernel's private
+                    // builtins, so a bare `format(x)` inside a `def
+                    // self.m` body with a `def self.format` in scope
+                    // must reach the class method, not `Kernel#format`.
+                    // Because this bucket runs BEFORE the no_recv
+                    // builtin dispatch (`try_dispatch_no_recv_builtin_
+                    // or_host`), serving here IS the correct order; the
+                    // `lookup_class_singleton_cached` MISS below cleanly
+                    // hands an UN-shadowed builtin name back to the
+                    // cascade (its builtin arm then wins), so the
+                    // negative case (`def self.go; puts …; end` with no
+                    // `def self.puts`) still reaches Kernel. The
+                    // routing/send names below stay denied — they
+                    // re-enter as explicit-recv / bypass forms that
+                    // resolve their own class-singleton overrides.
+                    let denied = matches!(
                             name,
                             // The universal-Object bare-call routing
                             // list (do_call's no_recv re-entry) —
@@ -12006,8 +12044,21 @@ impl Vm {
         // `Token.name` reading its `@name` ivar, not the class name.
         // Mirrors the `superclass` arm's override probe in
         // try_dispatch_class_introspection.
+        //
+        // The `nil?` / `!` / `!@` names ride the same gate: for a
+        // Class receiver they are answered by `primitive_call`'s
+        // UNIVERSAL arms (`(_, "nil?", [])` / `(_, "!", [])`), which —
+        // unlike the `is_a?` / `===` universals — fire BEFORE the
+        // canonical class-singleton arm below, so a `def Bar.nil?` /
+        // `def self.!` singleton override was silently shadowed. Skip
+        // the primitive when the override exists so the singleton arm
+        // (the `Value::Class` dispatch further down) serves it, exactly
+        // as it already does for `to_s` (mirrors the working Class
+        // `respond_to?` / class-singleton `to_s` buckets; the
+        // `class Class; def nil?` INSTANCE-reopen form is out of scope
+        // here, same as those buckets).
         let class_intrinsic_overridden = if let Value::Class(c) = &recv {
-            matches!(&*name, "name" | "to_s" | "inspect") && {
+            matches!(&*name, "name" | "to_s" | "inspect" | "nil?" | "!" | "!@") && {
                 let c = c.clone();
                 self.lookup_class_singleton_method(&c, name_id).is_some()
             }
@@ -25441,6 +25492,27 @@ impl Vm {
                     return Ok(false);
                 }
             }
+        } else {
+            // Array/Hash/Range base-class reopen mirror (`class Array;
+            // def map; ...`). The Str path above rides the
+            // `prim_reopen_mask` bit; the collection classes have no
+            // mask bit, so they ride the dedicated `coll_base_reopen`
+            // gate (false until someone reopens a collection method).
+            // A chain lookup (not own-table) so a subclass instance
+            // inheriting the base reopen declines too. On a hit we
+            // DECLINE — `do_call_block`'s collection-base-reopen serve
+            // gate then invokes the reopen WITH the block.
+            if self.fast_index_checked_gen != self.method_gen {
+                self.fast_index_revalidate();
+            }
+            if self.coll_base_reopen {
+                let recv = self.stack[recv_idx].clone();
+                if let Value::Class(cls) = self.class_of(&recv)
+                    && self.lookup_method_uncached(&cls, name_id).is_some()
+                {
+                    return Ok(false);
+                }
+            }
         }
         let recv = self.stack[recv_idx].clone();
         let args: Vec<Value> = self.stack[recv_idx + 2..].to_vec();
@@ -25952,6 +26024,29 @@ impl Vm {
                     }
                 }
             }
+        }
+
+        // Collection base-class reopen serve — the block-form twin of
+        // the no-block general-lookup path (which already honours
+        // `class Array; def first; …`). The native `collection_call_
+        // block` arm below serves a PLAIN Array/Hash/Range receiver
+        // BEFORE any class-chain lookup, so a base reopen of a block
+        // method (`class Array; def map; …`) was shadowed. Gated on the
+        // method_gen-revalidated `coll_base_reopen` (zero cost until a
+        // collection method is reopened), then a per-name CHAIN lookup
+        // (`lookup_method_uncached`) — so a subclass instance
+        // inheriting the base reopen is served too. Runs after the
+        // fast-path `try_serve_collection_block_fast` declined (it
+        // mirrors this same gate) and before `collection_call_block`.
+        if self.coll_base_reopen
+            && let Some(r) = &recv
+            && matches!(r, Value::Array(_) | Value::Hash(_) | Value::Range(_))
+            && let Value::Class(cls) = self.class_of(r)
+            && let Some(m) = self.lookup_method_uncached(&cls, name_id)
+        {
+            let r = r.clone();
+            self.invoke_method_with_block(m, r, args, Some(block))?;
+            return Ok(());
         }
 
         // Bare `instance_exec { ... }` / `instance_eval { ... }`

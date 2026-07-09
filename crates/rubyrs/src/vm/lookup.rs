@@ -1263,6 +1263,56 @@ impl Vm {
         }
     }
 
+    /// TRUE for a block-form collection method served natively by
+    /// `collection_call_block` for an Array / Hash / Range receiver
+    /// (the allow-list in `try_serve_collection_block_fast`, minus the
+    /// String-only names). Used only to compute the coarse
+    /// `coll_base_reopen` gate at `method_gen` change — a base-class
+    /// reopen of one of these must win over the native iterator. None
+    /// of these collide with the Array/Hash/Range PREAMBLE own-table
+    /// names (`bsearch_index` / `deconstruct` / `fetch` / `lazy` /
+    /// `sample` / `shuffle` / `deconstruct_keys` / `bsearch`), so the
+    /// gate stays false for a program that never reopens a collection.
+    pub(crate) fn is_collection_block_name(name: &str) -> bool {
+        matches!(
+            name,
+            "each"
+                | "each_pair"
+                | "map"
+                | "collect"
+                | "select"
+                | "filter"
+                | "inject"
+                | "reduce"
+                | "flat_map"
+                | "collect_concat"
+                | "reject"
+                | "detect"
+                | "find"
+                | "find_index"
+                | "each_with_index"
+                | "each_index"
+                | "each_with_object"
+                | "each_slice"
+                | "each_key"
+                | "each_value"
+                | "transform_keys"
+                | "transform_values"
+                | "any?"
+                | "all?"
+                | "none?"
+                | "min_by"
+                | "max_by"
+                | "sort_by"
+                | "group_by"
+                | "partition"
+                | "count"
+                | "sum"
+                | "delete_if"
+                | "keep_if"
+        )
+    }
+
     pub(crate) fn int_primitive_arm(name: &str) -> bool {
         matches!(
             name,

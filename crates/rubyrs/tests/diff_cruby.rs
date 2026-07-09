@@ -2508,3 +2508,10 @@ fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 // 2**64 backref line).
 #[cfg(all(feature = "regex", feature = "bignum"))]
 #[test] fn s8_arg_shapes() { run_diff("s8_arg_shapes"); }
+// Dispatch fast-serve vs user override (divB batch):
+// (1) universal-name (`nil?`/`!`/`!@`) overrides on a Class receiver,
+// (2) base-class Array/Hash/Range reopen of a BLOCK collection method,
+// (3) class-self bare call colliding with a Kernel private function.
+#[test] fn class_recv_universal_override() { run_diff("class_recv_universal_override"); }
+#[test] fn collection_base_class_reopen_block() { run_diff("collection_base_class_reopen_block"); }
+#[test] fn class_self_bare_call_kernel_collision() { run_diff("class_self_bare_call_kernel_collision"); }

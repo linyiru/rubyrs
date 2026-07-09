@@ -2726,6 +2726,22 @@ pub(crate) struct Vm {
     /// re-resolves identically).
     pub(crate) undef_names: crate::intern::FxHashSet<SymId>,
     pub(crate) prim_reopen_mask: u8,
+    /// True once the BASE `Array` / `Hash` / `Range` class has a
+    /// user (or preamble) method in its OWN table whose name is a
+    /// block-collection name (`map` / `each` / `select` / …, per
+    /// `Vm::is_collection_block_name`). Block-form collection sends
+    /// (`[1].map { }`) are served by the native `collection_call_block`
+    /// arm, which — for a PLAIN (untagged) receiver — runs BEFORE the
+    /// class-chain method lookup, so a `class Array; def map; …; end`
+    /// base reopen was silently shadowed (subclass overrides go through
+    /// `collection_call_block`'s `override_tag`, and the no-BLOCK path
+    /// already honours base reopens via its general lookup — only the
+    /// block-form base reopen was the gap). This flag is the
+    /// method_gen-revalidated coarse gate (mirrors `prim_reopen_mask`):
+    /// false until someone reopens a collection method, so the hot
+    /// no-reopen path pays a single bool test, and only when set do the
+    /// block-collection serve sites do the per-name chain lookup.
+    pub(crate) coll_base_reopen: bool,
     /// Stack of Array/Hash ObjIds currently being rendered by
     /// `inspect_value`. A re-entry on an id already present is a cycle
     /// (`a = []; a << a`) and renders as `[...]` / `{...}` instead of
@@ -3684,6 +3700,7 @@ impl Vm {
             any_undefs: false,
             undef_names: crate::intern::FxHashSet::default(),
             prim_reopen_mask: 0,
+            coll_base_reopen: false,
             inspect_stack: Vec::new(),
             builtin_class_cache: Default::default(),
             sym_to_s,
