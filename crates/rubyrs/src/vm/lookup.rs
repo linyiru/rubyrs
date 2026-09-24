@@ -1930,6 +1930,12 @@ impl Vm {
                 return false;
             }
         }
+        // A Symbol tombstone shadows the native arm (`sym_undefed`).
+        if let Value::Sym(_) = recv
+            && self.sym_undefed(name_id)
+        {
+            return false;
+        }
         let name: &str = self.interner.resolve(name_id);
         // Kernel's PRIVATE builtin surface — `respond_to?(name,
         // true)` must report the no-recv builtins dispatch actually
@@ -4508,6 +4514,25 @@ impl Vm {
         })
     }
 
+    /// True when `class Symbol; undef_method :name; end` left a
+    /// tombstone for `name_id`. The native Symbol arms (`sym_primitive`,
+    /// the pre-cascade buckets) have no method record for an undef to
+    /// remove, so they consult this instead. Only Symbol's OWN tables
+    /// count: the native methods live on Symbol itself, so a tombstone
+    /// higher up (Object, Kernel) sits behind them in CRuby's lookup
+    /// order and must not shadow them. Own table before tombstone, so a
+    /// redefine-after-undef wins. `undef_names` keeps the common case
+    /// (the name was never undef'd anywhere) to one set probe.
+    pub(crate) fn sym_undefed(&self, name_id: SymId) -> bool {
+        if !self.undef_names.contains(&name_id) {
+            return false;
+        }
+        let Some(c) = self.interner.get_id("Symbol").and_then(|id| self.classes.get(&id)) else {
+            return false;
+        };
+        !c.methods.borrow().contains_key(&name_id) && c.undefed.borrow().contains(&name_id)
+    }
+
     /// `Symbol#start_with?` / `#end_with?` read the interned name
     /// directly: no receiver String and no splat. The old preamble
     /// `to_s.start_with?(*args)` ran ~9× slower than CRuby (#380).
@@ -4594,15 +4619,21 @@ impl Vm {
             Value::Class(c) if matches!(v, Value::Object(_)) => c.name.to_string(),
             _ => v.conv_type_name().to_string(),
         };
-        let cls = match arg {
-            Value::Object(id) => Some(self.heap.class_of(*id)),
+        let to_str = self.interner.intern("to_str");
+        let m = match arg {
+            Value::Object(id) => {
+                let c = self.heap.class_of(*id);
+                self.lookup_method_uncached(&c, to_str)
+            }
+            // A class/module arg answers through its singleton chain
+            // (`def self.to_str`), same lookup `Klass.foo` uses.
+            Value::Class(c) => self.lookup_class_singleton_method(c, to_str),
             other => match self.class_of(other) {
-                Value::Class(c) => Some(c),
+                Value::Class(c) => self.lookup_method_uncached(&c, to_str),
                 _ => None,
             },
         };
-        let to_str = self.interner.intern("to_str");
-        if let Some(m) = cls.and_then(|c| self.lookup_method_uncached(&c, to_str)) {
+        if let Some(m) = m {
             let pre_frames = self.frames.len();
             let result = {
                 let mut g = super::PinGuard::new(self);

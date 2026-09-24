@@ -3039,6 +3039,19 @@ impl Vm {
         true
     }
 
+    /// The user method a primitive-class reopen gate serves instead of
+    /// the native arm: a PREPENDED module's own table first (it sits
+    /// ahead of the class in CRuby's lookup), then the class's own
+    /// table. Included modules stay behind the arm (String includes
+    /// Comparable). Shared by `do_call` and its block-form twin.
+    fn prim_reopen_target(cls: &Rc<crate::value::Class>, name_id: SymId) -> Option<Rc<Method>> {
+        cls.prepends
+            .borrow()
+            .iter()
+            .find_map(|p| p.methods.borrow().get(&name_id).cloned())
+            .or_else(|| cls.methods.borrow().get(&name_id).cloned())
+    }
+
     /// `Symbol#start_with?` / `#end_with?` fast path (#380). Rails
     /// probes setter names this way (`OrderedOptions#method_missing`,
     /// `class_attribute`) ~32×/request, and the slow cascade doubled
@@ -3350,6 +3363,8 @@ impl Vm {
             Some(c) => {
                 self.lookup_method_uncached(&c, self.sym_start_with_q).is_none()
                     && self.lookup_method_uncached(&c, self.sym_end_with_q).is_none()
+                    && !self.sym_undefed(self.sym_start_with_q)
+                    && !self.sym_undefed(self.sym_end_with_q)
             }
             None => false,
         };
@@ -3484,14 +3499,18 @@ impl Vm {
             (0, "Integer"), (1, "Float"), (2, "String"), (3, "Symbol"),
             (4, "NilClass"), (5, "TrueClass"), (5, "FalseClass"), (6, "Rational"),
         ];
+        // A module PREPENDED onto the class counts too: it sits ahead
+        // of the class in CRuby's lookup, so it must also beat the arm.
         let mut mask = 0u8;
         for (bit, cname) in PRIM_CLASSES {
             let sym = self.interner.intern(cname);
             if let Some(c) = self.classes.get(&sym) {
-                let methods = c.methods.borrow();
-                if methods.keys().any(|nid| {
-                    Self::primitive_arm_name_for_class(cname, self.interner.resolve(*nid))
-                }) {
+                let claims = |tbl: &Rc<crate::value::Class>| {
+                    tbl.methods.borrow().keys().any(|nid| {
+                        Self::primitive_arm_name_for_class(cname, self.interner.resolve(*nid))
+                    })
+                };
+                if claims(c) || c.prepends.borrow().iter().any(claims) {
                     mask |= 1 << bit;
                 }
             }
@@ -10400,12 +10419,10 @@ impl Vm {
                 if bit < 7
                     && self.prim_reopen_mask & (1 << bit) != 0
                     && let Value::Class(cls) = self.class_of(r)
+                    && let Some(m) = Self::prim_reopen_target(&cls, name_id)
                 {
-                    let m = cls.methods.borrow().get(&name_id).cloned();
-                    if let Some(m) = m {
-                        let r = r.clone();
-                        return self.invoke_method(m, r, args.into_vec());
-                    }
+                    let r = r.clone();
+                    return self.invoke_method(m, r, args.into_vec());
                 }
             }
         }
@@ -11778,6 +11795,19 @@ impl Vm {
         // goes straight to method_missing, CRuby's undef contract.
         // `any_undefs` keeps the cost at one bool for programs that
         // never undef.
+        // Symbol receivers join the gate through `sym_undefed`: their
+        // methods are native `sym_primitive` arms with no record for an
+        // undef to remove.
+        if self.any_undefs && matches!(recv, Value::Sym(_)) && self.sym_undefed(name_id) {
+            if self.try_method_missing(&recv, name_id, args.to_vec(), None)? {
+                return Ok(());
+            }
+            return Err(self.trap(RubyError::NoMethodError {
+                kind: crate::error::NoMethodErrorKind::Missing,
+                method: name.to_string(),
+                recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(&recv)),
+            }));
+        }
         if self.any_undefs {
             let chain_root = match &recv {
                 Value::Object(oid) => Some(self.heap.class_of(*oid)),
@@ -26066,13 +26096,11 @@ impl Vm {
                 if bit < 7
                     && self.prim_reopen_mask & (1 << bit) != 0
                     && let Value::Class(cls) = self.class_of(r)
+                    && let Some(m) = Self::prim_reopen_target(&cls, name_id)
                 {
-                    let m = cls.methods.borrow().get(&name_id).cloned();
-                    if let Some(m) = m {
-                        let r = r.clone();
-                        self.invoke_method_with_block(m, r, args, Some(block))?;
-                        return Ok(());
-                    }
+                    let r = r.clone();
+                    self.invoke_method_with_block(m, r, args, Some(block))?;
+                    return Ok(());
                 }
             }
         }

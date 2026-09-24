@@ -415,6 +415,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 #[test] fn symbol_methods() { run_diff("symbol_methods"); }
 #[test] fn symbol_inspect() { run_diff("symbol_inspect"); }
 #[test] fn symbol_affix() { run_diff("symbol_affix"); }
+#[test] fn symbol_affix_reopen() { run_diff("symbol_affix_reopen"); }
 #[test] fn string_intern() { run_diff("string_intern"); }
 #[test] fn private_class_method() { run_diff("private_class_method"); }
 #[test] fn interpolation() { run_diff("interpolation"); }
