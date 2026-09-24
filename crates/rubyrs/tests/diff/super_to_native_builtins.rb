@@ -59,3 +59,19 @@ end
 class Zed < SubBase; end
 class Alpha < SubBase; end
 p SubBase.subclasses
+
+# String#initialize keeps its type and arity checks under super.
+class StrSub < String
+  def initialize(*a)
+    super
+  end
+end
+p StrSub.new
+[[123], [nil], ["a", "b"]].each do |args|
+  begin
+    StrSub.new(*args)
+    p :no_error
+  rescue TypeError, ArgumentError => e
+    p [e.class, e.message]
+  end
+end

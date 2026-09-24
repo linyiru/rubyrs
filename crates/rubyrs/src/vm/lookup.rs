@@ -4068,8 +4068,21 @@ impl Vm {
                             // here (ActiveSupport::EnvironmentInquirer <
                             // StringInquirer < String).
                             if nm == "initialize" {
-                                if let (Value::Str(rs), Some(src @ Value::Str(_))) = (&sv, args.first()) {
-                                    self.string_collection_call(rs.clone(), "replace", std::slice::from_ref(src))?;
+                                if args.len() > 1 {
+                                    return Err(self.trap(crate::error::RubyError::ArgumentError {
+                                        msg: format!("wrong number of arguments (given {}, expected 0..1)", args.len()),
+                                    }));
+                                }
+                                match (&sv, args.first()) {
+                                    (Value::Str(rs), Some(src @ Value::Str(_))) => {
+                                        self.string_collection_call(rs.clone(), "replace", std::slice::from_ref(src))?;
+                                    }
+                                    (_, Some(other)) => {
+                                        return Err(self.trap(crate::error::RubyError::TypeError {
+                                            msg: format!("no implicit conversion of {} into String", other.conv_type_name()),
+                                        }));
+                                    }
+                                    _ => {}
                                 }
                                 self.stack.push(Value::Nil);
                                 return Ok(());
