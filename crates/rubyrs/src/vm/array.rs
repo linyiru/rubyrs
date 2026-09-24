@@ -409,6 +409,77 @@ impl Vm {
                             Some(self.heap.array_mut(id).remove(idx as usize))
                         }
                     }
+                    // `slice!(idx)` / `slice!(start, len)` / `slice!(range)`
+                    // — remove and return what the matching `[]` form
+                    // selects (nil when that is nil). tsort's
+                    // `stack.slice!(stack_length .. -1)` (Rails'
+                    // initializer ordering) is the forcing caller.
+                    ("slice!", [Value::Int(n)]) => {
+                        let len = self.heap.array(id).len() as i64;
+                        let idx = if *n < 0 { n + len } else { *n };
+                        if idx < 0 || idx >= len {
+                            Some(Value::Nil)
+                        } else {
+                            Some(self.heap.array_mut(id).remove(idx as usize))
+                        }
+                    }
+                    ("slice!", [Value::Int(_), Value::Int(_)] | [Value::Range(_)]) => {
+                        let len = self.heap.array(id).len() as i64;
+                        // Resolve to a half-open [begin, end) span, or
+                        // None where `[]` would answer nil.
+                        let span: Option<(i64, i64)> = match args {
+                            [Value::Int(start), Value::Int(length)] => {
+                                let s = if *start < 0 { len + *start } else { *start };
+                                if s < 0 || s > len || *length < 0 {
+                                    None
+                                } else {
+                                    Some((s, (s + *length).min(len)))
+                                }
+                            }
+                            [Value::Range(rid)] => {
+                                let r = self.heap.range(*rid);
+                                let (r_begin, r_end, r_excl) = (r.begin.clone(), r.end.clone(), r.exclusive);
+                                let begin = match r_begin {
+                                    Value::Nil => 0,
+                                    Value::Int(b) => if b < 0 { len + b } else { b },
+                                    other => return Err(self.trap(RubyError::TypeError {
+                                        msg: format!("no implicit conversion of {} into Integer", other.conv_type_name()),
+                                    })),
+                                };
+                                let end_excl = match r_end {
+                                    Value::Nil => len,
+                                    Value::Int(e) => {
+                                        let resolved = if e < 0 { len + e } else { e };
+                                        if r_excl { resolved } else { resolved + 1 }
+                                    }
+                                    other => return Err(self.trap(RubyError::TypeError {
+                                        msg: format!("no implicit conversion of {} into Integer", other.conv_type_name()),
+                                    })),
+                                };
+                                if begin < 0 || begin > len {
+                                    None
+                                } else {
+                                    Some((begin, end_excl.clamp(begin, len)))
+                                }
+                            }
+                            _ => unreachable!(),
+                        };
+                        match span {
+                            None => Some(Value::Nil),
+                            Some((b, e)) => {
+                                // Allocate the result BEFORE draining so the
+                                // removed elements are never unrooted across
+                                // a GC.
+                                self.maybe_gc();
+                                self.check_alloc()?;
+                                let nid = self.heap.alloc(HeapObj::Array(Vec::new().into()));
+                                let removed: Vec<Value> =
+                                    self.heap.array_mut(id).drain(b as usize..e as usize).collect();
+                                *self.heap.array_mut(nid) = removed;
+                                Some(Value::Array(nid))
+                            }
+                        }
+                    }
                     ("delete", [needle]) => {
                         // Two-phase: walk the immutable view to
                         // collect indices that match (need the
@@ -605,6 +676,10 @@ impl Vm {
                         self.heap.array_mut(id).insert(0, v.clone());
                         Some(Value::Array(id))
                     }
+                    // Zero-arg form is a no-op returning self — the
+                    // `paths.unshift(*maybe_empty)` splat shape (Rails'
+                    // engine initializers).
+                    ("unshift", []) | ("prepend", []) => Some(Value::Array(id)),
                     ("unshift", many) | ("prepend", many) if !many.is_empty() => {
                         let new_len = self.heap.array(id).len().saturating_add(many.len());
                         if let Some(max) = self.max_value_bytes
