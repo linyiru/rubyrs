@@ -193,8 +193,12 @@ build_base_gapscan() {
   fi
   # `git worktree add` doesn't populate submodules, and the workspace
   # manifest lists crates/rostdown (a submodule since 2026-06-16), so
-  # cargo can't even load the base workspace without it.
-  git -C "$wt" submodule update --init --recursive --quiet
+  # cargo can't even load the base workspace without it. .gitmodules
+  # uses SSH URLs and CI runners have no SSH key; the submodules are
+  # public, so fetch them over anonymous HTTPS (this command only —
+  # no persistent config change).
+  git -c url."https://github.com/".insteadOf="git@github.com:" \
+    -C "$wt" submodule update --init --recursive --quiet
   log "building rubyrs-gapscan from $BASE_REF"
   ( cd "$wt"
     CARGO_TARGET_DIR="$WORK/base-target" cargo build --quiet --release -p rubyrs-gapscan >&2
