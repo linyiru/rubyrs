@@ -1807,33 +1807,69 @@ impl Vm {
                         ),
                     })));
                 }
-                let src = match args[0] {
-                    Value::Int(0) => self.time_now.clone(),
-                    Value::Int(1..=3) => self.monotonic_now.clone().or_else(|| self.time_now.clone()),
+                // Validate both arguments before touching a clock, so
+                // the preamble's error surface doesn't depend on which
+                // capabilities are injected. `per_sec` is ticks per
+                // second of the requested unit.
+                let realtime = match args[0] {
+                    Value::Int(0) => true,
+                    Value::Int(1..=3) => false,
                     _ => return Some(Ok(Value::Nil)),
                 };
                 let Value::Sym(unit) = args[1] else {
                     return Some(Ok(Value::Nil));
                 };
+                let (float, per_sec): (bool, i128) = match &**self.interner.resolve(unit) {
+                    "float_second" => (true, 1),
+                    "float_millisecond" => (true, 1_000),
+                    "float_microsecond" => (true, 1_000_000),
+                    "second" => (false, 1),
+                    "millisecond" => (false, 1_000),
+                    "microsecond" => (false, 1_000_000),
+                    "nanosecond" => (false, 1_000_000_000),
+                    _ => return Some(Ok(Value::Nil)),
+                };
+                let src = if realtime {
+                    self.time_now.clone()
+                } else {
+                    self.monotonic_now.clone().or_else(|| self.time_now.clone())
+                };
                 let Some(src) = src else {
+                    let needs = if realtime {
+                        "`Config::time_now`"
+                    } else {
+                        "`Config::monotonic_now` (or `Config::time_now`)"
+                    };
                     return Some(Err(self.trap(RubyError::RuntimeError {
-                        msg: "Process.clock_gettime requires `Config::time_now` or \
-                              `Config::monotonic_now` injection — the embedding \
-                              host hasn't enabled a clock capability (Tier 1 \
-                              deterministic default)".into(),
+                        msg: format!(
+                            "Process.clock_gettime requires {needs} injection — the \
+                             embedding host hasn't enabled a clock capability (Tier 1 \
+                             deterministic default)"
+                        ),
                     })));
                 };
                 let (sec, nsec) = src();
-                let (sec, nsec) = (sec as i128, nsec as i128);
-                let v = match &**self.interner.resolve(unit) {
-                    "float_second" => Value::Float(sec as f64 + nsec as f64 / 1e9),
-                    "float_millisecond" => Value::Float(sec as f64 * 1e3 + nsec as f64 / 1e6),
-                    "float_microsecond" => Value::Float(sec as f64 * 1e6 + nsec as f64 / 1e3),
-                    "second" => Value::Int(sec as i64),
-                    "millisecond" => Value::Int((sec * 1_000 + nsec / 1_000_000) as i64),
-                    "microsecond" => Value::Int((sec * 1_000_000 + nsec / 1_000) as i64),
-                    "nanosecond" => Value::Int((sec * 1_000_000_000 + nsec) as i64),
-                    _ => Value::Nil,
+                let ns_per_tick = 1_000_000_000 / per_sec;
+                let v = if float {
+                    Value::Float(sec as f64 * per_sec as f64 + nsec as f64 / ns_per_tick as f64)
+                } else {
+                    // i128 can't overflow here (|sec| * 1e9 < 2^94);
+                    // a result past i64 promotes like any Integer.
+                    let ticks = sec as i128 * per_sec + nsec as i128 / ns_per_tick;
+                    match i64::try_from(ticks) {
+                        Ok(n) => Value::Int(n),
+                        #[cfg(feature = "bignum")]
+                        Err(_) => match self.bigint_to_value(num_bigint::BigInt::from(ticks)) {
+                            Ok(v) => v,
+                            Err(e) => return Some(Err(e)),
+                        },
+                        #[cfg(not(feature = "bignum"))]
+                        Err(_) => {
+                            return Some(Err(self.trap(RubyError::RangeError {
+                                msg: "clock_gettime: integer overflow (bignum feature off)".into(),
+                            })));
+                        }
+                    }
                 };
                 Some(Ok(v))
             }

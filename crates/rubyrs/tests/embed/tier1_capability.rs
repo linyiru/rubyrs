@@ -252,21 +252,38 @@ fn time_now_observes_capability_state_changes_per_call() {
 
 #[test]
 fn clock_gettime_default_raises_without_capability_injection() {
-    // Neither clock injected: every clock id raises, pointing at
-    // both capability slots.
+    // Neither clock injected: every clock id raises, naming the
+    // capability that clock id reads.
+    for (script, needs) in [
+        (
+            "Process.clock_gettime(Process::CLOCK_MONOTONIC)",
+            "`Config::monotonic_now` (or `Config::time_now`) injection",
+        ),
+        ("Process.clock_gettime(Process::CLOCK_REALTIME)", "`Config::time_now` injection"),
+    ] {
+        let mut rt = rubyrs::Runtime::new();
+        let err = rt.eval(script, "clock_no_capability.rb").unwrap_err();
+        let rubyrs::RubyError::Uncaught { class_name, message } = &err.err else {
+            panic!("expected Uncaught RuntimeError, got {:?}", err.err);
+        };
+        assert_eq!(class_name, "RuntimeError");
+        assert!(message.contains(needs), "unexpected message: {}", message);
+    }
+}
+
+#[test]
+fn clock_gettime_validates_unit_before_the_capability() {
+    // A bad unit is an ArgumentError whether or not a clock is
+    // injected — the error surface doesn't depend on host state.
     let mut rt = rubyrs::Runtime::new();
     let err = rt
-        .eval("Process.clock_gettime(Process::CLOCK_MONOTONIC)", "clock_no_capability.rb")
+        .eval("Process.clock_gettime(Process::CLOCK_MONOTONIC, :bogus)", "clock_bad_unit.rb")
         .unwrap_err();
     let rubyrs::RubyError::Uncaught { class_name, message } = &err.err else {
-        panic!("expected Uncaught RuntimeError, got {:?}", err.err);
+        panic!("expected Uncaught ArgumentError, got {:?}", err.err);
     };
-    assert_eq!(class_name, "RuntimeError");
-    assert!(
-        message.contains("`Config::time_now` or `Config::monotonic_now` injection"),
-        "unexpected message: {}",
-        message,
-    );
+    assert_eq!(class_name, "ArgumentError");
+    assert_eq!(message, "unexpected unit: bogus");
 }
 
 #[test]
@@ -286,6 +303,7 @@ fn clock_gettime_reads_the_matching_capability() {
         p Process.clock_gettime(Process::CLOCK_REALTIME, :millisecond)
         p Process.clock_gettime(Process::CLOCK_MONOTONIC)
         p Process.clock_gettime(Process::CLOCK_MONOTONIC, :float_millisecond)
+        p Process.clock_gettime(Process::CLOCK_MONOTONIC, :float_microsecond)
         p Process.clock_gettime(Process::CLOCK_MONOTONIC, :second)
         p Process.clock_gettime(Process::CLOCK_MONOTONIC, :millisecond)
         p Process.clock_gettime(Process::CLOCK_MONOTONIC, :microsecond)
@@ -295,8 +313,28 @@ fn clock_gettime_reads_the_matching_capability() {
     rt.eval(script, "clock_injected.rb").expect("eval");
     assert_eq!(
         buf.snapshot(),
-        "1700000000.25\n1700000000250\n42.123456789\n42123.456789\n42\n42123\n42123456\n42123456789\n42123456789\n"
+        "1700000000.25\n1700000000250\n42.123456789\n42123.456789\n42123456.789\n42\n42123\n42123456\n42123456789\n42123456789\n"
     );
+}
+
+#[cfg(feature = "bignum")]
+#[test]
+fn clock_gettime_integer_units_promote_past_i64() {
+    // A seconds value whose nanosecond count exceeds i64 returns
+    // a Bignum rather than wrapping.
+    let buf = SharedBuf::new();
+    let cfg = rubyrs::Config {
+        monotonic_now: Some(std::sync::Arc::new(|| (i64::MAX / 1_000, 1))),
+        ..rubyrs::Config::default()
+    };
+    let mut rt = rubyrs::Runtime::with_config(cfg);
+    rt.set_stdout(Box::new(buf.clone()));
+    rt.eval(
+        "p Process.clock_gettime(Process::CLOCK_MONOTONIC, :nanosecond)",
+        "clock_bignum.rb",
+    )
+    .expect("eval");
+    assert_eq!(buf.snapshot(), "9223372036854775000000001\n");
 }
 
 #[test]
