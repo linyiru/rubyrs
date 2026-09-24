@@ -1638,6 +1638,18 @@ fn singleton_body_needs_real_eval(body_nodes: &[Node<'_>], recv_is_self: bool) -
         if bn.as_constant_write_node().is_some() {
             return true;
         }
+        // An ivar write in the eigenclass body sets the ivar on the
+        // METACLASS object, not the attached class — only the real
+        // eigenclass-body path (self = the metaclass) models that; the
+        // desugar has no arm for it. (`class << self; @application =
+        // @app_class = nil` — railties' rails.rb.)
+        if bn.as_instance_variable_write_node().is_some()
+            || bn.as_instance_variable_or_write_node().is_some()
+            || bn.as_instance_variable_and_write_node().is_some()
+            || bn.as_instance_variable_operator_write_node().is_some()
+        {
+            return true;
+        }
         // `def self.x` (or any explicit-receiver def) inside the
         // eigenclass body — a method on the eigenclass's OWN
         // eigenclass. The per-statement desugar's `mk_singleton_def`

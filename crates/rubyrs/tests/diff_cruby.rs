@@ -2521,3 +2521,4 @@ fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 #[test] fn public_instance_method() { run_diff("public_instance_method"); }
 #[test] fn super_to_native_builtins() { run_diff("super_to_native_builtins"); }
 #[test] fn zsuper_forward_leading_params() { run_diff("zsuper_forward_leading_params"); }
+#[test] fn eigenclass_body_ivar_write() { run_diff("eigenclass_body_ivar_write"); }
