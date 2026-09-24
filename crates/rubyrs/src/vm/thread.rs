@@ -372,7 +372,19 @@ impl Vm {
         g.pin(Value::Block(block_id));
         g.pin(cur.clone());
         let step = g.vm.step_block(block_id, Vec::new(), pre_frames);
-        let unlocked = if g.vm.mutex_unlock_native(id, &cur) { Ok(()) } else { g.vm.mutex_unlock_ruby(id) };
+        // The block's value is unrooted while a Ruby-level unlock runs
+        // (it can collect).
+        if let Ok(BlockStep::Value(v) | BlockStep::Break(v)) = &step {
+            g.pin(v.clone());
+        }
+        // The block may have redefined `unlock` / `Thread.current` or
+        // given the receiver a singleton class; Ruby's `ensure; unlock`
+        // would see that, so re-check before releasing natively.
+        let native = g.vm.heap.class_of(id);
+        let unlocked = match g.vm.mutex_serve_thread(&native) {
+            Some(cur) if g.vm.mutex_unlock_native(id, &cur) => Ok(()),
+            _ => g.vm.mutex_unlock_ruby(id),
+        };
         drop(g);
         let v = match step? {
             BlockStep::Value(v) | BlockStep::Break(v) => v,
@@ -387,9 +399,12 @@ impl Vm {
     /// Run the preamble `Mutex#unlock` synchronously. It may run while
     /// a `return` / `break` signal is pending (the block exited that
     /// way), so those are parked around the call and restored after,
-    /// as Ruby's own `ensure` does.
+    /// as Ruby's own `ensure` does. `unlock` is resolved afresh on the
+    /// receiver, so a redefinition made inside the block is the one run.
     fn mutex_unlock_ruby(&mut self, id: ObjId) -> Result<(), Trap> {
-        let Some(unlock) = self.thread_intr.mutex_unlock.clone() else { return Ok(()) };
+        let cls = self.heap.class_of(id);
+        let found = self.lookup_method_uncached(&cls, self.thread_intr.sym_unlock);
+        let Some(unlock) = found.or_else(|| self.thread_intr.mutex_unlock.clone()) else { return Ok(()) };
         let method_return = self.method_return.take();
         let method_return_locals = self.method_return_locals.take();
         let break_signaled = std::mem::replace(&mut self.break_signaled, false);
@@ -482,12 +497,14 @@ mod tests {
             m = Mutex.new
             def m.unlock = ($log << :unlock; super)
             $log << m.synchronize { :single } << m.locked?
+            m2 = Mutex.new
+            $log << m2.synchronize { def m2.unlock = ($log << :late; super); :late_def } << m2.locked?
             class Mutex
               def lock = ($log << :global; @owner = Thread.current; self)
             end
             $log << Mutex.new.synchronize { :g }
             $log.inspect
         "##);
-        assert_eq!(out, "[:lock, :sub, false, :unlock, :single, false, :global, :g]");
+        assert_eq!(out, "[:lock, :sub, false, :unlock, :single, false, :late, :late_def, false, :global, :g]");
     }
 }

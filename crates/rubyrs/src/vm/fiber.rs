@@ -362,7 +362,7 @@ pub(crate) struct FiberObject {
     /// This fiber's fiber-local store (`Thread.current[:k]` inside
     /// the fiber body — CRuby keeps one per fiber, so a child fiber
     /// starts empty). `Nil` until first written, then a plain Hash;
-    /// see `Vm::fiber_locals_store` (vm/thread.rs). Written only
+    /// see `Vm::fiber_locals_value` (vm/thread.rs). Written only
     /// through `Heap::get_mut` so the generational write barrier
     /// records an old fiber that gains a young Hash.
     pub(crate) locals: RefCell<Value>,

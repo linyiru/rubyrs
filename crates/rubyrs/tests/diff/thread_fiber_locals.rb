@@ -36,5 +36,5 @@ p th.value, t[:a]
 th[:k] = 1
 th["k2"] = 2
 th[:k2] = nil
-p [th[:k], th["k"], th.key?(:k), th.keys]
+p [th[:k], th["k"], th.key?(:k), th.keys.sort]
 p((th[1] rescue $!.class))
