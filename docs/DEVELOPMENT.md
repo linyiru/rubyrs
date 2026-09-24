@@ -8,14 +8,21 @@
 
 ## Workspace layout
 
-rubyrs is a Cargo workspace with four crates under `crates/`:
+rubyrs is a Cargo workspace; the members are listed in the root
+`Cargo.toml`. The ones you will touch most:
 
 | Crate | Role |
 |---|---|
-| `crates/rubyrs` | Core interpreter — parser bridge, compiler, VM, embedding API |
+| `crates/rubyrs` | Core interpreter — parser bridge, compiler, VM, JIT tiers, embedding API |
 | `crates/rubyrs-cext` | C ABI bridge — `rb_*` FFI entry points C extensions call |
-| `crates/rubund` | Bundler/Gemfile-aware runner (DSL hosting demo) |
+| `crates/rubyrs-jit` | Backend-agnostic tiered-JIT policy + stats (ADR 0030) |
+| `crates/rubund` | Zero-copy Gemfile.lock parser (embedding-API driver) |
 | `crates/rubyrs-gapscan` | Subset-coverage scanner over real Ruby corpora |
+| `crates/rubyrs-spec-extract` | Rewrites ruby/spec files for the in-tree micro-runner |
+| `crates/carmine`, `liquidus`, `rostdown` | Extracted rouge / Liquid / kramdown engines (`rostdown` is a submodule — init it on a fresh clone) |
+
+`crates/rubyrs/fuzz` is deliberately excluded from the workspace
+(nightly-only); see [FUZZING.md](FUZZING.md).
 
 `cargo build` from the repository root builds the whole workspace.
 The CLI binary `rubyrs` lives in `crates/rubyrs` and lands at
@@ -38,9 +45,8 @@ Debug + safety flags via environment variables:
 
 | Var | Effect |
 |-----|--------|
-| `DEBUG_AST=1` | Print the translated `Expr` IR before execution |
-| `DEBUG_BC=1` | Print compiled bytecode (every Proto, every Op) |
-| `GC_STATS=1` | Print final heap stats on exit |
+| `RUBYRS_GC_STATS=1` | Print one stderr line per GC sweep (live count, young allocs, wall time) |
+| `RUBYRS_IC_STATS=1` | Print inline-cache hit/miss counts on exit (needs the `ic-stats` feature) |
 | `STRESS_GC=1` | Collect on every potential GC point (debug / regression) |
 | `RUBYRS_FUEL=N` | Trap as `ResourceExhausted` after `N` ops dispatched |
 | `RUBYRS_MAX_OBJECTS=N` | Trap when live heap objects exceed `N` |
@@ -59,18 +65,25 @@ cargo test --release --test diff_cruby  # the byte-compare suite vs CRuby
 
 The `diff_cruby` harness runs each `crates/rubyrs/tests/diff/*.rb`
 file through both rubyrs and the system `ruby` binary and asserts
-stdout matches byte-for-byte. Currently 79 fixtures; every PR is
-gated on it staying green.
+stdout matches byte-for-byte. It is the bulk of the suite (well
+over a thousand fixtures); every PR is gated on it staying green,
+and CI runs it again under both JIT tiers.
 
-To add a new diff fixture:
+To add a new diff fixture, write the `.rb` file and register it in
+`crates/rubyrs/tests/diff_cruby.rs` — fixtures are **not**
+auto-discovered:
 
 ```bash
 echo 'puts 42' > crates/rubyrs/tests/diff/example.rb
-cargo test --release --test diff_cruby example
+# in crates/rubyrs/tests/diff_cruby.rs:
+#   #[test] fn example() { run_diff("example"); }
+cargo test --release -p rubyrs --test diff_cruby example
 ```
 
-The harness auto-discovers `.rb` files; no separate registration
-step.
+A fixture that captures a not-yet-implemented feature gets
+`#[ignore = "known: …"]` naming the missing piece rather than being
+left red; run the quarantined set with
+`cargo test --release -p rubyrs --test diff_cruby -- --ignored`.
 
 For the older fixture/expected style (`crates/rubyrs/tests/fixtures/`):
 
@@ -347,8 +360,12 @@ rubyrs/
 │   │   │   ├── bytecode.rs          # Op + Proto
 │   │   │   ├── compiler.rs          # Expr → bytecode
 │   │   │   ├── error.rs             # Span, RubyError, Trap
-│   │   │   ├── vm.rs                # Vm struct + shared scaffolding (~380 lines)
-│   │   │   └── vm/                  # 17 per-type submodules — see VM_MODULE_MAP.md
+│   │   │   ├── jit_native.rs        # Cranelift specialized JIT tier
+│   │   │   ├── jit_tier2.rs         # frame-keeping baseline JIT tier (ADR 0037)
+│   │   │   ├── preamble/            # core-library Ruby source compiled at startup
+│   │   │   ├── *_native.rs          # native gem accelerators (json, yaml, rouge, …)
+│   │   │   ├── vm.rs                # Vm struct + shared scaffolding
+│   │   │   └── vm/                  # CRuby-mirrored submodules — see VM_MODULE_MAP.md
 │   │   │       ├── dispatch.rs      # do_call / invoke_method ...
 │   │   │       ├── step.rs          # opcode interpreter loop
 │   │   │       ├── cext.rs          # C ext loader + handle bridge
@@ -364,12 +381,16 @@ rubyrs/
 │   │   └── tests/
 │   │       ├── integration.rs       # golden-stdout fixtures
 │   │       ├── embed.rs             # public API smoke tests
-│   │       ├── diff_cruby.rs        # 79-fixture byte-compare vs CRuby
+│   │       ├── diff_cruby.rs        # byte-compare vs CRuby (main suite)
 │   │       ├── diff/                # diff_cruby fixtures (*.rb)
 │   │       └── fixtures/            # legacy .rb + .expected pairs
-│   ├── rubyrs-cext/                 # C ABI shims (~40 unsafe extern "C")
-│   ├── rubund/                      # Bundler/Gemfile runner
-│   └── rubyrs-gapscan/              # subset-coverage scanner
+│   ├── rubyrs-cext/                 # C ABI shims (unsafe extern "C")
+│   ├── rubyrs-jit/                  # tiered-JIT policy + stats
+│   ├── rubund/                      # Gemfile.lock parser
+│   ├── rubyrs-gapscan/              # subset-coverage scanner
+│   ├── rubyrs-spec-extract/         # ruby/spec ingestion
+│   ├── carmine/ liquidus/ rostdown/ # extracted engine crates
+│   └── rubyrs-wasm-embed/ rubyrs-wasm-timer/  # WASM measurement spikes
 ├── perf/
 │   ├── baselines.tsv                # CI-enforced perf budget
 │   ├── check.sh                     # runs each baseline workload

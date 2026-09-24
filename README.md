@@ -1,13 +1,23 @@
 # rubyrs (workspace)
 
-This is a Cargo workspace. It currently hosts one crate
-([`crates/rubyrs/`](crates/rubyrs/)) — the Ruby-subset
-interpreter described below. A second crate, `rubund` (a Rust
-implementation of Bundler), is planned and will be added as a
-sibling under `crates/`. `rubund` is the first real driver of
-`rubyrs`'s embedding API — Gemfile and `*.gemspec` files are
-Ruby DSLs, so the Bundler-in-Rust work doubles as in-tree
-dogfooding of the interpreter.
+This is a Cargo workspace. Its centre is
+[`crates/rubyrs/`](crates/rubyrs/) — the Ruby interpreter
+described below. Around it live:
+
+- **Runtime companions** — [`rubyrs-cext`](crates/rubyrs-cext/)
+  (the CRuby-shape C ABI for C extensions) and
+  [`rubyrs-jit`](crates/rubyrs-jit/) (tiered-JIT policy + stats).
+- **Engine crates extracted from this work** —
+  [`carmine`](crates/carmine/) (rouge-compatible highlighting, with
+  `carmine-ffi` and the `blusher-ext` gem binding),
+  [`liquidus`](crates/liquidus/) (Liquid templates), and
+  `rostdown` (kramdown-compatible markdown, a git submodule).
+- **Tooling** — [`rubund`](crates/rubund/) (Gemfile.lock parser,
+  the first in-tree driver of the embedding API),
+  [`rubyrs-gapscan`](crates/rubyrs-gapscan/) (subset-gap scanner),
+  [`rubyrs-spec-extract`](crates/rubyrs-spec-extract/) (ruby/spec
+  ingestion), and the `rubyrs-wasm-embed` / `rubyrs-wasm-timer`
+  WASM measurement spikes.
 
 ## rubyrs
 

@@ -2530,3 +2530,6 @@ fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 #[test] fn thread_each_caller_location() { run_diff("thread_each_caller_location"); }
 #[cfg(feature = "stdlib")]
 #[test] fn io_console_size() { run_diff("io_console_size"); }
+// Process.clock_gettime served natively off the time_now /
+// monotonic_now capabilities.
+#[test] fn process_clock_gettime() { run_diff("process_clock_gettime"); }

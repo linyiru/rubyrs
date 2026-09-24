@@ -446,6 +446,19 @@ pub struct Config {
     /// explicitly. Deterministic-test hosts inject a fixed
     /// `|| (1_700_000_000, 0)` closure for reproducible output.
     pub time_now: Option<std::sync::Arc<dyn Fn() -> (i64, u32) + Send + Sync>>,
+    /// Host-injected monotonic clock for
+    /// `Process.clock_gettime(Process::CLOCK_MONOTONIC)` (and the
+    /// CPU-time clock ids, which read it too). Returns
+    /// `(seconds, nanoseconds)` since an arbitrary host-chosen
+    /// anchor; only differences between readings are meaningful.
+    /// Must never go backwards.
+    ///
+    /// `None` makes the monotonic clock ids fall back to
+    /// [`Config::time_now`] (wall clock — not monotonic, but the
+    /// pre-capability behavior); with both `None`, every
+    /// `clock_gettime` raises (Tier 1 deterministic default).
+    /// The CLI binary injects a `std::time::Instant` reading.
+    pub monotonic_now: Option<std::sync::Arc<dyn Fn() -> (i64, u32) + Send + Sync>>,
     /// Host-injected wall-clock sleep for `Kernel#sleep`.
     /// `None` (the deterministic Tier 1 default) means
     /// `sleep` raises `RuntimeError`; embedders that want
@@ -778,6 +791,7 @@ impl Default for Config {
             env: None,
             pid: None,
             time_now: None,
+            monotonic_now: None,
             sleep_for: None,
             process_exit: None,
             install_signal_handler: false,
@@ -2569,6 +2583,7 @@ impl Runtime {
         self.vm.env_override = cfg.env;
         self.vm.pid = cfg.pid.map(|n| n.get() as i64);
         self.vm.time_now = cfg.time_now;
+        self.vm.monotonic_now = cfg.monotonic_now;
         self.vm.sleep_for = cfg.sleep_for;
         self.vm.process_exit = cfg.process_exit;
         // ADR 0025 Phase 1: SIGINT capture. install_signals
@@ -2668,7 +2683,7 @@ impl Runtime {
     /// - Resource caps (`max_frames`, `max_heap_objects`,
     ///   `max_symbols`, `max_value_bytes`,
     ///   `allow_filesystem_io`) and host state (`env`, `pid`,
-    ///   `time_now`, `stress_gc`, `stdout`). All of these are
+    ///   `time_now`, `monotonic_now`, `stress_gc`, `stdout`). All of these are
     ///   carried forward as-is — reset does NOT roll Config
     ///   back to whatever was in effect at construction time.
     ///   A host that has called `apply_config` mid-life to

@@ -35,6 +35,11 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   [0034](docs/adr/0034-jit-first-surpass-yjit.md))
 - **`Fiber`** — `Fiber.new` / `#resume` / `Fiber.yield` / `#alive?` over the
   `_fiber` battery.
+- **`Config::monotonic_now`** — a monotonic clock capability;
+  `Process.clock_gettime(Process::CLOCK_MONOTONIC)` now reads it (the CLI
+  injects `std::time::Instant`) and is served natively, ~6.5× faster.
+  ([#379](https://github.com/linyiru/rubyrs/issues/379),
+  `process_clock_gettime.rb`)
 
 ### Changed
 
@@ -143,6 +148,15 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Internal
 
+- **`CLAUDE.md` added** — agent-facing orientation at the repo root:
+  build/test commands (including the JIT-tier diff runs), the
+  diff-fixture registration and known-failure discipline, the
+  architecture overview, and the merge-gating rules.
+- **Orientation docs brought back in line with the code** — README's
+  workspace intro, `docs/DEVELOPMENT.md` (diff fixtures must be
+  registered in `diff_cruby.rs`; they were documented as
+  auto-discovered) and `docs/ARCHITECTURE.md` (the "No JIT" rationale
+  replaced by a JIT-tiers section; module tables refreshed).
 - **Tier-2 dispatch fast paths (campaign P6b)** — string-interpolation
   `to_s` (`Op::InterpToS`: String passthrough + Symbol/Integer primitive
   serve) runs a lean tier-2 helper instead of the generic op boundary, and

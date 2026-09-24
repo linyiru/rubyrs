@@ -1,10 +1,12 @@
 # Architecture
 
-A ~11k-line interpreter, organised as a Cargo workspace
-(`crates/rubyrs` core + `crates/rubund` runner + `crates/rubyrs-cext`
-opaque-handle bridge + `crates/rubyrs-gapscan` tooling). Inside the
-core crate the VM is split CRuby-style across 20 `vm/*.rs` submodules,
-each mirroring a CRuby compilation unit. The pipeline:
+A bytecode interpreter with native JIT tiers on top, organised as a
+Cargo workspace (`crates/rubyrs` core + `crates/rubyrs-cext`
+opaque-handle bridge + `crates/rubyrs-jit` tier policy + tooling and
+extracted engine crates — see [DEVELOPMENT.md](DEVELOPMENT.md#workspace-layout)).
+Inside the core crate the VM is split CRuby-style across the
+`vm/*.rs` submodules, each mirroring a CRuby compilation unit. The
+pipeline:
 
 ```
 .rb source bytes
@@ -31,8 +33,13 @@ Three reasons this structure is the way it is:
 2. **Bytecode > tree-walking.** A tree-walker was the v0; switching to a
    bytecode VM was a 2.2× speedup with no language changes. See
    [ADR 0002](adr/0002-bytecode-vm-not-jit.md).
-3. **No JIT.** rubyrs' niche is fast cold start and tiny memory; a JIT
-   directly conflicts with both. See [ADR 0002](adr/0002-bytecode-vm-not-jit.md).
+3. **The interpreter is the always-correct tier 0.** ADR 0002's original
+   "no JIT" call was reversed by [ADR 0034](adr/0034-jit-first-surpass-yjit.md);
+   the `jit-native` feature adds Cranelift tiers on top — see
+   [JIT tiers](#jit-tiers). Every tier deopts or bails back to the
+   bytecode VM; the invariant is that a JIT changes speed, never
+   results, and any known violation is quarantined and tracked (see
+   `JIT_KNOWN_DIVERGENCES` below).
 
 ## Modules
 
@@ -40,49 +47,56 @@ Three reasons this structure is the way it is:
 
 | File | Lines (~) | Role |
 |------|-----------|------|
-| `src/ast.rs` | 1100 | `Expr` enum, `Spanned<T>`, `tr()`: walk Prism `Node<'pr>`, drop the parser lifetime, attach byte-offset spans |
-| `src/value.rs` | 155 | `Value`, `Class`, `Instance`, `Method`, `BlockHandle`, `ObjId` |
-| `src/intern.rs` | 50 | `SymId(u32)` + `Interner`: dedup of method names, ivar names, class names, string literals |
-| `src/heap.rs` | 450 | `Heap`, `HeapObj`, `Slot`, mark-sweep; `impl Value` for display / equality (needs `&Heap` and `&Interner`) |
-| `src/bytecode.rs` | 200 | `Op` enum (Copy), `BinOpKind`, `Proto` (with `op_spans` and `filename`) |
-| `src/compiler.rs` | 930 | `ProtoBuilder`, `compile_expr`, `compile_proto`, `compile_block`; threads `&mut Interner` through |
-| `src/error.rs` | 175 | `Span`, `RubyError`, `Trap`, `TrapFrame`, `line_col`; `RubyError::is(class_name)` helper |
-| `src/lib.rs` | 645 | Public embedding API: `Runtime`, `Config`, `format_trap`, re-exports of `Value`/`Trap`/`RubyError` etc. |
-| `src/main.rs` | 30 | CLI entry: argv + env vars → `Config` → `Runtime::eval_file` |
+| `src/ast.rs` | 6100 | `Expr` enum, `Spanned<T>`, `tr()`: walk Prism `Node<'pr>`, drop the parser lifetime, attach byte-offset spans |
+| `src/value.rs` | 1800 | `Value`, `Class`, `Instance`, `Method`, `BlockHandle`, `ObjId` |
+| `src/intern.rs` | 180 | `SymId(u32)` + `Interner`: dedup of method names, ivar names, class names, string literals |
+| `src/heap.rs` | 3600 | `Heap`, `HeapObj`, `Slot`, mark-sweep; `impl Value` for display / equality (needs `&Heap` and `&Interner`) |
+| `src/bytecode.rs` | 1100 | `Op` enum (Copy), `BinOpKind`, `Proto` (with `op_spans` and `filename`) |
+| `src/compiler.rs` | 3500 | `ProtoBuilder`, `compile_expr`, `compile_proto`, `compile_block`; threads `&mut Interner` through |
+| `src/error.rs` | 760 | `Span`, `RubyError`, `Trap`, `TrapFrame`, `line_col`; `RubyError::is(class_name)` helper |
+| `src/lib.rs` | 5200 | Public embedding API: `Runtime`, `Config`, `format_trap`, re-exports of `Value`/`Trap`/`RubyError` etc. |
+| `src/main.rs` | 600 | CLI entry: argv + env vars → `Config` → `Runtime::eval_file` |
+| `src/jit_native.rs` | 7000 | Cranelift specialized tier: narrow eligibility, guard-failure deopt to the interpreter (ADR 0030 / 0032) |
+| `src/jit_tier2.rs` | 5600 | Frame-keeping direct-threaded baseline tier (ADR 0037) |
 
 ### `vm/` submodules (CRuby-mirrored layout)
 
-The VM itself is split across 20 files. Each mirrors a CRuby
+The VM itself is split across the `vm/*.rs` files. Each mirrors a CRuby
 compilation unit so the question "where would CRuby put this?"
 maps to the same intuition here. `vm.rs` holds only the `Vm`
-struct, `Frame`, `PinGuard`, `RescueHandler`, and the cext
-re-entrance thread-local; everything else lives in `vm/*.rs`.
+struct, `Frame`, `PinGuard`, and `RescueHandler`; everything else
+lives in `vm/*.rs` (the re-entrance thread-local `CURRENT_VM_PTR` is
+in `vm/vm_ptr.rs`; `vm.rs` only re-exports its helpers).
 Line counts below are approximate snapshots and drift as the
 code grows — see `wc -l crates/rubyrs/src/vm.rs crates/rubyrs/src/vm/*.rs`
 for the live numbers.
 
 | File | Lines (~) | CRuby analogue | Role |
 |------|-----------|----------------|------|
-| `src/vm.rs` | 745 | (struct definitions in `vm_core.h` / `vm_eval.c`) | `Vm`, `Frame`, `PinGuard`, `RescueHandler`, `HostFn` |
-| `vm/dispatch.rs` | 4280 | `vm_eval.c` / `vm_insnhelper.c` | `do_call`, `do_call_block`, `invoke_method`, `invoke_method_with_block`, `invoke_block`, `cext_invoke_method`, `try_method_missing` |
-| `vm/iter.rs` | 2160 | `enum.c` | block-form Enumerable filter/aggregation family (`iter_*_filter`, `collection_call_block`) |
-| `vm/step.rs` | 1640 | `vm_exec.c` | `dispatch` / `dispatch_until` outer drivers + per-opcode `step` |
-| `vm/string.rs` | 1570 | `string.c` | String primitives + Regex shims |
-| `vm/kernel.rs` | 1250 | `object.c` (Kernel) | `puts` / `p` / `Integer()` / `Float()` / … |
-| `vm/cext.rs` | 1240 | `internal/value.h` + `vm_eval.c` | rb_funcallv callback installation, handle ↔ Value translation, `cext_dispatch`, `cext_require`, `CURRENT_VM_PTR` |
-| `vm/bignum.rs` | 1170 | `bignum.c` | `try_bigint_binop`, `try_bigint_pow`, `try_bigint_unary`, `try_bigint_pow_method`, `try_integer_digits`, `bigint_primitive`, `bigint_to_value`, `as_bigint{,_ref}`, `bigint_arith` |
-| `vm/lookup.rs` | 1040 | `vm_method.c` + `class.c` | `CallCache`, `lookup_method_cached/uncached`, `responds_to`, `class_of`, `class_is_a`, `sym_primitive` |
-| `vm/array.rs` | 880 | `array.c` | no-block Array methods |
-| `vm/numeric.rs` | 595 | `numeric.c` | Int/Float primitives, `apply_int_promote` (i64-overflow promotion for reduce-style accumulators) |
-| `vm/raise.rs` | 490 | `eval.c` / `eval_error.c` | `normalize_exception`, `trap_to_exception`, `unwind_with_exception` |
-| `vm/hash.rs` | 390 | `hash.c` | Hash primitives |
-| `vm/range.rs` | 375 | `range.c` | Range primitives |
-| `vm/gc.rs` | 335 | `gc.c` + `thread.c` + `vm.c` | `Vm::run`, `check_fuel`/`alloc`/`frames`, `trap`, `maybe_gc` |
-| `vm/sprintf.rs` | 265 | `sprintf.c` | `ruby_sprintf` + width/prec parser |
-| `vm/fileops.rs` | 175 | `file.c` | `File.read` / `File.exist?` … |
-| `vm/primitive.rs` | 130 | (per-class C function tables) | `primitive_call` — typed fast-path dispatch for Int/Float/String/Symbol/Bool/Nil |
-| `vm/util.rs` | 80 | (cross-cutting) | `value_cmp_v`, `vec_nil`, `visibility_from_name` |
-| `vm/match_data.rs` | 45 | `re.c` | `materialize_match_data` — shared MatchData ivar wiring (regex feature only) |
+| `src/vm.rs` | 5100 | (struct definitions in `vm_core.h` / `vm_eval.c`) | `Vm`, `Frame`, `PinGuard`, `RescueHandler`, `HostFn` |
+| `vm/dispatch.rs` | 30300 | `vm_eval.c` / `vm_insnhelper.c` | `do_call`, `do_call_block`, `invoke_method`, `invoke_method_with_block`, `invoke_block`, `cext_invoke_method`, `try_method_missing` |
+| `vm/iter.rs` | 6500 | `enum.c` | block-form Enumerable filter/aggregation family (`iter_*_filter`, `collection_call_block`) |
+| `vm/step.rs` | 7100 | `vm_exec.c` | `dispatch` / `dispatch_until` outer drivers + per-opcode `step` |
+| `vm/string.rs` | 6000 | `string.c` | String primitives + Regex shims |
+| `vm/kernel.rs` | 7800 | `object.c` (Kernel) | `puts` / `p` / `Integer()` / `Float()` / … |
+| `vm/cext.rs` | 1300 | `internal/value.h` + `vm_eval.c` | rb_funcallv callback installation, handle ↔ Value translation, `cext_dispatch`, `cext_require` |
+| `vm/bignum.rs` | 2400 | `bignum.c` | `try_bigint_binop`, `try_bigint_pow`, `try_bigint_unary`, `try_bigint_pow_method`, `try_integer_digits`, `bigint_primitive`, `bigint_to_value`, `as_bigint{,_ref}`, `bigint_arith` |
+| `vm/lookup.rs` | 4800 | `vm_method.c` + `class.c` | `CallCache`, `lookup_method_cached/uncached`, `responds_to`, `class_of`, `class_is_a`, `sym_primitive` |
+| `vm/array.rs` | 2700 | `array.c` | no-block Array methods |
+| `vm/numeric.rs` | 2000 | `numeric.c` | Int/Float primitives, `apply_int_promote` (i64-overflow promotion for reduce-style accumulators) |
+| `vm/raise.rs` | 1500 | `eval.c` / `eval_error.c` | `normalize_exception`, `trap_to_exception`, `unwind_with_exception` |
+| `vm/hash.rs` | 2300 | `hash.c` | Hash primitives |
+| `vm/range.rs` | 840 | `range.c` | Range primitives |
+| `vm/gc.rs` | 1100 | `gc.c` + `thread.c` + `vm.c` | `Vm::run`, `check_fuel`/`alloc`/`frames`, `trap`, `maybe_gc` |
+| `vm/sprintf.rs` | 890 | `sprintf.c` | `ruby_sprintf` + width/prec parser |
+| `vm/fileops.rs` | 2200 | `file.c` | `File.read` / `File.exist?` … |
+| `vm/primitive.rs` | 190 | (per-class C function tables) | `primitive_call` — typed fast-path dispatch for Int/Float/String/Symbol/Bool/Nil |
+| `vm/fiber.rs` | 2200 | `cont.c` | Fiber primitive (ADR 0023) |
+| `vm/str2int.rs` | 590 | `bignum.c` (`rb_cstr_to_inum`) | the one string→Integer scanner behind `to_i` / `Integer()` |
+| `vm/sort.rs` | 190 | `array.c` (sort) | shared fallible-comparator engine for `sort` / `sort!` / `sort_by` |
+| `vm/vm_ptr.rs` | 80 | (re-entrance glue) | thread-local Vm pointer for re-entrant host-fn callers (cext, `_http_server`) |
+| `vm/util.rs` | 200 | (cross-cutting) | `value_cmp_v`, `vec_nil`, `visibility_from_name` |
+| `vm/match_data.rs` | 790 | `re.c` | `materialize_match_data` — shared MatchData ivar wiring (regex feature only) |
 | `vm/cext_wasi.rs` | 25 | (target-specific shim) | wasm32-wasi alt for `cext_require` (traps; WASI has no dynamic loader) |
 
 Cross-module dependency is acyclic. `ast` and `bytecode` and `intern`
@@ -196,6 +210,35 @@ asked for limits:
 
 Any hit returns `Err(Trap { err: ResourceExhausted { ... }, .. })`.
 
+## JIT tiers
+
+Behind the `jit-native` Cargo feature (Cranelift), switched on at run
+time by env var. The bytecode VM stays tier 0 and the source of truth
+for semantics; the backend-agnostic policy and stats live in
+`crates/rubyrs-jit`.
+
+- **Specialized tier** (`src/jit_native.rs`, `RUBYRS_JIT_NATIVE=1`) —
+  lowers eligible `Proto`s to machine code. Eligibility is narrow;
+  anything else stays interpreted, and a failed guard (unexpected tag,
+  arithmetic overflow) deopts to the interpreter. ADRs
+  [0030](adr/0030-jit-tier.md) / [0032](adr/0032-jit-native-surpass.md)
+  / [0035](adr/0035-jit-inline-object-access.md).
+- **Baseline tier** (`src/jit_tier2.rs`, `RUBYRS_JIT_TIER2=1`) —
+  frame-keeping direct-threaded code that admits most method bodies.
+  It keeps the real interpreter frame and operand stack, so VM state
+  equals the interpreter's at every point foreign code can observe
+  (helper calls, bail points, branch edges); a bail is a mode switch,
+  never a re-execution. Admitted ops that aren't inlined run the
+  interpreter's own `step()` for that op. `RUBYRS_JIT_TIER2_THRESHOLD=1`
+  compiles every method, which is how CI exercises it. See
+  [ADR 0037](adr/0037-baseline-jit-tier.md).
+
+CI runs the full `diff_cruby` suite under each tier, targeting
+interpreter == JIT == CRuby. That target is not met everywhere yet:
+JIT-only divergences (e.g. `tier2_call_refined` under the specialized
+tier) are quarantined in `JIT_KNOWN_DIVERGENCES` in
+`tests/diff_cruby.rs` with a tracking note and skipped under that tier.
+
 ## Exceptions
 
 `raise X` compiles to `<eval X>; Op::Raise`. `Op::Raise` pops the value and
@@ -287,7 +330,7 @@ Reasoning:
    atomic commit, gated on the 79-test `diff_cruby` suite staying
    byte-identical to CRuby.
 
-`vm.rs` is currently ~745 lines, holding the `Vm` struct, the
+Right after that pass `vm.rs` was ~745 lines, holding the `Vm` struct, the
 per-frame and per-rescue records, and the pin-stack RAII guard.
 (The original ~440-line target reflected the immediate-post-split
 state; subsequent work landed a handful of helpers back in `vm.rs`
@@ -297,5 +340,7 @@ that we've since pulled out — wasi `cext_require` →
 the entire BigInt cluster → `vm/bignum.rs`. The remaining gap is
 mostly utility helpers like `dig_step` / `user_cmp` that any
 `impl Vm` site can reach; further trimming is cosmetic rather than
-load-bearing.) The thread-local `CURRENT_VM_PTR` the cext
-re-entrance machinery needs lives in `vm/cext.rs`.
+load-bearing.) The thread-local `CURRENT_VM_PTR` the re-entrance
+machinery needs started in `vm/cext.rs` and now lives in
+`vm/vm_ptr.rs`, so the `_http_server` battery can share it without
+the `cext` feature.

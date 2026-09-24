@@ -56,6 +56,7 @@ impl Vm {
                 | "format"
                 | "using"
                 | "__time_now_raw"
+                | "__rubyrs_clock_gettime"
                 | "__rubyrs_time_parse_iso"
                 | "sleep"
                 | "exit"
@@ -998,7 +999,7 @@ impl Vm {
                     let is_builtin = matches!(
                         &*name,
                         "puts" | "p" | "pp" | "print" | "require" | "load" |
-                        "sprintf" | "format" | "__time_now_raw" | "__rubyrs_time_parse_iso" | "sleep" |
+                        "sprintf" | "format" | "__time_now_raw" | "__rubyrs_clock_gettime" | "__rubyrs_time_parse_iso" | "sleep" |
                         "exit" | "exit!" | "abort" | "warn" | "at_exit" | "__rubyrs_signal_trap" |
                         "__rubyrs_stdout_write" | "__rubyrs_stderr_write" | "__rubyrs_exe_path" |
                         "Integer" | "Float" | "String" | "Array" | "Rational" |
@@ -1787,6 +1788,90 @@ impl Vm {
                 let arr = vec![Value::Int(sec), Value::Int(nsec as i64)];
                 let id = self.heap.alloc(HeapObj::Array(arr.into()));
                 Some(Ok(Value::Array(id)))
+            }
+            // `__rubyrs_clock_gettime(clock_id, unit)` — the whole of
+            // `Process.clock_gettime` (preamble/process.rb). Reads the
+            // injected clock as integer (sec, nsec) and converts to
+            // the requested unit here, so the float path costs one
+            // division instead of a `Time` allocation plus Ruby-level
+            // arithmetic. CLOCK_REALTIME reads `time_now`; the
+            // monotonic and CPU-time ids read `monotonic_now`, falling
+            // back to `time_now`. Returns `nil` for an unknown clock
+            // id or unit — the preamble raises the CRuby error.
+            "__rubyrs_clock_gettime" => {
+                if args.len() != 2 {
+                    return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 2)",
+                            args.len(),
+                        ),
+                    })));
+                }
+                // Validate both arguments before touching a clock, so
+                // the preamble's error surface doesn't depend on which
+                // capabilities are injected. `per_sec` is ticks per
+                // second of the requested unit.
+                let realtime = match args[0] {
+                    Value::Int(0) => true,
+                    Value::Int(1..=3) => false,
+                    _ => return Some(Ok(Value::Nil)),
+                };
+                let Value::Sym(unit) = args[1] else {
+                    return Some(Ok(Value::Nil));
+                };
+                let (float, per_sec): (bool, i128) = match &**self.interner.resolve(unit) {
+                    "float_second" => (true, 1),
+                    "float_millisecond" => (true, 1_000),
+                    "float_microsecond" => (true, 1_000_000),
+                    "second" => (false, 1),
+                    "millisecond" => (false, 1_000),
+                    "microsecond" => (false, 1_000_000),
+                    "nanosecond" => (false, 1_000_000_000),
+                    _ => return Some(Ok(Value::Nil)),
+                };
+                let src = if realtime {
+                    self.time_now.clone()
+                } else {
+                    self.monotonic_now.clone().or_else(|| self.time_now.clone())
+                };
+                let Some(src) = src else {
+                    let needs = if realtime {
+                        "`Config::time_now`"
+                    } else {
+                        "`Config::monotonic_now` (or `Config::time_now`)"
+                    };
+                    return Some(Err(self.trap(RubyError::RuntimeError {
+                        msg: format!(
+                            "Process.clock_gettime requires {needs} injection — the \
+                             embedding host hasn't enabled a clock capability (Tier 1 \
+                             deterministic default)"
+                        ),
+                    })));
+                };
+                let (sec, nsec) = src();
+                let ns_per_tick = 1_000_000_000 / per_sec;
+                let v = if float {
+                    Value::Float(sec as f64 * per_sec as f64 + nsec as f64 / ns_per_tick as f64)
+                } else {
+                    // i128 can't overflow here (|sec| * 1e9 < 2^94);
+                    // a result past i64 promotes like any Integer.
+                    let ticks = sec as i128 * per_sec + nsec as i128 / ns_per_tick;
+                    match i64::try_from(ticks) {
+                        Ok(n) => Value::Int(n),
+                        #[cfg(feature = "bignum")]
+                        Err(_) => match self.bigint_to_value(num_bigint::BigInt::from(ticks)) {
+                            Ok(v) => v,
+                            Err(e) => return Some(Err(e)),
+                        },
+                        #[cfg(not(feature = "bignum"))]
+                        Err(_) => {
+                            return Some(Err(self.trap(RubyError::RangeError {
+                                msg: "clock_gettime: integer overflow (bignum feature off)".into(),
+                            })));
+                        }
+                    }
+                };
+                Some(Ok(v))
             }
             // `__rubyrs_time_parse_iso` — pure-computation fast path
             // for `Time.parse`'s ISO-8601-ish grammar (the
