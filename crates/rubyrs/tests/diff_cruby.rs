@@ -1775,6 +1775,13 @@ fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 #[test] fn set_collect_bang() { run_diff("set_collect_bang"); }
 #[test] fn to_h() { run_diff("to_h"); }
 #[test] fn thread_current_locals() { run_diff("thread_current_locals"); }
+// vm/thread.rs native Thread.current / Thread#[] / Mutex#synchronize serves
+#[test] fn thread_local_keys() { run_diff("thread_local_keys"); }
+#[test] fn mutex_synchronize() { run_diff("mutex_synchronize"); }
+#[cfg(feature = "_fiber")]
+#[test] fn thread_fiber_locals() { run_diff("thread_fiber_locals"); }
+#[cfg(feature = "_fiber")]
+#[test] fn mutex_synchronize_contended() { run_diff("mutex_synchronize_contended"); }
 #[test] fn dynamic_base_const() { run_diff("dynamic_base_const"); }
 // `$~` is frame-local: a callee's internal regex match must not leak
 // into the caller's $1.. (uses =~, so regex-gated like scan_fancy_regex).

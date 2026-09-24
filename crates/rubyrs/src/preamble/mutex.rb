@@ -29,7 +29,10 @@ class Mutex
     @waiters = []
   end
 
+  # vm/thread.rs serves the uncontended call (and `lock` / `unlock`
+  # below) natively while these defs are the live ones.
   def synchronize
+    raise ThreadError, "must be called with a block" unless block_given?
     lock
     begin
       yield

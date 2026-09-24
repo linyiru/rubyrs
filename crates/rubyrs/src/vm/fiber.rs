@@ -359,6 +359,13 @@ pub(crate) struct FiberObject {
     /// coop scheduler's park points (preamble/thread.rb) can fall
     /// back to inline scheduling instead of losing iterations.
     pub(crate) resume_native_iter_depth: std::cell::Cell<u32>,
+    /// This fiber's fiber-local store (`Thread.current[:k]` inside
+    /// the fiber body — CRuby keeps one per fiber, so a child fiber
+    /// starts empty). `Nil` until first written, then a plain Hash;
+    /// see `Vm::fiber_locals_store` (vm/thread.rs). Written only
+    /// through `Heap::get_mut` so the generational write barrier
+    /// records an old fiber that gains a young Hash.
+    pub(crate) locals: RefCell<Value>,
 }
 
 impl FiberObject {
@@ -373,6 +380,7 @@ impl FiberObject {
             snapshot: RefCell::new(FiberSnapshot::empty()),
             state: RefCell::new(FiberState::Created),
             resume_native_iter_depth: std::cell::Cell::new(0),
+            locals: RefCell::new(Value::Nil),
         }
     }
 }

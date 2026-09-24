@@ -18881,6 +18881,10 @@ impl Vm {
         if m.closure.is_some() {
             return self.try_invoke_closure_method_from_stack(&m, None, argc);
         }
+        // Native uncontended `Mutex#lock` / `#unlock` (vm/thread.rs).
+        if self.try_mutex_lock_unlock(&m, &cls, id, argc) {
+            return Ok(true);
+        }
         // D Layer 4 (inline-cache step 1): if this method is ALREADY compiled,
         // dispatch the native code RIGHT HERE — no slow-path round-trip through
         // invoke_method_with_block + the hook. This is the per-call win: a hot
@@ -19348,6 +19352,11 @@ impl Vm {
             Some(f) if f.required as usize == argc => f,
             _ => return Ok(false),
         };
+        // Native `Mutex#synchronize` (vm/thread.rs): no frame for the
+        // preamble's lock/begin/yield/ensure/unlock body.
+        if self.try_mutex_synchronize(&m, &cls, id, block_id, argc)? {
+            return Ok(true);
+        }
         self.check_frames()?;
         // Bind the argc args (stack top), then drop the block, then
         // the recv. These pops are guaranteed by the peeks above —
@@ -19489,6 +19498,11 @@ impl Vm {
                 return Ok(true);
             }
         };
+        // Frameless `Thread.current` / `Thread.current[:k]` (`= v`) /
+        // `Fiber.current` (vm/thread.rs).
+        if self.try_thread_class_intrinsic(&m, &cls, argc, recv_idx)? {
+            return Ok(true);
+        }
         self.check_frames()?;
         let n_locals = fixed.n_locals as usize;
         let locals = if fixed.stack_eligible {
