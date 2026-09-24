@@ -106,9 +106,11 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   ([#380](https://github.com/linyiru/rubyrs/issues/380), `symbol_affix.rb`)
 - **A module prepended to a primitive class wins over its native
   methods** — `class Symbol; prepend M; end` (likewise String, Integer, …)
-  now reaches `M#end_with?` instead of the built-in arm, and
+  now reaches `M#end_with?` instead of the built-in arm, including
+  modules that `M` itself prepends or includes, and
   `class Symbol; undef_method :start_with?; end` raises NoMethodError on
-  every call path (`send`, `respond_to?`, warm call sites). A class
+  every call path (`send`, `respond_to?`, block form, warm call sites)
+  unless a prepended module still supplies the method. A class
   argument's singleton `to_str` is honoured.
   ([#387](https://github.com/linyiru/rubyrs/pull/387), `symbol_affix_reopen.rb`)
 - **Keyword literal `String` defaults are fresh per call and honour

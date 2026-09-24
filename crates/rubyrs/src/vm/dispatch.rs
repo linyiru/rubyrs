@@ -3040,13 +3040,12 @@ impl Vm {
     }
 
     /// The user method a primitive-class reopen gate serves instead of
-    /// the native arm: a PREPENDED module's own table first (it sits
-    /// ahead of the class in CRuby's lookup), then the class's own
-    /// table. Included modules stay behind the arm (String includes
-    /// Comparable). Shared by `do_call` and its block-form twin.
+    /// the native arm: the PREPEND chain first (`prepend_chain`, which
+    /// sits ahead of the class in CRuby's lookup), then the class's own
+    /// table. The class's included modules stay behind the arm (String
+    /// includes Comparable). Shared by `do_call` and its block-form twin.
     fn prim_reopen_target(cls: &Rc<crate::value::Class>, name_id: SymId) -> Option<Rc<Method>> {
-        cls.prepends
-            .borrow()
+        Self::prepend_chain(cls)
             .iter()
             .find_map(|p| p.methods.borrow().get(&name_id).cloned())
             .or_else(|| cls.methods.borrow().get(&name_id).cloned())
@@ -3499,7 +3498,7 @@ impl Vm {
             (0, "Integer"), (1, "Float"), (2, "String"), (3, "Symbol"),
             (4, "NilClass"), (5, "TrueClass"), (5, "FalseClass"), (6, "Rational"),
         ];
-        // A module PREPENDED onto the class counts too: it sits ahead
+        // The PREPEND chain (`prepend_chain`) counts too: it sits ahead
         // of the class in CRuby's lookup, so it must also beat the arm.
         let mut mask = 0u8;
         for (bit, cname) in PRIM_CLASSES {
@@ -3510,7 +3509,7 @@ impl Vm {
                         Self::primitive_arm_name_for_class(cname, self.interner.resolve(*nid))
                     })
                 };
-                if claims(c) || c.prepends.borrow().iter().any(claims) {
+                if claims(c) || Self::prepend_chain(c).iter().any(claims) {
                     mask |= 1 << bit;
                 }
             }
@@ -26103,6 +26102,22 @@ impl Vm {
                     return Ok(());
                 }
             }
+        }
+        // Symbol undef tombstone gate — block-form twin of do_call's.
+        // After the reopen gate, so a prepended method still wins.
+        if self.any_undefs
+            && let Some(r @ Value::Sym(_)) = &recv
+            && self.sym_undefed(name_id)
+        {
+            let r = r.clone();
+            if self.try_method_missing(&r, name_id, args, Some(block))? {
+                return Ok(());
+            }
+            return Err(self.trap(RubyError::NoMethodError {
+                kind: crate::error::NoMethodErrorKind::Missing,
+                method: name.to_string(),
+                recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(&r)),
+            }));
         }
 
         // Collection base-class reopen serve — the block-form twin of

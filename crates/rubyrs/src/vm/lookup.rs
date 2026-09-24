@@ -4520,8 +4520,9 @@ impl Vm {
     /// remove, so they consult this instead. Only Symbol's OWN tables
     /// count: the native methods live on Symbol itself, so a tombstone
     /// higher up (Object, Kernel) sits behind them in CRuby's lookup
-    /// order and must not shadow them. Own table before tombstone, so a
-    /// redefine-after-undef wins. `undef_names` keeps the common case
+    /// order and must not shadow them. A prepended method and the own
+    /// table both come before the tombstone, so `prepend M` and a
+    /// redefine-after-undef win. `undef_names` keeps the common case
     /// (the name was never undef'd anywhere) to one set probe.
     pub(crate) fn sym_undefed(&self, name_id: SymId) -> bool {
         if !self.undef_names.contains(&name_id) {
@@ -4530,7 +4531,39 @@ impl Vm {
         let Some(c) = self.interner.get_id("Symbol").and_then(|id| self.classes.get(&id)) else {
             return false;
         };
-        !c.methods.borrow().contains_key(&name_id) && c.undefed.borrow().contains(&name_id)
+        !c.methods.borrow().contains_key(&name_id)
+            && c.undefed.borrow().contains(&name_id)
+            && !Self::prepend_chain(c).iter().any(|m| m.methods.borrow().contains_key(&name_id))
+    }
+
+    /// Every module that sits AHEAD of `cls` in its ancestry, in lookup
+    /// order: the prepend half of `lookup_method_uncached`'s walk (each
+    /// prepended module's own prepends, the module, then its includes,
+    /// recursively). `cls`'s own includes are behind it and not listed.
+    /// Empty (no allocation) when nothing is prepended.
+    pub(crate) fn prepend_chain(cls: &Rc<Class>) -> Vec<Rc<Class>> {
+        fn walk(m: &Rc<Class>, seen: &mut Vec<*const Class>, out: &mut Vec<Rc<Class>>) {
+            if seen.contains(&Rc::as_ptr(m)) {
+                return;
+            }
+            seen.push(Rc::as_ptr(m));
+            for p in m.prepends.borrow().iter() {
+                walk(p, seen, out);
+            }
+            out.push(m.clone());
+            for i in m.includes.borrow().iter() {
+                walk(i, seen, out);
+            }
+        }
+        let mut out = Vec::new();
+        if cls.prepends.borrow().is_empty() {
+            return out;
+        }
+        let mut seen = vec![Rc::as_ptr(cls)];
+        for p in cls.prepends.borrow().iter() {
+            walk(p, &mut seen, &mut out);
+        }
+        out
     }
 
     /// `Symbol#start_with?` / `#end_with?` read the interned name

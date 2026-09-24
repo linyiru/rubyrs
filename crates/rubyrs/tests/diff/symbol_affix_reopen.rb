@@ -26,6 +26,8 @@ t(:undef_call) { :abc.start_with?("a") }
 t(:undef_warm_site) { sw(:abc) }
 t(:undef_send) { :abc.send(:start_with?, "a") }
 t(:undef_public_send) { :abc.public_send(:start_with?, "a") }
+t(:undef_block_form) { :abc.start_with?("a") { } }
+t(:undef_send_block_form) { :abc.send(:start_with?, "a") { } }
 t(:undef_respond_to) { :abc.respond_to?(:start_with?) }
 t(:undef_method_defined) { Symbol.method_defined?(:start_with?) }
 t(:other_name_still_native) { :abc.end_with?("c") }
@@ -56,3 +58,18 @@ class Integer; prepend AffixPreOther; end
 t(:prepend_string) { "a".upcase }
 t(:prepend_integer) { 1.succ }
 t(:prepend_block_form) { "ab".each_byte { } }
+
+# The prepend chain is transitive: a prepended module's own prepends
+# and includes also sit ahead of the class.
+module AffixDeepPre; def size = :deep_prepend; def swapcase = :deep_prepend; end
+module AffixDeepInc; def downcase = :deep_include; end
+module AffixOuter; prepend AffixDeepPre; include AffixDeepInc; end
+class Symbol; prepend AffixOuter; end
+class String; prepend AffixOuter; end
+t(:transitive_prepend_sym) { :abc.size }
+t(:transitive_prepend_str) { "a".swapcase }
+t(:transitive_include_str) { "A".downcase }
+# An undef on Symbol does not hide a method a prepended module supplies.
+class Symbol; undef_method :end_with?; end
+t(:prepend_then_undef) { :abc.end_with?("c") }
+t(:prepend_then_undef_respond_to) { :abc.respond_to?(:end_with?) }
