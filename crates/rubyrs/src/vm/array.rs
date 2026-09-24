@@ -498,6 +498,31 @@ impl Vm {
                             }
                         }
                     }
+                    // Any other `slice!` shape: CRuby still owns the
+                    // method, so answer with its arity / conversion
+                    // errors rather than falling through to NoMethodError.
+                    // Float indices truncate (`to_int`) and re-dispatch.
+                    ("slice!", _) => {
+                        if args.is_empty() || args.len() > 2 {
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
+                            }));
+                        }
+                        let mut ints = Vec::with_capacity(args.len());
+                        for a in args {
+                            match a {
+                                Value::Int(n) => ints.push(Value::Int(*n)),
+                                Value::Float(f) if f.is_finite() => ints.push(Value::Int(f.trunc() as i64)),
+                                Value::Nil => return Err(self.trap(RubyError::TypeError {
+                                    msg: "no implicit conversion from nil to integer".to_string(),
+                                })),
+                                other => return Err(self.trap(RubyError::TypeError {
+                                    msg: format!("no implicit conversion of {} into Integer", other.conv_type_name()),
+                                })),
+                            }
+                        }
+                        return self.array_collection_call(id, name, &ints);
+                    }
                     ("delete", [needle]) => {
                         // Two-phase: walk the immutable view to
                         // collect indices that match (need the

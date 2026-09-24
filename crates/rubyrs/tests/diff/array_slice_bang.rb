@@ -46,3 +46,16 @@ a = [1, 2, 3, 4, 5]; show(:range_end_huge, a, a.slice!(1..4_611_686_018_427_387_
     p [e.class, e.message]
   end
 end
+
+# Unsupported shapes still belong to slice!: arity / conversion errors,
+# not NoMethodError. Float indices truncate.
+[[], [0, 1, 2], ["x"], [0, "x"], [nil]].each do |args|
+  begin
+    [1, 2, 3].slice!(*args)
+    p :no_error
+  rescue ArgumentError, TypeError => e
+    p [e.class, e.message]
+  end
+end
+p [1, 2, 3].slice!(1.9)
+p [1, 2, 3].slice!(0.0, 2.5)
