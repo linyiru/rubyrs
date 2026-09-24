@@ -43,8 +43,11 @@ describe "Module#class_eval" do
     assert_eq(CEAlias.new.shout, "loud")
   end
 
-  it "rejects a non-class receiver with TypeError" do
-    assert_raises("TypeError") do
+  # class_eval is a Module instance method, so a non-module receiver
+  # has no such method at all (CRuby 3.4: NoMethodError). A user
+  # `Kernel#class_eval` (ActiveSupport core_ext) must stay reachable.
+  it "rejects a non-class receiver with NoMethodError" do
+    assert_raises("NoMethodError") do
       "string".class_eval do
         # body never runs
       end
