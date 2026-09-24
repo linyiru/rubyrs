@@ -395,6 +395,23 @@ fn value_bytes_cap_traps_pack_count_blowup() {
 }
 
 #[test]
+fn value_bytes_cap_traps_expanding_pack_result() {
+    // An input under the cap whose packed form is not: base64 grows
+    // by 4/3 (plus a newline per 60 chars for `m`).
+    for src in [r#"["a" * 900].pack("m0")"#, r#"["a" * 900].pack("m")"#] {
+        let mut rt = Runtime::with_config(Config {
+            max_value_bytes: Some(1024),
+            ..Default::default()
+        });
+        let err = rt.eval(src, "pack_expand.rb").unwrap_err();
+        assert!(
+            matches!(err.err, RubyError::ResourceExhausted { ref msg } if msg.contains("Array#pack")),
+            "{src}: expected ResourceExhausted from Array#pack, got {:?}", err.err,
+        );
+    }
+}
+
+#[test]
 fn value_bytes_cap_traps_string_concat_blowup() {
     // `s = s + "a"` in a loop is the slow-growth flavour of the
     // same attack — each iteration allocates a fresh string one

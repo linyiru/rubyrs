@@ -6014,5 +6014,12 @@ pub(crate) fn pack_values(values: &[Value], fmt: &str, max_bytes: Option<usize>)
             _ => return Err(format!("unsupported pack/unpack directive '{}'", dir).into()),
         }
     }
+    // Per-directive growth is already bounded (by the array length or
+    // `pack_grow_to`), but expanding ones (`m`, `U`, fixed widths) can
+    // still land past the cap from an input at it — check the result.
+    if let Some(max) = max_bytes
+        && out.len() > max {
+        return Err(PackError::Cap(max));
+    }
     Ok(out)
 }
