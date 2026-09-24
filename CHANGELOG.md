@@ -153,6 +153,9 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Internal
 
+- **String literals copy the interned bytes directly** instead of going
+  through `ToString`'s formatter path, so a fresh literal costs ~30% less.
+  ([#380](https://github.com/linyiru/rubyrs/issues/380))
 - **`CLAUDE.md` added** — agent-facing orientation at the repo root:
   build/test commands (including the JIT-tier diff runs), the
   diff-fixture registration and known-failure discipline, the
