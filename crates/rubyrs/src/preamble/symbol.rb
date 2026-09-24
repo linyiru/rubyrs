@@ -32,14 +32,5 @@ class Symbol
     to_s[*args]
   end
 
-  # `Symbol#start_with?` / `#end_with?` — delegate to the string form
-  # (CRuby Symbol exposes both). dry-configurable's config method_missing
-  # peels a `name=` setter with `name.end_with?("=")`.
-  def start_with?(*args)
-    to_s.start_with?(*args)
-  end
-
-  def end_with?(*args)
-    to_s.end_with?(*args)
-  end
+  # `Symbol#start_with?` / `#end_with?` are native (`Vm::sym_affix_q`).
 end

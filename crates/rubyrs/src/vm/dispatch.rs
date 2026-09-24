@@ -2905,16 +2905,21 @@ impl Vm {
     /// the flags existed these arms silently shadowed reopens.
     /// `Regexp#===` body shared by the String and Symbol receiver
     /// shapes: run captures, publish `$~` (or clear it on miss),
-    /// return the hit verdict.
+    /// return the hit verdict. `anchored` counts only a match at
+    /// index 0 as a hit (`Symbol#start_with?(re)`, CRuby's
+    /// `rb_reg_start_with_p`); the leftmost match is the anchored
+    /// one whenever an anchored one exists, so a search suffices.
     #[cfg(feature = "regex")]
-    fn regex_case_eq_on(
+    pub(crate) fn regex_case_eq_on(
         &mut self,
         re: &crate::regex_engine::CompiledRegex,
         input: &str,
+        anchored: bool,
     ) -> Result<bool, Trap> {
         let owned = re
             .captures_owned(input)
-            .map_err(|e| self.trap(e.to_ruby_error(re.as_str())))?;
+            .map_err(|e| self.trap(e.to_ruby_error(re.as_str())))?
+            .filter(|oc| !anchored || oc.m_start == 0);
         match owned {
             Some(oc) => {
                 self.save_match_scope_on_write();
@@ -3032,6 +3037,41 @@ impl Vm {
         self.stack.pop();
         self.stack.push(v);
         true
+    }
+
+    /// `Symbol#start_with?` / `#end_with?` fast path (#380). Rails
+    /// probes setter names this way (`OrderedOptions#method_missing`,
+    /// `class_attribute`) ~32×/request, and the slow cascade doubled
+    /// the cost of the native arm. Serves the same `sym_affix_q` the
+    /// `sym_primitive` arm calls, so hit semantics are identical by
+    /// construction. Gated on `fast_sym_affix_safe` (no user def of
+    /// either name on the Symbol chain; same `method_gen` pass as
+    /// `try_fast_index`), so a reopen wins through the slow path's
+    /// reopen-precedence gate. The 1-arg shape runs without an args Vec.
+    pub(crate) fn try_fast_sym_affix(&mut self, name_id: SymId, argc: usize, no_recv: bool) -> Result<bool, Trap> {
+        let start = name_id == self.sym_start_with_q;
+        if no_recv || !(start || name_id == self.sym_end_with_q) || argc >= self.stack.len() {
+            return Ok(false);
+        }
+        let ridx = self.stack.len() - 1 - argc;
+        let Value::Sym(id) = self.stack[ridx] else { return Ok(false) };
+        if self.fast_index_checked_gen != self.method_gen {
+            self.fast_index_revalidate();
+        }
+        if !self.fast_sym_affix_safe {
+            return Ok(false);
+        }
+        let hit = if argc == 1 {
+            let arg = self.stack.pop().expect("ICE: sym affix fast path arg underflow");
+            self.stack.pop();
+            self.sym_affix_q(id, start, std::slice::from_ref(&arg))?
+        } else {
+            let args: Vec<Value> = self.stack.drain(ridx + 1..).collect();
+            self.stack.pop();
+            self.sym_affix_q(id, start, &args)?
+        };
+        self.stack.push(Value::Bool(hit));
+        Ok(true)
     }
 
     /// Collection-index fast path: `h[key]` / `a[int]` (and the
@@ -3303,6 +3343,13 @@ impl Vm {
         let symbol_sym = self.interner.intern("Symbol");
         self.fast_case_eq_sym_safe = match self.classes.get(&symbol_sym).cloned() {
             Some(c) => self.lookup_method_uncached(&c, self.sym_case_eq).is_none(),
+            None => false,
+        };
+        self.fast_sym_affix_safe = match self.classes.get(&symbol_sym).cloned() {
+            Some(c) => {
+                self.lookup_method_uncached(&c, self.sym_start_with_q).is_none()
+                    && self.lookup_method_uncached(&c, self.sym_end_with_q).is_none()
+            }
             None => false,
         };
         let string_sym = self.interner.intern("String");
@@ -10052,6 +10099,9 @@ impl Vm {
         if name_probed && !maybe_refined && self.try_fast_index(name_id, argc, no_recv) {
             return Ok(());
         }
+        if name_probed && !maybe_refined && self.try_fast_sym_affix(name_id, argc, no_recv)? {
+            return Ok(());
+        }
         // Explicit-receiver monomorphic fast path: an `obj.method(args)`
         // call on a user Object whose cached method is public and
         // fixed-arity — a plain `def` proto, an NFA-plan shape, or (P1) a
@@ -15775,7 +15825,7 @@ impl Vm {
                     // multipart specs `case` on lookahead patterns).
                     Value::Str(s) => {
                         let bound = s.to_string_lossy();
-                        self.regex_case_eq_on(re, &bound)?
+                        self.regex_case_eq_on(re, &bound, false)?
                     },
                     // CRuby's Regexp#=== also accepts Symbols,
                     // matching against the symbol's name —
@@ -15783,7 +15833,7 @@ impl Vm {
                     // runnable-method discovery) depends on it.
                     Value::Sym(sid) => {
                         let input = self.interner.resolve(*sid).to_string();
-                        self.regex_case_eq_on(re, &input)?
+                        self.regex_case_eq_on(re, &input, false)?
                     },
                     _ => false,
                 },

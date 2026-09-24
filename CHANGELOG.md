@@ -38,6 +38,10 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Changed
 
+- **`Symbol#start_with?` / `#end_with?` are native** — they read the
+  interned name with no String allocation and take a pre-cascade fast path,
+  ~8× faster than the preamble's `to_s.end_with?(*args)`.
+  ([#380](https://github.com/linyiru/rubyrs/issues/380), `symbol_affix.rb`)
 - **`define_method`-installed methods dispatch through the monomorphic
   inline-cache fast paths** — simple fixed-arity closure-backed methods
   (the `obj.dm_method(args)` / implicit-self shapes) no longer walk the
@@ -94,6 +98,12 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Fixed
 
+- **`Symbol#start_with?` / `#end_with?` match CRuby on non-String
+  arguments** — they raise TypeError (after a `to_str` attempt) instead of
+  returning `false`, `start_with?(regexp)` sets `$~`, and a non-ASCII
+  symbol against an incompatible BINARY affix raises
+  `Encoding::CompatibilityError`.
+  ([#380](https://github.com/linyiru/rubyrs/issues/380), `symbol_affix.rb`)
 - **Keyword literal `String` defaults are fresh per call and honour
   `# frozen_string_literal: true`** — `def f(s: "x"); s << "y"; end`
   no longer leaks one call's mutation into the next call's default

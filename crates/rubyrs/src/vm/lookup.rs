@@ -1541,6 +1541,8 @@ impl Vm {
                 | "downcase"
                 | "capitalize"
                 | "swapcase"
+                | "start_with?"
+                | "end_with?"
         )
     }
     pub(crate) fn nil_primitive_arm(name: &str) -> bool {
@@ -4499,8 +4501,133 @@ impl Vm {
             }
             // Cross-type with Symbol lhs: nil, not NoMethodError.
             (Value::Sym(_), "<=>", [_]) => Some(Value::Nil),
+            (Value::Sym(id), op @ ("start_with?" | "end_with?"), _) => {
+                Some(Value::Bool(self.sym_affix_q(*id, op == "start_with?", args)?))
+            }
             _ => None,
         })
+    }
+
+    /// `Symbol#start_with?` / `#end_with?` read the interned name
+    /// directly: no receiver String and no splat. The old preamble
+    /// `to_s.start_with?(*args)` ran ~9× slower than CRuby (#380).
+    /// Mirrors CRuby's `rb_str_start_with` / `rb_str_end_with`. Args
+    /// are tried in order and the first hit returns, so a bad arg
+    /// AFTER a hit never raises. Each arg is a String, a
+    /// `to_str`-convertible (else TypeError), or, for `start_with?`
+    /// only, a Regexp that must match at index 0 and publishes `$~`.
+    /// An affix counts only on a character boundary, and an
+    /// encoding-incompatible one raises Encoding::CompatibilityError.
+    pub(crate) fn sym_affix_q(&mut self, id: SymId, start: bool, args: &[Value]) -> Result<bool, Trap> {
+        // Hot shape: an ASCII name against String args. Every offset
+        // is a character boundary and every encoding is compatible, so
+        // only the bytes matter. Anything else takes the general loop
+        // from the first arg the hot loop can't answer.
+        let name = self.interner.resolve(id);
+        if name.is_ascii() {
+            let n = name.as_bytes();
+            for (i, arg) in args.iter().enumerate() {
+                let Value::Str(s) = arg else {
+                    return self.sym_affix_general(id, start, &args[i..]);
+                };
+                let t = s.content.borrow();
+                if if start { n.starts_with(&t) } else { n.ends_with(&t) } {
+                    return Ok(true);
+                }
+            }
+            return Ok(false);
+        }
+        self.sym_affix_general(id, start, args)
+    }
+
+    #[inline(never)]
+    fn sym_affix_general(&mut self, id: SymId, start: bool, args: &[Value]) -> Result<bool, Trap> {
+        let name = self.interner.resolve(id).clone();
+        for (i, arg) in args.iter().enumerate() {
+            #[cfg(feature = "regex")]
+            if start && let Value::Regex(re) = arg {
+                if self.regex_case_eq_on(re, &name, true)? {
+                    return Ok(true);
+                }
+                continue;
+            }
+            let s = match arg {
+                Value::Str(s) => s.clone(),
+                _ => self.affix_arg_to_str(arg, &args[i + 1..])?,
+            };
+            let bytes = s.content.borrow();
+            // An ASCII name is compatible with every tag; only a
+            // non-ASCII name can clash (UTF-8 vs a non-ASCII BINARY).
+            if !name.is_ascii()
+                && crate::value::enc_compat(
+                    crate::value::EncodingTag::Utf8, name.as_bytes(), s.encoding.get(), &bytes,
+                ).is_none()
+            {
+                return Err(self.trap(RubyError::HostException {
+                    class_name: "Encoding::CompatibilityError".to_string(),
+                    message: format!(
+                        "incompatible character encodings: {} and {}",
+                        crate::value::EncodingTag::Utf8.display(),
+                        s.encoding.get().display()
+                    ),
+                }));
+            }
+            let (n, t) = (name.as_bytes(), &bytes[..]);
+            let hit = n.len() >= t.len()
+                && if start {
+                    name.is_char_boundary(t.len()) && n.starts_with(t)
+                } else {
+                    name.is_char_boundary(n.len() - t.len()) && n.ends_with(t)
+                };
+            if hit {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Implicit `to_str` conversion of a non-String affix arg: CRuby's
+    /// `StringValue`. `rest` holds the args not yet examined; they
+    /// stay pinned across the user `to_str` call.
+    fn affix_arg_to_str(&mut self, arg: &Value, rest: &[Value]) -> Result<Rc<crate::value::RStr>, Trap> {
+        let class_name = |vm: &mut Self, v: &Value| match vm.class_of(v) {
+            Value::Class(c) if matches!(v, Value::Object(_)) => c.name.to_string(),
+            _ => v.conv_type_name().to_string(),
+        };
+        let cls = match arg {
+            Value::Object(id) => Some(self.heap.class_of(*id)),
+            other => match self.class_of(other) {
+                Value::Class(c) => Some(c),
+                _ => None,
+            },
+        };
+        let to_str = self.interner.intern("to_str");
+        if let Some(m) = cls.and_then(|c| self.lookup_method_uncached(&c, to_str)) {
+            let pre_frames = self.frames.len();
+            let result = {
+                let mut g = super::PinGuard::new(self);
+                g.pin(arg.clone());
+                for p in rest {
+                    g.pin(p.clone());
+                }
+                g.vm.invoke_method(m, arg.clone(), Vec::new())?;
+                if g.vm.frames.len() > pre_frames {
+                    g.vm.dispatch_until(pre_frames)?;
+                }
+                g.vm.stack.pop().unwrap_or(Value::Nil)
+            };
+            if let Value::Str(s) = result {
+                return Ok(s);
+            }
+            let (from, gives) = (class_name(self, arg), class_name(self, &result));
+            return Err(self.trap(RubyError::TypeError {
+                msg: format!("can't convert {from} to String ({from}#to_str gives {gives})"),
+            }));
+        }
+        let from = class_name(self, arg);
+        Err(self.trap(RubyError::TypeError {
+            msg: format!("no implicit conversion of {from} into String"),
+        }))
     }
 }
 
