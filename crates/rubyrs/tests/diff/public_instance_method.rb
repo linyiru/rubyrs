@@ -25,3 +25,4 @@ p PimHost.public_instance_method(:to_s).name
     p [m, e.class]
   end
 end
+p PimHost.respond_to?(:public_instance_method)

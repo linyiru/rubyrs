@@ -2156,7 +2156,7 @@ impl Vm {
                 if matches!(
                     name,
                     "new" | "name" | "to_s" | "inspect"
-                    | "method_defined?" | "instance_method" | "undef_method" | "remove_method"
+                    | "method_defined?" | "instance_method" | "public_instance_method" | "undef_method" | "remove_method"
                     | "ancestors" | "included_modules" | "include?"
                     | "<" | "<=" | ">" | ">="
                     | "instance_methods" | "public_instance_methods"
