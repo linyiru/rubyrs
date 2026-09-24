@@ -326,6 +326,16 @@ fn main() {
                 }
             }
         })),
+        // `Instant` is the platform monotonic clock; readings are
+        // reported relative to the first one taken (CRuby's are
+        // relative to boot — scripts only ever diff them).
+        monotonic_now: Some(std::sync::Arc::new(|| {
+            use std::sync::OnceLock;
+            use std::time::Instant;
+            static ANCHOR: OnceLock<Instant> = OnceLock::new();
+            let d = ANCHOR.get_or_init(Instant::now).elapsed();
+            (d.as_secs() as i64, d.subsec_nanos())
+        })),
         // CLI binary is the canonical "run untrusted-ish but
         // trusted-enough Ruby" host — File.* / require /
         // require_relative MUST work, matching `ruby script.rb`'s

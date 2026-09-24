@@ -56,6 +56,7 @@ impl Vm {
                 | "format"
                 | "using"
                 | "__time_now_raw"
+                | "__rubyrs_clock_gettime"
                 | "__rubyrs_time_parse_iso"
                 | "sleep"
                 | "exit"
@@ -998,7 +999,7 @@ impl Vm {
                     let is_builtin = matches!(
                         &*name,
                         "puts" | "p" | "pp" | "print" | "require" | "load" |
-                        "sprintf" | "format" | "__time_now_raw" | "__rubyrs_time_parse_iso" | "sleep" |
+                        "sprintf" | "format" | "__time_now_raw" | "__rubyrs_clock_gettime" | "__rubyrs_time_parse_iso" | "sleep" |
                         "exit" | "exit!" | "abort" | "warn" | "at_exit" | "__rubyrs_signal_trap" |
                         "__rubyrs_stdout_write" | "__rubyrs_stderr_write" | "__rubyrs_exe_path" |
                         "Integer" | "Float" | "String" | "Array" | "Rational" |
@@ -1787,6 +1788,54 @@ impl Vm {
                 let arr = vec![Value::Int(sec), Value::Int(nsec as i64)];
                 let id = self.heap.alloc(HeapObj::Array(arr.into()));
                 Some(Ok(Value::Array(id)))
+            }
+            // `__rubyrs_clock_gettime(clock_id, unit)` — the whole of
+            // `Process.clock_gettime` (preamble/process.rb). Reads the
+            // injected clock as integer (sec, nsec) and converts to
+            // the requested unit here, so the float path costs one
+            // division instead of a `Time` allocation plus Ruby-level
+            // arithmetic. CLOCK_REALTIME reads `time_now`; the
+            // monotonic and CPU-time ids read `monotonic_now`, falling
+            // back to `time_now`. Returns `nil` for an unknown clock
+            // id or unit — the preamble raises the CRuby error.
+            "__rubyrs_clock_gettime" => {
+                if args.len() != 2 {
+                    return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: format!(
+                            "wrong number of arguments (given {}, expected 2)",
+                            args.len(),
+                        ),
+                    })));
+                }
+                let src = match args[0] {
+                    Value::Int(0) => self.time_now.clone(),
+                    Value::Int(1..=3) => self.monotonic_now.clone().or_else(|| self.time_now.clone()),
+                    _ => return Some(Ok(Value::Nil)),
+                };
+                let Value::Sym(unit) = args[1] else {
+                    return Some(Ok(Value::Nil));
+                };
+                let Some(src) = src else {
+                    return Some(Err(self.trap(RubyError::RuntimeError {
+                        msg: "Process.clock_gettime requires `Config::time_now` or \
+                              `Config::monotonic_now` injection — the embedding \
+                              host hasn't enabled a clock capability (Tier 1 \
+                              deterministic default)".into(),
+                    })));
+                };
+                let (sec, nsec) = src();
+                let (sec, nsec) = (sec as i128, nsec as i128);
+                let v = match &**self.interner.resolve(unit) {
+                    "float_second" => Value::Float(sec as f64 + nsec as f64 / 1e9),
+                    "float_millisecond" => Value::Float(sec as f64 * 1e3 + nsec as f64 / 1e6),
+                    "float_microsecond" => Value::Float(sec as f64 * 1e6 + nsec as f64 / 1e3),
+                    "second" => Value::Int(sec as i64),
+                    "millisecond" => Value::Int((sec * 1_000 + nsec / 1_000_000) as i64),
+                    "microsecond" => Value::Int((sec * 1_000_000 + nsec / 1_000) as i64),
+                    "nanosecond" => Value::Int((sec * 1_000_000_000 + nsec) as i64),
+                    _ => Value::Nil,
+                };
+                Some(Ok(v))
             }
             // `__rubyrs_time_parse_iso` — pure-computation fast path
             // for `Time.parse`'s ISO-8601-ish grammar (the

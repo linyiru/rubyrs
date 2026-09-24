@@ -2052,6 +2052,10 @@ pub(crate) struct Vm {
     /// `std::time::SystemTime::now()`. ADR 0017 Rule 1 closure
     /// for the previous "no Time class at all" status.
     pub(crate) time_now: Option<std::sync::Arc<dyn Fn() -> (i64, u32) + Send + Sync>>,
+    /// Host-injected monotonic clock for `Process.clock_gettime`
+    /// (from `Config::monotonic_now`). `None` falls back to
+    /// `time_now`.
+    pub(crate) monotonic_now: Option<std::sync::Arc<dyn Fn() -> (i64, u32) + Send + Sync>>,
     /// Host-injected wall-clock sleep for `Kernel#sleep`.
     /// `None` means `sleep` raises (deterministic Tier 1
     /// default); CLI binary fills this with
@@ -3504,6 +3508,7 @@ impl Vm {
             env_override: None,
             pid: None,
             time_now: None,
+            monotonic_now: None,
             sleep_for: None,
             process_exit: None,
             // Default to a fresh dedicated flag. Runtime

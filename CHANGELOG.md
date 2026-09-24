@@ -35,6 +35,11 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   [0034](docs/adr/0034-jit-first-surpass-yjit.md))
 - **`Fiber`** — `Fiber.new` / `#resume` / `Fiber.yield` / `#alive?` over the
   `_fiber` battery.
+- **`Config::monotonic_now`** — a monotonic clock capability;
+  `Process.clock_gettime(Process::CLOCK_MONOTONIC)` now reads it (the CLI
+  injects `std::time::Instant`) and is served natively, ~6.5× faster.
+  ([#379](https://github.com/linyiru/rubyrs/issues/379),
+  `process_clock_gettime.rb`)
 
 ### Changed
 
