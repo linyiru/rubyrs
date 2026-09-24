@@ -2523,3 +2523,4 @@ fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 #[test] fn zsuper_forward_leading_params() { run_diff("zsuper_forward_leading_params"); }
 #[test] fn eigenclass_body_ivar_write() { run_diff("eigenclass_body_ivar_write"); }
 #[test] fn array_slice_bang() { run_diff("array_slice_bang"); }
+#[test] fn pack_at_directive() { run_diff("pack_at_directive"); }

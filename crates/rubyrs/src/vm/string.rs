@@ -5741,6 +5741,17 @@ pub(crate) fn unpack_bytes(input: &[u8], fmt: &str) -> Result<Vec<Value>, String
                 }
                 i += skip;
             }
+            // `@n` — jump to ABSOLUTE byte offset n. ActiveSupport::Cache::Coder
+            // builds its header templates (`"@#{SIGNATURE.bytesize}C"`)
+            // with it. Divergence: a bare `@` is `@0` on CRuby's unpack,
+            // but parse_directive can't tell it from `@1`.
+            '@' => {
+                let pos = if n == usize::MAX { 0 } else { n };
+                if pos > input.len() {
+                    return Err("@ outside of string".to_string());
+                }
+                i = pos;
+            }
             // Whitespace inside the format is ignored, per CRuby.
             ' ' | '\t' | '\n' => {}
             _ => return Err(format!("unsupported pack/unpack directive '{}'", dir)),
@@ -5758,6 +5769,10 @@ pub(crate) fn pack_values(values: &[Value], fmt: &str) -> Result<Vec<u8>, String
     while let Some((dir, count)) = parse_directive(&mut it) {
         let n = count.unwrap_or(1);
         match dir {
+            // `@n` — truncate or NUL-pad the output to absolute offset n.
+            '@' => {
+                out.resize(if n == usize::MAX { 0 } else { n }, 0);
+            }
             'C' | 'c' => {
                 let take = if n == usize::MAX { values.len() - vi } else { n };
                 for _ in 0..take {
