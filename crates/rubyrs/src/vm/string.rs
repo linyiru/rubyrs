@@ -5762,7 +5762,46 @@ pub(crate) fn unpack_bytes(input: &[u8], fmt: &str) -> Result<Vec<Value>, String
 
 /// Subset of CRuby's `Array#pack`. Mirror of `unpack_bytes`;
 /// see the call-site comment for the supported directive list.
-pub(crate) fn pack_values(values: &[Value], fmt: &str) -> Result<Vec<u8>, String> {
+/// Why `pack_values` failed.
+pub(crate) enum PackError {
+    /// Malformed format or a wrong-typed value — ArgumentError.
+    Arg(String),
+    /// A count-driven directive (`@`, `x`, `a`/`A`/`Z` padding) would
+    /// exceed `Config::max_value_bytes`.
+    Cap(usize),
+    /// ... or asked for more than the allocator can supply
+    /// (CRuby: NoMemoryError).
+    NoMemory,
+}
+
+impl From<String> for PackError {
+    fn from(msg: String) -> Self {
+        PackError::Arg(msg)
+    }
+}
+
+impl From<&str> for PackError {
+    fn from(msg: &str) -> Self {
+        PackError::Arg(msg.to_string())
+    }
+}
+
+/// Grow (or truncate) `out` to `len`, filling with `fill`. The
+/// length comes straight from a format count (`"@9000000000000000000"`),
+/// so check the byte cap and reserve fallibly before touching memory.
+fn pack_grow_to(out: &mut Vec<u8>, len: usize, fill: u8, max_bytes: Option<usize>) -> Result<(), PackError> {
+    if len > out.len() {
+        if let Some(max) = max_bytes
+            && len > max {
+            return Err(PackError::Cap(max));
+        }
+        out.try_reserve(len - out.len()).map_err(|_| PackError::NoMemory)?;
+    }
+    out.resize(len, fill);
+    Ok(())
+}
+
+pub(crate) fn pack_values(values: &[Value], fmt: &str, max_bytes: Option<usize>) -> Result<Vec<u8>, PackError> {
     let mut out: Vec<u8> = Vec::new();
     let mut vi = 0usize;
     let mut it = fmt.chars();
@@ -5771,7 +5810,7 @@ pub(crate) fn pack_values(values: &[Value], fmt: &str) -> Result<Vec<u8>, String
         match dir {
             // `@n` — truncate or NUL-pad the output to absolute offset n.
             '@' => {
-                out.resize(if n == usize::MAX { 0 } else { n }, 0);
+                pack_grow_to(&mut out, if n == usize::MAX { 0 } else { n }, 0, max_bytes)?;
             }
             'C' | 'c' => {
                 let take = if n == usize::MAX { values.len() - vi } else { n };
@@ -5920,9 +5959,10 @@ pub(crate) fn pack_values(values: &[Value], fmt: &str) -> Result<Vec<u8>, String
                 if bytes.len() >= want {
                     out.extend_from_slice(&bytes[..want]);
                 } else {
-                    out.extend_from_slice(&bytes);
                     let pad: u8 = if dir == 'A' { b' ' } else { 0 };
-                    out.extend(std::iter::repeat_n(pad, want - bytes.len()));
+                    let len = out.len().saturating_add(want);
+                    out.extend_from_slice(&bytes);
+                    pack_grow_to(&mut out, len, pad, max_bytes)?;
                 }
             }
             'm' => {
@@ -5961,10 +6001,11 @@ pub(crate) fn pack_values(values: &[Value], fmt: &str) -> Result<Vec<u8>, String
             'x' => {
                 // Null padding (consumes no value). `*` emits nothing.
                 let take = if n == usize::MAX { 0 } else { n };
-                out.extend(std::iter::repeat_n(0u8, take));
+                let len = out.len().saturating_add(take);
+                pack_grow_to(&mut out, len, 0, max_bytes)?;
             }
             ' ' | '\t' | '\n' => {}
-            _ => return Err(format!("unsupported pack/unpack directive '{}'", dir)),
+            _ => return Err(format!("unsupported pack/unpack directive '{}'", dir).into()),
         }
     }
     Ok(out)

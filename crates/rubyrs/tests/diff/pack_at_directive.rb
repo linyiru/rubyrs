@@ -17,3 +17,13 @@ begin
 rescue ArgumentError => e
   p e.class
 end
+
+# A count no allocator can satisfy is NoMemoryError, not a VM abort.
+%w[@9000000000000000000 x9000000000000000000 a9000000000000000000].each do |f|
+  begin
+    [""].pack(f)
+    p :no_error
+  rescue NoMemoryError => e
+    p [f[0], e.class, e.message]
+  end
+end

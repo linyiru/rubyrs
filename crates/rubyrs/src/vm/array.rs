@@ -1356,8 +1356,20 @@ impl Vm {
                     ("pack", [Value::Str(fmt)]) => {
                         let snapshot: Vec<Value> = self.heap.array(id).clone();
                         let fmt_str = fmt.to_string_lossy();
-                        let bytes = super::string::pack_values(&snapshot, &fmt_str)
-                            .map_err(|m| self.trap(RubyError::ArgumentError { msg: m }))?;
+                        use super::string::PackError;
+                        let bytes = super::string::pack_values(&snapshot, &fmt_str, self.max_value_bytes)
+                            .map_err(|e| {
+                                self.trap(match e {
+                                    PackError::Arg(msg) => RubyError::ArgumentError { msg },
+                                    PackError::Cap(max) => RubyError::ResourceExhausted {
+                                        msg: format!("Array#pack would exceed {max} bytes"),
+                                    },
+                                    PackError::NoMemory => RubyError::HostException {
+                                        class_name: "NoMemoryError".to_string(),
+                                        message: "failed to allocate memory".to_string(),
+                                    },
+                                })
+                            })?;
                         Some(Value::new_str_bytes_binary(bytes))
                     }
                     // `arr.assoc(needle)` — first sub-Array whose
