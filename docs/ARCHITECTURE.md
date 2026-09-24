@@ -37,7 +37,9 @@ Three reasons this structure is the way it is:
    "no JIT" call was reversed by [ADR 0034](adr/0034-jit-first-surpass-yjit.md);
    the `jit-native` feature adds Cranelift tiers on top — see
    [JIT tiers](#jit-tiers). Every tier deopts or bails back to the
-   bytecode VM, so a JIT can change speed, never results.
+   bytecode VM; the invariant is that a JIT changes speed, never
+   results, and any known violation is quarantined and tracked (see
+   `JIT_KNOWN_DIVERGENCES` below).
 
 ## Modules
 
@@ -95,7 +97,7 @@ for the live numbers.
 | `vm/vm_ptr.rs` | 80 | (re-entrance glue) | thread-local Vm pointer for re-entrant host-fn callers (cext, `_http_server`) |
 | `vm/util.rs` | 200 | (cross-cutting) | `value_cmp_v`, `vec_nil`, `visibility_from_name` |
 | `vm/match_data.rs` | 790 | `re.c` | `materialize_match_data` — shared MatchData ivar wiring (regex feature only) |
-| `vm/cext_wasi.rs` | 20 | (target-specific shim) | wasm32-wasi alt for `cext_require` (traps; WASI has no dynamic loader) |
+| `vm/cext_wasi.rs` | 25 | (target-specific shim) | wasm32-wasi alt for `cext_require` (traps; WASI has no dynamic loader) |
 
 Cross-module dependency is acyclic. `ast` and `bytecode` and `intern`
 have no inter-module deps; `value` depends on `intern`; `heap` and
@@ -231,9 +233,11 @@ for semantics; the backend-agnostic policy and stats live in
   compiles every method, which is how CI exercises it. See
   [ADR 0037](adr/0037-baseline-jit-tier.md).
 
-CI runs the full `diff_cruby` suite under each tier (interpreter ==
-JIT == CRuby). JIT-only divergences are quarantined in
-`JIT_KNOWN_DIVERGENCES` in `tests/diff_cruby.rs` with a tracking note.
+CI runs the full `diff_cruby` suite under each tier, targeting
+interpreter == JIT == CRuby. That target is not met everywhere yet:
+JIT-only divergences (e.g. `tier2_call_refined` under the specialized
+tier) are quarantined in `JIT_KNOWN_DIVERGENCES` in
+`tests/diff_cruby.rs` with a tracking note and skipped under that tier.
 
 ## Exceptions
 
