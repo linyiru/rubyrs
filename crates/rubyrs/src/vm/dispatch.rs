@@ -6567,6 +6567,34 @@ impl Vm {
                 self.stack.push(Value::Class(cls));
                 Ok(true)
             }
+            // `public_instance_method` — `instance_method` that refuses a
+            // private/protected method with NameError. ActiveSupport's
+            // `delegate` probes the target's signature through it
+            // (`receiver_class.public_instance_method(method).parameters`).
+            ("public_instance_method", [arg @ (Value::Sym(_) | Value::Str(_))]) => {
+                let sid = match arg {
+                    Value::Sym(s) => *s,
+                    Value::Str(s) => s.with_str_lossy(|raw| self.interner.intern(raw)),
+                    _ => unreachable!(),
+                };
+                if let Some(m) = self.lookup_method_uncached(&cls, sid) {
+                    let vis = match m.visibility.get() {
+                        Visibility::Private => Some("private"),
+                        Visibility::Protected => Some("protected"),
+                        _ => None,
+                    };
+                    if let Some(vis) = vis {
+                        let mname = self.interner.resolve(sid).to_string();
+                        return Err(self.trap(RubyError::NameError {
+                            msg: format!("method '{}' for class '{}' is {}", mname, cls.name, vis),
+                        }));
+                    }
+                }
+                self.try_dispatch_class_introspection("instance_method", &[Value::Sym(sid)], recv)
+            }
+            ("public_instance_method", args) => {
+                self.try_dispatch_class_introspection("instance_method", args, recv)
+            }
             // Arity guard FIRST so wrong-count calls surface as
             // ArgumentError (CRuby check order: arity → type).
             // 0 args / 2+ args both raise here.
@@ -10810,7 +10838,7 @@ impl Vm {
             if let Value::Class(cls) = &self_val {
                 let in_set = matches!(&*name,
                     "new" | "name" | "to_s" | "inspect"
-                    | "method_defined?" | "instance_method" | "undef_method" | "remove_method"
+                    | "method_defined?" | "instance_method" | "public_instance_method" | "undef_method" | "remove_method"
                     | "superclass" | "ancestors" | "include?"
                     | "instance_methods" | "public_instance_methods"
                     | "private_instance_methods" | "protected_instance_methods"
@@ -25592,7 +25620,7 @@ impl Vm {
         matches!(
             name,
             "new" | "name" | "to_s" | "inspect"
-                | "method_defined?" | "instance_method" | "undef_method" | "remove_method"
+                | "method_defined?" | "instance_method" | "public_instance_method" | "undef_method" | "remove_method"
                 | "superclass" | "ancestors" | "include?"
                 | "instance_methods" | "public_instance_methods"
                 | "private_instance_methods" | "protected_instance_methods"
@@ -27216,7 +27244,7 @@ impl Vm {
             if let Value::Class(cls) = &self_val {
                 let in_set = matches!(&*name,
                     "new" | "name" | "to_s" | "inspect"
-                    | "method_defined?" | "instance_method" | "undef_method" | "remove_method"
+                    | "method_defined?" | "instance_method" | "public_instance_method" | "undef_method" | "remove_method"
                     | "superclass" | "ancestors" | "include?"
                     | "instance_methods" | "public_instance_methods"
                     | "private_instance_methods" | "protected_instance_methods"

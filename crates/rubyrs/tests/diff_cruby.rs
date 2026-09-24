@@ -2518,3 +2518,4 @@ fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 // CRuby-compat batch surfaced by booting a Rails 8.1 app on rubyrs —
 // one fixture per fix.
 #[test] fn module_class_eval_over_kernel() { run_diff("module_class_eval_over_kernel"); }
+#[test] fn public_instance_method() { run_diff("public_instance_method"); }
