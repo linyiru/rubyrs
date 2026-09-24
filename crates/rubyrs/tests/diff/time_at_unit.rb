@@ -16,3 +16,14 @@ begin
 rescue ArgumentError => e
   p e.class
 end
+
+# subsec must be an exact number.
+["2", true, nil, :sym].each do |sub|
+  begin
+    Time.at(0, sub)
+    p :no_error
+  rescue TypeError => e
+    p [e.class, e.message]
+  end
+end
+p Time.at(0, Rational(3, 2)).nsec

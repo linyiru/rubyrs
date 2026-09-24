@@ -75,11 +75,16 @@ class Time
     nsec: 1, nanosecond: 1,
   }.freeze
 
-  def self.at(sec, subsec = nil, unit = :usec)
+  def self.at(sec, subsec = 0, unit = :usec)
     scale = AT_UNIT_NS.fetch(unit) do
       raise ArgumentError, "unexpected unit: #{unit.inspect}"
     end
-    subsec_ns = ((subsec || 0) * scale).to_i
+    # CRuby requires an exact-number subsec; a String would otherwise
+    # hit String#* and a nil/true NoMethodError.
+    unless subsec.is_a?(Numeric)
+      raise TypeError, "can't convert #{subsec.class} into an exact number"
+    end
+    subsec_ns = (subsec * scale).to_i
     case sec
     when Time
       # `Time.at(other_time)` returns a fresh copy.
