@@ -111,7 +111,7 @@ CASES = {
 }
 
 BASE_N = (300_000 * SCALE).to_i
-def time_ms
+def time_ns
   t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
   yield
   (Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0) * 1e9
@@ -119,11 +119,11 @@ end
 
 # warm everything once (IC fill, JIT thresholds)
 CASES.each_value { |f, l| l.call((20_000 * f).to_i) }
-empty_ns = [3].map { time_ms { empty_loop(BASE_N) } }.min / BASE_N
+empty_ns = [3].map { time_ns { empty_loop(BASE_N) } }.min / BASE_N
 
 CASES.each do |name, (f, l)|
   n = (BASE_N * f).to_i
-  best = 3.times.map { time_ms { l.call(n) } }.min
+  best = 3.times.map { time_ns { l.call(n) } }.min
   puts format("%-22s %9.1f", name, best / n - empty_ns)
 end
 puts format("%-22s %9.1f", "(empty loop iter)", empty_ns)
