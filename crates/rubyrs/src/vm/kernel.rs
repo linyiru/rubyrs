@@ -6030,6 +6030,10 @@ fn is_stdlib_stub_name(name: &str) -> bool {
         // satisfies the require; `IO#winsize`/`#raw` etc. raise
         // NoMethodError (feature-absent contract) if ever called.
         | "io/console"
+        // `io/console/size`: vendored IO.console_size fallback
+        // (stdlib_vendor/io_console_size.rb) — actionpack's routing
+        // inspector requires it on every Rails boot.
+        | "io/console/size"
         | "open3" | "shellwords" | "weakref"
         | "cgi" | "cgi/util" | "cgi/escape" | "cgi/cookie"
         | "ipaddr"

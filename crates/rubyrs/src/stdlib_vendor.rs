@@ -162,6 +162,9 @@ pub(crate) fn stdlib_vendor_source(name: &str) -> Option<&'static str> {
         // logger 1.7's LogDevice requires "monitor".
         "etc" => Some(include_str!("stdlib_vendor/etc.rb")),
         "timeout" => Some(include_str!("stdlib_vendor/timeout.rb")),
+        // `io/console/size`: IO.console_size over the $LINES/$COLUMNS
+        // fallback (no winsize). actionpack's routing inspector.
+        "io/console/size" => Some(include_str!("stdlib_vendor/io_console_size.rb")),
         "monitor" => Some(include_str!("stdlib_vendor/monitor.rb")),
         // `mutex_m`: the `Mutex_m` mixin, dropped from Ruby 3.4's default
         // stdlib. ActiveSupport 7.0's Notifications::Fanout requires it.

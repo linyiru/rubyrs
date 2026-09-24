@@ -2528,3 +2528,5 @@ fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 #[cfg(feature = "stdlib")]
 #[test] fn set_includes_enumerable() { run_diff("set_includes_enumerable"); }
 #[test] fn thread_each_caller_location() { run_diff("thread_each_caller_location"); }
+#[cfg(feature = "stdlib")]
+#[test] fn io_console_size() { run_diff("io_console_size"); }
