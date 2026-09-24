@@ -2515,3 +2515,6 @@ fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 #[test] fn class_recv_universal_override() { run_diff("class_recv_universal_override"); }
 #[test] fn collection_base_class_reopen_block() { run_diff("collection_base_class_reopen_block"); }
 #[test] fn class_self_bare_call_kernel_collision() { run_diff("class_self_bare_call_kernel_collision"); }
+// Process.clock_gettime served natively off the time_now /
+// monotonic_now capabilities.
+#[test] fn process_clock_gettime() { run_diff("process_clock_gettime"); }

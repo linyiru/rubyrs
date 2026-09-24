@@ -23,26 +23,31 @@ module Process
     $$
   end
 
-  # DIVERGENCE: every clock id reads the injected wall clock
-  # (`Config::time_now`, same capability Time.now uses) — there is
-  # no separate monotonic source, so this clock can jump if the
-  # host clock does. Callers measure short test-run durations;
-  # fail-loud capability behavior (raises without time_now, like
-  # Time.now) is inherited rather than masked.
-  def self.clock_gettime(_clock_id, unit = :float_second)
-    t = Time.now
-    case unit
-    when :float_second then t.to_f
-    when :float_millisecond then t.to_f * 1000.0
-    when :float_microsecond then t.to_f * 1_000_000.0
-    when :second then t.to_i
-    when :millisecond then (t.to_f * 1000.0).to_i
-    when :microsecond then (t.to_f * 1_000_000.0).to_i
-    when :nanosecond then (t.to_f * 1_000_000_000.0).to_i
-    else
-      raise ArgumentError, "unexpected unit: #{unit}"
-    end
+  # The clock read and unit conversion are native
+  # (`__rubyrs_clock_gettime`); this def keeps the method
+  # user-overridable and owns the CRuby error surface. REALTIME
+  # reads `Config::time_now`; MONOTONIC reads
+  # `Config::monotonic_now` (falling back to time_now when the host
+  # injected only a wall clock). Raises without either capability,
+  # like Time.now.
+  #
+  # DIVERGENCE: the CPU-time ids read the monotonic clock — rubyrs
+  # has no CPU-time capability, and elapsed wall time is an upper
+  # bound on a single-threaded runtime's CPU time.
+  def self.clock_gettime(clock_id, unit = :float_second)
+    __rubyrs_clock_gettime(clock_id, unit) || __clock_gettime_error(clock_id, unit)
   end
+
+  def self.__clock_gettime_error(clock_id, unit)
+    unless clock_id.is_a?(Integer)
+      raise TypeError, "no implicit conversion of #{clock_id.class} into Integer"
+    end
+    unless (0..3).cover?(clock_id)
+      raise Errno::EINVAL, "Invalid argument - clock_gettime(#{clock_id})"
+    end
+    raise ArgumentError, "unexpected unit: #{unit}"
+  end
+  private_class_method :__clock_gettime_error
 end
 
 # ---- Standard streams ----------------------------------------
