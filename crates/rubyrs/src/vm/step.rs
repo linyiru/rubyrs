@@ -1732,8 +1732,7 @@ impl Vm {
     /// frozen_string_literal stamp). Used by `Op::CaseEqLit` for both
     /// the ruby_eq compare and the do_call fallback.
     fn case_lit_str(&mut self, id: crate::intern::SymId, proto_idx: usize) -> Value {
-        let s = self.interner.resolve(id).clone();
-        let v = Value::new_str(s.to_string());
+        let v = Value::new_str(&**self.interner.resolve(id));
         if let Some(enc) = self.protos[proto_idx].source_encoding
             && let Value::Str(rs) = &v
         {
@@ -1756,8 +1755,7 @@ impl Vm {
             Op::LoadConstInt(i) => self.stack.push(Value::Int(i)),
             Op::LoadConstFloat(f) => self.stack.push(Value::Float(f)),
             Op::LoadConstStr(id) => {
-                let s = self.interner.resolve(id).clone();
-                let v = Value::new_str(s.to_string());
+                let v = Value::new_str(&**self.interner.resolve(id));
                 // Source-encoding re-tag: when the eval'd source wasn't
                 // UTF-8 (a template engine eval'ing a US-ASCII /
                 // Shift_JIS template), its string literals carry the
