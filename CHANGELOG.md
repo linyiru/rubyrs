@@ -40,6 +40,14 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   injects `std::time::Instant`) and is served natively, ~6.5× faster.
   ([#379](https://github.com/linyiru/rubyrs/issues/379),
   `process_clock_gettime.rb`)
+- **CRuby-compat batch** — `Array#slice!` (index / start-length / range,
+  with CRuby's arity, conversion and "array size too big" errors) and
+  zero-arg `unshift` / `prepend`; the `@` pack/unpack directive;
+  `Time.at`'s `subsec` unit argument (`:millisecond` / `:usec` /
+  `:nsec`, …); `Module#public_instance_method`;
+  `Thread.each_caller_location`; vendored `io/console/size`.
+  ([#377](https://github.com/linyiru/rubyrs/pull/377); `array_slice_bang.rb`,
+  `pack_at_directive.rb`, `time_at_unit.rb`, `public_instance_method.rb`)
 
 ### Changed
 
@@ -145,6 +153,22 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   `exit(2.5)` exits with status 2, negative capture indices count from the
   last group, `Encoding.find(:utf8)` → TypeError instead of ArgumentError).
   (`s8_arg_shapes.rb`)
+- **`Array#pack` raises "too few arguments" and respects
+  `Config::max_value_bytes`** — a directive wanting more values than
+  remain used to pack `0` / `""` defaults (so `[1].pack("C1000000000")`
+  grew without bound); count-driven growth (`@`, `x`, `a`/`A`/`Z`
+  padding) and the final result are cap-checked, and an allocation the
+  host cannot satisfy raises `NoMemoryError`.
+  ([#377](https://github.com/linyiru/rubyrs/pull/377); `pack_at_directive.rb`)
+- **`Time.at` rejects a non-numeric `subsec`** with CRuby's TypeError
+  instead of running `String#*` or accepting `nil`. (`time_at_unit.rb`)
+- **`super` reaches native `method_missing`, `String#initialize` (with
+  its arity / type checks) and `Class#subclasses`**; bare `super` in
+  `def m(a, ...)` forwards the leading params; ivar writes in a
+  `class << self` body target the singleton class; `Set` includes
+  `Enumerable`; `Module#class_eval` wins over a user `Kernel#class_eval`.
+  ([#377](https://github.com/linyiru/rubyrs/pull/377);
+  `super_to_native_builtins.rb`)
 
 ### Internal
 
