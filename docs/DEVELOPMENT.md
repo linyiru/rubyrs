@@ -45,9 +45,8 @@ Debug + safety flags via environment variables:
 
 | Var | Effect |
 |-----|--------|
-| `DEBUG_AST=1` | Print the translated `Expr` IR before execution |
-| `DEBUG_BC=1` | Print compiled bytecode (every Proto, every Op) |
-| `GC_STATS=1` | Print final heap stats on exit |
+| `RUBYRS_GC_STATS=1` | Print one stderr line per GC sweep (live count, young allocs, wall time) |
+| `RUBYRS_IC_STATS=1` | Print inline-cache hit/miss counts on exit (needs the `ic-stats` feature) |
 | `STRESS_GC=1` | Collect on every potential GC point (debug / regression) |
 | `RUBYRS_FUEL=N` | Trap as `ResourceExhausted` after `N` ops dispatched |
 | `RUBYRS_MAX_OBJECTS=N` | Trap when live heap objects exceed `N` |
