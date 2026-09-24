@@ -30,7 +30,7 @@ RUBYRS_JIT_NATIVE=1 cargo test --release --features jit-native --test diff_cruby
 RUBYRS_JIT_TIER2=1 RUBYRS_JIT_TIER2_THRESHOLD=1 cargo test --release --features jit-native --test diff_cruby
 ```
 
-`THRESHOLD=1` makes tier 2 compile every method, not just hot ones. For the wasm32-wasip1 build, see `docs/DEVELOPMENT.md` (requires wasi-sdk 24 and `--no-default-features`, because `cext` has no dynamic loader on WASI and `build.rs` panics if it is enabled). Useful debug env vars: `DEBUG_AST=1`, `DEBUG_BC=1`, `GC_STATS=1`, `RUBYRS_FUEL`/`RUBYRS_MAX_OBJECTS`/`RUBYRS_MAX_FRAMES`.
+`THRESHOLD=1` makes tier 2 compile every method, not just hot ones. For the wasm32-wasip1 build, see `docs/DEVELOPMENT.md` (requires wasi-sdk 24 and `--no-default-features`, because `cext` has no dynamic loader on WASI and `build.rs` panics if it is enabled). Useful debug env vars: `RUBYRS_GC_STATS=1` (one stderr line per GC sweep), `RUBYRS_IC_STATS=1` (inline-cache hit rate on exit; needs the `ic-stats` feature), `RUBYRS_FUEL`/`RUBYRS_MAX_OBJECTS`/`RUBYRS_MAX_FRAMES` (resource caps).
 
 ## Tests
 
