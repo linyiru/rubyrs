@@ -40,7 +40,7 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 - **`Symbol#start_with?` / `#end_with?` are native** — they read the
   interned name with no String allocation and take a pre-cascade fast path,
-  ~8× faster than the preamble's `to_s.end_with?(*args)`.
+  ~9× faster than the preamble's `to_s.end_with?(*args)`.
   ([#380](https://github.com/linyiru/rubyrs/issues/380), `symbol_affix.rb`)
 - **`define_method`-installed methods dispatch through the monomorphic
   inline-cache fast paths** — simple fixed-arity closure-backed methods

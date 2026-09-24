@@ -3062,7 +3062,8 @@ impl Vm {
             return Ok(false);
         }
         let hit = if argc == 1 {
-            let arg = self.stack.pop().expect("ICE: sym affix fast path arg underflow");
+            // `argc < stack.len()` is checked above, so this pop succeeds.
+            let Some(arg) = self.stack.pop() else { return Ok(false) };
             self.stack.pop();
             self.sym_affix_q(id, start, std::slice::from_ref(&arg))?
         } else {
