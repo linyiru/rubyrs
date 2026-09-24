@@ -62,8 +62,9 @@ Three reasons this structure is the way it is:
 The VM itself is split across the `vm/*.rs` files. Each mirrors a CRuby
 compilation unit so the question "where would CRuby put this?"
 maps to the same intuition here. `vm.rs` holds only the `Vm`
-struct, `Frame`, `PinGuard`, `RescueHandler`, and the cext
-re-entrance thread-local; everything else lives in `vm/*.rs`.
+struct, `Frame`, `PinGuard`, and `RescueHandler`; everything else
+lives in `vm/*.rs` (the re-entrance thread-local `CURRENT_VM_PTR` is
+in `vm/vm_ptr.rs`; `vm.rs` only re-exports its helpers).
 Line counts below are approximate snapshots and drift as the
 code grows — see `wc -l crates/rubyrs/src/vm.rs crates/rubyrs/src/vm/*.rs`
 for the live numbers.
@@ -76,7 +77,7 @@ for the live numbers.
 | `vm/step.rs` | 7100 | `vm_exec.c` | `dispatch` / `dispatch_until` outer drivers + per-opcode `step` |
 | `vm/string.rs` | 6000 | `string.c` | String primitives + Regex shims |
 | `vm/kernel.rs` | 7800 | `object.c` (Kernel) | `puts` / `p` / `Integer()` / `Float()` / … |
-| `vm/cext.rs` | 1300 | `internal/value.h` + `vm_eval.c` | rb_funcallv callback installation, handle ↔ Value translation, `cext_dispatch`, `cext_require`, `CURRENT_VM_PTR` |
+| `vm/cext.rs` | 1300 | `internal/value.h` + `vm_eval.c` | rb_funcallv callback installation, handle ↔ Value translation, `cext_dispatch`, `cext_require` |
 | `vm/bignum.rs` | 2400 | `bignum.c` | `try_bigint_binop`, `try_bigint_pow`, `try_bigint_unary`, `try_bigint_pow_method`, `try_integer_digits`, `bigint_primitive`, `bigint_to_value`, `as_bigint{,_ref}`, `bigint_arith` |
 | `vm/lookup.rs` | 4800 | `vm_method.c` + `class.c` | `CallCache`, `lookup_method_cached/uncached`, `responds_to`, `class_of`, `class_is_a`, `sym_primitive` |
 | `vm/array.rs` | 2700 | `array.c` | no-block Array methods |
@@ -335,5 +336,7 @@ that we've since pulled out — wasi `cext_require` →
 the entire BigInt cluster → `vm/bignum.rs`. The remaining gap is
 mostly utility helpers like `dig_step` / `user_cmp` that any
 `impl Vm` site can reach; further trimming is cosmetic rather than
-load-bearing.) The thread-local `CURRENT_VM_PTR` the cext
-re-entrance machinery needs lives in `vm/cext.rs`.
+load-bearing.) The thread-local `CURRENT_VM_PTR` the re-entrance
+machinery needs started in `vm/cext.rs` and now lives in
+`vm/vm_ptr.rs`, so the `_http_server` battery can share it without
+the `cext` feature.

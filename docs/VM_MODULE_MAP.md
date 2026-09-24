@@ -89,8 +89,8 @@ Public surface:
 - `cext_dispatch` (free fn) — wraps a single host-fn call: enters
   the cext state, installs the rb_funcallv callback, translates
   return handle back to a Value.
-- `with_vm_ptr_set` + `CURRENT_VM_PTR` (re-exported via `vm.rs`)
-  — thread-local raw pointer for cext re-entrance into the Vm.
+- Re-entrance into the Vm goes through `with_vm_ptr_set` /
+  `current_vm_ptr` from [`vm/vm_ptr.rs`](#vmvm_ptrrs-re-entrance-glue).
 
 Landmarks:
 - `cext_handle_to_value` / `cext_value_to_cvalue` recursive pairs
@@ -99,6 +99,16 @@ Landmarks:
 - `CExtStateGuard` / `FuncallCallbackGuard` / `TypedDataCallbackGuard`
   — RAII pop-on-Drop guards keep cext callbacks balanced across
   panic unwinds.
+
+### `vm/vm_ptr.rs` (re-entrance glue)
+
+Owns the thread-local `CURRENT_VM_PTR` (`*mut Vm`) plus
+`with_vm_ptr_set` / `current_vm_ptr`; `vm.rs` re-exports the two
+helpers. Set by `do_call` around a host-fn call and read by
+re-entrant callers — the cext `rb_funcallv` bridge and the
+`_http_server` per-request handler. Moved out of `vm/cext.rs` and
+out from behind the `cext` feature so both can share it. Safety
+contract: ADR 0013 and [CEXT_SAFETY.md](CEXT_SAFETY.md).
 
 ### `vm/iter.rs` (`enum.c`)
 
