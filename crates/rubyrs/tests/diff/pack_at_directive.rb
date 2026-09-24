@@ -27,3 +27,14 @@ end
     p [f[0], e.class, e.message]
   end
 end
+
+# A value-consuming directive wants more values than remain: CRuby
+# raises instead of packing defaults, which also bounds the output.
+[["C1000000000", [1]], ["n", []], ["aC", ["a"]], ["U3", [65, 66]], ["m", []]].each do |f, vals|
+  begin
+    vals.pack(f)
+    p :no_error
+  rescue ArgumentError => e
+    p [f, e.class, e.message]
+  end
+end

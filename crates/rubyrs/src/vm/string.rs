@@ -5801,6 +5801,12 @@ fn pack_grow_to(out: &mut Vec<u8>, len: usize, fill: u8, max_bytes: Option<usize
     Ok(())
 }
 
+/// CRuby's error when a directive wants more values than remain.
+/// Raising (instead of packing a default) also bounds every
+/// value-consuming directive's output by the array's length, so a
+/// format count like `C1000000000` cannot grow the output unchecked.
+const TOO_FEW: &str = "too few arguments";
+
 pub(crate) fn pack_values(values: &[Value], fmt: &str, max_bytes: Option<usize>) -> Result<Vec<u8>, PackError> {
     let mut out: Vec<u8> = Vec::new();
     let mut vi = 0usize;
@@ -5815,7 +5821,7 @@ pub(crate) fn pack_values(values: &[Value], fmt: &str, max_bytes: Option<usize>)
             'C' | 'c' => {
                 let take = if n == usize::MAX { values.len() - vi } else { n };
                 for _ in 0..take {
-                    let v = values.get(vi).cloned().unwrap_or(Value::Int(0));
+                    let v = values.get(vi).cloned().ok_or(TOO_FEW)?;
                     vi += 1;
                     let i = match v {
                         Value::Int(n) => n,
@@ -5832,7 +5838,7 @@ pub(crate) fn pack_values(values: &[Value], fmt: &str, max_bytes: Option<usize>)
                 // here for symmetry with unpack_bytes.
                 let take = if n == usize::MAX { values.len() - vi } else { n };
                 for _ in 0..take {
-                    let v = values.get(vi).cloned().unwrap_or(Value::Int(0));
+                    let v = values.get(vi).cloned().ok_or(TOO_FEW)?;
                     vi += 1;
                     let i = match v {
                         Value::Int(n) => n,
@@ -5849,7 +5855,7 @@ pub(crate) fn pack_values(values: &[Value], fmt: &str, max_bytes: Option<usize>)
             'N' | 'V' | 'T' | 't' => {
                 let take = if n == usize::MAX { values.len() - vi } else { n };
                 for _ in 0..take {
-                    let v = values.get(vi).cloned().unwrap_or(Value::Int(0));
+                    let v = values.get(vi).cloned().ok_or(TOO_FEW)?;
                     vi += 1;
                     let i = match v {
                         Value::Int(n) => n,
@@ -5869,7 +5875,7 @@ pub(crate) fn pack_values(values: &[Value], fmt: &str, max_bytes: Option<usize>)
             // shifts (high nibble = the lone digit). `*` packs
             // every nibble; explicit count truncates.
             'H' | 'h' => {
-                let v = values.get(vi).cloned().unwrap_or(Value::new_str(""));
+                let v = values.get(vi).cloned().ok_or(TOO_FEW)?;
                 vi += 1;
                 let s = match v {
                     Value::Str(s) => s.to_string_lossy(),
@@ -5892,7 +5898,7 @@ pub(crate) fn pack_values(values: &[Value], fmt: &str, max_bytes: Option<usize>)
             'q' | 'Q' | 'j' | 'J' => {
                 let take = if n == usize::MAX { values.len() - vi } else { n };
                 for _ in 0..take {
-                    let v = values.get(vi).cloned().unwrap_or(Value::Int(0));
+                    let v = values.get(vi).cloned().ok_or(TOO_FEW)?;
                     vi += 1;
                     let i = match v {
                         Value::Int(n) => n,
@@ -5913,7 +5919,7 @@ pub(crate) fn pack_values(values: &[Value], fmt: &str, max_bytes: Option<usize>)
                 // endian). Integers coerce to Float, matching CRuby.
                 let take = if n == usize::MAX { values.len() - vi } else { n };
                 for _ in 0..take {
-                    let v = values.get(vi).cloned().unwrap_or(Value::Float(0.0));
+                    let v = values.get(vi).cloned().ok_or(TOO_FEW)?;
                     vi += 1;
                     let f = match v {
                         Value::Float(f) => f,
@@ -5933,7 +5939,7 @@ pub(crate) fn pack_values(values: &[Value], fmt: &str, max_bytes: Option<usize>)
                 // endian). Integers and Floats both coerce to f32.
                 let take = if n == usize::MAX { values.len() - vi } else { n };
                 for _ in 0..take {
-                    let v = values.get(vi).cloned().unwrap_or(Value::Float(0.0));
+                    let v = values.get(vi).cloned().ok_or(TOO_FEW)?;
                     vi += 1;
                     let f = match v {
                         Value::Float(f) => f as f32,
@@ -5949,7 +5955,7 @@ pub(crate) fn pack_values(values: &[Value], fmt: &str, max_bytes: Option<usize>)
                 }
             }
             'a' | 'A' | 'Z' => {
-                let v = values.get(vi).cloned().unwrap_or(Value::new_str(""));
+                let v = values.get(vi).cloned().ok_or(TOO_FEW)?;
                 vi += 1;
                 let bytes: Vec<u8> = match v {
                     Value::Str(s) => s.borrow().clone(),
@@ -5971,7 +5977,7 @@ pub(crate) fn pack_values(values: &[Value], fmt: &str, max_bytes: Option<usize>)
                 // every 60 chars + trailing newline, CRuby default).
                 // rack's basic-auth test builds the header with
                 // `["user:pass"].pack("m*")`.
-                let v = values.get(vi).cloned().unwrap_or_else(|| Value::new_str(""));
+                let v = values.get(vi).cloned().ok_or(TOO_FEW)?;
                 vi += 1;
                 let bytes: Vec<u8> = match v {
                     Value::Str(s) => s.borrow().clone(),
@@ -5984,7 +5990,7 @@ pub(crate) fn pack_values(values: &[Value], fmt: &str, max_bytes: Option<usize>)
                 // `[item].pack('U')` / `seq.pack('U*')`.
                 let take = if n == usize::MAX { values.len() - vi } else { n };
                 for _ in 0..take {
-                    let v = values.get(vi).cloned().unwrap_or(Value::Int(0));
+                    let v = values.get(vi).cloned().ok_or(TOO_FEW)?;
                     vi += 1;
                     let cp = match v {
                         Value::Int(n) => n,
