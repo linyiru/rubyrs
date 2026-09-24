@@ -6567,6 +6567,45 @@ impl Vm {
                 self.stack.push(Value::Class(cls));
                 Ok(true)
             }
+            // `public_instance_method` — `instance_method` that refuses a
+            // private/protected method with NameError. ActiveSupport's
+            // `delegate` probes the target's signature through it
+            // (`receiver_class.public_instance_method(method).parameters`).
+            ("public_instance_method", [arg @ (Value::Sym(_) | Value::Str(_))]) => {
+                let sid = match arg {
+                    Value::Sym(s) => *s,
+                    // Same `max_symbols` guard as the `instance_method`
+                    // String arm.
+                    Value::Str(s) => s.with_str_lossy(|raw| {
+                        if let Some(max) = self.max_symbols
+                            && !self.interner.contains(raw)
+                            && self.interner.len() >= max {
+                            return Err(self.trap(RubyError::ResourceExhausted {
+                                msg: format!("interner exhausted: {} symbols", max),
+                            }));
+                        }
+                        Ok(self.interner.intern(raw))
+                    })?,
+                    _ => unreachable!(),
+                };
+                if let Some(m) = self.lookup_method_uncached(&cls, sid) {
+                    let vis = match m.visibility.get() {
+                        Visibility::Private => Some("private"),
+                        Visibility::Protected => Some("protected"),
+                        _ => None,
+                    };
+                    if let Some(vis) = vis {
+                        let mname = self.interner.resolve(sid).to_string();
+                        return Err(self.trap(RubyError::NameError {
+                            msg: format!("method '{}' for class '{}' is {}", mname, cls.name, vis),
+                        }));
+                    }
+                }
+                self.try_dispatch_class_introspection("instance_method", &[Value::Sym(sid)], recv)
+            }
+            ("public_instance_method", args) => {
+                self.try_dispatch_class_introspection("instance_method", args, recv)
+            }
             // Arity guard FIRST so wrong-count calls surface as
             // ArgumentError (CRuby check order: arity → type).
             // 0 args / 2+ args both raise here.
@@ -10552,7 +10591,19 @@ impl Vm {
             // Class), e.g. liquid's `def self.to_number; BigDecimal(...);
             // end`, and user `module Kernel; def Foo; end` conversion
             // functions.
-            if let Some(ksym) = self.kernel_class_sym
+            //
+            // Exception: a Class/Module self reaches `Module#class_eval`
+            // (natively served by the no_recv bridge below) BEFORE
+            // Kernel — Module precedes Object/Kernel in its ancestry.
+            // ActiveSupport's core_ext/kernel/singleton_class.rb defines
+            // `Kernel#class_eval` (→ `singleton_class.class_eval`); without
+            // this fence a bare `class_eval(str)` inside a Class method
+            // (class_attribute's instance-reader codegen) landed in the
+            // singleton class and shadowed the class-level reader.
+            let module_native_shadows_kernel = matches!(self_val, Value::Class(_))
+                && matches!(&*name, "class_eval" | "module_eval");
+            if !module_native_shadows_kernel
+                && let Some(ksym) = self.kernel_class_sym
                 && let Some(kernel) = self.classes.get(&ksym).cloned()
                 && let Some(m) = self.lookup_method_cached(&kernel, name_id, cache_id) {
                 self.invoke_method(m, self_val.clone(), args.into_vec())?;
@@ -10798,7 +10849,7 @@ impl Vm {
             if let Value::Class(cls) = &self_val {
                 let in_set = matches!(&*name,
                     "new" | "name" | "to_s" | "inspect"
-                    | "method_defined?" | "instance_method" | "undef_method" | "remove_method"
+                    | "method_defined?" | "instance_method" | "public_instance_method" | "undef_method" | "remove_method"
                     | "superclass" | "ancestors" | "include?"
                     | "instance_methods" | "public_instance_methods"
                     | "private_instance_methods" | "protected_instance_methods"
@@ -25580,7 +25631,7 @@ impl Vm {
         matches!(
             name,
             "new" | "name" | "to_s" | "inspect"
-                | "method_defined?" | "instance_method" | "undef_method" | "remove_method"
+                | "method_defined?" | "instance_method" | "public_instance_method" | "undef_method" | "remove_method"
                 | "superclass" | "ancestors" | "include?"
                 | "instance_methods" | "public_instance_methods"
                 | "private_instance_methods" | "protected_instance_methods"
@@ -26977,20 +27028,13 @@ impl Vm {
                 return Ok(());
             }
             let is_instance_eval = &*name == "instance_eval";
-            let is_class_eval = &*name == "class_eval" || &*name == "module_eval";
+            // `class_eval` is a Module instance method: a non-module
+            // receiver falls through (user `Kernel#class_eval` — e.g.
+            // ActiveSupport's core_ext/kernel/singleton_class.rb — or
+            // NoMethodError, CRuby parity) instead of being served here.
+            let is_class_eval = (&*name == "class_eval" || &*name == "module_eval")
+                && matches!(r, Value::Class(_));
             if (is_instance_eval || is_class_eval) && args.is_empty() {
-                if is_class_eval && !matches!(r, Value::Class(_)) {
-                    // Align with the existing wording for `include`
-                    // (vm/dispatch.rs:171, :369) so error messages
-                    // are consistent across the Module-receiver
-                    // family.
-                    return Err(self.trap(RubyError::TypeError {
-                        msg: format!(
-                            "wrong argument type {} (expected Module)",
-                            r.type_name(),
-                        ),
-                    }));
-                }
                 // CRuby passes `self` as the sole block arg (so
                 // `obj.instance_eval { |o| o == obj }` works);
                 // mirror that. The single-arg matches the
@@ -27211,7 +27255,7 @@ impl Vm {
             if let Value::Class(cls) = &self_val {
                 let in_set = matches!(&*name,
                     "new" | "name" | "to_s" | "inspect"
-                    | "method_defined?" | "instance_method" | "undef_method" | "remove_method"
+                    | "method_defined?" | "instance_method" | "public_instance_method" | "undef_method" | "remove_method"
                     | "superclass" | "ancestors" | "include?"
                     | "instance_methods" | "public_instance_methods"
                     | "private_instance_methods" | "protected_instance_methods"
@@ -28990,7 +29034,11 @@ impl Vm {
                 // `extend_object`: the singleton-insert primitive `extend`
                 // dispatches to. A module overriding it (Mutex_m) calls
                 // `super` to do the real insert — same force-dispatch path.
-                | "extend_object");
+                | "extend_object"
+                // `subclasses`: Rails::Railtie's `def self.subclasses;
+                // super.reject(&:abstract_railtie?).sort; end` filters the
+                // native Class#subclasses list.
+                | "subclasses");
         }
         let sentinel: Option<Value> = match class_name {
             "Integer" => Some(Value::Int(0)),

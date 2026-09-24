@@ -409,6 +409,120 @@ impl Vm {
                             Some(self.heap.array_mut(id).remove(idx as usize))
                         }
                     }
+                    // `slice!(idx)` / `slice!(start, len)` / `slice!(range)`
+                    // — remove and return what the matching `[]` form
+                    // selects (nil when that is nil). tsort's
+                    // `stack.slice!(stack_length .. -1)` (Rails'
+                    // initializer ordering) is the forcing caller.
+                    ("slice!", [Value::Int(n)]) => {
+                        let len = self.heap.array(id).len() as i64;
+                        let idx = if *n < 0 { n + len } else { *n };
+                        if idx < 0 || idx >= len {
+                            Some(Value::Nil)
+                        } else {
+                            Some(self.heap.array_mut(id).remove(idx as usize))
+                        }
+                    }
+                    ("slice!", [Value::Int(_), Value::Int(_)] | [Value::Range(_)]) => {
+                        let len = self.heap.array(id).len() as i64;
+                        // Resolve to a half-open [begin, end) span, or
+                        // None where `[]` would answer nil.
+                        let span: Option<(i64, i64)> = match args {
+                            [Value::Int(start), Value::Int(length)] => {
+                                let s = if *start < 0 { len + *start } else { *start };
+                                if s < 0 || s > len || *length < 0 {
+                                    None
+                                } else {
+                                    // CRuby raises when the span end
+                                    // overflows `long`.
+                                    let Some(end) = s.checked_add(*length) else {
+                                        return Err(self.trap(RubyError::ArgumentError {
+                                            msg: "array size too big".to_string(),
+                                        }));
+                                    };
+                                    Some((s, end.min(len)))
+                                }
+                            }
+                            [Value::Range(rid)] => {
+                                let r = self.heap.range(*rid);
+                                let (r_begin, r_end, r_excl) = (r.begin.clone(), r.end.clone(), r.exclusive);
+                                let begin = match r_begin {
+                                    Value::Nil => 0,
+                                    Value::Int(b) => if b < 0 { len + b } else { b },
+                                    other => return Err(self.trap(RubyError::TypeError {
+                                        msg: format!("no implicit conversion of {} into Integer", other.conv_type_name()),
+                                    })),
+                                };
+                                let end_excl = match r_end {
+                                    Value::Nil => len,
+                                    Value::Int(e) => {
+                                        let resolved = if e < 0 { len + e } else { e };
+                                        if r_excl {
+                                            resolved
+                                        } else if let Some(e) = resolved.checked_add(1) {
+                                            e
+                                        } else {
+                                            return Err(self.trap(RubyError::ArgumentError {
+                                                msg: "array size too big".to_string(),
+                                            }));
+                                        }
+                                    }
+                                    other => return Err(self.trap(RubyError::TypeError {
+                                        msg: format!("no implicit conversion of {} into Integer", other.conv_type_name()),
+                                    })),
+                                };
+                                if begin < 0 || begin > len {
+                                    None
+                                } else {
+                                    Some((begin, end_excl.clamp(begin, len)))
+                                }
+                            }
+                            _ => unreachable!(),
+                        };
+                        match span {
+                            None => Some(Value::Nil),
+                            Some((b, e)) => {
+                                // The receiver was already popped from the
+                                // operand stack, so pin it across maybe_gc;
+                                // allocating the result BEFORE draining keeps
+                                // the removed elements rooted too.
+                                let mut g = PinGuard::new(self);
+                                g.pin(Value::Array(id));
+                                g.vm.maybe_gc();
+                                g.vm.check_alloc()?;
+                                let nid = g.vm.heap.alloc(HeapObj::Array(Vec::new().into()));
+                                let removed: Vec<Value> =
+                                    g.vm.heap.array_mut(id).drain(b as usize..e as usize).collect();
+                                *g.vm.heap.array_mut(nid) = removed;
+                                Some(Value::Array(nid))
+                            }
+                        }
+                    }
+                    // Any other `slice!` shape: CRuby still owns the
+                    // method, so answer with its arity / conversion
+                    // errors rather than falling through to NoMethodError.
+                    // Float indices truncate (`to_int`) and re-dispatch.
+                    ("slice!", _) => {
+                        if args.is_empty() || args.len() > 2 {
+                            return Err(self.trap(RubyError::ArgumentError {
+                                msg: format!("wrong number of arguments (given {}, expected 1..2)", args.len()),
+                            }));
+                        }
+                        let mut ints = Vec::with_capacity(args.len());
+                        for a in args {
+                            match a {
+                                Value::Int(n) => ints.push(Value::Int(*n)),
+                                Value::Float(f) if f.is_finite() => ints.push(Value::Int(f.trunc() as i64)),
+                                Value::Nil => return Err(self.trap(RubyError::TypeError {
+                                    msg: "no implicit conversion from nil to integer".to_string(),
+                                })),
+                                other => return Err(self.trap(RubyError::TypeError {
+                                    msg: format!("no implicit conversion of {} into Integer", other.conv_type_name()),
+                                })),
+                            }
+                        }
+                        return self.array_collection_call(id, name, &ints);
+                    }
                     ("delete", [needle]) => {
                         // Two-phase: walk the immutable view to
                         // collect indices that match (need the
@@ -605,6 +719,10 @@ impl Vm {
                         self.heap.array_mut(id).insert(0, v.clone());
                         Some(Value::Array(id))
                     }
+                    // Zero-arg form is a no-op returning self — the
+                    // `paths.unshift(*maybe_empty)` splat shape (Rails'
+                    // engine initializers).
+                    ("unshift", []) | ("prepend", []) => Some(Value::Array(id)),
                     ("unshift", many) | ("prepend", many) if !many.is_empty() => {
                         let new_len = self.heap.array(id).len().saturating_add(many.len());
                         if let Some(max) = self.max_value_bytes
@@ -1263,8 +1381,20 @@ impl Vm {
                     ("pack", [Value::Str(fmt)]) => {
                         let snapshot: Vec<Value> = self.heap.array(id).clone();
                         let fmt_str = fmt.to_string_lossy();
-                        let bytes = super::string::pack_values(&snapshot, &fmt_str)
-                            .map_err(|m| self.trap(RubyError::ArgumentError { msg: m }))?;
+                        use super::string::PackError;
+                        let bytes = super::string::pack_values(&snapshot, &fmt_str, self.max_value_bytes)
+                            .map_err(|e| {
+                                self.trap(match e {
+                                    PackError::Arg(msg) => RubyError::ArgumentError { msg },
+                                    PackError::Cap(max) => RubyError::ResourceExhausted {
+                                        msg: format!("Array#pack would exceed {max} bytes"),
+                                    },
+                                    PackError::NoMemory => RubyError::HostException {
+                                        class_name: "NoMemoryError".to_string(),
+                                        message: "failed to allocate memory".to_string(),
+                                    },
+                                })
+                            })?;
                         Some(Value::new_str_bytes_binary(bytes))
                     }
                     // `arr.assoc(needle)` — first sub-Array whose

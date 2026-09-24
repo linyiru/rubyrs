@@ -41,7 +41,10 @@ pub(crate) struct TranslationCtx<'src> {
     /// SAME way `super(...)` does (splat `*`, kwsplat `__kw_rest_anon`,
     /// `&block`) — not slot-dump the `*` rest array as one positional.
     /// Blocks don't push, so `super` in a block sees the method's flag.
-    pub(crate) method_forward_stack: Vec<bool>,
+    /// `Some(leading)` carries the positional params declared before
+    /// the `...` (`def method_missing(name, ...)`): bare `super`
+    /// forwards their current values ahead of the splat.
+    pub(crate) method_forward_stack: Vec<Option<Vec<String>>>,
 }
 
 impl<'src> TranslationCtx<'src> {
@@ -1633,6 +1636,18 @@ fn singleton_body_needs_real_eval(body_nodes: &[Node<'_>], recv_is_self: bool) -
         // real eigenclass-body proto is flagged `in_singleton_body`, so it KEEPS
         // the bare store. (`class << self; CALLERS = [...].freeze` — sinatra.)
         if bn.as_constant_write_node().is_some() {
+            return true;
+        }
+        // An ivar write in the eigenclass body sets the ivar on the
+        // METACLASS object, not the attached class — only the real
+        // eigenclass-body path (self = the metaclass) models that; the
+        // desugar has no arm for it. (`class << self; @application =
+        // @app_class = nil` — railties' rails.rb.)
+        if bn.as_instance_variable_write_node().is_some()
+            || bn.as_instance_variable_or_write_node().is_some()
+            || bn.as_instance_variable_and_write_node().is_some()
+            || bn.as_instance_variable_operator_write_node().is_some()
+        {
             return true;
         }
         // `def self.x` (or any explicit-receiver def) inside the
@@ -4805,13 +4820,24 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         // ARRAY as a single positional arg (signalize's
         // `def signal_accessor(...); super; end` then saw `names ==
         // [[...]]`). Mirror the `super(...)` desugar below.
-        if matches!(ctx.method_forward_stack.last(), Some(true)) {
-            let star = sp(node, Expr::Call {
+        if let Some(Some(leading)) = ctx.method_forward_stack.last().cloned() {
+            let mut star = sp(node, Expr::Call {
                 receiver: None,
                 name: "Array".into(),
                 args: vec![sp(node, Expr::LVarRead("*".to_string()))],
                 kwargs_trailing: false,
             });
+            if !leading.is_empty() {
+                let lead = sp(node, Expr::ArrayLit(
+                    leading.into_iter().map(|n| sp(node, Expr::LVarRead(n))).collect(),
+                ));
+                star = sp(node, Expr::Call {
+                    receiver: Some(Box::new(lead)),
+                    name: "+".into(),
+                    args: vec![star],
+                    kwargs_trailing: false,
+                });
+            }
             let kw = kwsplat_chunk(node, sp(node, Expr::LVarRead("__kw_rest_anon".to_string())));
             let acc = sp(node, Expr::Call {
                 receiver: Some(Box::new(star)),
@@ -5302,7 +5328,7 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         // Track `(...)` forwarding across the body so bare `super`
         // forwards the anonymous args like `super(...)` (see
         // `method_forward_stack`).
-        ctx.method_forward_stack.push(is_dotdotdot_forward);
+        ctx.method_forward_stack.push(is_dotdotdot_forward.then(|| params.clone()));
         let body: Vec<SExpr> = match n.body() {
             Some(b) => {
                 if let Some(stmts) = b.as_statements_node() {

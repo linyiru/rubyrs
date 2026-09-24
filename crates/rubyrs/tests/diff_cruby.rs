@@ -2515,6 +2515,21 @@ fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 #[test] fn class_recv_universal_override() { run_diff("class_recv_universal_override"); }
 #[test] fn collection_base_class_reopen_block() { run_diff("collection_base_class_reopen_block"); }
 #[test] fn class_self_bare_call_kernel_collision() { run_diff("class_self_bare_call_kernel_collision"); }
+// CRuby-compat batch surfaced by booting a Rails 8.1 app on rubyrs —
+// one fixture per fix.
+#[test] fn module_class_eval_over_kernel() { run_diff("module_class_eval_over_kernel"); }
+#[test] fn public_instance_method() { run_diff("public_instance_method"); }
+#[test] fn super_to_native_builtins() { run_diff("super_to_native_builtins"); }
+#[test] fn zsuper_forward_leading_params() { run_diff("zsuper_forward_leading_params"); }
+#[test] fn eigenclass_body_ivar_write() { run_diff("eigenclass_body_ivar_write"); }
+#[test] fn array_slice_bang() { run_diff("array_slice_bang"); }
+#[test] fn pack_at_directive() { run_diff("pack_at_directive"); }
+#[test] fn time_at_unit() { run_diff("time_at_unit"); }
+#[cfg(feature = "stdlib")]
+#[test] fn set_includes_enumerable() { run_diff("set_includes_enumerable"); }
+#[test] fn thread_each_caller_location() { run_diff("thread_each_caller_location"); }
+#[cfg(feature = "stdlib")]
+#[test] fn io_console_size() { run_diff("io_console_size"); }
 // Process.clock_gettime served natively off the time_now /
 // monotonic_now capabilities.
 #[test] fn process_clock_gettime() { run_diff("process_clock_gettime"); }

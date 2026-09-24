@@ -66,19 +66,35 @@ class Time
   # adapter that multiplies usec → nsec before delegating.
   #
   # CRuby's full signature is `Time.at(sec, subsec, unit = :usec)`
-  # where unit ∈ {:usec, :millisecond, :nsec}; the unit-keyword
-  # form is a follow-up. For now the 2-arg form is usec-only.
-  def self.at(sec, subsec = nil)
+  # where unit ∈ {:millisecond, :usec/:microsecond, :nsec/:nanosecond}.
+  # ActiveSupport's FileUpdateChecker#max_mtime uses the 3-arg
+  # `Time.at(0, clock_ns, :nanosecond)` form. The `in:` zone keyword
+  # is not supported (Tier 1 is UTC-only).
+  AT_UNIT_NS = {
+    millisecond: 1_000_000, usec: 1_000, microsecond: 1_000,
+    nsec: 1, nanosecond: 1,
+  }.freeze
+
+  def self.at(sec, subsec = 0, unit = :usec)
+    scale = AT_UNIT_NS.fetch(unit) do
+      raise ArgumentError, "unexpected unit: #{unit.inspect}"
+    end
+    # CRuby requires an exact-number subsec; a String would otherwise
+    # hit String#* and a nil/true NoMethodError.
+    unless subsec.is_a?(Numeric)
+      raise TypeError, "can't convert #{subsec.class} into an exact number"
+    end
+    subsec_ns = (subsec * scale).to_i
     case sec
     when Time
       # `Time.at(other_time)` returns a fresh copy.
       new(sec.tv_sec, sec.tv_nsec)
     when Integer
-      # 2-arg subsec is MICROSECONDS — multiply by 1000 to get
-      # nsec for the internal builder. nil subsec → 0.
-      new(sec, (subsec || 0) * 1_000)
+      # subsec is in `unit` (default MICROSECONDS) — scaled to nsec
+      # for the internal builder, which normalizes nsec overflow.
+      new(sec, subsec_ns)
     when Float
-      total_ns = (sec * 1_000_000_000).to_i
+      total_ns = (sec * 1_000_000_000).to_i + subsec_ns
       whole_sec = total_ns / 1_000_000_000
       ns_remainder = total_ns - whole_sec * 1_000_000_000
       if ns_remainder < 0

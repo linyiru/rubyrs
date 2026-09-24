@@ -3252,7 +3252,7 @@ impl Vm {
             "extend", "prepend", "include?", "module_function",
             "respond_to?", "respond_to_missing?", "class_eval",
             "module_eval", "instance_eval", "instance_exec",
-            "instance_method", "instance_methods",
+            "instance_method", "public_instance_method", "instance_methods",
             "private_instance_methods", "public_instance_methods",
             "protected_instance_methods", "private_methods",
             "public_methods", "protected_methods", "method_defined?",

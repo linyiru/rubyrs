@@ -5741,6 +5741,17 @@ pub(crate) fn unpack_bytes(input: &[u8], fmt: &str) -> Result<Vec<Value>, String
                 }
                 i += skip;
             }
+            // `@n` — jump to ABSOLUTE byte offset n. ActiveSupport::Cache::Coder
+            // builds its header templates (`"@#{SIGNATURE.bytesize}C"`)
+            // with it. Divergence: a bare `@` is `@0` on CRuby's unpack,
+            // but parse_directive can't tell it from `@1`.
+            '@' => {
+                let pos = if n == usize::MAX { 0 } else { n };
+                if pos > input.len() {
+                    return Err("@ outside of string".to_string());
+                }
+                i = pos;
+            }
             // Whitespace inside the format is ignored, per CRuby.
             ' ' | '\t' | '\n' => {}
             _ => return Err(format!("unsupported pack/unpack directive '{}'", dir)),
@@ -5751,17 +5762,66 @@ pub(crate) fn unpack_bytes(input: &[u8], fmt: &str) -> Result<Vec<Value>, String
 
 /// Subset of CRuby's `Array#pack`. Mirror of `unpack_bytes`;
 /// see the call-site comment for the supported directive list.
-pub(crate) fn pack_values(values: &[Value], fmt: &str) -> Result<Vec<u8>, String> {
+/// Why `pack_values` failed.
+pub(crate) enum PackError {
+    /// Malformed format or a wrong-typed value — ArgumentError.
+    Arg(String),
+    /// A count-driven directive (`@`, `x`, `a`/`A`/`Z` padding) would
+    /// exceed `Config::max_value_bytes`.
+    Cap(usize),
+    /// ... or asked for more than the allocator can supply
+    /// (CRuby: NoMemoryError).
+    NoMemory,
+}
+
+impl From<String> for PackError {
+    fn from(msg: String) -> Self {
+        PackError::Arg(msg)
+    }
+}
+
+impl From<&str> for PackError {
+    fn from(msg: &str) -> Self {
+        PackError::Arg(msg.to_string())
+    }
+}
+
+/// Grow (or truncate) `out` to `len`, filling with `fill`. The
+/// length comes straight from a format count (`"@9000000000000000000"`),
+/// so check the byte cap and reserve fallibly before touching memory.
+fn pack_grow_to(out: &mut Vec<u8>, len: usize, fill: u8, max_bytes: Option<usize>) -> Result<(), PackError> {
+    if len > out.len() {
+        if let Some(max) = max_bytes
+            && len > max {
+            return Err(PackError::Cap(max));
+        }
+        out.try_reserve(len - out.len()).map_err(|_| PackError::NoMemory)?;
+    }
+    out.resize(len, fill);
+    Ok(())
+}
+
+/// CRuby's error when a directive wants more values than remain.
+/// Raising (instead of packing a default) also bounds every
+/// value-consuming directive's output by the array's length, so a
+/// format count like `C1000000000` cannot grow the output unchecked.
+const TOO_FEW: &str = "too few arguments";
+
+pub(crate) fn pack_values(values: &[Value], fmt: &str, max_bytes: Option<usize>) -> Result<Vec<u8>, PackError> {
     let mut out: Vec<u8> = Vec::new();
     let mut vi = 0usize;
     let mut it = fmt.chars();
     while let Some((dir, count)) = parse_directive(&mut it) {
         let n = count.unwrap_or(1);
         match dir {
+            // `@n` — truncate or NUL-pad the output to absolute offset n.
+            '@' => {
+                pack_grow_to(&mut out, if n == usize::MAX { 0 } else { n }, 0, max_bytes)?;
+            }
             'C' | 'c' => {
                 let take = if n == usize::MAX { values.len() - vi } else { n };
                 for _ in 0..take {
-                    let v = values.get(vi).cloned().unwrap_or(Value::Int(0));
+                    let v = values.get(vi).cloned().ok_or(TOO_FEW)?;
                     vi += 1;
                     let i = match v {
                         Value::Int(n) => n,
@@ -5778,7 +5838,7 @@ pub(crate) fn pack_values(values: &[Value], fmt: &str) -> Result<Vec<u8>, String
                 // here for symmetry with unpack_bytes.
                 let take = if n == usize::MAX { values.len() - vi } else { n };
                 for _ in 0..take {
-                    let v = values.get(vi).cloned().unwrap_or(Value::Int(0));
+                    let v = values.get(vi).cloned().ok_or(TOO_FEW)?;
                     vi += 1;
                     let i = match v {
                         Value::Int(n) => n,
@@ -5795,7 +5855,7 @@ pub(crate) fn pack_values(values: &[Value], fmt: &str) -> Result<Vec<u8>, String
             'N' | 'V' | 'T' | 't' => {
                 let take = if n == usize::MAX { values.len() - vi } else { n };
                 for _ in 0..take {
-                    let v = values.get(vi).cloned().unwrap_or(Value::Int(0));
+                    let v = values.get(vi).cloned().ok_or(TOO_FEW)?;
                     vi += 1;
                     let i = match v {
                         Value::Int(n) => n,
@@ -5815,7 +5875,7 @@ pub(crate) fn pack_values(values: &[Value], fmt: &str) -> Result<Vec<u8>, String
             // shifts (high nibble = the lone digit). `*` packs
             // every nibble; explicit count truncates.
             'H' | 'h' => {
-                let v = values.get(vi).cloned().unwrap_or(Value::new_str(""));
+                let v = values.get(vi).cloned().ok_or(TOO_FEW)?;
                 vi += 1;
                 let s = match v {
                     Value::Str(s) => s.to_string_lossy(),
@@ -5838,7 +5898,7 @@ pub(crate) fn pack_values(values: &[Value], fmt: &str) -> Result<Vec<u8>, String
             'q' | 'Q' | 'j' | 'J' => {
                 let take = if n == usize::MAX { values.len() - vi } else { n };
                 for _ in 0..take {
-                    let v = values.get(vi).cloned().unwrap_or(Value::Int(0));
+                    let v = values.get(vi).cloned().ok_or(TOO_FEW)?;
                     vi += 1;
                     let i = match v {
                         Value::Int(n) => n,
@@ -5859,7 +5919,7 @@ pub(crate) fn pack_values(values: &[Value], fmt: &str) -> Result<Vec<u8>, String
                 // endian). Integers coerce to Float, matching CRuby.
                 let take = if n == usize::MAX { values.len() - vi } else { n };
                 for _ in 0..take {
-                    let v = values.get(vi).cloned().unwrap_or(Value::Float(0.0));
+                    let v = values.get(vi).cloned().ok_or(TOO_FEW)?;
                     vi += 1;
                     let f = match v {
                         Value::Float(f) => f,
@@ -5879,7 +5939,7 @@ pub(crate) fn pack_values(values: &[Value], fmt: &str) -> Result<Vec<u8>, String
                 // endian). Integers and Floats both coerce to f32.
                 let take = if n == usize::MAX { values.len() - vi } else { n };
                 for _ in 0..take {
-                    let v = values.get(vi).cloned().unwrap_or(Value::Float(0.0));
+                    let v = values.get(vi).cloned().ok_or(TOO_FEW)?;
                     vi += 1;
                     let f = match v {
                         Value::Float(f) => f as f32,
@@ -5895,7 +5955,7 @@ pub(crate) fn pack_values(values: &[Value], fmt: &str) -> Result<Vec<u8>, String
                 }
             }
             'a' | 'A' | 'Z' => {
-                let v = values.get(vi).cloned().unwrap_or(Value::new_str(""));
+                let v = values.get(vi).cloned().ok_or(TOO_FEW)?;
                 vi += 1;
                 let bytes: Vec<u8> = match v {
                     Value::Str(s) => s.borrow().clone(),
@@ -5905,9 +5965,10 @@ pub(crate) fn pack_values(values: &[Value], fmt: &str) -> Result<Vec<u8>, String
                 if bytes.len() >= want {
                     out.extend_from_slice(&bytes[..want]);
                 } else {
-                    out.extend_from_slice(&bytes);
                     let pad: u8 = if dir == 'A' { b' ' } else { 0 };
-                    out.extend(std::iter::repeat_n(pad, want - bytes.len()));
+                    let len = out.len().saturating_add(want);
+                    out.extend_from_slice(&bytes);
+                    pack_grow_to(&mut out, len, pad, max_bytes)?;
                 }
             }
             'm' => {
@@ -5916,7 +5977,7 @@ pub(crate) fn pack_values(values: &[Value], fmt: &str) -> Result<Vec<u8>, String
                 // every 60 chars + trailing newline, CRuby default).
                 // rack's basic-auth test builds the header with
                 // `["user:pass"].pack("m*")`.
-                let v = values.get(vi).cloned().unwrap_or_else(|| Value::new_str(""));
+                let v = values.get(vi).cloned().ok_or(TOO_FEW)?;
                 vi += 1;
                 let bytes: Vec<u8> = match v {
                     Value::Str(s) => s.borrow().clone(),
@@ -5929,7 +5990,7 @@ pub(crate) fn pack_values(values: &[Value], fmt: &str) -> Result<Vec<u8>, String
                 // `[item].pack('U')` / `seq.pack('U*')`.
                 let take = if n == usize::MAX { values.len() - vi } else { n };
                 for _ in 0..take {
-                    let v = values.get(vi).cloned().unwrap_or(Value::Int(0));
+                    let v = values.get(vi).cloned().ok_or(TOO_FEW)?;
                     vi += 1;
                     let cp = match v {
                         Value::Int(n) => n,
@@ -5946,11 +6007,19 @@ pub(crate) fn pack_values(values: &[Value], fmt: &str) -> Result<Vec<u8>, String
             'x' => {
                 // Null padding (consumes no value). `*` emits nothing.
                 let take = if n == usize::MAX { 0 } else { n };
-                out.extend(std::iter::repeat_n(0u8, take));
+                let len = out.len().saturating_add(take);
+                pack_grow_to(&mut out, len, 0, max_bytes)?;
             }
             ' ' | '\t' | '\n' => {}
-            _ => return Err(format!("unsupported pack/unpack directive '{}'", dir)),
+            _ => return Err(format!("unsupported pack/unpack directive '{}'", dir).into()),
         }
+    }
+    // Per-directive growth is already bounded (by the array length or
+    // `pack_grow_to`), but expanding ones (`m`, `U`, fixed widths) can
+    // still land past the cap from an input at it — check the result.
+    if let Some(max) = max_bytes
+        && out.len() > max {
+        return Err(PackError::Cap(max));
     }
     Ok(out)
 }
