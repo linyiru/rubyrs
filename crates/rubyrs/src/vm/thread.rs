@@ -198,6 +198,14 @@ impl Vm {
                 self.stack.push(Value::Nil);
                 return Ok(true);
             };
+            // A per-instance eigenclass on the store (`def h.[]`)
+            // overrides everything; the generic dispatch probes it
+            // before `try_fast_index`, so this serve must too.
+            if self.any_hash_singletons
+                && matches!(self.heap.get(h), HeapObj::Hash(hh) if hh.singleton_class().is_some())
+            {
+                return Ok(false);
+            }
             // Swap the receiver for the store and run the plain-Hash
             // `[]` / `[]=` fast path; it declines (defaulted / frozen /
             // user-patched Hash) with the stack unchanged.
@@ -479,6 +487,21 @@ mod tests {
             r.inspect
         "##);
         assert_eq!(out, "[[:patched, 1], :cur]");
+    }
+
+    /// A per-instance override on the backing store Hash is honoured
+    /// by both `Thread.current[:k]` and `Thread.current[:k] = v`.
+    #[test]
+    fn store_hash_singleton_override_wins() {
+        let out = eval_str(r##"
+            Thread.current[:a] = 1
+            h = Thread.instance_variable_get(:@fiber_locals)
+            def h.[](k) = [:patched, k]
+            def h.[]=(k, v); super(k, [:wrapped, v]); end
+            Thread.current[:b] = 2
+            [Thread.current[:a], h.fetch(:b)].inspect
+        "##);
+        assert_eq!(out, "[[:patched, :a], [:wrapped, 2]]");
     }
 
     /// rubyrs's `synchronize` runs Ruby-level `lock`/`unlock`
