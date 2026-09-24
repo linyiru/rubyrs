@@ -4062,6 +4062,18 @@ impl Vm {
                         // list the stubbed name) → the String
                         // primitive of the same name.
                         (_, Some(sv @ Value::Str(_))) => {
+                            // String#initialize(str = "") from a String
+                            // subclass's `super(str)` — a String subclass
+                            // instance starts empty and takes its content
+                            // here (ActiveSupport::EnvironmentInquirer <
+                            // StringInquirer < String).
+                            if nm == "initialize" {
+                                if let (Value::Str(rs), Some(src @ Value::Str(_))) = (&sv, args.first()) {
+                                    self.string_collection_call(rs.clone(), "replace", std::slice::from_ref(src))?;
+                                }
+                                self.stack.push(Value::Nil);
+                                return Ok(());
+                            }
                             if let Some(v) = crate::vm::primitive::primitive_call(
                                 &sv,
                                 &nm,
@@ -4311,6 +4323,17 @@ impl Vm {
                     // same way (method_missing_on_class fixture's
                     // MFilter#method_missing super-filter).
                     if name_id == mm_id {
+                        // BasicObject#method_missing raises for the
+                        // ORIGINAL name (args[0]), not for
+                        // `method_missing` itself — Rails::Railtie's
+                        // `method_missing(name, ...)` supers here.
+                        if let (Some(Value::Sym(orig)), Some(sv)) = (args.first(), &self_val) {
+                            return Err(self.trap(crate::error::RubyError::NoMethodError {
+                                kind: crate::error::NoMethodErrorKind::Missing,
+                                method: self.interner.resolve(*orig).to_string(),
+                                recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(sv)),
+                            }));
+                        }
                         return Err(trap);
                     }
                     let mm = match &self_val {

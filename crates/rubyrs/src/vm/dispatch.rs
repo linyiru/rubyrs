@@ -29023,7 +29023,11 @@ impl Vm {
                 // `extend_object`: the singleton-insert primitive `extend`
                 // dispatches to. A module overriding it (Mutex_m) calls
                 // `super` to do the real insert — same force-dispatch path.
-                | "extend_object");
+                | "extend_object"
+                // `subclasses`: Rails::Railtie's `def self.subclasses;
+                // super.reject(&:abstract_railtie?).sort; end` filters the
+                // native Class#subclasses list.
+                | "subclasses");
         }
         let sentinel: Option<Value> = match class_name {
             "Integer" => Some(Value::Int(0)),

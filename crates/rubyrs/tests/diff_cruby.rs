@@ -2519,3 +2519,4 @@ fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 // one fixture per fix.
 #[test] fn module_class_eval_over_kernel() { run_diff("module_class_eval_over_kernel"); }
 #[test] fn public_instance_method() { run_diff("public_instance_method"); }
+#[test] fn super_to_native_builtins() { run_diff("super_to_native_builtins"); }
