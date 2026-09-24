@@ -143,6 +143,11 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Internal
 
+- **Orientation docs brought back in line with the code** — README's
+  workspace intro, `docs/DEVELOPMENT.md` (diff fixtures must be
+  registered in `diff_cruby.rs`; they were documented as
+  auto-discovered) and `docs/ARCHITECTURE.md` (the "No JIT" rationale
+  replaced by a JIT-tiers section; module tables refreshed).
 - **Tier-2 dispatch fast paths (campaign P6b)** — string-interpolation
   `to_s` (`Op::InterpToS`: String passthrough + Symbol/Integer primitive
   serve) runs a lean tier-2 helper instead of the generic op boundary, and

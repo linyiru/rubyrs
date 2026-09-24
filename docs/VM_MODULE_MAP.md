@@ -1,6 +1,6 @@
 # `vm/` module map
 
-A navigation guide to the 17 submodules under `crates/rubyrs/src/vm/`,
+A navigation guide to the submodules under `crates/rubyrs/src/vm/`,
 each named after the CRuby compilation unit it mirrors. Use this
 when looking for "where does X live" — start from the CRuby file
 you'd open in MRI, find the row, follow the path.
@@ -25,6 +25,10 @@ the `mod` declarations + cross-module re-exports.
 | resource caps (fuel/heap/deadline) + GC trigger | [`vm/gc.rs`](#vmgcrs-gcc--threadc--vmc) |
 | `sprintf` / `%`-format on strings | [`vm/sprintf.rs`](#vmsprintfrs-sprintfc) |
 | Int / Float methods | [`vm/numeric.rs`](#vmnumericrs-numericc) |
+| Integers outside `i64` | [`vm/bignum.rs`](#vmbignumrs-bignumc) |
+| parsing a digit string into an Integer | [`vm/str2int.rs`](#vmstr2intrs-bignumc-rb_cstr_to_inum) |
+| `sort` / `sort_by` ordering | [`vm/sort.rs`](#vmsortrs-arrayc-sort) |
+| `Fiber` | [`vm/fiber.rs`](#vmfiberrs-contc) |
 | String methods + Regex match shims | [`vm/string.rs`](#vmstringrs-stringc) |
 | `File.read` / `File.exist?` etc. | [`vm/fileops.rs`](#vmfileopsrs-filec) |
 | shared cross-cutting helpers | [`vm/util.rs`](#vmutilrs-cross-cutting) |
@@ -38,7 +42,8 @@ are approximate; see `wc -l crates/rubyrs/src/vm/` for current.
 ### `vm/dispatch.rs` (`vm_eval.c` + `vm_insnhelper.c`)
 
 The call-handling layer. Owns the path from "Op::Call fired" to
-"target Method located + frame pushed + args bound". ~960 lines.
+"target Method located + frame pushed + args bound". ~30,300
+lines, the biggest submodule.
 
 Public surface (used from `step.rs`):
 - `Vm::do_call(name_id, argc, no_recv, cache_id)` — entry point
@@ -53,7 +58,7 @@ Public surface (used from `step.rs`):
 - `Vm::try_method_missing` — fallback path on name miss.
 
 Landmarks:
-- The 459-line `do_call` body is the big switch over receiver
+- The `do_call` body is the big switch over receiver
   kind. Walks: builtins (puts/p/raise) → host_fns → primitive_call
   → collection_call → toplevel_methods → class chain via
   `lookup_method_cached`.
@@ -62,7 +67,7 @@ Landmarks:
 
 ### `vm/step.rs` (`vm_exec.c`)
 
-The opcode interpreter. ~750 lines, dominated by `step` (one big
+The opcode interpreter. ~7,100 lines, dominated by `step` (one big
 match over `Op` variants).
 
 Public surface:
@@ -80,7 +85,7 @@ complexity lives in `dispatch.rs` (for Call/CallBlock) and
 
 ### `vm/cext.rs` (`internal/value.h` + `vm_eval.c` handle bridge)
 
-C-extension dispatch and handle translation. ~915 lines. Gated
+C-extension dispatch and handle translation. ~1,300 lines. Gated
 `#![cfg(not(target_os = "wasi"))]` — wasi has no dynamic loader.
 
 Public surface:
@@ -89,8 +94,8 @@ Public surface:
 - `cext_dispatch` (free fn) — wraps a single host-fn call: enters
   the cext state, installs the rb_funcallv callback, translates
   return handle back to a Value.
-- `with_vm_ptr_set` + `CURRENT_VM_PTR` (re-exported via `vm.rs`)
-  — thread-local raw pointer for cext re-entrance into the Vm.
+- Re-entrance into the Vm goes through `with_vm_ptr_set` /
+  `current_vm_ptr` from [`vm/vm_ptr.rs`](#vmvm_ptrrs-re-entrance-glue).
 
 Landmarks:
 - `cext_handle_to_value` / `cext_value_to_cvalue` recursive pairs
@@ -100,9 +105,19 @@ Landmarks:
   — RAII pop-on-Drop guards keep cext callbacks balanced across
   panic unwinds.
 
+### `vm/vm_ptr.rs` (re-entrance glue)
+
+Owns the thread-local `CURRENT_VM_PTR` (`*mut Vm`) plus
+`with_vm_ptr_set` / `current_vm_ptr`; `vm.rs` re-exports the two
+helpers. Set by `do_call` around a host-fn call and read by
+re-entrant callers — the cext `rb_funcallv` bridge and the
+`_http_server` per-request handler. Moved out of `vm/cext.rs` and
+out from behind the `cext` feature so both can share it. Safety
+contract: ADR 0013 and [CEXT_SAFETY.md](CEXT_SAFETY.md).
+
 ### `vm/iter.rs` (`enum.c`)
 
-Block-form `Enumerable`. ~1220 lines, the biggest submodule.
+Block-form `Enumerable`. ~6,500 lines.
 
 Public surface:
 - `Vm::collection_call_block(recv, name, args, block_id)` — the
@@ -117,7 +132,7 @@ per collection.
 
 ### `vm/string.rs` (`string.c`)
 
-String primitives + Regex match shims. ~690 lines.
+String primitives + Regex match shims. ~6,000 lines.
 
 Public surface (consumed by `primitive.rs`):
 - `string_call(recv, name, args, max_value_bytes)` — fast-path
@@ -129,7 +144,7 @@ Public surface (consumed by `primitive.rs`):
 ### `vm/array.rs` (`array.c`)
 
 No-block Array methods (everything that isn't an iterator
-driver). ~550 lines.
+driver). ~2,700 lines.
 
 Public surface:
 - `Vm::array_collection_call(id, name, args)` — non-block Array
@@ -138,22 +153,22 @@ Public surface:
 
 ### `vm/hash.rs` (`hash.c`)
 
-Hash primitives. ~230 lines. Mirror of `array.rs`.
+Hash primitives. ~2,300 lines. Mirror of `array.rs`.
 
 ### `vm/range.rs` (`range.c`)
 
-Range primitives. ~150 lines.
+Range primitives. ~840 lines.
 
 ### `vm/numeric.rs` (`numeric.c`)
 
 Int + Float primitives (`abs`, `succ`, predicates, conversions).
-~200 lines. Consumed by `primitive.rs`.
+~2,000 lines. Consumed by `primitive.rs`.
 
 ### `vm/kernel.rs` (`object.c` Kernel arms)
 
 Built-in kernel functions called without a receiver:
 `puts` / `print` / `p` / `Integer()` / `Float()` / `gets` /
-`raise` (the no-class form). ~265 lines.
+`raise` (the no-class form). ~7,800 lines.
 
 Public surface:
 - `Vm::builtin_call(name, args)` — `dispatch.rs` calls this first
@@ -161,7 +176,7 @@ Public surface:
 
 ### `vm/fileops.rs` (`file.c`)
 
-`File.read` / `File.exist?` / `File.write` host-fn shims. ~110
+`File.read` / `File.exist?` / `File.write` host-fn shims. ~2,200
 lines.
 
 Public surface:
@@ -170,7 +185,7 @@ Public surface:
 
 ### `vm/raise.rs` (`eval.c` + `eval_error.c`)
 
-Exception machinery. ~200 lines.
+Exception machinery. ~1,500 lines.
 
 Public surface:
 - `Vm::normalize_exception(v)` — converts a raise arg (String /
@@ -182,7 +197,7 @@ Public surface:
 
 ### `vm/lookup.rs` (`vm_method.c` + `class.c`)
 
-Method-entry resolution + class-ancestor walks. ~270 lines.
+Method-entry resolution + class-ancestor walks. ~4,800 lines.
 
 Public surface:
 - `CallCache` struct + `Vm::ensure_call_caches(n)` /
@@ -200,7 +215,7 @@ Public surface:
 
 ### `vm/gc.rs` (`gc.c` + `thread.c` + `vm.c`)
 
-Resource caps + GC trigger + the Vm runtime entry point. ~175
+Resource caps + GC trigger + the Vm runtime entry point. ~1,100
 lines.
 
 Public surface:
@@ -214,7 +229,7 @@ Public surface:
 
 ### `vm/primitive.rs` (per-class C function tables)
 
-The typed fast-path dispatch table. ~100 lines.
+The typed fast-path dispatch table. ~190 lines.
 
 Public surface:
 - `primitive_call(recv, name, args, max_value_bytes)` (free fn)
@@ -227,7 +242,7 @@ short-circuit before any HashMap work.
 
 ### `vm/sprintf.rs` (`sprintf.c`)
 
-`ruby_sprintf` implementation + width / precision parser. ~240
+`ruby_sprintf` implementation + width / precision parser. ~890
 lines. Re-exported from `vm.rs` as `pub(crate) ruby_sprintf` so
 both `string.rs` (`String#%`) and `kernel.rs` (`Kernel#sprintf`)
 can consume it.
@@ -235,7 +250,7 @@ can consume it.
 ### `vm/util.rs` (cross-cutting)
 
 Small shared helpers too small to deserve their own module but
-not belonging with any per-type module. ~45 lines.
+not belonging with any per-type module. ~200 lines.
 
 - `value_cmp_v(a, b, interner)` — total ordering for Int/Str/Sym;
   consumed by `iter.rs` aggregation methods + `array.rs` sort.
@@ -243,6 +258,41 @@ not belonging with any per-type module. ~45 lines.
   fresh local-slot vectors are needed.
 - `visibility_from_name(name)` — parse `private` / `protected` /
   `public` into a `Visibility` enum.
+
+### `vm/bignum.rs` (`bignum.c`)
+
+BigInt arithmetic and the Integer surface for magnitudes outside
+`i64`. ~2,400 lines. Entry points
+include `try_bigint_binop` / `try_bigint_pow` / `try_bigint_unary`,
+`bigint_primitive`, and `bigint_to_value` (demotes back to `Int`
+when the result fits).
+
+### `vm/str2int.rs` (`bignum.c` `rb_cstr_to_inum`)
+
+The one string→Integer scanner behind `String#to_i` / `hex` /
+`oct`, `Integer()`, and `sprintf`'s integer coercion. ~590 lines.
+
+### `vm/sort.rs` (`array.c` sort)
+
+`merge_sort_by` — the shared fallible-comparator sort engine for
+`sort` / `sort!` / `sort_by`, so a raising `<=>` or block
+propagates cleanly. ~190 lines.
+
+### `vm/fiber.rs` (`cont.c`)
+
+The Fiber primitive
+([ADR 0023](adr/0023-true-async-streaming.md)). ~2,200 lines.
+
+### `vm/match_data.rs` (`re.c`)
+
+`materialize_match_data_with_context` — MatchData construction shared by
+`String#match` and the `$~` read path. ~790 lines. Only built with
+the `regex` feature.
+
+### `vm/cext_wasi.rs` (target-specific shim)
+
+wasm32-wasi stand-in for `cext_require` that traps, since WASI has
+no dynamic loader. ~25 lines.
 
 ## Cross-module call graph (informal)
 
