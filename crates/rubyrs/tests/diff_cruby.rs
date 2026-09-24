@@ -2525,3 +2525,5 @@ fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 #[test] fn array_slice_bang() { run_diff("array_slice_bang"); }
 #[test] fn pack_at_directive() { run_diff("pack_at_directive"); }
 #[test] fn time_at_unit() { run_diff("time_at_unit"); }
+#[cfg(feature = "stdlib")]
+#[test] fn set_includes_enumerable() { run_diff("set_includes_enumerable"); }

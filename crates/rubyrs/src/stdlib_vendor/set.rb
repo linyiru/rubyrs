@@ -12,6 +12,12 @@
 # Default builds do NOT include this file's behaviour.
 
 class Set
+  # CRuby's Set mixes in Enumerable. The veneer below still carries
+  # the common slice directly, but the mixin makes user extensions of
+  # Enumerable reachable (ActiveSupport's `index_with` on a Set in
+  # actionview's TagHelper) and `Set.ancestors` truthful.
+  include Enumerable
+
   # `Set[1, 2, 3]` — class-method constructor, equivalent to
   # `Set.new([1, 2, 3])`. `Set[]` is the empty set.
   def self.[](*items)
