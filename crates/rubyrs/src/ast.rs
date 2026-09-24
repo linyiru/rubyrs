@@ -41,7 +41,10 @@ pub(crate) struct TranslationCtx<'src> {
     /// SAME way `super(...)` does (splat `*`, kwsplat `__kw_rest_anon`,
     /// `&block`) — not slot-dump the `*` rest array as one positional.
     /// Blocks don't push, so `super` in a block sees the method's flag.
-    pub(crate) method_forward_stack: Vec<bool>,
+    /// `Some(leading)` carries the positional params declared before
+    /// the `...` (`def method_missing(name, ...)`): bare `super`
+    /// forwards their current values ahead of the splat.
+    pub(crate) method_forward_stack: Vec<Option<Vec<String>>>,
 }
 
 impl<'src> TranslationCtx<'src> {
@@ -4805,13 +4808,24 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         // ARRAY as a single positional arg (signalize's
         // `def signal_accessor(...); super; end` then saw `names ==
         // [[...]]`). Mirror the `super(...)` desugar below.
-        if matches!(ctx.method_forward_stack.last(), Some(true)) {
-            let star = sp(node, Expr::Call {
+        if let Some(Some(leading)) = ctx.method_forward_stack.last().cloned() {
+            let mut star = sp(node, Expr::Call {
                 receiver: None,
                 name: "Array".into(),
                 args: vec![sp(node, Expr::LVarRead("*".to_string()))],
                 kwargs_trailing: false,
             });
+            if !leading.is_empty() {
+                let lead = sp(node, Expr::ArrayLit(
+                    leading.into_iter().map(|n| sp(node, Expr::LVarRead(n))).collect(),
+                ));
+                star = sp(node, Expr::Call {
+                    receiver: Some(Box::new(lead)),
+                    name: "+".into(),
+                    args: vec![star],
+                    kwargs_trailing: false,
+                });
+            }
             let kw = kwsplat_chunk(node, sp(node, Expr::LVarRead("__kw_rest_anon".to_string())));
             let acc = sp(node, Expr::Call {
                 receiver: Some(Box::new(star)),
@@ -5302,7 +5316,7 @@ fn tr_impl(ctx: &mut TranslationCtx<'_>, node: &Node<'_>) -> SExpr {
         // Track `(...)` forwarding across the body so bare `super`
         // forwards the anonymous args like `super(...)` (see
         // `method_forward_stack`).
-        ctx.method_forward_stack.push(is_dotdotdot_forward);
+        ctx.method_forward_stack.push(is_dotdotdot_forward.then(|| params.clone()));
         let body: Vec<SExpr> = match n.body() {
             Some(b) => {
                 if let Some(stmts) = b.as_statements_node() {
