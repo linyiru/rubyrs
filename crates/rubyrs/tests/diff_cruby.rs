@@ -2527,3 +2527,4 @@ fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 #[test] fn time_at_unit() { run_diff("time_at_unit"); }
 #[cfg(feature = "stdlib")]
 #[test] fn set_includes_enumerable() { run_diff("set_includes_enumerable"); }
+#[test] fn thread_each_caller_location() { run_diff("thread_each_caller_location"); }

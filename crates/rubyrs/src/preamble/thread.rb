@@ -124,6 +124,21 @@ module Kernel
 end
 
 class Thread
+  # `Thread.each_caller_location(start = 1, length = nil) { |loc| }`
+  # (3.2+; start/length args 3.4) — yields what `caller_locations`
+  # would return, without CRuby's lazy frame walk (the list is built
+  # up front, so an early `return`/`break` saves nothing). The `+ 1`
+  # skips THIS frame. Returns nil. actionpack's
+  # Mapper#route_source_location and ActiveSupport::BacktraceCleaner
+  # (which probes `method(:each_caller_location).arity`) use it.
+  def self.each_caller_location(start = 1, length = nil)
+    locs = length.nil? ? caller_locations(start + 1) : caller_locations(start + 1, length)
+    locs&.each { |loc| yield loc }
+    nil
+  end
+end
+
+class Thread
   # DEFERRED-EXECUTION green thread (ADR 0017 Rule 4: no OS
   # threads). `Thread.new { ... }` captures the block; it runs — to
   # completion, inline — at the first `join` / `value` call. This
