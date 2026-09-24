@@ -433,7 +433,14 @@ impl Vm {
                                 if s < 0 || s > len || *length < 0 {
                                     None
                                 } else {
-                                    Some((s, (s + *length).min(len)))
+                                    // CRuby raises when the span end
+                                    // overflows `long`.
+                                    let Some(end) = s.checked_add(*length) else {
+                                        return Err(self.trap(RubyError::ArgumentError {
+                                            msg: "array size too big".to_string(),
+                                        }));
+                                    };
+                                    Some((s, end.min(len)))
                                 }
                             }
                             [Value::Range(rid)] => {
@@ -450,7 +457,15 @@ impl Vm {
                                     Value::Nil => len,
                                     Value::Int(e) => {
                                         let resolved = if e < 0 { len + e } else { e };
-                                        if r_excl { resolved } else { resolved + 1 }
+                                        if r_excl {
+                                            resolved
+                                        } else if let Some(e) = resolved.checked_add(1) {
+                                            e
+                                        } else {
+                                            return Err(self.trap(RubyError::ArgumentError {
+                                                msg: "array size too big".to_string(),
+                                            }));
+                                        }
                                     }
                                     other => return Err(self.trap(RubyError::TypeError {
                                         msg: format!("no implicit conversion of {} into Integer", other.conv_type_name()),
@@ -467,15 +482,18 @@ impl Vm {
                         match span {
                             None => Some(Value::Nil),
                             Some((b, e)) => {
-                                // Allocate the result BEFORE draining so the
-                                // removed elements are never unrooted across
-                                // a GC.
-                                self.maybe_gc();
-                                self.check_alloc()?;
-                                let nid = self.heap.alloc(HeapObj::Array(Vec::new().into()));
+                                // The receiver was already popped from the
+                                // operand stack, so pin it across maybe_gc;
+                                // allocating the result BEFORE draining keeps
+                                // the removed elements rooted too.
+                                let mut g = PinGuard::new(self);
+                                g.pin(Value::Array(id));
+                                g.vm.maybe_gc();
+                                g.vm.check_alloc()?;
+                                let nid = g.vm.heap.alloc(HeapObj::Array(Vec::new().into()));
                                 let removed: Vec<Value> =
-                                    self.heap.array_mut(id).drain(b as usize..e as usize).collect();
-                                *self.heap.array_mut(nid) = removed;
+                                    g.vm.heap.array_mut(id).drain(b as usize..e as usize).collect();
+                                *g.vm.heap.array_mut(nid) = removed;
                                 Some(Value::Array(nid))
                             }
                         }

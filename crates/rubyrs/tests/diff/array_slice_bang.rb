@@ -33,3 +33,16 @@ b = [1, 2]
 p b.unshift(*empty).equal?(b)
 p b.prepend.equal?(b)
 p b.unshift(0)
+
+# A huge length / range end clamps to "through the end"; one whose
+# span end overflows a 64-bit long raises (CRuby's check).
+a = [1, 2, 3, 4, 5]; show(:len_huge, a, a.slice!(1, 4_611_686_018_427_387_904))
+a = [1, 2, 3, 4, 5]; show(:range_end_huge, a, a.slice!(1..4_611_686_018_427_387_904))
+[[1, 9_223_372_036_854_775_807], [1..9_223_372_036_854_775_807]].each do |args|
+  begin
+    [1, 2, 3].slice!(*args)
+    p :no_error
+  rescue ArgumentError => e
+    p [e.class, e.message]
+  end
+end
