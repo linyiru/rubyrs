@@ -359,6 +359,10 @@ pub(crate) struct FiberObject {
     /// coop scheduler's park points (preamble/thread.rb) can fall
     /// back to inline scheduling instead of losing iterations.
     pub(crate) resume_native_iter_depth: std::cell::Cell<u32>,
+    /// This fiber's `Thread.current[:k]` store while it is suspended
+    /// or not yet started (`Nil` = none yet); while it runs, the
+    /// resumer's. See `Vm::swap_fiber_locals`.
+    pub(crate) fiber_locals: RefCell<Value>,
 }
 
 impl FiberObject {
@@ -373,6 +377,7 @@ impl FiberObject {
             snapshot: RefCell::new(FiberSnapshot::empty()),
             state: RefCell::new(FiberState::Created),
             resume_native_iter_depth: std::cell::Cell::new(0),
+            fiber_locals: RefCell::new(Value::Nil),
         }
     }
 }
@@ -609,6 +614,7 @@ pub(crate) fn resume_fiber(
     // `Fiber.current` inside nested resumes sees the right
     // chain. Restored after the guard drops.
     let prev_current_fiber = vm.current_fiber_id.replace(fiber_id);
+    vm.swap_fiber_locals(fiber_id);
 
     let guard = FiberStashGuard::install(vm, fiber_id);
     let pre_depth = 0usize; // fiber's outside frame count is 0 by definition
@@ -631,6 +637,9 @@ pub(crate) fn resume_fiber(
         // Returned (terminal failure) — same shape as a body
         // panic.
         *guard.vm.heap.fiber(fiber_id).state.borrow_mut() = FiberState::Returned;
+        drop(guard);
+        vm.swap_fiber_locals(fiber_id);
+        vm.current_fiber_id = prev_current_fiber;
         return Err(trap);
     }
 
@@ -681,6 +690,7 @@ pub(crate) fn resume_fiber(
     // id back so A's continuing bytecode sees
     // `Fiber.current == A`.
     vm.current_fiber_id = prev_current_fiber;
+    vm.swap_fiber_locals(fiber_id);
 
     outcome
 }

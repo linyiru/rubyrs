@@ -1945,6 +1945,7 @@ impl Heap {
                         &mut self.marks,
                         &mut worklist,
                     );
+                    Heap::visit_value(&fiber.fiber_locals.borrow(), &mut self.marks, &mut worklist);
                     let snap = fiber.snapshot.borrow();
                     // `Locals::Stack` frame slots live in the
                     // snapshot's swapped-out arena.

@@ -36,6 +36,7 @@ mod raise;
 mod range;
 mod sort;
 mod sprintf;
+mod thread;
 pub(crate) mod step;
 pub(crate) mod str2int;
 mod string;
@@ -2530,6 +2531,9 @@ pub(crate) struct Vm {
     /// allocation, so a user redefinition (which replaces the table
     /// entry and bumps `method_gen`) can never alias this pointer.
     pub(crate) rtm_default_stub: Option<std::rc::Rc<crate::value::Method>>,
+    /// Preamble Thread / Fiber / Mutex methods served natively when a
+    /// call resolves to exactly them (`vm/thread.rs`, #381).
+    pub(crate) native_protos: thread::NativeProtos,
     pub(crate) sym_send: SymId,
     pub(crate) sym_send_u: SymId,
     pub(crate) sym_public_send: SymId,
@@ -3645,6 +3649,7 @@ impl Vm {
             sym_respond_to,
             sym_respond_to_missing,
             rtm_default_stub: None,
+            native_protos: thread::NativeProtos::default(),
             sym_send,
             sym_send_u,
             sym_public_send,
