@@ -1,31 +1,43 @@
-//! `thread.c` + `thread_sync.c`: native serves for the preamble's
-//! hottest `Thread` / `Fiber` / `Mutex` methods (#381).
+//! Thread / Fiber / Mutex intrinsics. Mirrors CRuby's `thread.c`
+//! (`Thread.current`, the fiber-local `Thread#[]` / `#[]=`) and
+//! `thread_sync.c` (`Mutex#synchronize`).
 //!
-//! Rails touches `Thread.current` / `Fiber.current` ~35×/request
-//! (`IsolatedExecutionState`, `CurrentAttributes`, the logger) and
-//! `Mutex#synchronize` on the logger and cache paths. As preamble
-//! methods each paid a full frame push (and `synchronize` two more
-//! calls plus a `begin`/`ensure`), 6–20× CRuby.
+//! The semantics stay in the preamble (preamble/thread.rb,
+//! preamble/mutex.rb); this module only serves the hot, uncontended
+//! shapes without a Ruby frame, and only while the preamble method a
+//! call site resolved to is still the one captured at boot
+//! (`Rc::ptr_eq`, the `rtm_default_stub` precedent). A user
+//! redefinition installs a new `Rc<Method>`, so it can never match.
+//! Every serve here is observably identical to running the preamble
+//! body, except that `Mutex#synchronize` no longer shows up as a
+//! backtrace frame (CRuby shows it as a C frame at the caller's
+//! line; rubyrs showed a preamble line; now neither).
 //!
-//! Soundness: a serve fires only when dispatch has ALREADY resolved
-//! the call to the exact preamble `Method` (Rc identity, captured
-//! once after the preamble loads). A user reopen, subclass override
-//! or singleton def resolves to a different `Method` and never gets
-//! here. Each serve reproduces its preamble body's observable
-//! behaviour; any shape outside what it covers returns `Ok(false)`
-//! with the stack untouched, and the Ruby body runs.
+//! Contents:
+//!   - `ThreadIntrinsics` — the captured methods and pre-interned
+//!     ivar names, filled by `cache_thread_intrinsics` at
+//!     `load_preamble` time.
+//!   - `Vm::try_thread_class_intrinsic` — `Thread.current`,
+//!     `Thread.current[:k]`, `Thread.current[:k] = v`,
+//!     `Fiber.current` (called from `try_invoke_class_singleton_cached`).
+//!   - `Vm::try_mutex_synchronize` — native lock / yield /
+//!     ensure-unlock (called from `try_invoke_explicit_recv_block_cached`).
+//!   - `Vm::fiber_locals_value` — the per-fiber fiber-local Hash
+//!     behind the `__rubyrs_fiber_locals` kernel builtin.
 
 use std::rc::Rc;
 
-use super::iter::BlockStep;
-use super::{PinGuard, Vm};
 use crate::error::Trap;
-use crate::intern::SymId;
+use crate::heap::HeapObj;
+use crate::intern::{Interner, SymId};
 use crate::value::{Class, Method, ObjId, Value};
 
-/// The preamble methods `vm/thread.rs` serves, plus what the serves
-/// read. All `None` until `Vm::capture_native_protos` runs.
-pub(crate) struct NativeProtos {
+use super::iter::BlockStep;
+use super::{PinGuard, Vm};
+
+pub(crate) struct ThreadIntrinsics {
+    thread_class: Option<Rc<Class>>,
+    mutex_class: Option<Rc<Class>>,
     thread_current: Option<Rc<Method>>,
     thread_aref: Option<Rc<Method>>,
     thread_aset: Option<Rc<Method>>,
@@ -33,307 +45,489 @@ pub(crate) struct NativeProtos {
     mutex_synchronize: Option<Rc<Method>>,
     mutex_lock: Option<Rc<Method>>,
     mutex_unlock: Option<Rc<Method>>,
-    thread_class: Option<Rc<Class>>,
-    mutex_class: Option<Rc<Class>>,
-    ivar_coop_current: SymId,
-    ivar_fiber_locals: SymId,
-    ivar_root_fiber: SymId,
-    ivar_owner: SymId,
-    ivar_depth: SymId,
-    ivar_waiters: SymId,
-    /// `method_gen` at which `mutex_ok` was computed.
+    /// `method_gen` at which `mutex_intact` was last computed. The
+    /// native synchronize inlines `lock`, `unlock`, and the
+    /// `::Thread.current` they call, so all three must still resolve
+    /// to the preamble's methods.
     mutex_checked_gen: Option<u32>,
-    /// `Mutex#lock` / `#unlock` and `Thread.current` still resolve to
-    /// the preamble's — the bodies `synchronize` stands in for.
-    mutex_ok: bool,
+    mutex_intact: bool,
+    sym_coop_current: SymId,
+    sym_fiber_locals: SymId,
+    sym_root_fiber: SymId,
+    sym_owner: SymId,
+    sym_depth: SymId,
+    sym_waiters: SymId,
+    sym_lock: SymId,
+    sym_unlock: SymId,
+    sym_current: SymId,
 }
 
-impl Default for NativeProtos {
-    fn default() -> Self {
-        // The ivar syms are never read before capture: every serve
-        // first matches a captured `Method`, and those start `None`.
-        let unset = SymId(u32::MAX);
-        NativeProtos {
-            thread_current: None, thread_aref: None, thread_aset: None, fiber_current: None,
-            mutex_synchronize: None, mutex_lock: None, mutex_unlock: None,
-            thread_class: None, mutex_class: None,
-            ivar_coop_current: unset, ivar_fiber_locals: unset, ivar_root_fiber: unset,
-            ivar_owner: unset, ivar_depth: unset, ivar_waiters: unset,
-            mutex_checked_gen: None, mutex_ok: false,
+impl ThreadIntrinsics {
+    pub(crate) fn new(interner: &mut Interner) -> Self {
+        ThreadIntrinsics {
+            thread_class: None,
+            mutex_class: None,
+            thread_current: None,
+            thread_aref: None,
+            thread_aset: None,
+            fiber_current: None,
+            mutex_synchronize: None,
+            mutex_lock: None,
+            mutex_unlock: None,
+            mutex_checked_gen: None,
+            mutex_intact: false,
+            sym_coop_current: interner.intern("@coop_current"),
+            sym_fiber_locals: interner.intern("@fiber_locals"),
+            sym_root_fiber: interner.intern("@root_fiber"),
+            sym_owner: interner.intern("@owner"),
+            sym_depth: interner.intern("@depth"),
+            sym_waiters: interner.intern("@waiters"),
+            sym_lock: interner.intern("lock"),
+            sym_unlock: interner.intern("unlock"),
+            sym_current: interner.intern("current"),
         }
     }
 }
 
-fn same(slot: &Option<Rc<Method>>, m: &Rc<Method>) -> bool {
-    slot.as_ref().is_some_and(|s| Rc::ptr_eq(s, m))
-}
-
-fn truthy(v: &Value) -> bool {
-    !matches!(v, Value::Nil | Value::Bool(false))
+fn is_method(slot: &Option<Rc<Method>>, m: &Rc<Method>) -> bool {
+    slot.as_ref().is_some_and(|c| Rc::ptr_eq(c, m))
 }
 
 /// `equal?` for the two shapes a Mutex owner can take: the Thread
-/// class (main thread) or a green-thread instance. `None` = some
-/// other value, which the serve leaves to the Ruby body.
-fn identical(a: &Value, b: &Value) -> Option<bool> {
+/// class itself (the main thread) or a green-thread instance.
+fn same_thread(a: &Value, b: &Value) -> bool {
     match (a, b) {
-        (Value::Class(x), Value::Class(y)) => Some(Rc::ptr_eq(x, y)),
-        (Value::Object(x), Value::Object(y)) => Some(x == y),
-        (Value::Class(_), Value::Object(_)) | (Value::Object(_), Value::Class(_)) => Some(false),
-        _ => None,
+        (Value::Class(x), Value::Class(y)) => Rc::ptr_eq(x, y),
+        (Value::Object(x), Value::Object(y)) => x == y,
+        _ => false,
     }
 }
 
 impl Vm {
-    /// Record the preamble methods to serve natively. Called from
-    /// `load_preamble` on both the cache-hit and live paths.
-    pub(crate) fn capture_native_protos(&mut self) {
-        let thread = self.classes.get(&self.interner.intern("Thread")).cloned();
-        let fiber = self.classes.get(&self.interner.intern("Fiber")).cloned();
-        let mutex = self.classes.get(&self.interner.intern("Mutex")).cloned();
-        let current = self.interner.intern("current");
-        let singleton = |vm: &Self, c: &Option<Rc<Class>>, name: SymId| {
-            c.as_ref().and_then(|c| vm.lookup_class_singleton_method(c, name))
+    /// Capture the preamble's Thread / Fiber / Mutex methods. Called
+    /// from `load_preamble` on both the preamble-cache hit and miss
+    /// paths, before any user code runs.
+    pub(crate) fn cache_thread_intrinsics(&mut self) {
+        let class = |vm: &mut Vm, name: &str| {
+            let sym = vm.interner.intern(name);
+            vm.classes.get(&sym).cloned()
         };
-        let instance = |vm: &Self, c: &Option<Rc<Class>>, name: &str| {
-            let name = vm.interner.get_id(name)?;
-            c.as_ref().and_then(|c| vm.lookup_method_uncached(c, name))
+        let thread = class(self, "Thread");
+        let fiber = class(self, "Fiber");
+        let mutex = class(self, "Mutex");
+        let singleton = |vm: &mut Vm, cls: &Option<Rc<Class>>, name: &str| {
+            let sym = vm.interner.intern(name);
+            cls.as_ref().and_then(|c| vm.lookup_class_singleton_method(c, sym))
         };
-        self.native_protos = NativeProtos {
-            thread_current: singleton(self, &thread, current),
-            thread_aref: singleton(self, &thread, self.sym_index_op),
-            thread_aset: singleton(self, &thread, self.sym_index_set_op),
-            fiber_current: singleton(self, &fiber, current),
-            mutex_synchronize: instance(self, &mutex, "synchronize"),
-            mutex_lock: instance(self, &mutex, "lock"),
-            mutex_unlock: instance(self, &mutex, "unlock"),
-            thread_class: thread,
-            mutex_class: mutex,
-            ivar_coop_current: self.interner.intern("@coop_current"),
-            ivar_fiber_locals: self.interner.intern("@fiber_locals"),
-            ivar_root_fiber: self.interner.intern("@root_fiber"),
-            ivar_owner: self.interner.intern("@owner"),
-            ivar_depth: self.interner.intern("@depth"),
-            ivar_waiters: self.interner.intern("@waiters"),
-            mutex_checked_gen: None,
-            mutex_ok: false,
+        self.thread_intr.thread_current = singleton(self, &thread, "current");
+        self.thread_intr.thread_aref = singleton(self, &thread, "[]");
+        self.thread_intr.thread_aset = singleton(self, &thread, "[]=");
+        self.thread_intr.fiber_current = singleton(self, &fiber, "current");
+        let instance = |vm: &mut Vm, name: &str| {
+            let sym = vm.interner.intern(name);
+            mutex.as_ref().and_then(|c| vm.lookup_method_uncached(c, sym))
         };
+        self.thread_intr.mutex_synchronize = instance(self, "synchronize");
+        self.thread_intr.mutex_lock = instance(self, "lock");
+        self.thread_intr.mutex_unlock = instance(self, "unlock");
+        self.thread_intr.thread_class = thread;
+        self.thread_intr.mutex_class = mutex;
+        self.thread_intr.mutex_checked_gen = None;
     }
 
-    /// CRuby's `Thread#[]` store is per FIBER: every fiber starts
-    /// with an empty one. The main thread's is `Thread`'s
-    /// `@fiber_locals` (preamble/thread.rb), which the serves above
-    /// read directly, so `resume_fiber` calls this on entry and again
-    /// on exit to swap it with the fiber's own slot. The swap is its
-    /// own inverse: while the fiber runs, its slot parks the
-    /// resumer's store (and the GC marks it there). A green thread
-    /// keeps its store on its Thread instance, so this is a no-op for
-    /// what it observes.
-    #[cfg(feature = "_fiber")]
-    pub(crate) fn swap_fiber_locals(&mut self, fiber: ObjId) {
-        let Some(thread) = self.native_protos.thread_class.as_ref() else { return };
-        let sym = self.native_protos.ivar_fiber_locals;
-        let mut ivars = thread.ivars.borrow_mut();
-        let outer = ivars.remove(&sym).unwrap_or(Value::Nil);
-        let inner = self.heap.fiber(fiber).fiber_locals.replace(outer);
-        if !matches!(inner, Value::Nil) {
-            ivars.insert(sym, inner);
+    /// The fiber-local store `Thread.current[..]` resolves to on the
+    /// class-level (main-thread) receiver `cls`, mirroring preamble
+    /// `Thread.__fiber_local_store`: the running fiber's own Hash when
+    /// inside a non-root fiber of the main thread, else the class's
+    /// `@fiber_locals`. `Some(None)` = that store is not allocated
+    /// yet; `None` = an unexpected shape, take the Ruby path.
+    fn fiber_local_store(&self, cls: &Rc<Class>) -> Option<Option<ObjId>> {
+        let ivars = cls.ivars.borrow();
+        #[cfg(feature = "_fiber")]
+        if let Some(fid) = self.current_fiber_id
+            && !ivars.get(&self.thread_intr.sym_coop_current).is_some_and(Value::is_truthy)
+        {
+            return match &*self.heap.fiber(fid).locals.borrow() {
+                Value::Hash(h) => Some(Some(*h)),
+                Value::Nil => Some(None),
+                _ => None,
+            };
+        }
+        match ivars.get(&self.thread_intr.sym_fiber_locals) {
+            Some(Value::Hash(h)) => Some(Some(*h)),
+            None | Some(Value::Nil) => Some(None),
+            _ => None,
         }
     }
 
-    /// `Thread.current`'s body: `@coop_current || self`.
-    fn native_thread_current(&self, cls: &Rc<Class>) -> Value {
-        match cls.ivars.borrow().get(&self.native_protos.ivar_coop_current) {
-            Some(v) if truthy(v) => v.clone(),
-            _ => Value::Class(cls.clone()),
-        }
-    }
-
-    /// Class-receiver serves, called from the class-singleton IC with
-    /// the resolved method. Stack: `[.., recv, a1..aN]`, `recv` the
-    /// `Value::Class` the method was resolved on (Thread or a
-    /// subclass: the bodies read `self`'s own ivars, so do we).
-    pub(crate) fn try_serve_native_class_fn(
+    /// Frameless serve of `Thread.current`, `Thread.current[:k]`,
+    /// `Thread.current[:k] = v` and `Fiber.current` when `m` (already
+    /// resolved and arity-checked by the caller) is the captured
+    /// preamble method. Stack layout `[.., recv, a1, .., aN]`;
+    /// `Ok(false)` leaves it untouched.
+    pub(crate) fn try_thread_class_intrinsic(
         &mut self,
         m: &Rc<Method>,
         cls: &Rc<Class>,
-        name_id: SymId,
         argc: usize,
+        recv_idx: usize,
     ) -> Result<bool, Trap> {
-        let np = &self.native_protos;
-        let (fiber_locals, root_fiber) = (np.ivar_fiber_locals, np.ivar_root_fiber);
-        let is_current = argc == 0 && same(&np.thread_current, m);
-        let is_index = (argc == 1 && same(&np.thread_aref, m)) || (argc == 2 && same(&np.thread_aset, m));
-        let is_fiber_current = argc == 0 && same(&np.fiber_current, m);
-        if is_current {
-            let v = self.native_thread_current(cls);
-            self.stack.pop();
-            self.stack.push(v);
+        let ti = &self.thread_intr;
+        if is_method(&ti.thread_current, m) {
+            // `@coop_current || self`
+            let v = cls.ivars.borrow().get(&ti.sym_coop_current).filter(|v| v.is_truthy()).cloned();
+            self.stack.truncate(recv_idx);
+            self.stack.push(v.unwrap_or_else(|| Value::Class(cls.clone())));
             return Ok(true);
         }
-        if is_index {
-            // `@fiber_locals ||= {}; @fiber_locals[key]` (or `[key] =
-            // val`): once the store exists this IS a Hash index, so
-            // serve it through the same Hash fast path the body's
-            // own `@fiber_locals[key]` would take. The first touch
-            // (no store yet) runs the Ruby body to create it.
-            let Some(Value::Hash(hid)) = cls.ivars.borrow().get(&fiber_locals).cloned() else {
+        let aref = is_method(&ti.thread_aref, m);
+        if aref || is_method(&ti.thread_aset, m) {
+            // Symbol keys only (a String key needs `to_sym`, anything
+            // else raises); `[k] = nil` deletes, which the Ruby path owns.
+            if !matches!(self.stack[recv_idx + 1], Value::Sym(_))
+                || (!aref && matches!(self.stack[recv_idx + 2], Value::Nil))
+            {
                 return Ok(false);
+            }
+            let Some(store) = self.fiber_local_store(cls) else { return Ok(false) };
+            let Some(h) = store else {
+                if !aref {
+                    return Ok(false); // first write allocates the store
+                }
+                self.stack.truncate(recv_idx);
+                self.stack.push(Value::Nil);
+                return Ok(true);
             };
-            let recv_idx = self.stack.len() - 1 - argc;
-            self.stack[recv_idx] = Value::Hash(hid);
-            if self.try_fast_index(name_id, argc, false) {
+            // A per-instance eigenclass on the store (`def h.[]`)
+            // overrides everything; the generic dispatch probes it
+            // before `try_fast_index`, so this serve must too.
+            if self.any_hash_singletons
+                && matches!(self.heap.get(h), HeapObj::Hash(hh) if hh.singleton_class().is_some())
+            {
+                return Ok(false);
+            }
+            // Swap the receiver for the store and run the plain-Hash
+            // `[]` / `[]=` fast path; it declines (defaulted / frozen /
+            // user-patched Hash) with the stack unchanged.
+            let recv = std::mem::replace(&mut self.stack[recv_idx], Value::Hash(h));
+            let op = if aref { self.sym_index_op } else { self.sym_index_set_op };
+            if self.try_fast_index(op, argc, false) {
                 return Ok(true);
             }
-            self.stack[recv_idx] = Value::Class(cls.clone());
+            self.stack[recv_idx] = recv;
             return Ok(false);
         }
-        if is_fiber_current {
-            // `(__rubyrs_fiber_current rescue nil) || (@root_fiber ||=
-            // Object.new)`; the first root read runs the Ruby body.
+        if is_method(&ti.fiber_current, m) {
             #[cfg(feature = "_fiber")]
-            if let Some(id) = self.current_fiber_id {
-                self.stack.pop();
-                self.stack.push(Value::Object(id));
+            if let Some(fid) = self.current_fiber_id {
+                self.stack.truncate(recv_idx);
+                self.stack.push(Value::Object(fid));
                 return Ok(true);
             }
-            let root = match cls.ivars.borrow().get(&root_fiber) {
-                Some(v) if truthy(v) => v.clone(),
-                _ => return Ok(false),
-            };
-            self.stack.pop();
-            self.stack.push(root);
-            return Ok(true);
+            // Root fiber: the preamble's `@root_fiber ||= Object.new`,
+            // once it has been allocated.
+            let root = cls.ivars.borrow().get(&ti.sym_root_fiber).filter(|v| v.is_truthy()).cloned();
+            if let Some(v) = root {
+                self.stack.truncate(recv_idx);
+                self.stack.push(v);
+                return Ok(true);
+            }
         }
         Ok(false)
     }
 
-    /// `Mutex#synchronize { }` served natively: lock, run the block,
-    /// unlock on every exit (value, `break`, method `return`, raise).
-    /// Called from the block-form object IC with the resolved method.
-    /// Stack: `[.., recv, block]`.
-    ///
-    /// Only the uncontended / re-entrant lock on the main thread
-    /// outside any fiber: a green thread is a fiber, and a block
-    /// driven from Rust cannot be suspended mid-way, so there the
-    /// Ruby body (whose `yield` can) keeps the job.
-    pub(crate) fn try_serve_mutex_synchronize(
+    fn mutex_intact(&mut self) -> bool {
+        if self.thread_intr.mutex_checked_gen == Some(self.method_gen) {
+            return self.thread_intr.mutex_intact;
+        }
+        let ti = &self.thread_intr;
+        let ok = match (&ti.mutex_class, &ti.thread_class) {
+            (Some(mutex), Some(thread)) => {
+                let resolves = |slot: &Option<Rc<Method>>, found: Option<Rc<Method>>| {
+                    found.is_some_and(|f| is_method(slot, &f))
+                };
+                resolves(&ti.mutex_lock, self.lookup_method_uncached(mutex, ti.sym_lock))
+                    && resolves(&ti.mutex_unlock, self.lookup_method_uncached(mutex, ti.sym_unlock))
+                    && resolves(&ti.thread_current, self.lookup_class_singleton_method(thread, ti.sym_current))
+            }
+            _ => false,
+        };
+        self.thread_intr.mutex_intact = ok;
+        self.thread_intr.mutex_checked_gen = Some(self.method_gen);
+        ok
+    }
+
+    /// `::Thread.current` for a native Mutex serve of receiver class
+    /// `cls`, or `None` when the serve must decline: inside a fiber
+    /// (a `Fiber.yield` under a native driver cannot be stashed, see
+    /// `resume_native_iter_depth`), for a Mutex subclass or singleton,
+    /// and once `lock` / `unlock` / `Thread.current` are patched.
+    fn mutex_serve_thread(&mut self, cls: &Rc<Class>) -> Option<Value> {
+        #[cfg(feature = "_fiber")]
+        if self.current_fiber_id.is_some() {
+            return None;
+        }
+        if !self.thread_intr.mutex_class.as_ref().is_some_and(|c| Rc::ptr_eq(c, cls)) || !self.mutex_intact() {
+            return None;
+        }
+        let thread = self.thread_intr.thread_class.clone()?;
+        let cur = thread.ivars.borrow().get(&self.thread_intr.sym_coop_current).filter(|v| v.is_truthy()).cloned();
+        Some(cur.unwrap_or(Value::Class(thread)))
+    }
+
+    /// Preamble `Mutex#lock`, uncontended: take a free lock or count a
+    /// re-entry. `false` (nothing mutated) for a lock held by another
+    /// green thread, where the Ruby `lock` parks, and for a frozen or
+    /// unexpectedly shaped Mutex.
+    fn mutex_lock_native(&mut self, id: ObjId, cur: &Value) -> bool {
+        let (sym_owner, sym_depth) = (self.thread_intr.sym_owner, self.thread_intr.sym_depth);
+        let (owner, depth) = match self.heap.get(id) {
+            HeapObj::Instance(i) if !i.frozen.get() => match (i.ivar_get(sym_owner), i.ivar_get(sym_depth)) {
+                (Some(o), Some(Value::Int(d))) => (o.clone(), *d),
+                _ => return false,
+            },
+            _ => return false,
+        };
+        if matches!(owner, Value::Nil) {
+            self.heap.instance_mut(id).ivar_set(sym_owner, cur.clone());
+        } else if same_thread(&owner, cur) && depth < i64::MAX {
+            self.heap.instance_mut(id).ivar_set(sym_depth, Value::Int(depth + 1));
+        } else {
+            return false;
+        }
+        true
+    }
+
+    /// Preamble `Mutex#unlock` without its wake step: a no-op unless
+    /// `cur` owns the lock, else drop one re-entry level or release.
+    /// `false` (nothing mutated) when the Ruby `unlock` must run: a
+    /// release with parked waiters (it wakes one through the coop
+    /// scheduler), and a frozen or unexpectedly shaped Mutex.
+    fn mutex_unlock_native(&mut self, id: ObjId, cur: &Value) -> bool {
+        let ti = &self.thread_intr;
+        let (sym_owner, sym_depth, sym_waiters) = (ti.sym_owner, ti.sym_depth, ti.sym_waiters);
+        let (owner, depth, waiters) = match self.heap.get(id) {
+            HeapObj::Instance(i) if !i.frozen.get() => (
+                i.ivar_get(sym_owner).cloned(),
+                i.ivar_get(sym_depth).cloned(),
+                i.ivar_get(sym_waiters).cloned(),
+            ),
+            _ => return false,
+        };
+        if !owner.is_some_and(|o| same_thread(&o, cur)) {
+            return true;
+        }
+        match (depth, waiters) {
+            (Some(Value::Int(d)), _) if d > 0 => {
+                self.heap.instance_mut(id).ivar_set(sym_depth, Value::Int(d - 1));
+                true
+            }
+            (Some(Value::Int(_)), Some(Value::Array(w))) if self.heap.array(w).is_empty() => {
+                self.heap.instance_mut(id).ivar_set(sym_owner, Value::Nil);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Native `Mutex#lock` / `Mutex#unlock` (no block; stack layout
+    /// `[.., recv]`), both returning the receiver. Same declines as
+    /// `mutex_serve_thread` plus the `_native` helpers' own.
+    pub(crate) fn try_mutex_lock_unlock(
         &mut self,
         m: &Rc<Method>,
         cls: &Rc<Class>,
         id: ObjId,
-        block: ObjId,
+        argc: usize,
+    ) -> bool {
+        let lock = is_method(&self.thread_intr.mutex_lock, m);
+        if argc != 0 || !(lock || is_method(&self.thread_intr.mutex_unlock, m)) {
+            return false;
+        }
+        let Some(cur) = self.mutex_serve_thread(cls) else { return false };
+        // The receiver slot already holds `self`, the return value.
+        if lock { self.mutex_lock_native(id, &cur) } else { self.mutex_unlock_native(id, &cur) }
+    }
+
+    /// Native `Mutex#synchronize` for the uncontended case: lock, run
+    /// the block, and unlock on every exit (value, `break`, `return`,
+    /// `throw`, exception) exactly as preamble/mutex.rb's
+    /// `lock; begin; yield; ensure; unlock; end` does. Stack layout
+    /// `[.., recv, block]`; declines (stack untouched) as
+    /// `mutex_serve_thread` / `mutex_lock_native` do.
+    pub(crate) fn try_mutex_synchronize(
+        &mut self,
+        m: &Rc<Method>,
+        cls: &Rc<Class>,
+        id: ObjId,
+        block_id: ObjId,
+        argc: usize,
     ) -> Result<bool, Trap> {
-        if !same(&self.native_protos.mutex_synchronize, m) {
+        if argc != 0 || !is_method(&self.thread_intr.mutex_synchronize, m) {
             return Ok(false);
         }
-        #[cfg(feature = "_fiber")]
-        if self.current_fiber_id.is_some() {
+        let Some(cur) = self.mutex_serve_thread(cls) else { return Ok(false) };
+        if !self.mutex_lock_native(id, &cur) {
             return Ok(false);
         }
-        // Exact Mutex (a subclass may override lock/unlock; an
-        // eigenclass shows up as a different `cls`).
-        if !self.native_protos.mutex_class.as_ref().is_some_and(|c| Rc::ptr_eq(c, cls)) {
-            return Ok(false);
-        }
-        if self.native_protos.mutex_checked_gen != Some(self.method_gen) {
-            self.revalidate_native_mutex();
-        }
-        if !self.native_protos.mutex_ok || self.heap.instance(id).frozen.get() {
-            return Ok(false);
-        }
-        let Some(thread) = self.native_protos.thread_class.clone() else { return Ok(false) };
-        let cur = self.native_thread_current(&thread);
-        let (owner_sym, depth_sym) = (self.native_protos.ivar_owner, self.native_protos.ivar_depth);
-        // `lock`: take it when free, count a re-entry by the owner;
-        // anything else (contended, odd ivar state) is the Ruby body's.
-        {
-            let inst = self.heap.instance(id);
-            let owner = inst.ivars.get(cls, owner_sym).cloned().unwrap_or(Value::Nil);
-            let depth = inst.ivars.get(cls, depth_sym).cloned().unwrap_or(Value::Nil);
-            let waiters_empty = matches!(
-                inst.ivars.get(cls, self.native_protos.ivar_waiters),
-                Some(Value::Array(w)) if self.heap.array(*w).is_empty()
-            );
-            let (Value::Int(d), true) = (depth, waiters_empty) else { return Ok(false) };
-            let write = match &owner {
-                Value::Nil => (owner_sym, cur.clone()),
-                o => match identical(o, &cur) {
-                    Some(true) => (depth_sym, Value::Int(d + 1)),
-                    _ => return Ok(false),
-                },
-            };
-            self.heap.instance_mut(id).ivars.insert(cls, write.0, write.1);
-        }
-        self.stack.pop(); // block
-        let recv = self.stack.pop().unwrap_or(Value::Nil);
+        // `[.., recv, block]` -> `[..]`; the block runs as a native
+        // driver's block (no synchronize frame).
+        let recv_idx = self.stack.len() - 2;
+        self.stack.truncate(recv_idx);
         let pre_frames = self.frames.len();
         let mut g = PinGuard::new(self);
-        g.pin(recv.clone());
-        g.pin(Value::Block(block));
-        let r = g.vm.step_block(block, Vec::new(), pre_frames);
-        // `ensure unlock` — its own error replaces the block's outcome,
-        // as a raising `ensure` clause does.
-        g.vm.native_mutex_unlock(recv, cls, id, &cur)?;
-        let v = match r? {
-            // `method_return` stays set; the outer dispatch unwinds on it.
-            BlockStep::MethodReturn => Value::Nil,
-            BlockStep::Break(v) | BlockStep::Value(v) => v,
+        g.pin(Value::Object(id));
+        g.pin(Value::Block(block_id));
+        g.pin(cur.clone());
+        let step = g.vm.step_block(block_id, Vec::new(), pre_frames);
+        // The block's value is unrooted while a Ruby-level unlock runs
+        // (it can collect).
+        if let Ok(BlockStep::Value(v) | BlockStep::Break(v)) = &step {
+            g.pin(v.clone());
+        }
+        // The block may have redefined `unlock` / `Thread.current` or
+        // given the receiver a singleton class; Ruby's `ensure; unlock`
+        // would see that, so re-check before releasing natively.
+        let native = g.vm.heap.class_of(id);
+        let unlocked = match g.vm.mutex_serve_thread(&native) {
+            Some(cur) if g.vm.mutex_unlock_native(id, &cur) => Ok(()),
+            _ => g.vm.mutex_unlock_ruby(id),
         };
-        g.vm.stack.push(v);
+        drop(g);
+        let v = match step? {
+            BlockStep::Value(v) | BlockStep::Break(v) => v,
+            // `method_return` stays set; the outer dispatch unwinds.
+            BlockStep::MethodReturn => Value::Nil,
+        };
+        unlocked?;
+        self.stack.push(v);
         Ok(true)
     }
 
-    fn revalidate_native_mutex(&mut self) {
-        let np = &self.native_protos;
-        let ok = match (&np.mutex_class, &np.thread_class) {
-            (Some(mc), Some(tc)) => {
-                let resolves = |slot: &Option<Rc<Method>>, found: Option<Rc<Method>>| {
-                    found.is_some_and(|f| same(slot, &f))
-                };
-                let (lock, unlock) = (self.interner.get_id("lock"), self.interner.get_id("unlock"));
-                let current = self.interner.get_id("current");
-                lock.is_some_and(|s| resolves(&np.mutex_lock, self.lookup_method_uncached(mc, s)))
-                    && unlock.is_some_and(|s| resolves(&np.mutex_unlock, self.lookup_method_uncached(mc, s)))
-                    && current.is_some_and(|s| resolves(&np.thread_current, self.lookup_class_singleton_method(tc, s)))
-            }
-            _ => false,
-        };
-        self.native_protos.mutex_ok = ok;
-        self.native_protos.mutex_checked_gen = Some(self.method_gen);
+    /// Run the preamble `Mutex#unlock` synchronously. It may run while
+    /// a `return` / `break` signal is pending (the block exited that
+    /// way), so those are parked around the call and restored after,
+    /// as Ruby's own `ensure` does. `unlock` is resolved afresh on the
+    /// receiver, so a redefinition made inside the block is the one run.
+    fn mutex_unlock_ruby(&mut self, id: ObjId) -> Result<(), Trap> {
+        let cls = self.heap.class_of(id);
+        let found = self.lookup_method_uncached(&cls, self.thread_intr.sym_unlock);
+        let Some(unlock) = found.or_else(|| self.thread_intr.mutex_unlock.clone()) else { return Ok(()) };
+        let method_return = self.method_return.take();
+        let method_return_locals = self.method_return_locals.take();
+        let break_signaled = std::mem::replace(&mut self.break_signaled, false);
+        let pre_frames = self.frames.len();
+        let r = self.invoke_method(unlock, Value::Object(id), Vec::new()).and_then(|()| self.dispatch_until(pre_frames));
+        if r.is_ok() {
+            self.stack.pop();
+        }
+        self.method_return = method_return;
+        self.method_return_locals = method_return_locals;
+        self.break_signaled = break_signaled;
+        r.map(|_| ())
     }
 
-    /// `Mutex#unlock` for the served lock. A waiter queued while the
-    /// block ran (a green thread started inside it) needs the
-    /// scheduler's wake-up, so that case calls the Ruby `unlock`.
-    fn native_mutex_unlock(&mut self, recv: Value, cls: &Rc<Class>, id: ObjId, cur: &Value) -> Result<(), Trap> {
-        let (owner_sym, depth_sym) = (self.native_protos.ivar_owner, self.native_protos.ivar_depth);
-        let inst = self.heap.instance(id);
-        let waiters_empty = matches!(
-            inst.ivars.get(cls, self.native_protos.ivar_waiters),
-            Some(Value::Array(w)) if self.heap.array(*w).is_empty()
-        );
-        if !waiters_empty {
-            let Some(unlock) = self.native_protos.mutex_unlock.clone() else { return Ok(()) };
-            // A pending method `return` would short-circuit the nested
-            // dispatch; park it across the call.
-            let mr = self.method_return.take();
-            let pre_frames = self.frames.len();
-            let r = self.invoke_method(unlock, recv, Vec::new()).and_then(|()| self.dispatch_until(pre_frames));
-            self.method_return = mr;
-            r?;
-            self.stack.pop();
-            return Ok(());
+    /// `__rubyrs_fiber_locals` — the running non-root fiber's
+    /// fiber-local Hash, allocated on first use; `nil` on the root
+    /// fiber (and in builds without fibers), where preamble
+    /// `Thread.__fiber_local_store` falls back to the class's
+    /// process-global `@fiber_locals`.
+    pub(crate) fn fiber_locals_value(&mut self) -> Result<Value, Trap> {
+        #[cfg(feature = "_fiber")]
+        if let Some(fid) = self.current_fiber_id {
+            let cur = self.heap.fiber(fid).locals.borrow().clone();
+            if let Value::Hash(_) = cur {
+                return Ok(cur);
+            }
+            let mut g = PinGuard::new(self);
+            g.pin(Value::Object(fid));
+            g.vm.maybe_gc();
+            g.vm.check_alloc()?;
+            let h = g.vm.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(Vec::new())));
+            // `get_mut` records the write barrier (an old fiber now
+            // holds a young Hash).
+            if let HeapObj::Fiber(f) = g.vm.heap.get_mut(fid) {
+                *f.locals.get_mut() = Value::Hash(h);
+            }
+            return Ok(Value::Hash(h));
         }
-        let owner = inst.ivars.get(cls, owner_sym).cloned().unwrap_or(Value::Nil);
-        if identical(&owner, cur) != Some(true) {
-            return Ok(()); // unlocked inside the block: `unlock` is a no-op
+        Ok(Value::Nil)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::value::Value;
+
+    fn eval_str(src: &str) -> String {
+        let mut rt = crate::Runtime::new();
+        match rt.eval(src, "thread_intrinsics.rb").expect("eval ok") {
+            Value::Str(s) => s.to_string_lossy().to_string(),
+            other => panic!("expected Str, got {other:?}"),
         }
-        let write = match inst.ivars.get(cls, depth_sym) {
-            Some(Value::Int(d)) if *d > 0 => (depth_sym, Value::Int(d - 1)),
-            _ => (owner_sym, Value::Nil),
-        };
-        self.heap.instance_mut(id).ivars.insert(cls, write.0, write.1);
-        Ok(())
+    }
+
+    /// A redefinition of `Thread.[]` / `Thread.current` must win over
+    /// the native serve (the captured-method identity check fails).
+    #[test]
+    fn user_thread_overrides_win() {
+        let out = eval_str(r##"
+            Thread.current[:a] = 1
+            class Thread
+              class << self
+                alias_method :orig_aref, :[]
+                def [](k) = [:patched, orig_aref(k)]
+              end
+            end
+            r = [Thread[:a]]
+            class Thread
+              def self.current = :cur
+            end
+            r << Thread.current
+            r.inspect
+        "##);
+        assert_eq!(out, "[[:patched, 1], :cur]");
+    }
+
+    /// A per-instance override on the backing store Hash is honoured
+    /// by both `Thread.current[:k]` and `Thread.current[:k] = v`.
+    #[test]
+    fn store_hash_singleton_override_wins() {
+        let out = eval_str(r##"
+            Thread.current[:a] = 1
+            h = Thread.instance_variable_get(:@fiber_locals)
+            def h.[](k) = [:patched, k]
+            def h.[]=(k, v); super(k, [:wrapped, v]); end
+            Thread.current[:b] = 2
+            [Thread.current[:a], h.fetch(:b)].inspect
+        "##);
+        assert_eq!(out, "[[:patched, :a], [:wrapped, 2]]");
+    }
+
+    /// rubyrs's `synchronize` runs Ruby-level `lock`/`unlock`
+    /// overrides (CRuby's C implementation does not; a deliberate
+    /// divergence, see preamble/mutex.rb), so a subclass or singleton
+    /// override must take the Ruby path, never the native one.
+    #[test]
+    fn mutex_lock_unlock_overrides_are_called() {
+        let out = eval_str(r##"
+            $log = []
+            class LoudMutex < Mutex
+              def lock = ($log << :lock; super)
+            end
+            lm = LoudMutex.new
+            $log << lm.synchronize { :sub } << lm.locked?
+            m = Mutex.new
+            def m.unlock = ($log << :unlock; super)
+            $log << m.synchronize { :single } << m.locked?
+            m2 = Mutex.new
+            $log << m2.synchronize { def m2.unlock = ($log << :late; super); :late_def } << m2.locked?
+            class Mutex
+              def lock = ($log << :global; @owner = Thread.current; self)
+            end
+            $log << Mutex.new.synchronize { :g }
+            $log.inspect
+        "##);
+        assert_eq!(out, "[:lock, :sub, false, :unlock, :single, false, :late, :late_def, false, :global, :g]");
     }
 }

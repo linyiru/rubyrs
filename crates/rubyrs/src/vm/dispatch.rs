@@ -18961,6 +18961,10 @@ impl Vm {
         if m.closure.is_some() {
             return self.try_invoke_closure_method_from_stack(&m, None, argc);
         }
+        // Native uncontended `Mutex#lock` / `#unlock` (vm/thread.rs).
+        if self.try_mutex_lock_unlock(&m, &cls, id, argc) {
+            return Ok(true);
+        }
         // D Layer 4 (inline-cache step 1): if this method is ALREADY compiled,
         // dispatch the native code RIGHT HERE — no slow-path round-trip through
         // invoke_method_with_block + the hook. This is the per-call win: a hot
@@ -19424,14 +19428,15 @@ impl Vm {
         {
             return Ok(false);
         }
-        // Resolved to the preamble `Mutex#synchronize` — vm/thread.rs.
-        if argc == 0 && self.try_serve_mutex_synchronize(&m, &cls, id, block_id)? {
-            return Ok(true);
-        }
         let fixed = match m.fixed_arity {
             Some(f) if f.required as usize == argc => f,
             _ => return Ok(false),
         };
+        // Native `Mutex#synchronize` (vm/thread.rs): no frame for the
+        // preamble's lock/begin/yield/ensure/unlock body.
+        if self.try_mutex_synchronize(&m, &cls, id, block_id, argc)? {
+            return Ok(true);
+        }
         self.check_frames()?;
         // Bind the argc args (stack top), then drop the block, then
         // the recv. These pops are guaranteed by the peeks above —
@@ -19544,11 +19549,6 @@ impl Vm {
         if m.builtin.is_some() || m.visibility.get() != Visibility::Public {
             return Ok(false);
         }
-        // Resolved to a preamble Thread/Fiber method served natively
-        // (`Thread.current`, `Thread.current[:k]`, …) — vm/thread.rs.
-        if self.try_serve_native_class_fn(&m, &cls, name_id, argc)? {
-            return Ok(true);
-        }
         let fixed = match m.fixed_arity {
             Some(f) if m.closure.is_none() && f.required as usize == argc => f,
             _ => {
@@ -19578,6 +19578,11 @@ impl Vm {
                 return Ok(true);
             }
         };
+        // Frameless `Thread.current` / `Thread.current[:k]` (`= v`) /
+        // `Fiber.current` (vm/thread.rs).
+        if self.try_thread_class_intrinsic(&m, &cls, argc, recv_idx)? {
+            return Ok(true);
+        }
         self.check_frames()?;
         let n_locals = fixed.n_locals as usize;
         let locals = if fixed.stack_eligible {

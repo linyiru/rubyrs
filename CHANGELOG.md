@@ -51,14 +51,12 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Changed
 
-- **`Thread.current`, `Thread.current[:k]` / `[]=`, `Fiber.current` and
-  `Mutex#synchronize` are served natively** once dispatch resolves them
-  to the preamble's own methods (a user override still wins). Measured
-  per call: `Thread.current` 147 → 77 ns, `Thread.current[:k]` 286 →
-  123 ns, `Fiber.current` 287 → 78 ns, `Mutex#synchronize {}` 1101 →
-  273 ns. `synchronize` goes native only uncontended or re-entrant on
-  the main thread outside a fiber; everywhere else the Ruby body runs.
-  ([#381](https://github.com/linyiru/rubyrs/issues/381),
+- **`Thread.current`, `Thread.current[:k]` / `[:k]=`, `Fiber.current`,
+  `Mutex#synchronize` / `#lock` / `#unlock`** — served natively while the
+  preamble definitions are live (3–8× faster); a user redefinition still
+  wins. Divergence: the `Thread::Mutex#synchronize` frame no longer appears
+  in backtraces. ([#381](https://github.com/linyiru/rubyrs/issues/381),
+  `mutex_synchronize.rb`, `mutex_synchronize_contended.rb`,
   `thread_native_serves.rb`)
 - **`Symbol#start_with?` / `#end_with?` are native** — they read the
   interned name with no String allocation and take a pre-cascade fast path,
@@ -120,11 +118,15 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Fixed
 
-- **`Thread.current[:k]` is fiber-local** — each `Fiber.new` body now
-  starts with an empty store and leaves the resumer's alone, as in
-  CRuby. Before, every fiber shared the main thread's store.
-  `thread_variable_get` / `set` stay thread-wide.
-  (`thread_fiber_locals.rb`)
+- **`Thread.current[:k]` is fiber-local** — each `Fiber.new` body gets its
+  own store (the thread-variable store stays shared); String keys are
+  interned, other keys raise `TypeError`, `[k] = nil` deletes; adds
+  `Thread.main`, `Thread#keys`, `thread_variables`, and
+  `thread_variable?` is false for nil; `Mutex#synchronize` without a block
+  raises `ThreadError`. Divergence: a fiber nested inside a green thread
+  shares that thread's store.
+  ([#381](https://github.com/linyiru/rubyrs/issues/381),
+  `thread_fiber_locals.rb`, `thread_local_keys.rb`)
 - **`Symbol#start_with?` / `#end_with?` match CRuby on non-String
   arguments** — they raise TypeError (after a `to_str` attempt) instead of
   returning `false`, `start_with?(regexp)` sets `$~`, and a non-ASCII
