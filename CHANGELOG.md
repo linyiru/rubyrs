@@ -51,6 +51,13 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Changed
 
+- **`Thread.current`, `Thread.current[:k]` / `[:k]=`, `Fiber.current`,
+  `Mutex#synchronize` / `#lock` / `#unlock`** — served natively while the
+  preamble definitions are live (3–8× faster); a user redefinition still
+  wins. Divergence: the `Thread::Mutex#synchronize` frame no longer appears
+  in backtraces. ([#381](https://github.com/linyiru/rubyrs/issues/381),
+  `mutex_synchronize.rb`, `mutex_synchronize_contended.rb`,
+  `thread_native_serves.rb`)
 - **`method_missing` dispatch is cached per call site** — once a site has
   missed to a user `method_missing` for a receiver class, later calls skip
   the dispatch cascade and invoke it directly (~1.7× on `o.nope`, now at
@@ -117,6 +124,15 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Fixed
 
+- **`Thread.current[:k]` is fiber-local** — each `Fiber.new` body gets its
+  own store (the thread-variable store stays shared); String keys are
+  interned, other keys raise `TypeError`, `[k] = nil` deletes; adds
+  `Thread.main`, `Thread#keys`, `thread_variables`, and
+  `thread_variable?` is false for nil; `Mutex#synchronize` without a block
+  raises `ThreadError`. Divergence: a fiber nested inside a green thread
+  shares that thread's store.
+  ([#381](https://github.com/linyiru/rubyrs/issues/381),
+  `thread_fiber_locals.rb`, `thread_local_keys.rb`)
 - **`Symbol#start_with?` / `#end_with?` match CRuby on non-String
   arguments** — they raise TypeError (after a `to_str` attempt) instead of
   returning `false`, `start_with?(regexp)` sets `$~`, and a non-ASCII

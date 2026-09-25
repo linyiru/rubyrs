@@ -29,6 +29,7 @@ the `mod` declarations + cross-module re-exports.
 | parsing a digit string into an Integer | [`vm/str2int.rs`](#vmstr2intrs-bignumc-rb_cstr_to_inum) |
 | `sort` / `sort_by` ordering | [`vm/sort.rs`](#vmsortrs-arrayc-sort) |
 | `Fiber` | [`vm/fiber.rs`](#vmfiberrs-contc) |
+| `Thread.current` / `Thread#[]` / `Mutex#synchronize` fast paths | [`vm/thread.rs`](#vmthreadrs-threadc--thread_syncc) |
 | String methods + Regex match shims | [`vm/string.rs`](#vmstringrs-stringc) |
 | `File.read` / `File.exist?` etc. | [`vm/fileops.rs`](#vmfileopsrs-filec) |
 | shared cross-cutting helpers | [`vm/util.rs`](#vmutilrs-cross-cutting) |
@@ -282,6 +283,16 @@ propagates cleanly. ~190 lines.
 
 The Fiber primitive
 ([ADR 0023](adr/0023-true-async-streaming.md)). ~2,200 lines.
+
+### `vm/thread.rs` (`thread.c` + `thread_sync.c`)
+
+Native serves for the preamble's `Thread` / `Mutex` hot paths
+(`Thread.current`, `Thread.[]`/`[]=` on Symbol keys, `Fiber.current`,
+uncontended `Mutex#synchronize`/`lock`/`unlock`). Each serve fires
+only while the preamble method captured by `cache_thread_intrinsics`
+is still the resolved one, and declines (leaving the stack untouched)
+on anything else, so the Ruby definitions stay the semantics. Also
+`fiber_locals_value`, the per-fiber fiber-local Hash. ~400 lines.
 
 ### `vm/match_data.rs` (`re.c`)
 

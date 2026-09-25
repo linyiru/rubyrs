@@ -19,11 +19,12 @@
 #     Motivating consumer: minitest's Parallel::Executor.
 #   - `Thread.current` returns the Thread class itself — a stable
 #     singleton-shaped object. With one thread there is no
-#     distinct "current thread" to model, and class-level
-#     fiber-local / thread-var stores (`[]`, `thread_variable_*`)
-#     are process-global, which is the correct semantics for
-#     exactly one thread. Consumers: minitest spec.rb
-#     (`Thread.current[:current_spec]`), rouge, tilt.
+#     distinct "current thread" to model, and the class-level
+#     thread-var store (`thread_variable_*`) is process-global,
+#     which is the correct semantics for exactly one thread. The
+#     fiber-local store (`[]`) is per fiber, as in CRuby.
+#     Consumers: minitest spec.rb (`Thread.current[:current_spec]`),
+#     rouge, tilt.
 #   - `Thread.object_id` returns a constant non-zero integer so
 #     tilt's `"__tilt_#{Thread.current.object_id.abs}"` (tilt
 #     2.7.0 template.rb:439) is deterministic and call-time-stable.
@@ -324,6 +325,10 @@ class Thread
   def self.current
     @coop_current || self
   end
+  # The main thread is the Thread class itself (see `current`).
+  def self.main
+    self
+  end
   # The live-thread list: the main-thread sentinel (`self` — the
   # documented divergence that main IS the Thread class) plus every
   # live cooperative green thread. Consumer: rack 2.2.8 reloader.rb
@@ -337,37 +342,66 @@ class Thread
   def self.object_id
     1
   end
-  # `Thread.current` IS the Thread class in the single-threaded model,
-  # so `Thread.current[:k]` lands here; one process-global store is the
-  # correct semantics when there is exactly one thread/fiber.
+  # `Thread.current` IS the Thread class on the main thread, so
+  # `Thread.current[:k]` lands here.
   #
   # CRuby keeps `#[]`/`#[]=` (FIBER-local) and
   # `#thread_variable_get`/`set` (THREAD-local) in SEPARATE stores, so
   # they must not alias. (rouge's `Formatter.escape_enabled?` reads
   # `Thread.current[:'rouge/with-escape']`, the fiber-local form.)
+  # The fiber-local store is per FIBER: the main thread's root fiber
+  # uses `@fiber_locals`, and a `Fiber.new` body gets its own empty
+  # store (`__rubyrs_fiber_locals`, held by the fiber object). A green
+  # thread's store lives on its Thread instance (`Thread#[]` below);
+  # a fiber nested inside a green thread shares that store (a
+  # divergence: CRuby would give it a fresh one).
+  #
+  # Key contract (CRuby's rb_thread_aref/aset): a Symbol, or a String
+  # interned to one, else TypeError; `[k] = nil` deletes the key.
+  # vm/thread.rs serves the Symbol-key `[]` / non-nil `[]=` and
+  # `Thread.current` itself without a frame while these defs are the
+  # live ones.
+  def self.__local_key(key)
+    case key
+    when Symbol then key
+    when String then key.to_sym
+    else raise TypeError, "#{key.inspect} is not a symbol nor a string"
+    end
+  end
+  def self.__fiber_local_store
+    (@coop_current.nil? && __rubyrs_fiber_locals) || (@fiber_locals ||= {})
+  end
   def self.[](key)
-    @fiber_locals ||= {}
-    @fiber_locals[key]
+    __fiber_local_store[__local_key(key)]
   end
   def self.[]=(key, val)
-    @fiber_locals ||= {}
-    @fiber_locals[key] = val
+    k = __local_key(key)
+    if val.nil?
+      __fiber_local_store.delete(k)
+    else
+      __fiber_local_store[k] = val
+    end
+    val
   end
   def self.key?(key)
-    @fiber_locals ||= {}
-    @fiber_locals.key?(key)
+    __fiber_local_store.key?(__local_key(key))
   end
+  def self.keys
+    __fiber_local_store.keys
+  end
+  # Thread variables: same key contract; a nil value is stored (it
+  # still shows in `thread_variables`) but reads as not set.
   def self.thread_variable_get(key)
-    @thread_vars ||= {}
-    @thread_vars[key]
+    (@thread_vars ||= {})[__local_key(key)]
   end
   def self.thread_variable_set(key, val)
-    @thread_vars ||= {}
-    @thread_vars[key] = val
+    (@thread_vars ||= {})[__local_key(key)] = val
   end
   def self.thread_variable?(key)
-    @thread_vars ||= {}
-    @thread_vars.key?(key)
+    !(@thread_vars ||= {})[__local_key(key)].nil?
+  end
+  def self.thread_variables
+    (@thread_vars ||= {}).keys
   end
 
   # `Thread.handle_interrupt(ExceptionClass => :never|:immediate|:on_blocking)
@@ -1230,28 +1264,43 @@ class Thread
   # CRuby Thread instance surface used by real code: fiber-locals
   # (`Thread.current[:k]` inside a green thread lands here), thread
   # variables, wakeup/run, name.
+  # Same key contract as the class-level store above.
   def [](key)
-    (@fiber_locals ||= {})[key]
+    (@fiber_locals ||= {})[::Thread.__local_key(key)]
   end
 
   def []=(key, val)
-    (@fiber_locals ||= {})[key] = val
+    k = ::Thread.__local_key(key)
+    if val.nil?
+      (@fiber_locals ||= {}).delete(k)
+    else
+      (@fiber_locals ||= {})[k] = val
+    end
+    val
   end
 
   def key?(key)
-    (@fiber_locals ||= {}).key?(key)
+    (@fiber_locals ||= {}).key?(::Thread.__local_key(key))
+  end
+
+  def keys
+    (@fiber_locals ||= {}).keys
   end
 
   def thread_variable_get(key)
-    (@thread_vars ||= {})[key]
+    (@thread_vars ||= {})[::Thread.__local_key(key)]
   end
 
   def thread_variable_set(key, val)
-    (@thread_vars ||= {})[key] = val
+    (@thread_vars ||= {})[::Thread.__local_key(key)] = val
   end
 
   def thread_variable?(key)
-    (@thread_vars ||= {}).key?(key)
+    !(@thread_vars ||= {})[::Thread.__local_key(key)].nil?
+  end
+
+  def thread_variables
+    (@thread_vars ||= {}).keys
   end
 
   def wakeup

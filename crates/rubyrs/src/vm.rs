@@ -37,6 +37,7 @@ mod range;
 mod sort;
 mod sprintf;
 pub(crate) mod step;
+mod thread;
 pub(crate) mod str2int;
 mod string;
 mod util;
@@ -2537,6 +2538,10 @@ pub(crate) struct Vm {
     /// allocation, so a user redefinition (which replaces the table
     /// entry and bumps `method_gen`) can never alias this pointer.
     pub(crate) rtm_default_stub: Option<std::rc::Rc<crate::value::Method>>,
+    /// Captured preamble Thread / Fiber / Mutex methods behind the
+    /// frameless `Thread.current` / `Thread.current[:k]` /
+    /// `Mutex#synchronize` serves (vm/thread.rs).
+    pub(crate) thread_intr: thread::ThreadIntrinsics,
     pub(crate) sym_send: SymId,
     pub(crate) sym_send_u: SymId,
     pub(crate) sym_public_send: SymId,
@@ -3255,6 +3260,7 @@ impl Vm {
             }
             mask
         };
+        let thread_intr = thread::ThreadIntrinsics::new(&mut interner);
         let class_singleton_deny: crate::intern::FxHashSet<SymId> = [
             "__dir__", "__send__", "send", "public_send", "method",
             "methods", "define_method", "define_singleton_method",
@@ -3661,6 +3667,7 @@ impl Vm {
             sym_respond_to_missing,
             sym_method_missing,
             rtm_default_stub: None,
+            thread_intr,
             sym_send,
             sym_send_u,
             sym_public_send,

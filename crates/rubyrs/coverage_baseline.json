@@ -113,6 +113,7 @@
     "crates/rubyrs/src/vm/step.rs": 86,
     "crates/rubyrs/src/vm/str2int.rs": 98,
     "crates/rubyrs/src/vm/string.rs": 87,
+    "crates/rubyrs/src/vm/thread.rs": 89,
     "crates/rubyrs/src/vm/util.rs": 96,
     "crates/rubyrs/src/vm/vm_ptr.rs": 100
   },
