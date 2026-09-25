@@ -518,16 +518,24 @@ impl Vm {
     fn kept_frame_run(&mut self, bl: &mut BlockLoop) -> Result<BlockStep, Trap> {
         bl.live = false;
         self.dispatch_until(bl.pre_frames)?;
-        if self.method_return.is_some() {
-            return Ok(BlockStep::MethodReturn);
-        }
         #[cfg(feature = "_fiber")]
         let parked = self.fiber_yield_pending.is_some();
         #[cfg(not(feature = "_fiber"))]
         let parked = false;
-        bl.live = !parked
+        bl.live = self.method_return.is_none()
+            && !parked
             && self.frames.len() == bl.pre_frames + 1
             && self.kept_block == (self.frames.len(), self.frames[bl.pre_frames].base_sp);
+        if !bl.live {
+            // The frame was popped (or is left for an outer unwinder):
+            // drop its marker so a later frame at the same depth and
+            // base_sp — one `kept_frame_arm_run` did not arm — is not
+            // mistaken for it by the kept-frame arm of `Op::Return`.
+            self.kept_block = bl.prev;
+        }
+        if self.method_return.is_some() {
+            return Ok(BlockStep::MethodReturn);
+        }
         let r = self.stack.pop().unwrap_or(Value::Nil);
         if self.break_signaled {
             self.break_signaled = false;
@@ -544,6 +552,7 @@ impl Vm {
             return;
         }
         bl.live = false;
+        self.kept_block = bl.prev;
         if self.frames.len() == bl.pre_frames + 1
             && let Some(f) = self.frames.pop()
         {

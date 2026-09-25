@@ -123,3 +123,16 @@ p a.map(&method(:Integer))
 [1, 2].each { p it }
 [1, 2].each { p _1 }
 { a: 1 }.each { p [_1, _2] }
+
+# Kept and popped frames alternate: odd elements leave through an
+# ensure-driven `next` (frame popped), even ones return plainly (kept).
+def id1(v) = v
+log = []
+r = (1..6).map { |x| x.odd? ? (begin; next id1(-x); ensure; log << x; end) : id1(x) }
+p r, log
+log = []
+6.times { |i| i.even? ? (begin; next; ensure; log << i; end) : log << id1(i * 10) }
+p log
+log = []
+p({ a: 1, b: 2, c: 3 }.select { |k, v| v == 2 ? (begin; next true; ensure; log << k; end) : v > 2 })
+p log
