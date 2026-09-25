@@ -19424,6 +19424,10 @@ impl Vm {
         {
             return Ok(false);
         }
+        // Resolved to the preamble `Mutex#synchronize` — vm/thread.rs.
+        if argc == 0 && self.try_serve_mutex_synchronize(&m, &cls, id, block_id)? {
+            return Ok(true);
+        }
         let fixed = match m.fixed_arity {
             Some(f) if f.required as usize == argc => f,
             _ => return Ok(false),
@@ -19539,6 +19543,11 @@ impl Vm {
         // the NoMethodError visibility shape, respectively).
         if m.builtin.is_some() || m.visibility.get() != Visibility::Public {
             return Ok(false);
+        }
+        // Resolved to a preamble Thread/Fiber method served natively
+        // (`Thread.current`, `Thread.current[:k]`, …) — vm/thread.rs.
+        if self.try_serve_native_class_fn(&m, &cls, name_id, argc)? {
+            return Ok(true);
         }
         let fixed = match m.fixed_arity {
             Some(f) if m.closure.is_none() && f.required as usize == argc => f,

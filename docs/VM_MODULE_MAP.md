@@ -29,6 +29,7 @@ the `mod` declarations + cross-module re-exports.
 | parsing a digit string into an Integer | [`vm/str2int.rs`](#vmstr2intrs-bignumc-rb_cstr_to_inum) |
 | `sort` / `sort_by` ordering | [`vm/sort.rs`](#vmsortrs-arrayc-sort) |
 | `Fiber` | [`vm/fiber.rs`](#vmfiberrs-contc) |
+| `Thread.current` / `Mutex#synchronize` fast paths | [`vm/thread.rs`](#vmthreadrs-threadc--thread_syncc) |
 | String methods + Regex match shims | [`vm/string.rs`](#vmstringrs-stringc) |
 | `File.read` / `File.exist?` etc. | [`vm/fileops.rs`](#vmfileopsrs-filec) |
 | shared cross-cutting helpers | [`vm/util.rs`](#vmutilrs-cross-cutting) |
@@ -282,6 +283,18 @@ propagates cleanly. ~190 lines.
 
 The Fiber primitive
 ([ADR 0023](adr/0023-true-async-streaming.md)). ~2,200 lines.
+
+### `vm/thread.rs` (`thread.c` + `thread_sync.c`)
+
+Native serves for the preamble's hottest `Thread` / `Fiber` / `Mutex`
+methods (#381). ~340 lines. `capture_native_protos` records the
+preamble `Method`s once they load (from `load_preamble`). A serve fires
+only when dispatch has already resolved the call to one of those exact
+`Rc`s. The hooks are `try_serve_native_class_fn`, called from the
+class-singleton IC, and `try_serve_mutex_synchronize`, called from the
+block-form object IC. `swap_fiber_locals` gives each fiber its own
+`Thread.current[:k]` store and is called by `fiber.rs`'s
+`resume_fiber`.
 
 ### `vm/match_data.rs` (`re.c`)
 

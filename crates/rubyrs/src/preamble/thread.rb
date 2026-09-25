@@ -338,8 +338,10 @@ class Thread
     1
   end
   # `Thread.current` IS the Thread class in the single-threaded model,
-  # so `Thread.current[:k]` lands here; one process-global store is the
-  # correct semantics when there is exactly one thread/fiber.
+  # so `Thread.current[:k]` lands here. `@fiber_locals` is the RUNNING
+  # fiber's store: `resume_fiber` swaps it per fiber
+  # (vm/thread.rs `swap_fiber_locals`), and vm/thread.rs also reads it
+  # directly to serve these two methods natively.
   #
   # CRuby keeps `#[]`/`#[]=` (FIBER-local) and
   # `#thread_variable_get`/`set` (THREAD-local) in SEPARATE stores, so
