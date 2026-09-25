@@ -151,6 +151,18 @@ class U
 end
 2.times { puts call_zero_args(u) }
 
+# A site as wide as the cache: each missing class holds one way, which also
+# answers the regular lookup negatively. Then give one class a real method,
+# another a private one, and check every way still answers correctly.
+wide = (1..5).map do |i|
+  Class.new { define_method(:method_missing) { |name, *args| "W#{i}(#{name})" } }
+end
+wobjs = wide.map(&:new)
+3.times { puts wobjs.map { |o| call_zero_args(o) }.join(" ") }
+wide[2].class_eval { def zed = "W3 real zed" }
+wide[3].class_eval { private def zed = "W4 private zed" }
+2.times { puts wobjs.map { |o| call_zero_args(o) }.join(" ") }
+
 # Hot loop over one site.
 acc = 0
 k = A.new
