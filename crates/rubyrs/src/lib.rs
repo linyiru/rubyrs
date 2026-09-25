@@ -3514,7 +3514,7 @@ impl Runtime {
                 self.register_encoding_constants();
                 self.cache_fiber_class();
                 self.cache_default_rtm_stub();
-                self.vm.capture_native_protos();
+                self.vm.cache_thread_intrinsics();
                 self.startup_prof_report(_t_total);
                 return;
             }
@@ -3523,7 +3523,7 @@ impl Runtime {
         self.register_encoding_constants();
         self.cache_fiber_class();
         self.cache_default_rtm_stub();
-        self.vm.capture_native_protos();
+        self.vm.cache_thread_intrinsics();
         self.startup_prof_report(_t_total);
     }
 

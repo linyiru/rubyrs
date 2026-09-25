@@ -36,8 +36,8 @@ mod raise;
 mod range;
 mod sort;
 mod sprintf;
-mod thread;
 pub(crate) mod step;
+mod thread;
 pub(crate) mod str2int;
 mod string;
 mod util;
@@ -2525,6 +2525,10 @@ pub(crate) struct Vm {
     /// the name is pre-interned and the hook-existence probe rides
     /// the respond_to? `(class, name, method_gen)` memo.
     pub(crate) sym_respond_to_missing: SymId,
+    /// `method_missing` — resolved on every dispatch miss
+    /// (`try_method_missing`) and by the call-site method_missing IC
+    /// fill, so the name is interned once here.
+    pub(crate) sym_method_missing: SymId,
     /// The preamble's default `Object#respond_to_missing?` stub
     /// (pure `return false`), captured at `load_preamble` time —
     /// BEFORE any user code can run — so `try_respond_to_missing`
@@ -2534,9 +2538,10 @@ pub(crate) struct Vm {
     /// allocation, so a user redefinition (which replaces the table
     /// entry and bumps `method_gen`) can never alias this pointer.
     pub(crate) rtm_default_stub: Option<std::rc::Rc<crate::value::Method>>,
-    /// Preamble Thread / Fiber / Mutex methods served natively when a
-    /// call resolves to exactly them (`vm/thread.rs`, #381).
-    pub(crate) native_protos: thread::NativeProtos,
+    /// Captured preamble Thread / Fiber / Mutex methods behind the
+    /// frameless `Thread.current` / `Thread.current[:k]` /
+    /// `Mutex#synchronize` serves (vm/thread.rs).
+    pub(crate) thread_intr: thread::ThreadIntrinsics,
     pub(crate) sym_send: SymId,
     pub(crate) sym_send_u: SymId,
     pub(crate) sym_public_send: SymId,
@@ -3216,6 +3221,7 @@ impl Vm {
         let sym_method_intro = interner.intern("__method__");
         let sym_respond_to = interner.intern("respond_to?");
         let sym_respond_to_missing = interner.intern("respond_to_missing?");
+        let sym_method_missing = interner.intern("method_missing");
         let sym_send = interner.intern("send");
         let sym_send_u = interner.intern("__send__");
         let sym_public_send = interner.intern("public_send");
@@ -3262,6 +3268,7 @@ impl Vm {
             }
             mask
         };
+        let thread_intr = thread::ThreadIntrinsics::new(&mut interner);
         let class_singleton_deny: crate::intern::FxHashSet<SymId> = [
             "__dir__", "__send__", "send", "public_send", "method",
             "methods", "define_method", "define_singleton_method",
@@ -3666,8 +3673,9 @@ impl Vm {
             sym_method_intro,
             sym_respond_to,
             sym_respond_to_missing,
+            sym_method_missing,
             rtm_default_stub: None,
-            native_protos: thread::NativeProtos::default(),
+            thread_intr,
             sym_send,
             sym_send_u,
             sym_public_send,

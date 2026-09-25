@@ -568,6 +568,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // super(*a, &b) with no superclass method falls to method_missing;
 // super FROM method_missing raises (no recursion).
 #[test] fn super_to_method_missing() { run_diff("super_to_method_missing"); }
+// Call-site method_missing IC (#391): redefine / remove / undef after a
+// site warmed up, polymorphic and singleton receivers, every mm arity shape.
+#[test] fn method_missing_site_cache() { run_diff("method_missing_site_cache"); }
 // Pure-Ruby IPAddr (Tier 3 vendored): IPv4/IPv6 + CIDR + include?/===
 // (rack-protection HostAuthorization). Needs the vendored stdlib source.
 #[cfg(feature = "stdlib")]
@@ -1779,11 +1782,14 @@ fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 #[test] fn set_collect_bang() { run_diff("set_collect_bang"); }
 #[test] fn to_h() { run_diff("to_h"); }
 #[test] fn thread_current_locals() { run_diff("thread_current_locals"); }
+// vm/thread.rs native Thread.current / Thread#[] / Mutex#synchronize serves
+#[test] fn thread_local_keys() { run_diff("thread_local_keys"); }
+#[test] fn mutex_synchronize() { run_diff("mutex_synchronize"); }
 #[test] fn thread_native_serves() { run_diff("thread_native_serves"); }
-// Fiber-local vs thread-local stores, and the #381 serves stepping
-// aside inside fibers / green threads — needs the `_fiber` build.
 #[cfg(feature = "_fiber")]
 #[test] fn thread_fiber_locals() { run_diff("thread_fiber_locals"); }
+#[cfg(feature = "_fiber")]
+#[test] fn mutex_synchronize_contended() { run_diff("mutex_synchronize_contended"); }
 #[test] fn dynamic_base_const() { run_diff("dynamic_base_const"); }
 // `$~` is frame-local: a callee's internal regex match must not leak
 // into the caller's $1.. (uses =~, so regex-gated like scan_fancy_regex).

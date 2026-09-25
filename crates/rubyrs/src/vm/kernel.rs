@@ -57,6 +57,7 @@ impl Vm {
                 | "using"
                 | "__time_now_raw"
                 | "__rubyrs_clock_gettime"
+                | "__rubyrs_fiber_locals"
                 | "__rubyrs_time_parse_iso"
                 | "sleep"
                 | "exit"
@@ -999,7 +1000,7 @@ impl Vm {
                     let is_builtin = matches!(
                         &*name,
                         "puts" | "p" | "pp" | "print" | "require" | "load" |
-                        "sprintf" | "format" | "__time_now_raw" | "__rubyrs_clock_gettime" | "__rubyrs_time_parse_iso" | "sleep" |
+                        "sprintf" | "format" | "__time_now_raw" | "__rubyrs_clock_gettime" | "__rubyrs_fiber_locals" | "__rubyrs_time_parse_iso" | "sleep" |
                         "exit" | "exit!" | "abort" | "warn" | "at_exit" | "__rubyrs_signal_trap" |
                         "__rubyrs_stdout_write" | "__rubyrs_stderr_write" | "__rubyrs_exe_path" |
                         "Integer" | "Float" | "String" | "Array" | "Rational" |
@@ -1798,6 +1799,17 @@ impl Vm {
             // monotonic and CPU-time ids read `monotonic_now`, falling
             // back to `time_now`. Returns `nil` for an unknown clock
             // id or unit — the preamble raises the CRuby error.
+            // `__rubyrs_fiber_locals` — the running fiber's own
+            // fiber-local Hash, or nil on the root fiber
+            // (preamble/thread.rb `Thread.__fiber_local_store`).
+            "__rubyrs_fiber_locals" => {
+                if !args.is_empty() {
+                    return Some(Err(self.trap(RubyError::ArgumentError {
+                        msg: format!("wrong number of arguments (given {}, expected 0)", args.len()),
+                    })));
+                }
+                Some(self.fiber_locals_value())
+            }
             "__rubyrs_clock_gettime" => {
                 if args.len() != 2 {
                     return Some(Err(self.trap(RubyError::ArgumentError {
