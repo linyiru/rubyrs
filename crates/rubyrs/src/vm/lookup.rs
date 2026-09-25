@@ -467,10 +467,21 @@ impl Vm {
         if idx < self.call_caches.len() {
             let cc = &self.call_caches[idx];
             let cur_gen = self.method_gen;
+            let mm_key = class_ptr | 2;
             for w in &cc.ways {
-                if w.class_ptr == class_ptr && w.generation == cur_gen {
+                if w.generation != cur_gen {
+                    continue;
+                }
+                if w.class_ptr == class_ptr {
                     self.ic_stats.record_hit();
                     return w.method.clone();
+                }
+                // A method_missing entry doubles as this class's
+                // negative entry: it is only ever converted from one
+                // (see `fill_method_missing_cached`).
+                if w.class_ptr == mm_key {
+                    self.ic_stats.record_hit();
+                    return None;
                 }
             }
         }
@@ -534,6 +545,58 @@ impl Vm {
             cc.next_way = ((slot + 1) % IC_WAYS) as u8;
         }
         m
+    }
+
+    /// Call-site `method_missing` IC probe (#391): the user
+    /// `method_missing` this site resolved to the last time an
+    /// Object of class `cls` missed here, if `method_gen` hasn't
+    /// bumped since. Probe-only — entries are written by
+    /// `fill_method_missing_cached`, from the one place that proves
+    /// the whole `do_call` cascade declined the name for this class.
+    /// Entries share the site's ways, keyed `Rc::as_ptr(cls) | 2`:
+    /// bit 1 is free for the same alignment reason bit 0 is (see
+    /// `lookup_class_singleton_cached`), so no singleton probe can
+    /// match a method_missing entry, nor the reverse.
+    #[inline]
+    pub(crate) fn lookup_method_missing_cache_hit(
+        &self,
+        cls: &Rc<Class>,
+        cache_id: u32,
+    ) -> Option<Rc<Method>> {
+        let key = Rc::as_ptr(cls) as usize | 2;
+        let cc = self.call_caches.get(cache_id as usize)?;
+        cc.ways
+            .iter()
+            .find(|w| w.class_ptr == key && w.generation == self.method_gen)
+            .and_then(|w| w.method.clone())
+    }
+
+    /// Fill side of `lookup_method_missing_cache_hit`: cache `mm` as
+    /// the method_missing resolution for (`cls`, site `cache_id`) at
+    /// the current `method_gen`. The entry REPLACES the site's
+    /// negative `(cls, None)` entry, which the explicit-recv lookup
+    /// filled on this same miss, and `lookup_method_cached` reads it
+    /// back as that negative answer — so each missing class costs one
+    /// way, not two, and a polymorphic site keeps `IC_WAYS` classes.
+    /// With no current negative entry (a non-public method resolved
+    /// instead, which the fast path never serves past) nothing fills.
+    pub(crate) fn fill_method_missing_cached(&mut self, cls: &Rc<Class>, cache_id: u32, mm: Rc<Method>) {
+        let class_ptr = Rc::as_ptr(cls) as usize;
+        let key = class_ptr | 2;
+        let cur_gen = self.method_gen;
+        let Some(cc) = self.call_caches.get_mut(cache_id as usize) else { return };
+        let mut mm = Some(mm);
+        for w in cc.ways.iter_mut() {
+            if w.class_ptr == class_ptr && w.generation == cur_gen && w.method.is_none() {
+                if let Some(mm) = mm.take() {
+                    *w = CallCacheEntry { class_ptr: key, generation: cur_gen, method: Some(mm) };
+                }
+            } else if w.class_ptr == key {
+                // A stale entry for this key (older `method_gen`)
+                // frees its way.
+                *w = CallCacheEntry::default();
+            }
+        }
     }
 
     pub(crate) fn lookup_toplevel_method_cached(

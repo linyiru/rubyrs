@@ -58,6 +58,12 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   in backtraces. ([#381](https://github.com/linyiru/rubyrs/issues/381),
   `mutex_synchronize.rb`, `mutex_synchronize_contended.rb`,
   `thread_native_serves.rb`)
+- **`method_missing` dispatch is cached per call site** — once a site has
+  missed to a user `method_missing` for a receiver class, later calls skip
+  the dispatch cascade and invoke it directly (~1.7× on `o.nope`, now at
+  parity with calling the same body directly).
+  ([#391](https://github.com/linyiru/rubyrs/issues/391),
+  `method_missing_site_cache.rb`)
 - **`Symbol#start_with?` / `#end_with?` are native** — they read the
   interned name with no String allocation and take a pre-cascade fast path,
   ~9× faster than the preamble's `to_s.end_with?(*args)`.

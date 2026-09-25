@@ -568,6 +568,9 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // super(*a, &b) with no superclass method falls to method_missing;
 // super FROM method_missing raises (no recursion).
 #[test] fn super_to_method_missing() { run_diff("super_to_method_missing"); }
+// Call-site method_missing IC (#391): redefine / remove / undef after a
+// site warmed up, polymorphic and singleton receivers, every mm arity shape.
+#[test] fn method_missing_site_cache() { run_diff("method_missing_site_cache"); }
 // Pure-Ruby IPAddr (Tier 3 vendored): IPv4/IPv6 + CIDR + include?/===
 // (rack-protection HostAuthorization). Needs the vendored stdlib source.
 #[cfg(feature = "stdlib")]

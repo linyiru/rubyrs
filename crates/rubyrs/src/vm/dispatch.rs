@@ -2139,7 +2139,33 @@ impl Vm {
         args: Vec<Value>,
         block: Option<ObjId>,
     ) -> Result<bool, Trap> {
-        let mm_id = self.interner.intern("method_missing");
+        let Some(m) = self.resolve_method_missing(recv) else { return Ok(false) };
+        let mut args = args;
+        args.insert(0, Value::Sym(name_id));
+        self.invoke_method_with_block(m, recv.clone(), args, block)?;
+        Ok(true)
+    }
+
+    /// `try_method_missing` for a borrowed args slice: builds the
+    /// forwarded `[name, *args]` once, with no intermediate copy.
+    pub(crate) fn try_method_missing_slice(
+        &mut self,
+        recv: &Value,
+        name_id: SymId,
+        args: &[Value],
+        block: Option<ObjId>,
+    ) -> Result<bool, Trap> {
+        let Some(m) = self.resolve_method_missing(recv) else { return Ok(false) };
+        let mut new_args = Vec::with_capacity(args.len() + 1);
+        new_args.push(Value::Sym(name_id));
+        new_args.extend_from_slice(args);
+        self.invoke_method_with_block(m, recv.clone(), new_args, block)?;
+        Ok(true)
+    }
+
+    /// The `method_missing` a dispatch miss on `recv` invokes, if any.
+    fn resolve_method_missing(&mut self, recv: &Value) -> Option<Rc<Method>> {
+        let mm_id = self.sym_method_missing;
         // Class / Module receivers consult the singleton-method
         // chain — same lookup `Klass.foo` itself uses — so a
         // `method_missing` defined in a module extended into the
@@ -2150,7 +2176,7 @@ impl Vm {
         // Module method_missing handlers — surfaced as
         // "undefined method `X' for Class" instead of the
         // user's recorder firing.
-        let m = match recv {
+        match recv {
             Value::Object(id) => {
                 let cls = self.heap.class_of(*id);
                 self.lookup_method_uncached(&cls, mm_id)
@@ -2197,16 +2223,7 @@ impl Vm {
                 tag.and_then(|tag| self.lookup_method_uncached(&tag, mm_id))
             }
             _ => None,
-        };
-        let m = match m {
-            Some(m) => m,
-            None => return Ok(false),
-        };
-        let mut new_args = Vec::with_capacity(args.len() + 1);
-        new_args.push(Value::Sym(name_id));
-        new_args.extend(args);
-        self.invoke_method_with_block(m, recv.clone(), new_args, block)?;
-        Ok(true)
+        }
     }
 
     /// CRuby resolves an absent constant by invoking the owning
@@ -11827,7 +11844,7 @@ impl Vm {
             // method_missing fallback (PoC #2). For Object self, look
             // up the class chain — if found, hand it the missed name
             // as a Symbol arg. Primitives skip this and raise directly.
-            if self.try_method_missing(&self_val, name_id, args.into_vec(), None)? {
+            if self.try_method_missing_slice(&self_val, name_id, &args, None)? {
                 return Ok(());
             }
             return Err(self.trap(RubyError::NoMethodError {
@@ -11849,7 +11866,7 @@ impl Vm {
         // methods are native `sym_primitive` arms with no record for an
         // undef to remove.
         if self.any_undefs && matches!(recv, Value::Sym(_)) && self.sym_undefed(name_id) {
-            if self.try_method_missing(&recv, name_id, args.to_vec(), None)? {
+            if self.try_method_missing_slice(&recv, name_id, &args, None)? {
                 return Ok(());
             }
             return Err(self.trap(RubyError::NoMethodError {
@@ -11880,7 +11897,7 @@ impl Vm {
                     walker = c.superclass.borrow().clone();
                 }
                 if undefed {
-                    if self.try_method_missing(&recv, name_id, args.to_vec(), None)? {
+                    if self.try_method_missing_slice(&recv, name_id, &args, None)? {
                         return Ok(());
                     }
                     return Err(self.trap(RubyError::NoMethodError {
@@ -12346,7 +12363,7 @@ impl Vm {
                 if let Err(e) =
                     self.check_method_visibility(&m, &recv, &name, bypass_visibility, require_public)
                 {
-                    if self.try_method_missing(&recv, name_id, args.into_vec(), None)? {
+                    if self.try_method_missing_slice(&recv, name_id, &args, None)? {
                         return Ok(());
                     }
                     return Err(e);
@@ -17446,7 +17463,31 @@ impl Vm {
                 return Ok(());
             }
         }
-        if self.try_method_missing(&recv, name_id, args.to_vec(), None)? {
+        // Call-site method_missing IC fill (#391). Reaching this point
+        // proves every arm above declined `name_id` for this receiver
+        // class, so later calls from this site with the same class and
+        // `method_gen` can go straight to the user `method_missing`
+        // (served in `try_invoke_method_missing_cached`). Only the
+        // plain Op::Call shape the explicit-recv fast path itself
+        // serves fills: no refinement, force-primitive, or
+        // public_send. Names that any earlier arm keys on
+        // (`class_singleton_deny`, the P5b probe mask) never fill,
+        // since those arms may also look at argument values, which the
+        // cache key does not cover.
+        if cache_id != u32::MAX
+            && !maybe_refined
+            && !force_primitive
+            && !require_public
+            && let Value::Object(oid) = &recv
+            && let Some(cls) = self.heap.try_class_of(*oid)
+            && !self.class_singleton_deny.contains(&name_id)
+            && !self.probe_name_may_serve(name_id)
+            && let Some(mm) = self.lookup_method_uncached(&cls, self.sym_method_missing)
+            && mm.builtin.is_none()
+        {
+            self.fill_method_missing_cached(&cls, cache_id, mm);
+        }
+        if self.try_method_missing_slice(&recv, name_id, &args, None)? {
             return Ok(());
         }
         // Kernel module-function fallback: CRuby's `Kernel#Array`,
@@ -18946,7 +18987,7 @@ impl Vm {
             return Ok(false); // class-less slot (HeapObj::Fiber) -> universal arms
         };
         let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) else {
-            return Ok(false);
+            return self.try_invoke_method_missing_cached(id, cls, name_id, argc, cache_id, recv_idx);
         };
         // Builtins carry a dummy `proto_idx` and re-dispatch in
         // `invoke_method_with_block`; non-public methods keep the slow
@@ -18954,6 +18995,60 @@ impl Vm {
         if m.visibility.get() != Visibility::Public || m.builtin.is_some() {
             return Ok(false);
         }
+        self.serve_explicit_recv_method(m, id, cls, recv_idx, argc, true)
+    }
+
+    /// Call-site `method_missing` IC serve (#391): the explicit-recv
+    /// lookup missed, and this site has already watched the full
+    /// `do_call` cascade decline the name for this receiver class and
+    /// land on a user `method_missing` (see the fill at the cascade
+    /// tail). Invoke that method stack-direct with the missed name
+    /// inserted as its first argument, which is exactly the call
+    /// `try_method_missing` makes, minus the cascade walk and the two
+    /// args `Vec`s. A declined serve removes the inserted name, so the
+    /// stack is as it was and the caller falls through.
+    fn try_invoke_method_missing_cached(
+        &mut self,
+        id: ObjId,
+        cls: Rc<Class>,
+        name_id: SymId,
+        argc: usize,
+        cache_id: u32,
+        recv_idx: usize,
+    ) -> Result<bool, Trap> {
+        let Some(mm) = self.lookup_method_missing_cache_hit(&cls, cache_id) else {
+            return Ok(false);
+        };
+        self.stack.insert(recv_idx + 1, Value::Sym(name_id));
+        // `jit_route = false`: routing to the slow-cascade JIT hook
+        // would compile the method the cascade resolves for `name_id`,
+        // not `method_missing`, and would decline this serve forever.
+        let served = self.serve_explicit_recv_method(mm, id, cls, recv_idx, argc + 1, false)?;
+        if !served {
+            self.stack.remove(recv_idx + 1);
+        }
+        Ok(served)
+    }
+
+    /// The serve half of `try_invoke_explicit_recv_cached`: invoke the
+    /// resolved non-builtin method `m` on the Object at
+    /// `stack[recv_idx]` with the `argc` args above it, stack-direct.
+    /// `Ok(false)` leaves the stack untouched. `jit_route` permits the
+    /// decline that routes a not-yet-compiled 1-arg method to the
+    /// slow-cascade JIT hook.
+    #[inline]
+    fn serve_explicit_recv_method(
+        &mut self,
+        m: Rc<Method>,
+        id: ObjId,
+        cls: Rc<Class>,
+        recv_idx: usize,
+        argc: usize,
+        jit_route: bool,
+    ) -> Result<bool, Trap> {
+        // Both are read only by the jit-native serves below.
+        #[cfg(not(feature = "jit-native"))]
+        let _ = (&cls, jit_route);
         // Closure-backed (`define_method`) methods: serve the simple
         // fixed-arity shape stack-direct (dispatch-campaign P1 — the
         // dm_bench 2M-send shape previously walked the whole cascade);
@@ -19103,7 +19198,8 @@ impl Vm {
             // Not yet compiled but eligible → route to the hook to compile it.
             // Skipped entirely when the 1-arg settle bit is set (the route
             // answer is a known `false`; avoids re-reading the flag inside).
-            if argc == 1
+            if jit_route
+                && argc == 1
                 && jflags & crate::vm::JFLAG_NO_ONEARG == 0
                 && self.jit_should_route(pidx, argc)
             {
