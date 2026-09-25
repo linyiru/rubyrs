@@ -2461,6 +2461,9 @@ pub(crate) struct Vm {
     /// path (PathManager.join-style guards probe both per call).
     pub(crate) sym_nil_q: SymId,
     pub(crate) sym_empty_q: SymId,
+    /// Pre-interned `start_with?` / `end_with?` for `try_fast_sym_affix`.
+    pub(crate) sym_start_with_q: SymId,
+    pub(crate) sym_end_with_q: SymId,
     /// Pre-interned `===` for the case-equality fast path (RuboCop's
     /// NodePattern matchers fire `SYM === node` / `Mod === node`
     /// millions of times per cop walk — 20% of the slow cascade).
@@ -2569,6 +2572,9 @@ pub(crate) struct Vm {
     /// perf in that exotic program, never correctness).
     pub(crate) fast_prim_str_safe: bool,
     pub(crate) fast_prim_int_safe: bool,
+    /// `try_fast_sym_affix` twin (same pass): no user `start_with?` /
+    /// `end_with?` anywhere on the Symbol chain.
+    pub(crate) fast_sym_affix_safe: bool,
     /// `===` case-equality fast-path twins (same revalidation pass):
     /// no user `===` anywhere on the Symbol / String chain (sym /
     /// str flags), and no user `===` INSTANCE method on the Module /
@@ -3173,6 +3179,8 @@ impl Vm {
         let sym_frozen_q = interner.intern("frozen?");
         let sym_nil_q = interner.intern("nil?");
         let sym_empty_q = interner.intern("empty?");
+        let sym_start_with_q = interner.intern("start_with?");
+        let sym_end_with_q = interner.intern("end_with?");
         let sym_case_eq = interner.intern("===");
         let sym_not = interner.intern("!");
         let sym_is_a = interner.intern("is_a?");
@@ -3238,7 +3246,7 @@ impl Vm {
                 sym_push, sym_method_defined_q, sym_kernel_array,
                 sym_block_given_q, sym_method_intro, sym_respond_to,
                 sym_public_send, sym_send, sym_send_u, sym_merge, sym_slice,
-                sym_except,
+                sym_except, sym_start_with_q, sym_end_with_q,
             ];
             let max = served.iter().map(|s| s.0).max().unwrap_or(0) as usize;
             let mut mask = vec![0u64; max / 64 + 1];
@@ -3622,6 +3630,8 @@ impl Vm {
             sym_frozen_q,
             sym_nil_q,
             sym_empty_q,
+            sym_start_with_q,
+            sym_end_with_q,
             sym_case_eq,
             sym_not,
             sym_is_a,
@@ -3663,6 +3673,7 @@ impl Vm {
             fast_index_hash_key_safe: false,
             fast_prim_str_safe: false,
             fast_prim_int_safe: false,
+            fast_sym_affix_safe: false,
             fast_case_eq_sym_safe: false,
             fast_case_eq_str_safe: false,
             fast_case_eq_class_safe: false,

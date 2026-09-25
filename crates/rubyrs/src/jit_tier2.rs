@@ -2051,8 +2051,7 @@ unsafe extern "C" fn t2_lite_const_flat(
 unsafe extern "C" fn t2_push_const_str(vm: *mut crate::vm::Vm, sym: i64, pidx: i64) {
     let vm = unsafe { &mut *vm };
     let (id, pidx) = (SymId(sym as u32), pidx as usize);
-    let s = vm.interner.resolve(id).clone();
-    let v = Value::new_str(s.to_string());
+    let v = Value::new_str(&**vm.interner.resolve(id));
     if let Some(enc) = vm.protos[pidx].source_encoding
         && let Value::Str(rs) = &v
     {

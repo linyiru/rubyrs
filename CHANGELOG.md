@@ -57,7 +57,10 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   wins. Divergence: the `Thread::Mutex#synchronize` frame no longer appears
   in backtraces. ([#381](https://github.com/linyiru/rubyrs/issues/381),
   `mutex_synchronize.rb`, `mutex_synchronize_contended.rb`)
-
+- **`Symbol#start_with?` / `#end_with?` are native** — they read the
+  interned name with no String allocation and take a pre-cascade fast path,
+  ~9× faster than the preamble's `to_s.end_with?(*args)`.
+  ([#380](https://github.com/linyiru/rubyrs/issues/380), `symbol_affix.rb`)
 - **`define_method`-installed methods dispatch through the monomorphic
   inline-cache fast paths** — simple fixed-arity closure-backed methods
   (the `obj.dm_method(args)` / implicit-self shapes) no longer walk the
@@ -123,7 +126,21 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   shares that thread's store.
   ([#381](https://github.com/linyiru/rubyrs/issues/381),
   `thread_fiber_locals.rb`, `thread_local_keys.rb`)
-
+- **`Symbol#start_with?` / `#end_with?` match CRuby on non-String
+  arguments** — they raise TypeError (after a `to_str` attempt) instead of
+  returning `false`, `start_with?(regexp)` sets `$~`, and a non-ASCII
+  symbol against an incompatible BINARY affix raises
+  `Encoding::CompatibilityError`.
+  ([#380](https://github.com/linyiru/rubyrs/issues/380), `symbol_affix.rb`)
+- **A module prepended to a primitive class wins over its native
+  methods** — `class Symbol; prepend M; end` (likewise String, Integer, …)
+  now reaches `M#end_with?` instead of the built-in arm, including
+  modules that `M` itself prepends or includes, and
+  `class Symbol; undef_method :start_with?; end` raises NoMethodError on
+  every call path (`send`, `respond_to?`, block form, warm call sites)
+  unless a prepended module still supplies the method. A class
+  argument's singleton `to_str` is honoured.
+  ([#387](https://github.com/linyiru/rubyrs/pull/387), `symbol_affix_reopen.rb`)
 - **Keyword literal `String` defaults are fresh per call and honour
   `# frozen_string_literal: true`** — `def f(s: "x"); s << "y"; end`
   no longer leaks one call's mutation into the next call's default
@@ -189,6 +206,9 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Internal
 
+- **String literals copy the interned bytes directly** instead of going
+  through `ToString`'s formatter path, so a fresh literal costs ~30% less.
+  ([#380](https://github.com/linyiru/rubyrs/issues/380))
 - **`CLAUDE.md` added** — agent-facing orientation at the repo root:
   build/test commands (including the JIT-tier diff runs), the
   diff-fixture registration and known-failure discipline, the

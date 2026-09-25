@@ -2905,16 +2905,21 @@ impl Vm {
     /// the flags existed these arms silently shadowed reopens.
     /// `Regexp#===` body shared by the String and Symbol receiver
     /// shapes: run captures, publish `$~` (or clear it on miss),
-    /// return the hit verdict.
+    /// return the hit verdict. `anchored` counts only a match at
+    /// index 0 as a hit (`Symbol#start_with?(re)`, CRuby's
+    /// `rb_reg_start_with_p`); the leftmost match is the anchored
+    /// one whenever an anchored one exists, so a search suffices.
     #[cfg(feature = "regex")]
-    fn regex_case_eq_on(
+    pub(crate) fn regex_case_eq_on(
         &mut self,
         re: &crate::regex_engine::CompiledRegex,
         input: &str,
+        anchored: bool,
     ) -> Result<bool, Trap> {
         let owned = re
             .captures_owned(input)
-            .map_err(|e| self.trap(e.to_ruby_error(re.as_str())))?;
+            .map_err(|e| self.trap(e.to_ruby_error(re.as_str())))?
+            .filter(|oc| !anchored || oc.m_start == 0);
         match owned {
             Some(oc) => {
                 self.save_match_scope_on_write();
@@ -3032,6 +3037,54 @@ impl Vm {
         self.stack.pop();
         self.stack.push(v);
         true
+    }
+
+    /// The user method a primitive-class reopen gate serves instead of
+    /// the native arm: the PREPEND chain first (`prepend_chain`, which
+    /// sits ahead of the class in CRuby's lookup), then the class's own
+    /// table. The class's included modules stay behind the arm (String
+    /// includes Comparable). Shared by `do_call` and its block-form twin.
+    fn prim_reopen_target(cls: &Rc<crate::value::Class>, name_id: SymId) -> Option<Rc<Method>> {
+        Self::prepend_chain(cls)
+            .iter()
+            .find_map(|p| p.methods.borrow().get(&name_id).cloned())
+            .or_else(|| cls.methods.borrow().get(&name_id).cloned())
+    }
+
+    /// `Symbol#start_with?` / `#end_with?` fast path (#380). Rails
+    /// probes setter names this way (`OrderedOptions#method_missing`,
+    /// `class_attribute`) ~32×/request, and the slow cascade doubled
+    /// the cost of the native arm. Serves the same `sym_affix_q` the
+    /// `sym_primitive` arm calls, so hit semantics are identical by
+    /// construction. Gated on `fast_sym_affix_safe` (no user def of
+    /// either name on the Symbol chain; same `method_gen` pass as
+    /// `try_fast_index`), so a reopen wins through the slow path's
+    /// reopen-precedence gate. The 1-arg shape runs without an args Vec.
+    pub(crate) fn try_fast_sym_affix(&mut self, name_id: SymId, argc: usize, no_recv: bool) -> Result<bool, Trap> {
+        let start = name_id == self.sym_start_with_q;
+        if no_recv || !(start || name_id == self.sym_end_with_q) || argc >= self.stack.len() {
+            return Ok(false);
+        }
+        let ridx = self.stack.len() - 1 - argc;
+        let Value::Sym(id) = self.stack[ridx] else { return Ok(false) };
+        if self.fast_index_checked_gen != self.method_gen {
+            self.fast_index_revalidate();
+        }
+        if !self.fast_sym_affix_safe {
+            return Ok(false);
+        }
+        let hit = if argc == 1 {
+            // `argc < stack.len()` is checked above, so this pop succeeds.
+            let Some(arg) = self.stack.pop() else { return Ok(false) };
+            self.stack.pop();
+            self.sym_affix_q(id, start, std::slice::from_ref(&arg))?
+        } else {
+            let args: Vec<Value> = self.stack.drain(ridx + 1..).collect();
+            self.stack.pop();
+            self.sym_affix_q(id, start, &args)?
+        };
+        self.stack.push(Value::Bool(hit));
+        Ok(true)
     }
 
     /// Collection-index fast path: `h[key]` / `a[int]` (and the
@@ -3305,6 +3358,15 @@ impl Vm {
             Some(c) => self.lookup_method_uncached(&c, self.sym_case_eq).is_none(),
             None => false,
         };
+        self.fast_sym_affix_safe = match self.classes.get(&symbol_sym).cloned() {
+            Some(c) => {
+                self.lookup_method_uncached(&c, self.sym_start_with_q).is_none()
+                    && self.lookup_method_uncached(&c, self.sym_end_with_q).is_none()
+                    && !self.sym_undefed(self.sym_start_with_q)
+                    && !self.sym_undefed(self.sym_end_with_q)
+            }
+            None => false,
+        };
         let string_sym = self.interner.intern("String");
         self.fast_case_eq_str_safe = match self.classes.get(&string_sym).cloned() {
             Some(c) => self.lookup_method_uncached(&c, self.sym_case_eq).is_none(),
@@ -3436,14 +3498,18 @@ impl Vm {
             (0, "Integer"), (1, "Float"), (2, "String"), (3, "Symbol"),
             (4, "NilClass"), (5, "TrueClass"), (5, "FalseClass"), (6, "Rational"),
         ];
+        // The PREPEND chain (`prepend_chain`) counts too: it sits ahead
+        // of the class in CRuby's lookup, so it must also beat the arm.
         let mut mask = 0u8;
         for (bit, cname) in PRIM_CLASSES {
             let sym = self.interner.intern(cname);
             if let Some(c) = self.classes.get(&sym) {
-                let methods = c.methods.borrow();
-                if methods.keys().any(|nid| {
-                    Self::primitive_arm_name_for_class(cname, self.interner.resolve(*nid))
-                }) {
+                let claims = |tbl: &Rc<crate::value::Class>| {
+                    tbl.methods.borrow().keys().any(|nid| {
+                        Self::primitive_arm_name_for_class(cname, self.interner.resolve(*nid))
+                    })
+                };
+                if claims(c) || Self::prepend_chain(c).iter().any(claims) {
                     mask |= 1 << bit;
                 }
             }
@@ -10091,6 +10157,9 @@ impl Vm {
         if name_probed && !maybe_refined && self.try_fast_index(name_id, argc, no_recv) {
             return Ok(());
         }
+        if name_probed && !maybe_refined && self.try_fast_sym_affix(name_id, argc, no_recv)? {
+            return Ok(());
+        }
         // Explicit-receiver monomorphic fast path: an `obj.method(args)`
         // call on a user Object whose cached method is public and
         // fixed-arity — a plain `def` proto, an NFA-plan shape, or (P1) a
@@ -10388,12 +10457,10 @@ impl Vm {
                 if bit < 7
                     && self.prim_reopen_mask & (1 << bit) != 0
                     && let Value::Class(cls) = self.class_of(r)
+                    && let Some(m) = Self::prim_reopen_target(&cls, name_id)
                 {
-                    let m = cls.methods.borrow().get(&name_id).cloned();
-                    if let Some(m) = m {
-                        let r = r.clone();
-                        return self.invoke_method(m, r, args.into_vec());
-                    }
+                    let r = r.clone();
+                    return self.invoke_method(m, r, args.into_vec());
                 }
             }
         }
@@ -11778,6 +11845,19 @@ impl Vm {
         // goes straight to method_missing, CRuby's undef contract.
         // `any_undefs` keeps the cost at one bool for programs that
         // never undef.
+        // Symbol receivers join the gate through `sym_undefed`: their
+        // methods are native `sym_primitive` arms with no record for an
+        // undef to remove.
+        if self.any_undefs && matches!(recv, Value::Sym(_)) && self.sym_undefed(name_id) {
+            if self.try_method_missing(&recv, name_id, args.to_vec(), None)? {
+                return Ok(());
+            }
+            return Err(self.trap(RubyError::NoMethodError {
+                kind: crate::error::NoMethodErrorKind::Missing,
+                method: name.to_string(),
+                recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(&recv)),
+            }));
+        }
         if self.any_undefs {
             let chain_root = match &recv {
                 Value::Object(oid) => Some(self.heap.class_of(*oid)),
@@ -15826,7 +15906,7 @@ impl Vm {
                     // multipart specs `case` on lookahead patterns).
                     Value::Str(s) => {
                         let bound = s.to_string_lossy();
-                        self.regex_case_eq_on(re, &bound)?
+                        self.regex_case_eq_on(re, &bound, false)?
                     },
                     // CRuby's Regexp#=== also accepts Symbols,
                     // matching against the symbol's name —
@@ -15834,7 +15914,7 @@ impl Vm {
                     // runnable-method discovery) depends on it.
                     Value::Sym(sid) => {
                         let input = self.interner.resolve(*sid).to_string();
-                        self.regex_case_eq_on(re, &input)?
+                        self.regex_case_eq_on(re, &input, false)?
                     },
                     _ => false,
                 },
@@ -26080,15 +26160,29 @@ impl Vm {
                 if bit < 7
                     && self.prim_reopen_mask & (1 << bit) != 0
                     && let Value::Class(cls) = self.class_of(r)
+                    && let Some(m) = Self::prim_reopen_target(&cls, name_id)
                 {
-                    let m = cls.methods.borrow().get(&name_id).cloned();
-                    if let Some(m) = m {
-                        let r = r.clone();
-                        self.invoke_method_with_block(m, r, args, Some(block))?;
-                        return Ok(());
-                    }
+                    let r = r.clone();
+                    self.invoke_method_with_block(m, r, args, Some(block))?;
+                    return Ok(());
                 }
             }
+        }
+        // Symbol undef tombstone gate — block-form twin of do_call's.
+        // After the reopen gate, so a prepended method still wins.
+        if self.any_undefs
+            && let Some(r @ Value::Sym(_)) = &recv
+            && self.sym_undefed(name_id)
+        {
+            let r = r.clone();
+            if self.try_method_missing(&r, name_id, args, Some(block))? {
+                return Ok(());
+            }
+            return Err(self.trap(RubyError::NoMethodError {
+                kind: crate::error::NoMethodErrorKind::Missing,
+                method: name.to_string(),
+                recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(&r)),
+            }));
         }
 
         // Collection base-class reopen serve — the block-form twin of
