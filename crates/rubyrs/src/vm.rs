@@ -3000,6 +3000,14 @@ pub(crate) struct Vm {
     /// Deliberately NOT cfg-gated: a plain u32 inc/dec keeps the
     /// non-fiber hot path branch-free.
     pub(crate) native_iter_depth: u32,
+    /// Kept block frame of the innermost Rust-level iterator driver
+    /// running a `BlockLoop` (vm/iter.rs, issue #382): `(frames.len()
+    /// with the frame on top, its base_sp)`, `(0, 0)` = none. A plain
+    /// `Op::Return` from exactly that frame leaves it in place (value
+    /// pushed, dispatch_until exited) so the driver re-binds the next
+    /// element into it instead of popping and re-pushing a Frame per
+    /// iteration. Fiber-local (swapped with the frame stack it indexes).
+    pub(crate) kept_block: (usize, usize),
     /// P1c.3 (ADR 0023) — currently-running Fiber's ObjId.
     ///
     /// Set by `resume_fiber` BEFORE installing the
@@ -3753,6 +3761,7 @@ impl Vm {
             #[cfg(feature = "_fiber")]
             fiber_yield_pending: None,
             native_iter_depth: 0,
+            kept_block: (0, 0),
             #[cfg(feature = "_fiber")]
             current_fiber_id: None,
             #[cfg(feature = "_fiber")]

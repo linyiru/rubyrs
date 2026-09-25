@@ -6343,6 +6343,44 @@ impl Vm {
                         None => {}
                     }
                 }
+                // Kept block frame (issue #382, `BlockLoop` in
+                // vm/iter.rs): a plain return from the iterator
+                // driver's block frame leaves the frame in place for
+                // the next element. Only a frame with no open
+                // begin/rescue/loop bookkeeping qualifies (the
+                // driver re-enters it at ip 0); anything else takes
+                // the full pop below and the driver pushes afresh.
+                // Ok(false) ends the driver's dispatch_until exactly
+                // like the pop would (frames back at its boundary
+                // from its point of view: the value is on the stack).
+                if self.kept_block.0 == self.frames.len() && !crossing_walk_abandoned {
+                    let top = self.frames.len() - 1;
+                    let f = &self.frames[top];
+                    if f.base_sp == self.kept_block.1
+                        && f.swap_return.is_none()
+                        && f.aux.as_ref().is_none_or(|a| {
+                            a.rescues.is_empty()
+                                && a.begin_rescue_depths.is_empty()
+                                && a.loop_rescue_depths.is_empty()
+                                && a.loop_stack_depths.is_empty()
+                        })
+                    {
+                        let base = f.base_sp;
+                        // Balanced body (the common case): the return
+                        // value already sits alone above base_sp.
+                        if self.stack.len() != base + 1 {
+                            let ret = self.stack.pop().unwrap_or(Value::Nil);
+                            self.stack.truncate(base);
+                            self.stack.push(ret);
+                        }
+                        if !self.pending_loop_transfers.is_empty()
+                            || !self.pending_method_breaks.is_empty()
+                        {
+                            self.cancel_transfers_in_dead_frames(top);
+                        }
+                        return Ok(false);
+                    }
+                }
                 let f = self.frames.pop().expect("ICE: Return no frame");
                 // Cancel any ensure-walk suspended in the popped
                 // frame: a plain `return` from inside a suspended

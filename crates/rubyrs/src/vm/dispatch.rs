@@ -25654,6 +25654,20 @@ impl Vm {
                 }
             }
         }
+        // Plain `Array#each { }`, the hottest shape: straight to its
+        // driver, skipping `collection_call_block`'s preamble (frozen
+        // / subclass-override / Str gates) and arm chain. A subclass
+        // instance (class tag) keeps the full path's override probe.
+        if name == "each"
+            && argc == 0
+            && let Some(&Value::Array(aid)) = self.stack.get(recv_idx)
+            && self.heap.array_class_tag(aid).is_none()
+        {
+            let v = self.iter_array_each(aid, block_id)?;
+            self.stack.truncate(recv_idx);
+            self.stack.push(v);
+            return Ok(true);
+        }
         let recv = self.stack[recv_idx].clone();
         let args: Vec<Value> = self.stack[recv_idx + 2..].to_vec();
         debug_assert_eq!(args.len(), argc);

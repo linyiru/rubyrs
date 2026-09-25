@@ -1148,10 +1148,18 @@ impl Vm {
                 let loop_depth = f.loop_depth();
                 self.stack.truncate(h.stack_depth);
                 f.ip = h.handler_ip;
+                // `stack_len` is the length the body actually starts
+                // at, not `h.stack_depth`: a native iter driver that
+                // saw a non-local return has already consumed the
+                // yielding method's operands below the left-behind
+                // block frame, so the stack can be shorter than the
+                // handler's recorded depth (truncate never grows it)
+                // and EndEnsure would mistake the mismatch for an
+                // exception entry and "re-raise" a non-exception.
                 let coord = crate::vm::SuspendCoord {
                     frame_idx: self.frames.len() - 1,
                     rescues_len: rescues_after,
-                    stack_len: h.stack_depth,
+                    stack_len: self.stack.len(),
                     loop_depth,
                     seq: self.next_suspend_seq(),
                 };

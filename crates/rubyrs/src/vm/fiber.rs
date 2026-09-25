@@ -224,6 +224,8 @@ pub(crate) struct FiberSnapshot {
     /// (see `Vm::require_public_once`); Fiber-local for the same
     /// reason.
     pub(crate) require_public_once: bool,
+    /// `Vm::kept_block` indexes `frames` — it travels with them.
+    pub(crate) kept_block: (usize, usize),
     #[cfg(feature = "regex")]
     pub(crate) last_match: Option<LastMatch>,
 }
@@ -275,6 +277,7 @@ impl FiberSnapshot {
             &mut vm.require_public_once,
             &mut self.require_public_once,
         );
+        std::mem::swap(&mut vm.kept_block, &mut self.kept_block);
         #[cfg(feature = "regex")]
         std::mem::swap(&mut vm.last_match, &mut self.last_match);
         // The folded mask is a cache over swapped fields — refresh it
@@ -304,6 +307,7 @@ impl FiberSnapshot {
             suppress_call_result_push: false,
             bypass_visibility_once: false,
             require_public_once: false,
+            kept_block: (0, 0),
             #[cfg(feature = "regex")]
             last_match: None,
         }

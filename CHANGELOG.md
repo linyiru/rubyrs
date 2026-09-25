@@ -51,6 +51,18 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Changed
 
+- **Native iterators keep one block frame per call** instead of pushing
+  and popping a frame for every element: after a plain block return the
+  driver re-binds the next element into the same frame (Array, Hash,
+  Range and Integer drivers that run no Ruby code between yields).
+  `Array#each` on an Array receiver also skips the generic block-call
+  cascade. Blocks that can capture their binding (an inner closure,
+  `binding`, rest/keyword params) and the JIT tiers keep the per-element
+  frame. Interpreter, 10 elements per call: `A.each {}` 1225 → 497 ns
+  (CRuby 230), `A.map` 1302 → 590, `each_with_index` 1224 → 530,
+  `H.each { |k, v| }` 1229 → 547, `(1..10).each` 1209 → 520, `10.times`
+  1237 → 476. ([#382](https://github.com/linyiru/rubyrs/issues/382),
+  `iter_block_frame_reuse.rb`)
 - **`Thread.current`, `Thread.current[:k]` / `[]=`, `Fiber.current` and
   `Mutex#synchronize` are served natively** once dispatch resolves them
   to the preamble's own methods (a user override still wins). Measured
@@ -120,6 +132,15 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Fixed
 
+- **`return` through a block's `ensure` no longer raises TypeError** —
+  `def m = [1].each { begin; return 1; ensure; …; end }` ran the ensure
+  and then failed with "exception class/object expected" when `m` was
+  called outside any block. The ensure walk now records the stack depth
+  it actually resumes at, so the ensure tail resumes the return instead
+  of re-raising a stray operand. (`iter_block_frame_reuse.rb`)
+- **`Array#each` sees the array change under it** — like CRuby, elements
+  the block appends are visited and a shrink ends the walk early. It
+  used to iterate a snapshot taken at the call. (`iter_block_frame_reuse.rb`)
 - **`Thread.current[:k]` is fiber-local** — each `Fiber.new` body now
   starts with an empty store and leaves the resumer's alone, as in
   CRuby. Before, every fiber shared the main thread's store.
