@@ -2524,6 +2524,10 @@ pub(crate) struct Vm {
     /// the name is pre-interned and the hook-existence probe rides
     /// the respond_to? `(class, name, method_gen)` memo.
     pub(crate) sym_respond_to_missing: SymId,
+    /// `method_missing` — resolved on every dispatch miss
+    /// (`try_method_missing`) and by the call-site method_missing IC
+    /// fill, so the name is interned once here.
+    pub(crate) sym_method_missing: SymId,
     /// The preamble's default `Object#respond_to_missing?` stub
     /// (pure `return false`), captured at `load_preamble` time —
     /// BEFORE any user code can run — so `try_respond_to_missing`
@@ -3204,6 +3208,7 @@ impl Vm {
         let sym_method_intro = interner.intern("__method__");
         let sym_respond_to = interner.intern("respond_to?");
         let sym_respond_to_missing = interner.intern("respond_to_missing?");
+        let sym_method_missing = interner.intern("method_missing");
         let sym_send = interner.intern("send");
         let sym_send_u = interner.intern("__send__");
         let sym_public_send = interner.intern("public_send");
@@ -3654,6 +3659,7 @@ impl Vm {
             sym_method_intro,
             sym_respond_to,
             sym_respond_to_missing,
+            sym_method_missing,
             rtm_default_stub: None,
             sym_send,
             sym_send_u,

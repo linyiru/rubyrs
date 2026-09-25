@@ -536,6 +536,49 @@ impl Vm {
         m
     }
 
+    /// Call-site `method_missing` IC probe (#391): the user
+    /// `method_missing` this site resolved to the last time an
+    /// Object of class `cls` missed here, if `method_gen` hasn't
+    /// bumped since. Probe-only — entries are written by
+    /// `fill_method_missing_cached`, from the one place that proves
+    /// the whole `do_call` cascade declined the name for this class.
+    /// Entries share the site's ways, keyed `Rc::as_ptr(cls) | 2`:
+    /// bit 1 is free for the same alignment reason bit 0 is (see
+    /// `lookup_class_singleton_cached`), so no regular or singleton
+    /// probe can match a method_missing entry, nor the reverse.
+    #[inline]
+    pub(crate) fn lookup_method_missing_cache_hit(
+        &self,
+        cls: &Rc<Class>,
+        cache_id: u32,
+    ) -> Option<Rc<Method>> {
+        let key = Rc::as_ptr(cls) as usize | 2;
+        let cc = self.call_caches.get(cache_id as usize)?;
+        cc.ways
+            .iter()
+            .find(|w| w.class_ptr == key && w.generation == self.method_gen)
+            .and_then(|w| w.method.clone())
+    }
+
+    /// Fill side of `lookup_method_missing_cache_hit`: cache `mm` as
+    /// the method_missing resolution for (`cls`, site `cache_id`) at
+    /// the current `method_gen`.
+    pub(crate) fn fill_method_missing_cached(&mut self, cls: &Rc<Class>, cache_id: u32, mm: Rc<Method>) {
+        let key = Rc::as_ptr(cls) as usize | 2;
+        let cur_gen = self.method_gen;
+        let Some(cc) = self.call_caches.get_mut(cache_id as usize) else { return };
+        // A stale entry for the same key (older `method_gen`) is
+        // overwritten in place rather than left to occupy a second way.
+        let entry = CallCacheEntry { class_ptr: key, generation: cur_gen, method: Some(mm) };
+        if let Some(w) = cc.ways.iter_mut().find(|w| w.class_ptr == key) {
+            *w = entry;
+            return;
+        }
+        let slot = (cc.next_way as usize) % IC_WAYS;
+        cc.ways[slot] = entry;
+        cc.next_way = ((slot + 1) % IC_WAYS) as u8;
+    }
+
     pub(crate) fn lookup_toplevel_method_cached(
         &mut self,
         name_id: SymId,
