@@ -56,7 +56,8 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   preamble definitions are live (3–8× faster); a user redefinition still
   wins. Divergence: the `Thread::Mutex#synchronize` frame no longer appears
   in backtraces. ([#381](https://github.com/linyiru/rubyrs/issues/381),
-  `mutex_synchronize.rb`, `mutex_synchronize_contended.rb`)
+  `mutex_synchronize.rb`, `mutex_synchronize_contended.rb`,
+  `thread_native_serves.rb`)
 - **`Symbol#start_with?` / `#end_with?` are native** — they read the
   interned name with no String allocation and take a pre-cascade fast path,
   ~9× faster than the preamble's `to_s.end_with?(*args)`.

@@ -1780,6 +1780,7 @@ fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 // vm/thread.rs native Thread.current / Thread#[] / Mutex#synchronize serves
 #[test] fn thread_local_keys() { run_diff("thread_local_keys"); }
 #[test] fn mutex_synchronize() { run_diff("mutex_synchronize"); }
+#[test] fn thread_native_serves() { run_diff("thread_native_serves"); }
 #[cfg(feature = "_fiber")]
 #[test] fn thread_fiber_locals() { run_diff("thread_fiber_locals"); }
 #[cfg(feature = "_fiber")]
