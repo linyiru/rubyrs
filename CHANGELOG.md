@@ -89,8 +89,11 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   the dispatch cascade and invoke it directly (~1.7× on `o.nope`, now at
   parity with calling the same body directly). Bare implicit-self misses
   (`nope` inside an instance method) are cached the same way (~1.7×).
+  Under tier 2, a frameless caller also serves a cached fixed-arity
+  `method_missing(name, …)` without materializing its frame (~1.25×).
   ([#391](https://github.com/linyiru/rubyrs/issues/391),
-  `method_missing_site_cache.rb`, `method_missing_self_site_cache.rb`)
+  `method_missing_site_cache.rb`, `method_missing_self_site_cache.rb`,
+  `method_missing_lite_serve.rb`)
 - **`Symbol#start_with?` / `#end_with?` are native** — they read the
   interned name with no String allocation and take a pre-cascade fast path,
   ~9× faster than the preamble's `to_s.end_with?(*args)`.

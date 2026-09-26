@@ -1510,6 +1510,69 @@ fn lite_mat_here(
     1
 }
 
+/// `lite_mat_here` for `lite_serve_m`: first drops the `undo` stack range
+/// a `method_missing` serve inserted, restoring the call op's stack.
+#[inline]
+fn lite_mat_undo(
+    vm: &mut crate::vm::Vm,
+    c: &LiteCtx,
+    ip: usize,
+    reason: u8,
+    name: SymId,
+    cargc: usize,
+    undo: Option<(usize, usize)>,
+) -> i64 {
+    match undo {
+        Some((i, n)) => {
+            vm.stack.drain(i..i + n);
+            lite_mat_here(vm, c, ip, reason, name, cargc - 1)
+        }
+        None => lite_mat_here(vm, c, ip, reason, name, cargc),
+    }
+}
+
+/// Serve a lookup miss whose call site has cached a user `method_missing`
+/// for `cls` (#391, `Vm::fill_method_missing_site`) frameless: insert the
+/// missed name as the first argument at stack index `at` and serve
+/// `method_missing` through `lite_serve_m` with one more argument. Only a
+/// plain fixed-arity `method_missing` taking exactly the name plus the
+/// call's arguments qualifies; every other shape (and a cold cache)
+/// materializes with the stack untouched, as a plain miss did before.
+/// The fused `LoadLocalCall` form (`LiteRecv::LocalSlot`, no args) pushes a
+/// copy of the receiver and then the name, and serves as the explicit
+/// stack form: the result then replaces that copy, the fused op's net
+/// effect.
+#[allow(clippy::too_many_arguments)]
+fn lite_serve_method_missing(
+    vm: &mut crate::vm::Vm,
+    c: &LiteCtx,
+    ip: usize,
+    name_id: SymId,
+    cls: &std::rc::Rc<crate::value::Class>,
+    oid: crate::value::ObjId,
+    cid: u32,
+    recv: LiteRecv,
+    at: usize,
+    cargc: usize,
+) -> i64 {
+    let Some(mm) = vm.lookup_method_missing_cache_hit(cls, cid) else {
+        return lite_mat_here(vm, c, ip, 34, name_id, cargc);
+    };
+    if mm.closure.is_some() || mm.fixed_arity.is_none_or(|f| f.required as usize != cargc + 1) {
+        return lite_mat_here(vm, c, ip, 34, name_id, cargc);
+    }
+    if let LiteRecv::LocalSlot(p) = recv {
+        let recv_idx = vm.stack.len();
+        let v = unsafe { (*p).clone() };
+        vm.stack.push(v);
+        vm.stack.push(Value::Sym(name_id));
+        let undo = Some((recv_idx, 2));
+        return lite_serve_m(vm, c, ip, name_id, &mm, Some(cls), Some(oid), LiteRecv::Stack(recv_idx), 1, undo);
+    }
+    vm.stack.insert(at, Value::Sym(name_id));
+    lite_serve_m(vm, c, ip, name_id, &mm, Some(cls), Some(oid), recv, cargc + 1, Some((at, 1)))
+}
+
 /// Dispatch-boundary gates shared by every lite call form. Any hit →
 /// materialize (the full cascade owns these states). `t2_poll_flags != 0`
 /// (fuel or wall-clock deadline active) also declines: the per-call
@@ -1564,6 +1627,10 @@ fn lite_place(vm: &mut crate::vm::Vm, recv: &LiteRecv, cargc: usize, v: Value) {
 /// explicit forms additionally Public) frameless, or materialize. `oid`/`cls`
 /// are `Some` for an Object receiver (`None` = the toplevel-main form, which
 /// only the guard-free native families and lite→lite chains can serve).
+/// `undo` is the `(index, count)` stack range `lite_serve_method_missing`
+/// inserted (the name argument, plus the receiver copy for the fused
+/// `LoadLocalCall` form): every decline removes it again before
+/// materializing, so the interpreter re-runs the original call op.
 #[allow(clippy::too_many_arguments)]
 fn lite_serve_m(
     vm: &mut crate::vm::Vm,
@@ -1575,13 +1642,14 @@ fn lite_serve_m(
     oid: Option<crate::value::ObjId>,
     recv: LiteRecv,
     cargc: usize,
+    undo: Option<(usize, usize)>,
 ) -> i64 {
     let pidx = m.proto_idx;
     let fixed = match m.fixed_arity {
         Some(f) if f.required as usize == cargc => Some(f),
         // Wrong arity for a fixed method: the cascade raises the canonical
         // ArgumentError against the materialized frame.
-        Some(_) => return lite_mat_here(vm, c, ip, 36, name_id, cargc),
+        Some(_) => return lite_mat_undo(vm, c, ip, 36, name_id, cargc, undo),
         None => None,
     };
     if fixed.is_none() {
@@ -1600,7 +1668,7 @@ fn lite_serve_m(
             lite_place(vm, &recv, cargc, Value::Bool(result));
             return 0;
         }
-        return lite_mat_here(vm, c, ip, 37, name_id, cargc);
+        return lite_mat_undo(vm, c, ip, 37, name_id, cargc, undo);
     }
     // Trivial attr_reader: the frame-free getter read (both the explicit
     // and implicit dispatch paths serve this shape before anything else).
@@ -1654,7 +1722,7 @@ fn lite_serve_m(
                 }
                 debug_assert!(deopt);
                 vm.jstat_serve(pidx, 6, true);
-                return lite_mat_here(vm, c, ip, 38, name_id, cargc);
+                return lite_mat_undo(vm, c, ip, 38, name_id, cargc, undo);
             }
         }
         if cargc == 1 && jflags & crate::vm::JFLAG_NO_ONEARG == 0 {
@@ -1687,7 +1755,7 @@ fn lite_serve_m(
                         return 0;
                     }
                     vm.jstat_serve(pidx, 0, true);
-                    return lite_mat_here(vm, c, ip, 38, name_id, cargc);
+                    return lite_mat_undo(vm, c, ip, 38, name_id, cargc, undo);
                 }
             }
             // Object arg → the objparam specialization.
@@ -1709,7 +1777,7 @@ fn lite_serve_m(
                         return 0;
                     }
                     vm.jstat_serve(pidx, 3, true);
-                    return lite_mat_here(vm, c, ip, 38, name_id, cargc);
+                    return lite_mat_undo(vm, c, ip, 38, name_id, cargc, undo);
                 }
             }
         }
@@ -1732,7 +1800,7 @@ fn lite_serve_m(
                     return 0;
                 }
                 vm.jstat_serve(pidx, 2, true);
-                return lite_mat_here(vm, c, ip, 38, name_id, cargc);
+                return lite_mat_undo(vm, c, ip, 38, name_id, cargc, undo);
             }
         }
     }
@@ -1753,7 +1821,7 @@ fn lite_serve_m(
             || vm.frames.len() + vm.t2_lite_pending.len() + 2 > 10_000
             || vm.max_frames.is_some()
         {
-            return lite_mat_here(vm, c, ip, 40, name_id, cargc);
+            return lite_mat_undo(vm, c, ip, 40, name_id, cargc, undo);
         }
         let (n_pop, w) = match &recv {
             LiteRecv::Stack(recv_idx) => (cargc + 1, value_words(&vm.stack[*recv_idx])),
@@ -1817,7 +1885,7 @@ fn lite_serve_m(
         }
         return 1;
     }
-    lite_mat_here(vm, c, ip, 39, name_id, cargc)
+    lite_mat_undo(vm, c, ip, 39, name_id, cargc, undo)
 }
 
 /// `Op::Call(name, argc, cid)` in a FRAMELESS body — explicit receiver.
@@ -1847,7 +1915,9 @@ unsafe extern "C" fn t2_lite_call_ex(
                 return lite_mat_here(vm, &c, ip, 33, name_id, cargc);
             };
             let Some(m) = vm.lookup_method_cached(&cls, name_id, cid) else {
-                return lite_mat_here(vm, &c, ip, 34, name_id, cargc);
+                return lite_serve_method_missing(
+                    vm, &c, ip, name_id, &cls, oid, cid, LiteRecv::Stack(recv_idx), recv_idx + 1, cargc,
+                );
             };
             if m.visibility.get() != crate::value::Visibility::Public
                 || m.closure.is_some()
@@ -1855,7 +1925,7 @@ unsafe extern "C" fn t2_lite_call_ex(
             {
                 return lite_mat_here(vm, &c, ip, 35, name_id, cargc);
             }
-            lite_serve_m(vm, &c, ip, name_id, &m, Some(&cls), Some(oid), LiteRecv::Stack(recv_idx), cargc)
+            lite_serve_m(vm, &c, ip, name_id, &m, Some(&cls), Some(oid), LiteRecv::Stack(recv_idx), cargc, None)
         }
         _ => {
             // Non-Object receiver: the cascade's own native arms
@@ -1913,7 +1983,7 @@ unsafe extern "C" fn t2_lite_call_ns(
         if m.closure.is_some() || m.builtin.is_some() {
             return lite_mat_here(vm, &c, ip, 35, name_id, cargc);
         }
-        return lite_serve_m(vm, &c, ip, name_id, &m, None, None, LiteRecv::SelfWords, cargc);
+        return lite_serve_m(vm, &c, ip, name_id, &m, None, None, LiteRecv::SelfWords, cargc, None);
     }
     let Value::Object(oid) = &*sv else {
         return lite_mat_here(vm, &c, ip, 44, name_id, cargc);
@@ -1922,14 +1992,17 @@ unsafe extern "C" fn t2_lite_call_ns(
         return lite_mat_here(vm, &c, ip, 33, name_id, cargc);
     };
     let Some(m) = vm.lookup_method_cached(&cls, name_id, cid) else {
-        return lite_mat_here(vm, &c, ip, 34, name_id, cargc);
+        let Some(at) = vm.stack.len().checked_sub(cargc) else {
+            return lite_mat_here(vm, &c, ip, 34, name_id, cargc);
+        };
+        return lite_serve_method_missing(vm, &c, ip, name_id, &cls, *oid, cid, LiteRecv::SelfWords, at, cargc);
     };
     // No visibility gate: implicit-self calls legally reach
     // private/protected methods.
     if m.closure.is_some() || m.builtin.is_some() {
         return lite_mat_here(vm, &c, ip, 35, name_id, cargc);
     }
-    lite_serve_m(vm, &c, ip, name_id, &m, Some(&cls), Some(*oid), LiteRecv::SelfWords, cargc)
+    lite_serve_m(vm, &c, ip, name_id, &m, Some(&cls), Some(*oid), LiteRecv::SelfWords, cargc, None)
 }
 
 /// `Op::LoadLocalCall(slot, name, cid)` in a FRAMELESS body — the fused
@@ -1961,7 +2034,10 @@ unsafe extern "C" fn t2_lite_call_local(
                 return lite_mat_here(vm, &c, ip, 33, name_id, 0);
             };
             let Some(m) = vm.lookup_method_cached(&cls, name_id, cid) else {
-                return lite_mat_here(vm, &c, ip, 34, name_id, 0);
+                let at = vm.stack.len();
+                return lite_serve_method_missing(
+                    vm, &c, ip, name_id, &cls, oid, cid, LiteRecv::LocalSlot(recv_ptr), at, 0,
+                );
             };
             if m.visibility.get() != crate::value::Visibility::Public
                 || m.closure.is_some()
@@ -1969,7 +2045,7 @@ unsafe extern "C" fn t2_lite_call_local(
             {
                 return lite_mat_here(vm, &c, ip, 35, name_id, 0);
             }
-            lite_serve_m(vm, &c, ip, name_id, &m, Some(&cls), Some(oid), LiteRecv::LocalSlot(recv_ptr), 0)
+            lite_serve_m(vm, &c, ip, name_id, &m, Some(&cls), Some(oid), LiteRecv::LocalSlot(recv_ptr), 0, None)
         }
         _ => lite_mat_here(vm, &c, ip, 44, name_id, 0),
     }
