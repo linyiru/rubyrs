@@ -2163,6 +2163,34 @@ impl Vm {
         Ok(true)
     }
 
+    /// Call-site method_missing IC fill (#391), called from the two
+    /// `do_call` tails that fall to `try_method_missing` once every arm
+    /// has declined `name_id` for `recv` (the explicit-recv tail, and
+    /// the bare-call tail when `bare`). That proves later calls from
+    /// this site with the same receiver class and `method_gen` can go
+    /// straight to the user `method_missing`
+    /// (`try_invoke_method_missing_cached` /
+    /// `try_invoke_self_method_missing_cached`). Names any earlier arm
+    /// keys on never fill, since those arms may also look at argument
+    /// values, which the cache key does not cover: the
+    /// `class_singleton_deny` universal names, the P5b probe mask, and
+    /// for a bare call the Kernel builtins (`is_builtin_name`).
+    pub(crate) fn fill_method_missing_site(&mut self, recv: &Value, name_id: SymId, cache_id: u32, bare: bool) {
+        let Value::Object(oid) = recv else { return };
+        let Some(cls) = self.heap.try_class_of(*oid) else { return };
+        if self.class_singleton_deny.contains(&name_id)
+            || self.probe_name_may_serve(name_id)
+            || (bare && Self::is_builtin_name(self.interner.resolve(name_id)))
+        {
+            return;
+        }
+        if let Some(mm) = self.lookup_method_uncached(&cls, self.sym_method_missing)
+            && mm.builtin.is_none()
+        {
+            self.fill_method_missing_cached(&cls, cache_id, mm);
+        }
+    }
+
     /// The `method_missing` a dispatch miss on `recv` invokes, if any.
     fn resolve_method_missing(&mut self, recv: &Value) -> Option<Rc<Method>> {
         let mm_id = self.sym_method_missing;
@@ -11841,6 +11869,14 @@ impl Vm {
                 for a in args { self.stack.push(a); }
                 return self.do_call(name_id, argc, /*no_recv=*/false, u32::MAX);
             }
+            // Bare-call twin of the explicit tail's method_missing IC
+            // fill (#391), served by `try_invoke_self_recv_cached` under
+            // the same gates (`main` is excluded there, so here too).
+            if cache_id != u32::MAX && !maybe_refined && !force_primitive
+                && !self.is_main_self(&self_val)
+            {
+                self.fill_method_missing_site(&self_val, name_id, cache_id, true);
+            }
             // method_missing fallback (PoC #2). For Object self, look
             // up the class chain — if found, hand it the missed name
             // as a Symbol arg. Primitives skip this and raise directly.
@@ -17468,29 +17504,11 @@ impl Vm {
                 return Ok(());
             }
         }
-        // Call-site method_missing IC fill (#391). Reaching this point
-        // proves every arm above declined `name_id` for this receiver
-        // class, so later calls from this site with the same class and
-        // `method_gen` can go straight to the user `method_missing`
-        // (served in `try_invoke_method_missing_cached`). Only the
-        // plain Op::Call shape the explicit-recv fast path itself
-        // serves fills: no refinement, force-primitive, or
-        // public_send. Names that any earlier arm keys on
-        // (`class_singleton_deny`, the P5b probe mask) never fill,
-        // since those arms may also look at argument values, which the
-        // cache key does not cover.
-        if cache_id != u32::MAX
-            && !maybe_refined
-            && !force_primitive
-            && !require_public
-            && let Value::Object(oid) = &recv
-            && let Some(cls) = self.heap.try_class_of(*oid)
-            && !self.class_singleton_deny.contains(&name_id)
-            && !self.probe_name_may_serve(name_id)
-            && let Some(mm) = self.lookup_method_uncached(&cls, self.sym_method_missing)
-            && mm.builtin.is_none()
-        {
-            self.fill_method_missing_cached(&cls, cache_id, mm);
+        // Call-site method_missing IC fill (#391): every arm above
+        // declined `name_id` for this receiver. Only the plain Op::Call
+        // shape the explicit-recv fast path itself serves fills.
+        if cache_id != u32::MAX && !maybe_refined && !force_primitive && !require_public {
+            self.fill_method_missing_site(&recv, name_id, cache_id, false);
         }
         if self.try_method_missing_slice(&recv, name_id, &args, None)? {
             return Ok(());
@@ -19417,7 +19435,7 @@ impl Vm {
             return Ok(false);
         };
         let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) else {
-            return Ok(false);
+            return self.try_invoke_self_method_missing_cached(self_val, &cls, name_id, argc, cache_id);
         };
         if m.builtin.is_some() {
             return Ok(false);
@@ -19462,6 +19480,43 @@ impl Vm {
             return self.try_invoke_nfa_method_from_stack(&m, Some(self_val), argc);
         }
         self.try_invoke_fixed_method_from_stack(m, self_val, argc, None)
+    }
+
+    /// Implicit-self twin of `try_invoke_method_missing_cached` (#391):
+    /// a bare `nope(args)` on an Object self whose site already watched
+    /// the cascade land on a user `method_missing` for this class.
+    /// Inserts the missed name below the args (a no_recv stack is
+    /// `[.., a1..aN]`) and invokes the method stack-direct; a declined
+    /// serve removes the name again, leaving the stack as it was. The
+    /// getter serve and the JIT routing gate are skipped: a
+    /// method_missing call always has the name argument, and routing
+    /// would compile the method resolved for `name_id`, not this one.
+    fn try_invoke_self_method_missing_cached(
+        &mut self,
+        self_val: Value,
+        cls: &Rc<Class>,
+        name_id: SymId,
+        argc: usize,
+        cache_id: u32,
+    ) -> Result<bool, Trap> {
+        let Some(mm) = self.lookup_method_missing_cache_hit(cls, cache_id) else {
+            return Ok(false);
+        };
+        let Some(name_idx) = self.stack.len().checked_sub(argc) else {
+            return Ok(false);
+        };
+        self.stack.insert(name_idx, Value::Sym(name_id));
+        let served = if mm.closure.is_some() {
+            self.try_invoke_closure_method_from_stack(&mm, Some(self_val), argc + 1)?
+        } else if mm.fixed_arity.is_none() {
+            self.try_invoke_nfa_method_from_stack(&mm, Some(self_val), argc + 1)?
+        } else {
+            self.try_invoke_fixed_method_from_stack(mm, self_val, argc + 1, None)?
+        };
+        if !served {
+            self.stack.remove(name_idx);
+        }
+        Ok(served)
     }
 
     /// Block-form sibling of `try_invoke_explicit_recv_cached`.
