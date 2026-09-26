@@ -354,6 +354,46 @@ pub(crate) struct CallCache {
     pub(crate) next_way: u8,
 }
 
+/// Upper bound on `GlobalMethodCache` entries; the map is dropped
+/// wholesale when it fills, like on a `method_gen` bump.
+const GLOBAL_METHOD_CACHE_CAP: usize = 1 << 14;
+
+/// `(class, name) -> resolved method` for the chain walks, valid for
+/// one `method_gen`: the first fill after a bump clears the map. The
+/// `Weak` pins the class allocation, so a freed class's address can't
+/// be reused by a new class while its entries survive. Singleton
+/// lookups key on the class pointer with bit 0 set (Class allocations
+/// are word-aligned), the same tagging `lookup_class_singleton_cached`
+/// uses.
+type GlobalMethodEntry = (std::rc::Weak<Class>, Option<Rc<Method>>);
+
+#[derive(Default)]
+pub(crate) struct GlobalMethodCache {
+    generation: u32,
+    map: crate::intern::FxHashMap<(usize, SymId), GlobalMethodEntry>,
+}
+
+impl GlobalMethodCache {
+    fn get(&self, generation: u32, key: (usize, SymId)) -> Option<Option<Rc<Method>>> {
+        if self.generation != generation {
+            return None;
+        }
+        self.map.get(&key).map(|(_, m)| m.clone())
+    }
+
+    fn put(&mut self, generation: u32, key: (usize, SymId), cls: &Rc<Class>, m: &Option<Rc<Method>>) {
+        if self.generation != generation || self.map.len() >= GLOBAL_METHOD_CACHE_CAP {
+            self.map.clear();
+            self.generation = generation;
+        }
+        self.map.insert(key, (Rc::downgrade(cls), m.clone()));
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.map.clear();
+    }
+}
+
 impl Vm {
     /// Make sure `call_caches` has at least `n` entries (one per
     /// emitted call op). Called by the host (`Runtime::eval`) after a
@@ -688,6 +728,17 @@ impl Vm {
         cls: &Rc<Class>,
         name_id: SymId,
     ) -> Option<Rc<Method>> {
+        let key = (Rc::as_ptr(cls) as usize | 1, name_id);
+        if let Some(m) = self.method_cache.borrow().get(self.method_gen, key) {
+            return m;
+        }
+        let m = self.walk_class_singleton_method(cls, name_id);
+        self.method_cache.borrow_mut().put(self.method_gen, key, cls, &m);
+        m
+    }
+
+    /// The chain walk behind `lookup_class_singleton_method`.
+    fn walk_class_singleton_method(&self, cls: &Rc<Class>, name_id: SymId) -> Option<Rc<Method>> {
         // Walk a prepended module (and its own prepends/includes
         // transitively) looking for an *instance* method named
         // `name_id`. Methods on a prepended-to-singleton module
@@ -772,9 +823,22 @@ impl Vm {
         }
     }
 
-    /// Plain method lookup walking the class chain, with no cache
-    /// touch. Used for paths that don't benefit from caching (e.g.
-    /// `initialize` resolution during `Class.new`).
+    /// Method lookup with no call-site cache: probes the global
+    /// method cache, then walks the class chain. Used by dispatch
+    /// probes and by paths without a call site (e.g. `initialize`
+    /// resolution during `Class.new`).
+    #[inline]
+    pub(crate) fn lookup_method_uncached(&self, cls: &Rc<Class>, name_id: SymId) -> Option<Rc<Method>> {
+        let key = (Rc::as_ptr(cls) as usize, name_id);
+        if let Some(m) = self.method_cache.borrow().get(self.method_gen, key) {
+            return m;
+        }
+        let m = self.walk_method(cls, name_id);
+        self.method_cache.borrow_mut().put(self.method_gen, key, cls, &m);
+        m
+    }
+
+    /// The chain walk behind `lookup_method_uncached`.
     ///
     /// Lookup order at each class in the chain (CRuby ancestor walk):
     /// **prepends (transitive) → own methods → included modules
@@ -782,12 +846,7 @@ impl Vm {
     /// also walk their own prepends/includes recursively, so
     /// `module M; include N; end; class C; include M; end` resolves
     /// `N`'s methods on a `C` instance.
-    #[inline]
-    pub(crate) fn lookup_method_uncached(
-        &self,
-        cls: &Rc<Class>,
-        name_id: SymId,
-    ) -> Option<Rc<Method>> {
+    fn walk_method(&self, cls: &Rc<Class>, name_id: SymId) -> Option<Rc<Method>> {
         // Recursive helper that walks one node's prepends, own
         // methods, then includes (transitively, in dispatch order).
         // Returns `Some` on the first hit. `visited` carries an
@@ -5027,10 +5086,12 @@ mod tests {
         for (cls, _) in &classes {
             let _ = vm.lookup_method_cached(cls, name, 0);
         }
-        // Strip every method so any uncached walk returns None.
+        // Strip every method so any uncached walk returns None, and
+        // drop the global method cache so a miss really walks.
         for (cls, _) in &classes {
             cls.methods.borrow_mut().remove(&name);
         }
+        vm.method_cache.borrow_mut().clear();
         // Check the surviving ways FIRST — looking up the evicted
         // class first would consume a cache slot (its uncached-walk
         // result gets installed at next_way) and contaminate the

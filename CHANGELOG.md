@@ -51,6 +51,14 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Changed
 
+- **Global method cache** (#400). Chain walks for instance and
+  class-singleton methods are cached per (class, name) until the
+  next method-table or ancestry change (`method_gen`), as CRuby's
+  global method cache does. Many dispatch probes resolve through
+  these walks without a call site: collection block fast paths,
+  class intrinsics, `respond_to?`, and inline-cache misses. On the
+  Rails hello world bench they were 7.5% of samples. Rails bench:
+  818–847 → 882–916 req/s.
 - **`raise` / `rescue` no longer pays for the backtrace up front**
   (#383). A raise now records only each live frame's
   `(proto, ip)`; the `"file:line:in 'meth'"` strings are built the

@@ -2392,6 +2392,11 @@ pub(crate) struct Vm {
     /// which effectively invalidates every cache entry — re-fill is
     /// lazy on the next call at each site.
     pub(crate) call_caches: Vec<CallCache>,
+    /// Global method cache behind every chain walk
+    /// (`lookup_method_uncached`, `lookup_class_singleton_method`),
+    /// as CRuby's `vm_method.c` global cache. See
+    /// `lookup::GlobalMethodCache`.
+    pub(crate) method_cache: RefCell<crate::vm::lookup::GlobalMethodCache>,
     /// Per-ivar-site inline caches (ADR 0035 Ph4/5), dense by the
     /// `Op::LoadIvar`/`StoreIvar`/`IncIvar*` cid (`CidGen::ivar`
     /// space). See `IvarSiteCache` for the no-invalidation contract.
@@ -3652,6 +3657,7 @@ impl Vm {
             max_symbols: None,
             max_value_bytes: None,
             call_caches: Vec::new(),
+            method_cache: RefCell::default(),
             ivar_caches: Vec::new(),
             cvar_caches: Vec::new(),
             cvar_gen: 0,
