@@ -2242,8 +2242,8 @@ pub(crate) struct Vm {
     /// re-registered file rebuilds its index.
     pub(crate) line_starts: crate::intern::FxHashMap<Rc<str>, SourceLineStarts>,
     /// `unwind_with_exception`'s user-`set_backtrace` probe, cached as
-    /// `(method_gen, class, overridden?)` for the last raised class.
-    pub(crate) set_backtrace_probe: Option<(u32, Rc<Class>, bool)>,
+    /// `(method_gen, class, override)` for the last raised class.
+    pub(crate) set_backtrace_probe: Option<(u32, Rc<Class>, Option<Rc<crate::value::Method>>)>,
     /// `Encoding.default_external` (E3): the tag File.read stamps
     /// when no `encoding:` argument is given. CRuby's process-wide
     /// default; ours starts at UTF-8 and is set through the

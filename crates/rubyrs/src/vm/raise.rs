@@ -394,12 +394,11 @@ impl Vm {
     /// narrower is user code. Cached per `(method_gen, class)` so a
     /// raise of the same class skips the uncached lookup.
     fn user_set_backtrace(&mut self, cls: &Rc<Class>) -> Option<Rc<crate::value::Method>> {
-        if let Some((generation, c, hit)) = &self.set_backtrace_probe
+        if let Some((generation, c, m)) = &self.set_backtrace_probe
             && *generation == self.method_gen
             && Rc::ptr_eq(c, cls)
-            && !*hit
         {
-            return None;
+            return m.clone();
         }
         let m = self.lookup_method_uncached(cls, self.sym_set_backtrace).filter(|m| {
             m.defining_class
@@ -407,7 +406,7 @@ impl Vm {
                 .and_then(std::rc::Weak::upgrade)
                 .is_none_or(|dc| dc.name != "Exception")
         });
-        self.set_backtrace_probe = Some((self.method_gen, cls.clone(), m.is_some()));
+        self.set_backtrace_probe = Some((self.method_gen, cls.clone(), m.clone()));
         m
     }
 

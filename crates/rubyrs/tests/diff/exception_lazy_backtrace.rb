@@ -80,3 +80,9 @@ module M
   end
 end
 p 3.times.map { |k| M::C.new.r(k % 2) }
+
+# A repeated raise of an overriding class still calls the override,
+# and a top-level method cannot shadow the backtrace reader.
+p 3.times.map { begin; raise Bt; rescue Bt => x; x.seen == x.backtrace.size; end }
+def __rubyrs_exc_backtrace = :shadowed
+p lines(caught.backtrace).first

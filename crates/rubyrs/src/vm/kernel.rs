@@ -58,6 +58,7 @@ impl Vm {
                 | "__time_now_raw"
                 | "__rubyrs_clock_gettime"
                 | "__rubyrs_fiber_locals"
+                | "__rubyrs_exc_backtrace"
                 | "__rubyrs_time_parse_iso"
                 | "sleep"
                 | "exit"
@@ -1000,7 +1001,7 @@ impl Vm {
                     let is_builtin = matches!(
                         &*name,
                         "puts" | "p" | "pp" | "print" | "require" | "load" |
-                        "sprintf" | "format" | "__time_now_raw" | "__rubyrs_clock_gettime" | "__rubyrs_fiber_locals" | "__rubyrs_time_parse_iso" | "sleep" |
+                        "sprintf" | "format" | "__time_now_raw" | "__rubyrs_clock_gettime" | "__rubyrs_fiber_locals" | "__rubyrs_exc_backtrace" | "__rubyrs_time_parse_iso" | "sleep" |
                         "exit" | "exit!" | "abort" | "warn" | "at_exit" | "__rubyrs_signal_trap" |
                         "__rubyrs_stdout_write" | "__rubyrs_stderr_write" | "__rubyrs_exe_path" |
                         "Integer" | "Float" | "String" | "Array" | "Rational" |
