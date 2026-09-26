@@ -879,6 +879,8 @@ fn tier2_restblock_lite() { run_diff("tier2_restblock_lite"); }
 // kept because modern CRuby HANGS on the K4 shape) lives as pinned
 // goldens in tests/embed/ensure_walk_divergences.rs.
 #[test] fn ensure_walk_break_return() { run_diff("ensure_walk_break_return"); }
+// Native iterator drivers keep one block frame across elements (#382).
+#[test] fn iter_block_frame_reuse() { run_diff("iter_block_frame_reuse"); }
 #[test] fn raise_class_runs_initialize() { run_diff("raise_class_runs_initialize"); }
 #[test] fn time_components() { run_diff("time_components"); }
 #[cfg(feature = "stdlib")]

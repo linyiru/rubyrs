@@ -300,6 +300,288 @@ impl Vm {
         }
         Ok(BlockStep::Value(r))
     }
+
+    /// Run `body` with a [`BlockLoop`] over `block` — the frame-reusing
+    /// form of a `step_block1` / `step_block2` driver loop (issue #382).
+    /// The kept frame is popped and the outer driver's `kept_block`
+    /// restored on every exit, `?` included.
+    pub(crate) fn with_block_loop<R>(
+        &mut self,
+        block: ObjId,
+        pre_frames: usize,
+        body: impl FnOnce(&mut Vm, &mut BlockLoop) -> Result<R, Trap>,
+    ) -> Result<R, Trap> {
+        let mut bl = self.block_loop_begin(block, pre_frames);
+        let r = body(self, &mut bl);
+        self.kept_frame_release(&mut bl);
+        self.kept_block = bl.prev;
+        r
+    }
+
+    /// `Array#each { |x| … }` (the `collection_call_block` arm, also
+    /// served directly by the dispatch fast path). The driver only
+    /// cares whether `break` fired (its value is the result);
+    /// method_return propagates by staying set on the Vm.
+    pub(crate) fn iter_array_each(&mut self, id: ObjId, block: ObjId) -> Result<Value, Trap> {
+        let mut g = PinGuard::new(self);
+        g.pin(Value::Array(id));
+        g.pin(Value::Block(block));
+        // Native whole-loop each-accumulator (`total += f(x)` over an
+        // all-Int array): updates the captured slot in place and returns
+        // the receiver. Declines (None) for any other shape -> the generic
+        // walk below; a part-way deopt commits nothing, so that fallback
+        // re-runs the whole `each` soundly. (ADR 0034 layer 3c.)
+        #[cfg(feature = "jit-native")]
+        if g.vm.try_native_each_acc_loop(block, id).is_some() {
+            return Ok(Value::Array(id));
+        }
+        // Float each-accumulator (`total += f(x)` over an all-Float array,
+        // total a Float). Tries after the Int each-acc declines on a Float
+        // accumulator (ADR 0034 layer 3d).
+        #[cfg(feature = "jit-native")]
+        if g.vm.try_native_floateach_acc_loop(block, id).is_some() {
+            return Ok(Value::Array(id));
+        }
+        // Int-element / Float-accumulator each-acc (`total += x*1.5` over an
+        // Int array, total a Float). Tries after the float each-acc declines
+        // on the Int element (its float reader deopts) (ADR 0034 layer 3d).
+        #[cfg(feature = "jit-native")]
+        if g.vm.try_native_intelem_floateach_acc_loop(block, id).is_some() {
+            return Ok(Value::Array(id));
+        }
+        // Walk by index against the live array, re-reading the
+        // length every step (CRuby rb_ary_each): elements the
+        // block appends are visited, a shrink stops the walk.
+        let pre_frames = g.vm.frames.len();
+        let early = g.vm.with_block_loop(block, pre_frames, |vm, bl| {
+            let mut i = 0;
+            while let Some(v) = vm.heap.array(id).get(i).cloned() {
+                i += 1;
+                match vm.loop_block1(bl, v)? {
+                    BlockStep::MethodReturn => break,
+                    BlockStep::Break(r) => return Ok(Some(r)),
+                    BlockStep::Value(_) => {}  // each ignores per-iter result
+                }
+            }
+            Ok(None)
+        })?;
+        Ok(early.unwrap_or(Value::Array(id)))
+    }
+
+    fn block_loop_begin(&mut self, block: ObjId, pre_frames: usize) -> BlockLoop {
+        let bh = self.heap.block(block);
+        let proto = &self.protos[bh.proto_idx];
+        // The shapes the plain `invoke_block1` / `invoke_block2`
+        // binders serve (the re-bind below must equal them), minus
+        // any block whose body can capture its cell (`creates_block`:
+        // an inner closure must see a fresh per-iteration binding).
+        // The JIT tiers keep their own block-entry paths.
+        #[cfg(feature = "jit-native")]
+        let jit = self.jit_tier2_on || self.jit_native_on;
+        #[cfg(not(feature = "jit-native"))]
+        let jit = false;
+        let reuse = !jit
+            && bh.rest_slot.is_none()
+            && bh.kw_rest_slot.is_none()
+            && proto.block_kw_params.is_empty()
+            && proto.block_param_slot.is_none()
+            && proto.sym_proc.is_none()
+            && !proto.creates_block;
+        BlockLoop {
+            block,
+            pre_frames,
+            reuse,
+            live: false,
+            proto_idx: bh.proto_idx,
+            n_params: bh.n_params as usize,
+            is_lambda: bh.is_lambda,
+            param_start: bh.param_start as usize,
+            body_local_start: proto.block_body_local_start as usize,
+            needed: proto.n_locals as usize,
+            prev: self.kept_block,
+        }
+    }
+
+    /// `step_block1` through the loop's kept frame.
+    pub(crate) fn loop_block1(&mut self, bl: &mut BlockLoop, arg: Value) -> Result<BlockStep, Trap> {
+        if !bl.reuse || bl.n_params > 1 || (bl.is_lambda && bl.n_params != 1) {
+            return self.step_block1(bl.block, arg, bl.pre_frames);
+        }
+        #[cfg(feature = "_fiber")]
+        if self.fiber_yield_pending.is_some() {
+            return Ok(BlockStep::Value(Value::Nil));
+        }
+        self.native_iter_depth += 1;
+        let mut arg = Some(arg);
+        let r = if self.kept_frame_rebind(bl, &mut arg, &mut None) {
+            self.kept_frame_run(bl)
+        } else {
+            match self.invoke_block1(bl.block, arg.unwrap_or(Value::Nil)) {
+                Ok(_) => self.kept_frame_arm_run(bl),
+                Err(e) => Err(e),
+            }
+        };
+        self.native_iter_depth -= 1;
+        r
+    }
+
+    /// `step_block2` through the loop's kept frame.
+    pub(crate) fn loop_block2(&mut self, bl: &mut BlockLoop, a: Value, b: Value) -> Result<BlockStep, Trap> {
+        if !bl.reuse || bl.n_params != 2 {
+            return self.step_block2(bl.block, a, b, bl.pre_frames);
+        }
+        #[cfg(feature = "_fiber")]
+        if self.fiber_yield_pending.is_some() {
+            return Ok(BlockStep::Value(Value::Nil));
+        }
+        self.native_iter_depth += 1;
+        let (mut a, mut b) = (Some(a), Some(b));
+        let r = if self.kept_frame_rebind(bl, &mut a, &mut b) {
+            self.kept_frame_run(bl)
+        } else {
+            match self.invoke_block2(bl.block, a.unwrap_or(Value::Nil), b.unwrap_or(Value::Nil)) {
+                Ok(_) => self.kept_frame_arm_run(bl),
+                Err(e) => Err(e),
+            }
+        };
+        self.native_iter_depth -= 1;
+        r
+    }
+
+    /// Reset the live kept frame for the next element: ip 0, the
+    /// body locals nil-filled as a fresh push would leave them, and
+    /// the leading params bound from `a` / `b` (taken). `false` = no
+    /// reusable frame (none live, or its copy-path cell escaped —
+    /// e.g. into a `binding` — and must stay that iteration's): the
+    /// args are left in place and the caller pushes a fresh frame.
+    #[inline]
+    fn kept_frame_rebind(&mut self, bl: &mut BlockLoop, a: &mut Option<Value>, b: &mut Option<Value>) -> bool {
+        if !bl.live {
+            return false;
+        }
+        let ok = match self.frames.last_mut() {
+            Some(f) => match f.locals.as_shared() {
+                // A copy-path cell (own_start > 0) is this frame's
+                // alone; a share-direct cell is the method's own and
+                // shared by design.
+                Some(cell) if f.own_start == 0 || std::rc::Rc::strong_count(cell) == 1 => {
+                    let mut locals = cell.borrow_mut();
+                    if locals.len() >= bl.needed {
+                        for s in bl.body_local_start..bl.needed {
+                            locals[s] = Value::Nil;
+                        }
+                        if bl.n_params >= 1 && let Some(v) = a.take() {
+                            locals[bl.param_start] = v;
+                        }
+                        if bl.n_params == 2 && let Some(v) = b.take() {
+                            locals[bl.param_start + 1] = v;
+                        }
+                        drop(locals);
+                        f.ip = 0;
+                        f.pending_yield = false;
+                        true
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            },
+            None => false,
+        };
+        if !ok {
+            self.kept_frame_release(bl);
+        }
+        ok
+    }
+
+    /// Arm `kept_block` on the frame a fresh invoke just pushed, then
+    /// run it. A serve that pushed no block frame of ours (nothing at
+    /// `pre_frames`, or a different proto) is left unarmed.
+    fn kept_frame_arm_run(&mut self, bl: &mut BlockLoop) -> Result<BlockStep, Trap> {
+        if self.frames.len() == bl.pre_frames + 1
+            && let Some(f) = self.frames.last()
+            && f.is_block
+            && f.proto_idx == bl.proto_idx
+        {
+            self.kept_block = (self.frames.len(), f.base_sp);
+        }
+        self.kept_frame_run(bl)
+    }
+
+    /// Drive the block frame and classify the outcome like
+    /// `step_block1_pinned`. The frame is still ours afterwards iff
+    /// the kept-frame `Op::Return` ended the run: frames back at
+    /// `pre_frames + 1` with no method-return or fiber switch pending
+    /// (every other exit either popped it or left it for an outer
+    /// unwinder).
+    #[inline]
+    fn kept_frame_run(&mut self, bl: &mut BlockLoop) -> Result<BlockStep, Trap> {
+        bl.live = false;
+        self.dispatch_until(bl.pre_frames)?;
+        #[cfg(feature = "_fiber")]
+        let parked = self.fiber_yield_pending.is_some();
+        #[cfg(not(feature = "_fiber"))]
+        let parked = false;
+        bl.live = self.method_return.is_none()
+            && !parked
+            && self.frames.len() == bl.pre_frames + 1
+            && self.kept_block == (self.frames.len(), self.frames[bl.pre_frames].base_sp);
+        if !bl.live {
+            // The frame was popped (or is left for an outer unwinder):
+            // drop its marker so a later frame at the same depth and
+            // base_sp — one `kept_frame_arm_run` did not arm — is not
+            // mistaken for it by the kept-frame arm of `Op::Return`.
+            self.kept_block = bl.prev;
+        }
+        if self.method_return.is_some() {
+            return Ok(BlockStep::MethodReturn);
+        }
+        let r = self.stack.pop().unwrap_or(Value::Nil);
+        if self.break_signaled {
+            self.break_signaled = false;
+            self.sync_control_signals();
+            return Ok(BlockStep::Break(r));
+        }
+        Ok(BlockStep::Value(r))
+    }
+
+    /// Pop the live kept frame the way `Op::Return` pops a block frame
+    /// (its transfers were already cancelled when it returned).
+    fn kept_frame_release(&mut self, bl: &mut BlockLoop) {
+        if !bl.live {
+            return;
+        }
+        bl.live = false;
+        self.kept_block = bl.prev;
+        if self.frames.len() == bl.pre_frames + 1
+            && let Some(f) = self.frames.pop()
+        {
+            self.release_frame_locals(f.locals);
+            self.recycle_frame_aux(f.aux);
+        }
+    }
+}
+
+/// Per-driver-loop state for block frame reuse (issue #382). A Rust
+/// iterator driver pushes its block's frame once and, after each plain
+/// block return (see the kept-frame arm of `Op::Return`), re-binds the
+/// next element into it — no per-element handle snapshot, locals-cell
+/// setup, Frame push, or Frame pop. Built by `Vm::with_block_loop`.
+pub(crate) struct BlockLoop {
+    block: ObjId,
+    pre_frames: usize,
+    /// The handle shape allows in-place re-binding at all.
+    reuse: bool,
+    /// The kept frame sits at `frames[pre_frames]`, returned and idle.
+    live: bool,
+    proto_idx: usize,
+    n_params: usize,
+    is_lambda: bool,
+    param_start: usize,
+    body_local_start: usize,
+    needed: usize,
+    /// The enclosing driver's `kept_block`, restored on exit.
+    prev: (usize, usize),
 }
 
 
@@ -403,7 +685,6 @@ impl Vm {
             Some(rid)
         } else { None };
         let pre_frames = g.vm.frames.len();
-        let mut early: Option<Value> = None;
         let mut find_val = Value::Nil;
         let mut bool_acc = mode.bool_init();
         // `IterMode::One` short-circuits to false on the SECOND
@@ -411,26 +692,29 @@ impl Vm {
         // the full walk. Tracked separately so the loop break-on-
         // second-match optimisation matches CRuby's stop point.
         let mut one_count: usize = 0;
-        for v in snapshot {
-            let r = match g.vm.step_block1(block, v.clone(), pre_frames)? {
-                BlockStep::MethodReturn => break,
-                BlockStep::Break(r) => { early = Some(r); break; }
-                BlockStep::Value(r) => r,
-            };
-            let truthy = r.is_truthy();
-            match mode {
-                IterMode::Select => if truthy { g.vm.heap.array_mut(acc_id.unwrap()).push(v); }
-                IterMode::Reject => if !truthy { g.vm.heap.array_mut(acc_id.unwrap()).push(v); }
-                IterMode::Find => if truthy { find_val = v; break; }
-                IterMode::Any => if truthy { bool_acc = true; break; }
-                IterMode::All => if !truthy { bool_acc = false; break; }
-                IterMode::NoneM => if truthy { bool_acc = false; break; }
-                IterMode::One => if truthy {
-                    one_count += 1;
-                    if one_count > 1 { break; }
+        let early = g.vm.with_block_loop(block, pre_frames, |vm, bl| {
+            for v in snapshot {
+                let r = match vm.loop_block1(bl, v.clone())? {
+                    BlockStep::MethodReturn => break,
+                    BlockStep::Break(r) => return Ok(Some(r)),
+                    BlockStep::Value(r) => r,
+                };
+                let truthy = r.is_truthy();
+                match mode {
+                    IterMode::Select => if truthy { vm.heap.array_mut(acc_id.unwrap()).push(v); }
+                    IterMode::Reject => if !truthy { vm.heap.array_mut(acc_id.unwrap()).push(v); }
+                    IterMode::Find => if truthy { find_val = v; break; }
+                    IterMode::Any => if truthy { bool_acc = true; break; }
+                    IterMode::All => if !truthy { bool_acc = false; break; }
+                    IterMode::NoneM => if truthy { bool_acc = false; break; }
+                    IterMode::One => if truthy {
+                        one_count += 1;
+                        if one_count > 1 { break; }
+                    }
                 }
             }
-        }
+            Ok(None)
+        })?;
         // PinGuard drops at function exit, including the `?` paths above.
         if let Some(e) = early { return Ok(e); }
         Ok(match mode {
@@ -1526,50 +1810,7 @@ impl Vm {
             (Value::Range(id), "first" | "last", _) => {
                 return self.range_collection_call(*id, name, args);
             }
-            (Value::Array(id), "each", []) => {
-                // Pilot migration to `step_block` per #151.
-                // The driver only cares about: did break fire?
-                // (use the break value). Otherwise continues to
-                // the next element. method_return propagates up
-                // by leaving `method_return` set on the Vm.
-                let mut g = PinGuard::new(self);
-                g.pin(Value::Array(*id));
-                g.pin(Value::Block(block));
-                // Native whole-loop each-accumulator (`total += f(x)` over an
-                // all-Int array): updates the captured slot in place and returns
-                // the receiver. Declines (None) for any other shape -> the generic
-                // walk below; a part-way deopt commits nothing, so that fallback
-                // re-runs the whole `each` soundly. (ADR 0034 layer 3c.)
-                #[cfg(feature = "jit-native")]
-                if g.vm.try_native_each_acc_loop(block, *id).is_some() {
-                    return Ok(Some(Value::Array(*id)));
-                }
-                // Float each-accumulator (`total += f(x)` over an all-Float array,
-                // total a Float). Tries after the Int each-acc declines on a Float
-                // accumulator (ADR 0034 layer 3d).
-                #[cfg(feature = "jit-native")]
-                if g.vm.try_native_floateach_acc_loop(block, *id).is_some() {
-                    return Ok(Some(Value::Array(*id)));
-                }
-                // Int-element / Float-accumulator each-acc (`total += x*1.5` over an
-                // Int array, total a Float). Tries after the float each-acc declines
-                // on the Int element (its float reader deopts) (ADR 0034 layer 3d).
-                #[cfg(feature = "jit-native")]
-                if g.vm.try_native_intelem_floateach_acc_loop(block, *id).is_some() {
-                    return Ok(Some(Value::Array(*id)));
-                }
-                let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
-                let pre_frames = g.vm.frames.len();
-                let mut early = None;
-                for v in snapshot {
-                    match g.vm.step_block1(block, v, pre_frames)? {
-                        BlockStep::MethodReturn => break,
-                        BlockStep::Break(r) => { early = Some(r); break; }
-                        BlockStep::Value(_) => {}  // each ignores per-iter result
-                    }
-                }
-                Some(early.unwrap_or(Value::Array(*id)))
-            }
+            (Value::Array(id), "each", []) => Some(self.iter_array_each(*id, block)?),
             // `arr.reverse_each { |v| … }` — `each` walking the
             // snapshot in reverse order. Returns the receiver.
             // Used by msgpack/bigint.rb's `from_msgpack_ext` to
@@ -1626,14 +1867,16 @@ impl Vm {
                 g.pin(Value::Block(block));
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
                 let pre_frames = g.vm.frames.len();
-                let mut early = None;
-                for v in snapshot.into_iter().rev() {
-                    match g.vm.step_block1(block, v, pre_frames)? {
-                        BlockStep::MethodReturn => break,
-                        BlockStep::Break(r) => { early = Some(r); break; }
-                        BlockStep::Value(_) => {}
+                let early = g.vm.with_block_loop(block, pre_frames, |vm, bl| {
+                    for v in snapshot.into_iter().rev() {
+                        match vm.loop_block1(bl, v)? {
+                            BlockStep::MethodReturn => break,
+                            BlockStep::Break(r) => return Ok(Some(r)),
+                            BlockStep::Value(_) => {}
+                        }
                     }
-                }
+                    Ok(None)
+                })?;
                 Some(early.unwrap_or(Value::Array(*id)))
             }
             // `arr.sum { |x| expr }` — sum the block return values (B5). A native
@@ -1781,15 +2024,17 @@ impl Vm {
                 let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(snapshot.len()).into()));
                 g.pin(Value::Array(result_id));
                 let pre_frames = g.vm.frames.len();
-                let mut early = None;
-                for v in snapshot {
-                    let r = match g.vm.step_block1(block, v, pre_frames)? {
-                        BlockStep::MethodReturn => break,
-                        BlockStep::Break(r) => { early = Some(r); break; }
-                        BlockStep::Value(r) => r,
-                    };
-                    g.vm.heap.array_mut(result_id).push(r);
-                }
+                let early = g.vm.with_block_loop(block, pre_frames, |vm, bl| {
+                    for v in snapshot {
+                        let r = match vm.loop_block1(bl, v)? {
+                            BlockStep::MethodReturn => break,
+                            BlockStep::Break(r) => return Ok(Some(r)),
+                            BlockStep::Value(r) => r,
+                        };
+                        vm.heap.array_mut(result_id).push(r);
+                    }
+                    Ok(None)
+                })?;
                 Some(early.unwrap_or(Value::Array(result_id)))
             }
             // `Array#to_h { |elem| [k, v] }` — map each element through
@@ -1913,23 +2158,25 @@ impl Vm {
                     }
                 }
                 let pre_frames = g.vm.frames.len();
-                let mut early = None;
-                for (idx, v) in snapshot.into_iter().enumerate() {
-                    let r = match g.vm.step_block1(block, v, pre_frames)? {
-                        BlockStep::MethodReturn => break,
-                        BlockStep::Break(r) => { early = Some(r); break; }
-                        BlockStep::Value(r) => r,
-                    };
-                    // In-place write at the iteration index. The
-                    // receiver array might have shrunk if the
-                    // block mutated it (rare but legal); guard
-                    // against the index falling off the end so
-                    // we don't panic in that case.
-                    let arr = g.vm.heap.array_mut(*id);
-                    if idx < arr.len() {
-                        arr[idx] = r;
+                let early = g.vm.with_block_loop(block, pre_frames, |vm, bl| {
+                    for (idx, v) in snapshot.into_iter().enumerate() {
+                        let r = match vm.loop_block1(bl, v)? {
+                            BlockStep::MethodReturn => break,
+                            BlockStep::Break(r) => return Ok(Some(r)),
+                            BlockStep::Value(r) => r,
+                        };
+                        // In-place write at the iteration index. The
+                        // receiver array might have shrunk if the
+                        // block mutated it (rare but legal); guard
+                        // against the index falling off the end so
+                        // we don't panic in that case.
+                        let arr = vm.heap.array_mut(*id);
+                        if idx < arr.len() {
+                            arr[idx] = r;
+                        }
                     }
-                }
+                    Ok(None)
+                })?;
                 Some(early.unwrap_or(Value::Array(*id)))
             }
             // `flat_map { ... }` = map then flatten(1). Same
@@ -1972,21 +2219,23 @@ impl Vm {
                 let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(snapshot.len()).into()));
                 g.pin(Value::Array(result_id));
                 let pre_frames = g.vm.frames.len();
-                let mut early = None;
-                for v in snapshot {
-                    let r = match g.vm.step_block1(block, v, pre_frames)? {
-                        BlockStep::MethodReturn => break,
-                        BlockStep::Break(r) => { early = Some(r); break; }
-                        BlockStep::Value(r) => r,
-                    };
-                    match r {
-                        Value::Array(rid) => {
-                            let items: Vec<Value> = g.vm.heap.array(rid).clone();
-                            for it in items { g.vm.heap.array_mut(result_id).push(it); }
+                let early = g.vm.with_block_loop(block, pre_frames, |vm, bl| {
+                    for v in snapshot {
+                        let r = match vm.loop_block1(bl, v)? {
+                            BlockStep::MethodReturn => break,
+                            BlockStep::Break(r) => return Ok(Some(r)),
+                            BlockStep::Value(r) => r,
+                        };
+                        match r {
+                            Value::Array(rid) => {
+                                let items: Vec<Value> = vm.heap.array(rid).clone();
+                                for it in items { vm.heap.array_mut(result_id).push(it); }
+                            }
+                            other => vm.heap.array_mut(result_id).push(other),
                         }
-                        other => g.vm.heap.array_mut(result_id).push(other),
                     }
-                }
+                    Ok(None)
+                })?;
                 Some(early.unwrap_or(Value::Array(result_id)))
             }
             // `chunk { |x| key }` groups consecutive elements
@@ -2141,15 +2390,17 @@ impl Vm {
                 g.pin(Value::Block(block));
                 let snapshot: Vec<(Value, Value)> = g.vm.heap.hash(id).to_vec();
                 let pre_frames = g.vm.frames.len();
-                let mut early = None;
-                for (k, v) in snapshot {
-                    let yielded = if key_only { k } else { v };
-                    match g.vm.step_block1(block, yielded, pre_frames)? {
-                        BlockStep::MethodReturn => break,
-                        BlockStep::Break(r) => { early = Some(r); break; }
-                        BlockStep::Value(_) => {}
+                let early = g.vm.with_block_loop(block, pre_frames, |vm, bl| {
+                    for (k, v) in snapshot {
+                        let yielded = if key_only { k } else { v };
+                        match vm.loop_block1(bl, yielded)? {
+                            BlockStep::MethodReturn => break,
+                            BlockStep::Break(r) => return Ok(Some(r)),
+                            BlockStep::Value(_) => {}
+                        }
                     }
-                }
+                    Ok(None)
+                })?;
                 Some(early.unwrap_or(Value::Hash(id)))
             }
             (Value::Hash(id), "delete", [k]) => {
@@ -2209,7 +2460,6 @@ impl Vm {
                     if v.is_gc_heap_ref() { g.pin(v.clone()); }
                 }
                 let pre_frames = g.vm.frames.len();
-                let mut early = None;
                 // Plain `|k, v|` blocks (the overwhelmingly common
                 // shape) take the zero-allocation two-arg path:
                 // CRuby's "yield one pair Array, auto-splat into
@@ -2223,30 +2473,33 @@ impl Vm {
                     let bh = g.vm.heap.block(block);
                     bh.n_params == 2 && bh.rest_slot.is_none() && bh.kw_rest_slot.is_none()
                 };
-                for (k, v) in snapshot {
-                    let step_result = if two_arg_fast {
-                        g.vm.step_block2(block, k, v, pre_frames)
-                    } else {
-                        g.vm.maybe_gc();
-                        g.vm.check_alloc()?;
-                        let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
-                        // Scoped pin: step_block's args→locals copy can
-                        // call maybe_gc (block with rest param has to
-                        // alloc a rest Array), and pair_id is only
-                        // reachable via this Rust-local Vec until then.
-                        // Push/pop around the single call so we don't
-                        // accumulate pins across iterations.
-                        g.vm.pinned.push(Value::Array(pair_id));
-                        let r = g.vm.step_block1(block, Value::Array(pair_id), pre_frames);
-                        g.vm.pinned.pop();
-                        r
-                    };
-                    match step_result? {
-                        BlockStep::MethodReturn => break,
-                        BlockStep::Break(r) => { early = Some(r); break; }
-                        BlockStep::Value(_) => {}
+                let early = g.vm.with_block_loop(block, pre_frames, |vm, bl| {
+                    for (k, v) in snapshot {
+                        let step_result = if two_arg_fast {
+                            vm.loop_block2(bl, k, v)
+                        } else {
+                            vm.maybe_gc();
+                            vm.check_alloc()?;
+                            let pair_id = vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
+                            // Scoped pin: the args-to-locals copy can call
+                            // maybe_gc (block with rest param has to
+                            // alloc a rest Array), and pair_id is only
+                            // reachable via this Rust local until then.
+                            // Push/pop around the single call so we don't
+                            // accumulate pins across iterations.
+                            vm.pinned.push(Value::Array(pair_id));
+                            let r = vm.loop_block1(bl, Value::Array(pair_id));
+                            vm.pinned.pop();
+                            r
+                        };
+                        match step_result? {
+                            BlockStep::MethodReturn => break,
+                            BlockStep::Break(r) => return Ok(Some(r)),
+                            BlockStep::Value(_) => {}
+                        }
                     }
-                }
+                    Ok(None)
+                })?;
                 Some(early.unwrap_or(Value::Hash(id)))
             }
             (Value::Hash(id), "each_with_index", []) => {
@@ -2271,24 +2524,26 @@ impl Vm {
                     if v.is_gc_heap_ref() { g.pin(v.clone()); }
                 }
                 let pre_frames = g.vm.frames.len();
-                let mut early = None;
-                for (i, (k, v)) in snapshot.into_iter().enumerate() {
-                    g.vm.maybe_gc();
-                    g.vm.check_alloc()?;
-                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
-                    // Scoped pin for the freshly-allocated pair
-                    // Array — only reachable via this Rust local
-                    // until step_block copies it to the block's
-                    // slot.
-                    g.vm.pinned.push(Value::Array(pair_id));
-                    let step_result = g.vm.step_block2(block, Value::Array(pair_id), Value::Int(i as i64), pre_frames);
-                    g.vm.pinned.pop();
-                    match step_result? {
-                        BlockStep::MethodReturn => break,
-                        BlockStep::Break(r) => { early = Some(r); break; }
-                        BlockStep::Value(_) => {}
+                let early = g.vm.with_block_loop(block, pre_frames, |vm, bl| {
+                    for (i, (k, v)) in snapshot.into_iter().enumerate() {
+                        vm.maybe_gc();
+                        vm.check_alloc()?;
+                        let pair_id = vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
+                        // Scoped pin for the freshly-allocated pair
+                        // Array — only reachable via this Rust local
+                        // until step_block copies it to the block's
+                        // slot.
+                        vm.pinned.push(Value::Array(pair_id));
+                        let step_result = vm.loop_block2(bl, Value::Array(pair_id), Value::Int(i as i64));
+                        vm.pinned.pop();
+                        match step_result? {
+                            BlockStep::MethodReturn => break,
+                            BlockStep::Break(r) => return Ok(Some(r)),
+                            BlockStep::Value(_) => {}
+                        }
                     }
-                }
+                    Ok(None)
+                })?;
                 Some(early.unwrap_or(Value::Hash(id)))
             }
             (Value::Hash(id), "map", []) | (Value::Hash(id), "collect", []) => {
@@ -2320,21 +2575,23 @@ impl Vm {
                 let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(snapshot.len()).into()));
                 g.pin(Value::Array(result_id));
                 let pre_frames = g.vm.frames.len();
-                let mut early = None;
-                for (k, v) in snapshot {
-                    g.vm.maybe_gc();
-                    g.vm.check_alloc()?;
-                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
-                    g.vm.pinned.push(Value::Array(pair_id));
-                    let step_result = g.vm.step_block1(block, Value::Array(pair_id), pre_frames);
-                    g.vm.pinned.pop();
-                    let r = match step_result? {
-                        BlockStep::MethodReturn => break,
-                        BlockStep::Break(r) => { early = Some(r); break; }
-                        BlockStep::Value(r) => r,
-                    };
-                    g.vm.heap.array_mut(result_id).push(r);
-                }
+                let early = g.vm.with_block_loop(block, pre_frames, |vm, bl| {
+                    for (k, v) in snapshot {
+                        vm.maybe_gc();
+                        vm.check_alloc()?;
+                        let pair_id = vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
+                        vm.pinned.push(Value::Array(pair_id));
+                        let step_result = vm.loop_block1(bl, Value::Array(pair_id));
+                        vm.pinned.pop();
+                        let r = match step_result? {
+                            BlockStep::MethodReturn => break,
+                            BlockStep::Break(r) => return Ok(Some(r)),
+                            BlockStep::Value(r) => r,
+                        };
+                        vm.heap.array_mut(result_id).push(r);
+                    }
+                    Ok(None)
+                })?;
                 Some(early.unwrap_or(Value::Array(result_id)))
             }
             // `h.transform_keys { |k| ... }` — new Hash with keys
@@ -2778,16 +3035,18 @@ impl Vm {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Block(block));
                 let pre_frames = g.vm.frames.len();
-                let mut early = None;
-                let mut i = start;
-                while i <= stop {
-                    match g.vm.step_block1(block, Value::Int(i), pre_frames)? {
-                        BlockStep::MethodReturn => break,
-                        BlockStep::Break(r) => { early = Some(r); break; }
-                        BlockStep::Value(_) => {}
+                let early = g.vm.with_block_loop(block, pre_frames, |vm, bl| {
+                    let mut i = start;
+                    while i <= stop {
+                        match vm.loop_block1(bl, Value::Int(i))? {
+                            BlockStep::MethodReturn => break,
+                            BlockStep::Break(r) => return Ok(Some(r)),
+                            BlockStep::Value(_) => {}
+                        }
+                        i += 1;
                     }
-                    i += 1;
-                }
+                    Ok(None)
+                })?;
                 Some(early.unwrap_or(Value::Int(start)))
             }
             // Float endpoint — CRuby `1.upto(13.3)` yields up to
@@ -2806,16 +3065,18 @@ impl Vm {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Block(block));
                 let pre_frames = g.vm.frames.len();
-                let mut early = None;
-                let mut i = start;
-                while i <= stop {
-                    match g.vm.step_block1(block, Value::Int(i), pre_frames)? {
-                        BlockStep::MethodReturn => break,
-                        BlockStep::Break(r) => { early = Some(r); break; }
-                        BlockStep::Value(_) => {}
+                let early = g.vm.with_block_loop(block, pre_frames, |vm, bl| {
+                    let mut i = start;
+                    while i <= stop {
+                        match vm.loop_block1(bl, Value::Int(i))? {
+                            BlockStep::MethodReturn => break,
+                            BlockStep::Break(r) => return Ok(Some(r)),
+                            BlockStep::Value(_) => {}
+                        }
+                        i += 1;
                     }
-                    i += 1;
-                }
+                    Ok(None)
+                })?;
                 Some(early.unwrap_or(Value::Int(start)))
             }
             (Value::Int(start), "downto", [Value::Int(stop)]) => {
@@ -2825,16 +3086,18 @@ impl Vm {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Block(block));
                 let pre_frames = g.vm.frames.len();
-                let mut early = None;
-                let mut i = start;
-                while i >= stop {
-                    match g.vm.step_block1(block, Value::Int(i), pre_frames)? {
-                        BlockStep::MethodReturn => break,
-                        BlockStep::Break(r) => { early = Some(r); break; }
-                        BlockStep::Value(_) => {}
+                let early = g.vm.with_block_loop(block, pre_frames, |vm, bl| {
+                    let mut i = start;
+                    while i >= stop {
+                        match vm.loop_block1(bl, Value::Int(i))? {
+                            BlockStep::MethodReturn => break,
+                            BlockStep::Break(r) => return Ok(Some(r)),
+                            BlockStep::Value(_) => {}
+                        }
+                        i -= 1;
                     }
-                    i -= 1;
-                }
+                    Ok(None)
+                })?;
                 Some(early.unwrap_or(Value::Int(start)))
             }
             // `n.step(limit, by=1) { |i| … }` and the keyword form
@@ -2881,16 +3144,18 @@ impl Vm {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Block(block));
                 let pre_frames = g.vm.frames.len();
-                let mut early = None;
-                let mut i = start;
-                while i >= stop {
-                    match g.vm.step_block1(block, Value::Int(i), pre_frames)? {
-                        BlockStep::MethodReturn => break,
-                        BlockStep::Break(r) => { early = Some(r); break; }
-                        BlockStep::Value(_) => {}
+                let early = g.vm.with_block_loop(block, pre_frames, |vm, bl| {
+                    let mut i = start;
+                    while i >= stop {
+                        match vm.loop_block1(bl, Value::Int(i))? {
+                            BlockStep::MethodReturn => break,
+                            BlockStep::Break(r) => return Ok(Some(r)),
+                            BlockStep::Value(_) => {}
+                        }
+                        i -= 1;
                     }
-                    i -= 1;
-                }
+                    Ok(None)
+                })?;
                 Some(early.unwrap_or(Value::Int(start)))
             }
             (Value::Int(n), "times", []) => {
@@ -2905,16 +3170,18 @@ impl Vm {
                 let mut g = PinGuard::new(self);
                 g.pin(Value::Block(block));
                 let pre_frames = g.vm.frames.len();
-                let mut early = None;
-                let n_val = *n;
-                for i in 0..n_val {
-                    match g.vm.step_block1(block, Value::Int(i), pre_frames)? {
-                        BlockStep::MethodReturn => break,
-                        BlockStep::Break(r) => { early = Some(r); break; }
-                        BlockStep::Value(_) => {}
+                let early = g.vm.with_block_loop(block, pre_frames, |vm, bl| {
+                    let n_val = *n;
+                    for i in 0..n_val {
+                        match vm.loop_block1(bl, Value::Int(i))? {
+                            BlockStep::MethodReturn => break,
+                            BlockStep::Break(r) => return Ok(Some(r)),
+                            BlockStep::Value(_) => {}
+                        }
                     }
-                }
-                Some(early.unwrap_or(Value::Int(n_val)))
+                    Ok(None)
+                })?;
+                Some(early.unwrap_or(Value::Int(*n)))
             }
             // BigInt iteration: `times` / `upto` / `downto` with at
             // least one BigInt operand. Counter lives as a native
@@ -3259,17 +3526,19 @@ impl Vm {
                         g.pin(Value::Range(*id));
                         g.pin(Value::Block(block));
                         let pre_frames = g.vm.frames.len();
-                        let mut early = None;
-                        let end_inc = if excl { ei - 1 } else { ei };
-                        let mut i = bi;
-                        while i <= end_inc {
-                            match g.vm.step_block1(block, Value::Int(i), pre_frames)? {
-                                BlockStep::MethodReturn => break,
-                                BlockStep::Break(r) => { early = Some(r); break; }
-                                BlockStep::Value(_) => {}
+                        let early = g.vm.with_block_loop(block, pre_frames, |vm, bl| {
+                            let end_inc = if excl { ei - 1 } else { ei };
+                            let mut i = bi;
+                            while i <= end_inc {
+                                match vm.loop_block1(bl, Value::Int(i))? {
+                                    BlockStep::MethodReturn => break,
+                                    BlockStep::Break(r) => return Ok(Some(r)),
+                                    BlockStep::Value(_) => {}
+                                }
+                                i += 1;
                             }
-                            i += 1;
-                        }
+                            Ok(None)
+                        })?;
                         Some(early.unwrap_or(Value::Range(*id)))
                     }
                     (Value::Str(_), Value::Str(_)) => {
@@ -3671,14 +3940,16 @@ impl Vm {
                 }
                 let snapshot: Vec<Value> = g.vm.heap.array(*id).clone();
                 let pre_frames = g.vm.frames.len();
-                let mut early = None;
-                for (i, v) in snapshot.into_iter().enumerate() {
-                    match g.vm.step_block2(block, v, Value::Int(i as i64), pre_frames)? {
-                        BlockStep::MethodReturn => break,
-                        BlockStep::Break(r) => { early = Some(r); break; }
-                        BlockStep::Value(_) => {}
+                let early = g.vm.with_block_loop(block, pre_frames, |vm, bl| {
+                    for (i, v) in snapshot.into_iter().enumerate() {
+                        match vm.loop_block2(bl, v, Value::Int(i as i64))? {
+                            BlockStep::MethodReturn => break,
+                            BlockStep::Break(r) => return Ok(Some(r)),
+                            BlockStep::Value(_) => {}
+                        }
                     }
-                }
+                    Ok(None)
+                })?;
                 Some(early.unwrap_or(Value::Array(*id)))
             }
             (Value::Array(id), "each_index", []) => {
@@ -3690,14 +3961,16 @@ impl Vm {
                 g.pin(Value::Block(block));
                 let len = g.vm.heap.array(*id).len();
                 let pre_frames = g.vm.frames.len();
-                let mut early = None;
-                for i in 0..len {
-                    match g.vm.step_block1(block, Value::Int(i as i64), pre_frames)? {
-                        BlockStep::MethodReturn => break,
-                        BlockStep::Break(r) => { early = Some(r); break; }
-                        BlockStep::Value(_) => {}
+                let early = g.vm.with_block_loop(block, pre_frames, |vm, bl| {
+                    for i in 0..len {
+                        match vm.loop_block1(bl, Value::Int(i as i64))? {
+                            BlockStep::MethodReturn => break,
+                            BlockStep::Break(r) => return Ok(Some(r)),
+                            BlockStep::Value(_) => {}
+                        }
                     }
-                }
+                    Ok(None)
+                })?;
                 Some(early.unwrap_or(Value::Array(*id)))
             }
             (Value::Array(id), "each_with_object", [seed]) => {
@@ -5350,45 +5623,47 @@ impl Vm {
                 let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::new().into()));
                 g.pin(Value::Array(result_id));
                 let pre_frames = g.vm.frames.len();
-                let mut early = None;
-                let mut crossed = false;
-                for (k, v) in snapshot {
-                    if crossed {
-                        // drop_while past the crossover: append
-                        // remaining pairs without invoking block.
-                        g.vm.maybe_gc();
-                        g.vm.check_alloc()?;
-                        let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
-                        g.vm.heap.array_mut(result_id).push(Value::Array(pair_id));
-                        continue;
-                    }
-                    g.vm.maybe_gc();
-                    g.vm.check_alloc()?;
-                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
-                    g.vm.pinned.push(Value::Array(pair_id));
-                    let step = g.vm.step_block1(block, Value::Array(pair_id), pre_frames);
-                    g.vm.pinned.pop();
-                    let r = match step? {
-                        BlockStep::MethodReturn => break,
-                        BlockStep::Break(r) => { early = Some(r); break; }
-                        BlockStep::Value(r) => r,
-                    };
-                    let truthy = r.is_truthy();
-                    if is_take {
-                        if truthy {
-                            g.vm.heap.array_mut(result_id).push(Value::Array(pair_id));
+                let early = g.vm.with_block_loop(block, pre_frames, |vm, bl| {
+                    let mut crossed = false;
+                    for (k, v) in snapshot {
+                        if crossed {
+                            // drop_while past the crossover: append
+                            // remaining pairs without invoking block.
+                            vm.maybe_gc();
+                            vm.check_alloc()?;
+                            let pair_id = vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
+                            vm.heap.array_mut(result_id).push(Value::Array(pair_id));
+                            continue;
+                        }
+                        vm.maybe_gc();
+                        vm.check_alloc()?;
+                        let pair_id = vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
+                        vm.pinned.push(Value::Array(pair_id));
+                        let step = vm.loop_block1(bl, Value::Array(pair_id));
+                        vm.pinned.pop();
+                        let r = match step? {
+                            BlockStep::MethodReturn => break,
+                            BlockStep::Break(r) => return Ok(Some(r)),
+                            BlockStep::Value(r) => r,
+                        };
+                        let truthy = r.is_truthy();
+                        if is_take {
+                            if truthy {
+                                vm.heap.array_mut(result_id).push(Value::Array(pair_id));
+                            } else {
+                                break;
+                            }
                         } else {
-                            break;
-                        }
-                    } else {
-                        // drop_while: keep dropping until first
-                        // falsy, then collect THIS pair + rest.
-                        if !truthy {
-                            crossed = true;
-                            g.vm.heap.array_mut(result_id).push(Value::Array(pair_id));
+                            // drop_while: keep dropping until first
+                            // falsy, then collect THIS pair + rest.
+                            if !truthy {
+                                crossed = true;
+                                vm.heap.array_mut(result_id).push(Value::Array(pair_id));
+                            }
                         }
                     }
-                }
+                    Ok(None)
+                })?;
                 Some(early.unwrap_or(Value::Array(result_id)))
             }
             // `h.each_slice(n) { |slice| ... }` — yield each
@@ -5857,27 +6132,29 @@ impl Vm {
                 let result_id = g.vm.heap.alloc(HeapObj::Array(Vec::with_capacity(snapshot.len()).into()));
                 g.pin(Value::Array(result_id));
                 let pre_frames = g.vm.frames.len();
-                let mut early = None;
-                for (k, v) in snapshot {
-                    g.vm.maybe_gc();
-                    g.vm.check_alloc()?;
-                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
-                    g.vm.pinned.push(Value::Array(pair_id));
-                    let step = g.vm.step_block1(block, Value::Array(pair_id), pre_frames);
-                    g.vm.pinned.pop();
-                    let r = match step? {
-                        BlockStep::MethodReturn => break,
-                        BlockStep::Break(r) => { early = Some(r); break; }
-                        BlockStep::Value(r) => r,
-                    };
-                    match r {
-                        Value::Array(rid) => {
-                            let items: Vec<Value> = g.vm.heap.array(rid).clone();
-                            for it in items { g.vm.heap.array_mut(result_id).push(it); }
+                let early = g.vm.with_block_loop(block, pre_frames, |vm, bl| {
+                    for (k, v) in snapshot {
+                        vm.maybe_gc();
+                        vm.check_alloc()?;
+                        let pair_id = vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
+                        vm.pinned.push(Value::Array(pair_id));
+                        let step = vm.loop_block1(bl, Value::Array(pair_id));
+                        vm.pinned.pop();
+                        let r = match step? {
+                            BlockStep::MethodReturn => break,
+                            BlockStep::Break(r) => return Ok(Some(r)),
+                            BlockStep::Value(r) => r,
+                        };
+                        match r {
+                            Value::Array(rid) => {
+                                let items: Vec<Value> = vm.heap.array(rid).clone();
+                                for it in items { vm.heap.array_mut(result_id).push(it); }
+                            }
+                            other => vm.heap.array_mut(result_id).push(other),
                         }
-                        other => g.vm.heap.array_mut(result_id).push(other),
                     }
-                }
+                    Ok(None)
+                })?;
                 Some(early.unwrap_or(Value::Array(result_id)))
             }
             // `h.reduce { |acc, (k, v)| ... }` — no-init form.
@@ -6051,20 +6328,22 @@ impl Vm {
                     if v.is_gc_heap_ref() { g.pin(v.clone()); }
                 }
                 let pre_frames = g.vm.frames.len();
-                let mut early = None;
-                for (k, v) in snapshot {
-                    g.vm.maybe_gc();
-                    g.vm.check_alloc()?;
-                    let pair_id = g.vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
-                    g.vm.pinned.push(Value::Array(pair_id));
-                    let step_result = g.vm.step_block2(block, Value::Array(pair_id), seed.clone(), pre_frames);
-                    g.vm.pinned.pop();
-                    match step_result? {
-                        BlockStep::MethodReturn => break,
-                        BlockStep::Break(r) => { early = Some(r); break; }
-                        BlockStep::Value(_) => {}
+                let early = g.vm.with_block_loop(block, pre_frames, |vm, bl| {
+                    for (k, v) in snapshot {
+                        vm.maybe_gc();
+                        vm.check_alloc()?;
+                        let pair_id = vm.heap.alloc(HeapObj::Array(vec![k, v].into()));
+                        vm.pinned.push(Value::Array(pair_id));
+                        let step_result = vm.loop_block2(bl, Value::Array(pair_id), seed.clone());
+                        vm.pinned.pop();
+                        match step_result? {
+                            BlockStep::MethodReturn => break,
+                            BlockStep::Break(r) => return Ok(Some(r)),
+                            BlockStep::Value(_) => {}
+                        }
                     }
-                }
+                    Ok(None)
+                })?;
                 Some(early.unwrap_or(seed))
             }
 
