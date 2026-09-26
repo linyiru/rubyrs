@@ -2982,6 +2982,12 @@ impl Runtime {
         self.vm.any_heap_singletons = false;
         // Kernel#binding local snapshots hold captured Values.
         self.vm.binding_locals.clear();
+        // Lazy backtraces (#383) point at user-era protos and heap
+        // slots; the line-start index and the `set_backtrace` probe
+        // are keyed to sources / method_gen values reset rewinds.
+        self.vm.lazy_backtraces.clear();
+        self.vm.line_starts.clear();
+        self.vm.set_backtrace_probe = None;
         // A fiber suspended when its driving eval trapped leaves
         // its swapped-out frames + arena (all user state, all
         // heap-referencing) on the stash stack.
@@ -3164,6 +3170,7 @@ impl Runtime {
         self.vm.const_gen = snapshot.const_gen.wrapping_add(1);
         self.vm.const_cache_flat.clear();
         self.vm.const_cache_chain.clear();
+        self.vm.rescue_filter_cache.clear();
         // --- TypedData dfree callbacks, gathered during the heap
         //     surgery above ---
         // Run LAST, once every table is back to baseline —

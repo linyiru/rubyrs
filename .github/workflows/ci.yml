@@ -704,7 +704,7 @@ jobs:
           # count had sat at 19 since the ensure-walk suspension
           # rounds kept their new sites expect-free; locking the
           # headroom out.
-          check crates/rubyrs/src/vm/raise.rs        19
+          check crates/rubyrs/src/vm/raise.rs        18
           # Ratcheted 3 → 1 (-2) on 2026-07-04: two sites removed
           # (lookup cycle-guard rework); locking the win in.
           check crates/rubyrs/src/vm/lookup.rs        1

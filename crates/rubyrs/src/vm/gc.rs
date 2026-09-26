@@ -932,6 +932,12 @@ impl Vm {
             self.binding_locals
                 .retain(|&id, _| heap.is_live(crate::value::ObjId(id as u32)));
         }
+        // Same for the lazy backtraces (#383) of swept exceptions: a
+        // recycled slot must not inherit a dead exception's frames.
+        if !self.lazy_backtraces.is_empty() {
+            let heap = &self.heap;
+            self.lazy_backtraces.retain(|&id, _| heap.is_live(crate::value::ObjId(id)));
+        }
         // Run TypedData dfree callbacks AFTER `collect` has
         // returned and the &mut Heap borrow is released (review #2
         // on PR #19). Conservative shape — even though

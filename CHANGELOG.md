@@ -51,6 +51,20 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Changed
 
+- **`raise` / `rescue` no longer pays for the backtrace up front**
+  (#383). A raise now records only each live frame's
+  `(proto, ip)`; the `"file:line:in 'meth'"` strings are built the
+  first time `backtrace`, `full_message`, `dup`/`exception` or
+  Marshal reads them, and line numbers come from a per-source
+  line-start index instead of a scan from the top of the file. The
+  cost was ~650 ns per live frame on every raise. Named `rescue`
+  filters are cached per (proto, name) against `const_gen`, so a
+  `rescue Foo` inside a module no longer builds and interns a
+  qualified name for each lexical scope on every raise. shape-bench
+  `raise+rescue`: 42.6 µs → 0.75 µs (CRuby 0.40 µs). Raising
+  through 100 method frames: 68.2 µs → 0.83 µs (CRuby 1.11 µs).
+  `raise` then `e.backtrace`: 2.94 µs → 1.53 µs (CRuby 1.98 µs).
+  Backtrace, cause and `full_message` output is unchanged.
 - **Native iterators keep one block frame per call** instead of pushing
   and popping a frame for every element: after a plain block return the
   driver re-binds the next element into the same frame (Array, Hash,

@@ -19,7 +19,7 @@ use std::rc::Rc;
 
 use crate::error::{RubyError, Trap};
 use crate::heap::HeapObj;
-use crate::value::{Class, Instance, Value};
+use crate::value::{Class, Instance, ObjId, Value};
 
 use super::{LoopTransfer, LoopTransferKind, RescueFilter, Vm, class_is_a};
 
@@ -76,95 +76,116 @@ impl Vm {
             }
             crate::vm::RescueFilterSpec::Sym(filter_sym) => {
                 let filter_sym = *filter_sym;
-                // Clone the `Rc<str>` instead of materializing a
-                // fresh `String` — the interner returns `&Rc<str>`
-                // so the clone is a refcount bump.
-                let bare_name: Rc<str> = self.interner.resolve(filter_sym).clone();
-                // Splatted filter (`rescue *PASSTHROUGH`) — the marked
-                // name is a CONSTANT holding an Array of classes.
-                // Unresolved names and non-Array/non-Class values
-                // yield `None` (match nothing): fail-closed, where a
-                // dropped-splat lowering would degrade to a bare
-                // rescue that matched EVERY StandardError.
-                if let Some(splat_inner) = crate::const_marker::strip_splat(&bare_name) {
-                    let val: Option<Value> = if let Some(abs) = crate::const_marker::strip_absolute(splat_inner) {
-                        let abs_sym = self.interner.intern(abs);
-                        self.constants.get(&abs_sym).cloned()
-                    } else {
-                        let proto_idx = self.frames.last().expect("ICE: rescue filter with no frame").proto_idx;
-                        let lex = self.protos[proto_idx].lexical_scope.clone();
-                        let mut found = None;
-                        for scope_sym in &lex {
-                            let scope_name = self.interner.resolve(*scope_sym).clone();
-                            let qualified = format!("{}::{}", scope_name, splat_inner);
-                            let qsym = self.interner.intern(&qualified);
-                            if let Some(v) = self.constants.get(&qsym) {
-                                found = Some(v.clone());
-                                break;
-                            }
-                        }
-                        found.or_else(|| {
-                            let inner_sym = self.interner.intern(splat_inner);
-                            self.constants.get(&inner_sym).cloned()
-                        })
-                    };
-                    match val {
-                        Some(Value::Array(id)) => {
-                            let list: Vec<Rc<Class>> = self.heap.array(id).iter()
-                                .filter_map(|v| match v {
-                                    Value::Class(c) => Some(c.clone()),
-                                    _ => None,
-                                })
-                                .collect();
-                            Some(RescueFilter::Any(list))
-                        }
-                        // `rescue *X` where X holds a single class —
-                        // CRuby Array()-coerces, so it behaves as a
-                        // one-element list.
-                        Some(Value::Class(c)) => Some(RescueFilter::Class(c)),
-                        _ => None,
+                // The resolution depends only on the frame's proto (its
+                // lexical scope) and the global class / constant tables,
+                // so a hit stays valid until `const_gen` moves — the
+                // same contract as `const_cache_chain`. Skips the
+                // per-scope `format!` + intern on every raise.
+                let proto_idx = self.frames.last().expect("ICE: rescue filter with no frame").proto_idx;
+                let key = (proto_idx as u32, filter_sym.0);
+                if let Some((c, g)) = self.rescue_filter_cache.get(&key)
+                    && *g == self.const_gen
+                {
+                    return Some(RescueFilter::Class(c.clone()));
+                }
+                let resolved = self.resolve_rescue_filter_sym(proto_idx, filter_sym);
+                // Single-class results only: a splat filter's Array can
+                // be mutated in place without moving `const_gen`.
+                if let Some(RescueFilter::Class(c)) = &resolved {
+                    self.rescue_filter_cache.insert(key, (c.clone(), self.const_gen));
+                }
+                resolved
+            }
+        }
+    }
+
+    /// Uncached body of `resolve_rescue_filter` for a named filter.
+    fn resolve_rescue_filter_sym(&mut self, proto_idx: usize, filter_sym: crate::intern::SymId) -> Option<RescueFilter> {
+        // Clone the `Rc<str>` instead of materializing a
+        // fresh `String` — the interner returns `&Rc<str>`
+        // so the clone is a refcount bump.
+        let bare_name: Rc<str> = self.interner.resolve(filter_sym).clone();
+        // Splatted filter (`rescue *PASSTHROUGH`) — the marked
+        // name is a CONSTANT holding an Array of classes.
+        // Unresolved names and non-Array/non-Class values
+        // yield `None` (match nothing): fail-closed, where a
+        // dropped-splat lowering would degrade to a bare
+        // rescue that matched EVERY StandardError.
+        if let Some(splat_inner) = crate::const_marker::strip_splat(&bare_name) {
+            let val: Option<Value> = if let Some(abs) = crate::const_marker::strip_absolute(splat_inner) {
+                let abs_sym = self.interner.intern(abs);
+                self.constants.get(&abs_sym).cloned()
+            } else {
+                let lex = self.protos[proto_idx].lexical_scope.clone();
+                let mut found = None;
+                for scope_sym in &lex {
+                    let scope_name = self.interner.resolve(*scope_sym).clone();
+                    let qualified = format!("{}::{}", scope_name, splat_inner);
+                    let qsym = self.interner.intern(&qualified);
+                    if let Some(v) = self.constants.get(&qsym) {
+                        found = Some(v.clone());
+                        break;
                     }
                 }
-                // Absolute paths (`rescue ::Foo::Bar`) carry a leading
-                // `::` marker from the AST lowering. CRuby semantics:
-                // skip the lex-walk and look up the joined name at top
-                // level only.
-                else if let Some(absolute_bare) = crate::const_marker::strip_absolute(&bare_name) {
-                    let abs_sym = self.interner.intern(absolute_bare);
-                    self.classes.get(&abs_sym).cloned()
-                        .or_else(|| match self.constants.get(&abs_sym) {
-                            Some(Value::Class(c)) => Some(c.clone()),
+                found.or_else(|| {
+                    let inner_sym = self.interner.intern(splat_inner);
+                    self.constants.get(&inner_sym).cloned()
+                })
+            };
+            match val {
+                Some(Value::Array(id)) => {
+                    let list: Vec<Rc<Class>> = self.heap.array(id).iter()
+                        .filter_map(|v| match v {
+                            Value::Class(c) => Some(c.clone()),
                             _ => None,
                         })
-                        .map(RescueFilter::Class)
-                } else {
-                    let proto_idx = self.frames.last().expect("ICE: rescue filter with no frame").proto_idx;
-                    let lex = self.protos[proto_idx].lexical_scope.clone();
-                    let mut found = None;
-                    if !lex.is_empty() {
-                        for scope_sym in &lex {
-                            let scope_name = self.interner.resolve(*scope_sym).clone();
-                            let qualified = format!("{}::{}", scope_name, bare_name);
-                            let qsym = self.interner.intern(&qualified);
-                            if let Some(c) = self.classes.get(&qsym).cloned() {
-                                found = Some(c);
-                                break;
-                            }
-                            if let Some(Value::Class(c)) = self.constants.get(&qsym) {
-                                found = Some(c.clone());
-                                break;
-                            }
-                        }
+                        .collect();
+                    Some(RescueFilter::Any(list))
+                }
+                // `rescue *X` where X holds a single class —
+                // CRuby Array()-coerces, so it behaves as a
+                // one-element list.
+                Some(Value::Class(c)) => Some(RescueFilter::Class(c)),
+                _ => None,
+            }
+        }
+        // Absolute paths (`rescue ::Foo::Bar`) carry a leading
+        // `::` marker from the AST lowering. CRuby semantics:
+        // skip the lex-walk and look up the joined name at top
+        // level only.
+        else if let Some(absolute_bare) = crate::const_marker::strip_absolute(&bare_name) {
+            let abs_sym = self.interner.intern(absolute_bare);
+            self.classes.get(&abs_sym).cloned()
+                .or_else(|| match self.constants.get(&abs_sym) {
+                    Some(Value::Class(c)) => Some(c.clone()),
+                    _ => None,
+                })
+                .map(RescueFilter::Class)
+        } else {
+            let lex = self.protos[proto_idx].lexical_scope.clone();
+            let mut found = None;
+            if !lex.is_empty() {
+                for scope_sym in &lex {
+                    let scope_name = self.interner.resolve(*scope_sym).clone();
+                    let qualified = format!("{}::{}", scope_name, bare_name);
+                    let qsym = self.interner.intern(&qualified);
+                    if let Some(c) = self.classes.get(&qsym).cloned() {
+                        found = Some(c);
+                        break;
                     }
-                    found
-                        .or_else(|| self.classes.get(&filter_sym).cloned())
-                        .or_else(|| match self.constants.get(&filter_sym) {
-                            Some(Value::Class(c)) => Some(c.clone()),
-                            _ => None,
-                        })
-                        .map(RescueFilter::Class)
+                    if let Some(Value::Class(c)) = self.constants.get(&qsym) {
+                        found = Some(c.clone());
+                        break;
+                    }
                 }
             }
+            found
+                .or_else(|| self.classes.get(&filter_sym).cloned())
+                .or_else(|| match self.constants.get(&filter_sym) {
+                    Some(Value::Class(c)) => Some(c.clone()),
+                    _ => None,
+                })
+                .map(RescueFilter::Class)
         }
     }
 
@@ -368,6 +389,91 @@ impl Vm {
         Ok(())
     }
 
+    /// The user `set_backtrace` override for exception class `cls`, if
+    /// any: the preamble default lives on Exception itself, anything
+    /// narrower is user code. Cached per `(method_gen, class)` so a
+    /// raise of the same class skips the uncached lookup.
+    fn user_set_backtrace(&mut self, cls: &Rc<Class>) -> Option<Rc<crate::value::Method>> {
+        if let Some((generation, c, m)) = &self.set_backtrace_probe
+            && *generation == self.method_gen
+            && Rc::ptr_eq(c, cls)
+        {
+            return m.clone();
+        }
+        let m = self.lookup_method_uncached(cls, self.sym_set_backtrace).filter(|m| {
+            m.defining_class
+                .as_ref()
+                .and_then(std::rc::Weak::upgrade)
+                .is_none_or(|dc| dc.name != "Exception")
+        });
+        self.set_backtrace_probe = Some((self.method_gen, cls.clone(), m.clone()));
+        m
+    }
+
+    /// Remove exception `id`'s pending lazy backtrace (#383) and build
+    /// it as an Array of `"file:line:in 'meth'"` Strings, or `nil` when
+    /// none is pending. The caller must keep `id` rooted.
+    pub(crate) fn take_lazy_backtrace(&mut self, id: ObjId) -> Value {
+        let Some(raw) = self.lazy_backtraces.remove(&id.0) else { return Value::Nil };
+        let lines: Vec<Value> = raw.iter().filter_map(|&(p, ip)| self.backtrace_line(p as usize, ip as usize)).collect();
+        // The Strings are `Rc`-backed, not heap objects; only the
+        // Array allocation below can collect.
+        self.maybe_gc();
+        Value::Array(self.heap.alloc(HeapObj::Array(lines.into())))
+    }
+
+    /// Store exception `id`'s pending lazy backtrace, if any, as its
+    /// `@backtrace` Array. Every reader of `@backtrace` calls this
+    /// first (`__rubyrs_exc_backtrace`, Marshal). A `@backtrace` that is
+    /// already present was written after the capture (`set_backtrace`,
+    /// `instance_variable_set`) and wins: the entry is just dropped.
+    pub(crate) fn materialize_backtrace(&mut self, id: ObjId) {
+        if !self.lazy_backtraces.contains_key(&id.0) { return; }
+        let sym = self.sym_at_backtrace;
+        if self.heap.instance(id).ivar_defined(sym) {
+            self.lazy_backtraces.remove(&id.0);
+            return;
+        }
+        self.pinned.push(Value::Object(id));
+        let bt = self.take_lazy_backtrace(id);
+        self.pinned.pop();
+        self.heap.instance_mut(id).ivar_set(sym, bt);
+    }
+
+    /// One backtrace line for a frame at `(proto_idx, ip)`: `ip` points
+    /// one past the current op, mapped back through `op_spans` to a
+    /// byte offset (`ip == 0` falls back to offset 0, matching the
+    /// `Vm::trap` shape). `None` for a proto that no longer exists.
+    fn backtrace_line(&mut self, proto_idx: usize, ip: usize) -> Option<Value> {
+        let proto = self.protos.get(proto_idx)?;
+        let offset = if ip > 0 && ip <= proto.op_spans.len() { proto.op_spans[ip - 1].byte_offset } else { 0 };
+        let (filename, method, line_base) = (proto.filename.clone(), proto.name.clone(), proto.line_base);
+        let line = match self.source_line_starts(&filename) {
+            Some(starts) => crate::error::line_with_base(starts.partition_point(|&s| s <= offset) as u32, line_base),
+            None => 0,
+        };
+        Some(Value::new_str(format!("{}:{}:in '{}'", filename, line, method)))
+    }
+
+    /// Byte offsets of every line start in `filename`'s registered
+    /// source (always beginning with 0), built once per source. The
+    /// 1-based line of `offset` is the count of starts `<= offset` —
+    /// the same answer as `error::line_col`'s scan.
+    fn source_line_starts(&mut self, filename: &Rc<str>) -> Option<Rc<[u32]>> {
+        let src = self.sources.get(filename)?;
+        if let Some((cached_src, starts)) = self.line_starts.get(filename)
+            && Rc::ptr_eq(cached_src, src)
+        {
+            return Some(starts.clone());
+        }
+        let starts: Rc<[u32]> = std::iter::once(0u32)
+            .chain(src.bytes().enumerate().filter(|&(_, b)| b == b'\n').map(|(i, _)| i as u32 + 1))
+            .collect();
+        let src = src.clone();
+        self.line_starts.insert(filename.clone(), (src, starts.clone()));
+        Some(starts)
+    }
+
     pub(crate) fn unwind_with_exception(&mut self, exc: Value) -> Result<(), Trap> {
         cold_path();
         // A real exception supersedes an in-flight `break`/`next`/
@@ -400,132 +506,11 @@ impl Vm {
             && let Some(Value::Object(bang_id)) = self.globals.get(&self.sym_bang).cloned()
             && bang_id != *exc_id
         {
-            let cause_sym = self.interner.intern("@cause");
+            let cause_sym = self.sym_at_cause;
             let already = self.heap.instance(*exc_id).ivar_get(cause_sym)
                 .is_some_and(|v| !matches!(v, Value::Nil));
             if !already {
                 self.heap.instance_mut(*exc_id).ivar_set(cause_sym, Value::Object(bang_id));
-            }
-        }
-        // Populate `@backtrace` on the raised exception from the
-        // current frame stack — covers both the `raise "msg"` /
-        // `raise FooClass.new` Object route (where normalize_
-        // exception doesn't fill backtrace) and the trap-to-
-        // exception route (where the trap.backtrace has the same
-        // shape). Skips when the ivar is already set (e.g.
-        // re-raise of an already-rescued exception that preserves
-        // its original backtrace, matching CRuby).
-        // `throw`/`catch` rides the exception machinery via an internal
-        // `RubyrsThrowSignal` (see the handler-walk note below). It is
-        // control flow — a `catch` block consumes it and NOTHING ever
-        // reads its backtrace. Eagerly materializing the full backtrace
-        // (one formatted, line-computed, heap-allocated String per frame)
-        // for it was measured at ~68% of a Sinatra request — which
-        // `throw :halt`s on EVERY request (483µs→153µs with it skipped).
-        // Skip the build for the throw carrier; real raises still get it.
-        let exc_is_throw = matches!(&exc, Value::Object(id)
-            if class_chain_has_name(&self.heap.real_class_of(*id), "RubyrsThrowSignal"));
-        if let Value::Object(exc_id) = &exc {
-            let bt_sym = self.interner.intern("@backtrace");
-            let already_set = self.heap.instance(*exc_id).ivar_get(bt_sym)
-                .map(|v| !matches!(v, Value::Nil))
-                .unwrap_or(false);
-            if !already_set && !exc_is_throw {
-                // Innermost frame first (the raise site), oldest
-                // last — CRuby `Exception#backtrace` ordering.
-                let bt_strings: Vec<Value> = self
-                    .frames
-                    .iter()
-                    .rev()
-                    .map(|f| {
-                        let proto = &self.protos[f.proto_idx];
-                        let filename = proto.filename.clone();
-                        let method = proto.name.clone();
-                        // `f.ip` points one past the current op; map
-                        // back through `op_spans` to a byte offset.
-                        // Fall back to `Span::ZERO` (line 0) on the
-                        // boundary case `ip == 0`, matching the
-                        // existing `Vm::trap` shape.
-                        let span = if f.ip > 0 && f.ip <= proto.op_spans.len() {
-                            proto.op_spans[f.ip - 1]
-                        } else {
-                            crate::error::Span::ZERO
-                        };
-                        let line = match self.sources.get(&filename) {
-                            Some(src) => {
-                                crate::error::line_with_base(src, span.byte_offset, proto.line_base)
-                            }
-                            None => 0,
-                        };
-                        Value::new_str(format!("{}:{}:in '{}'", filename, line, method))
-                    })
-                    .collect();
-                if !bt_strings.is_empty() {
-                    // GC root-hole guard: `exc` is a Rust local
-                    // (not on `self.stack` / pinned), so the
-                    // upcoming `maybe_gc` would sweep the Instance
-                    // we just unwrapped `exc_id` from. Pin
-                    // `Value::Object(exc_id)` plus each
-                    // bt_string (heap-backed Str) across the
-                    // alloc, then drop the pins.
-                    self.pinned.push(Value::Object(*exc_id));
-                    for s in &bt_strings {
-                        self.pinned.push(s.clone());
-                    }
-                    let n_pinned = bt_strings.len() + 1;
-                    self.maybe_gc();
-                    let bt_arr_id = self.heap.alloc(HeapObj::Array(bt_strings.into()));
-                    // CRuby's raise funcalls `set_backtrace`, so a
-                    // USER override observes the raise (minitest's
-                    // BetterError fixture stamps `@bad_ivar =
-                    // binding` there to poison marshalability).
-                    // Detect an override by its defining class —
-                    // the preamble default lives on Exception
-                    // itself; anything narrower is user code. The
-                    // dispatch runs BEFORE the handler walk (frames
-                    // untouched); on any failure inside the
-                    // override, fall back to the direct ivar write
-                    // (best-effort, never compounds the unwind).
-                    let sbt_sym = self.interner.intern("set_backtrace");
-                    let exc_cls = self.heap.real_class_of(*exc_id);
-                    let user_sbt = self.lookup_method_uncached(&exc_cls, sbt_sym).filter(|m| {
-                        m.defining_class
-                            .as_ref()
-                            .and_then(std::rc::Weak::upgrade)
-                            .is_none_or(|dc| dc.name != "Exception")
-                    });
-                    let mut dispatched = false;
-                    if let Some(m) = user_sbt {
-                        self.pinned.push(Value::Array(bt_arr_id));
-                        let pre_frames = self.frames.len();
-                        let invoked = self
-                            .invoke_method(m, Value::Object(*exc_id), vec![Value::Array(bt_arr_id)])
-                            .and_then(|()| self.dispatch_until(pre_frames));
-                        self.pinned.pop();
-                        if invoked.is_ok() {
-                            self.stack.pop();
-                            dispatched = true;
-                        } else {
-                            for f in &self.frames[pre_frames..] {
-                                if f.dm_share {
-                                    self.dm_share_depth = self.dm_share_depth.saturating_sub(1);
-                                }
-                            }
-                            self.frames.truncate(pre_frames);
-                            // A failing user set_backtrace override
-                            // could have parked an ensure walk in
-                            // one of the discarded frames.
-                            self.cancel_transfers_in_dead_frames(pre_frames);
-                        }
-                    }
-                    for _ in 0..n_pinned {
-                        self.pinned.pop();
-                    }
-                    if !dispatched {
-                        self.heap.instance_mut(*exc_id)
-                            .ivar_set(bt_sym, Value::Array(bt_arr_id));
-                    }
-                }
             }
         }
         // Resolve the raised value's class once up front; the unwind loop
@@ -538,6 +523,91 @@ impl Vm {
             Value::Object(id) => Some(self.heap.real_class_of(*id)),
             _ => None,
         };
+        let exc_is_throw_signal = exc_class
+            .as_ref()
+            .is_some_and(|c| class_chain_has_name(c, "RubyrsThrowSignal"));
+        // Record the backtrace on the raised exception from the current
+        // frame stack — covers both the `raise "msg"` / `raise
+        // FooClass.new` Object route (where normalize_exception doesn't
+        // fill one) and the trap-to-exception route.
+        // `throw`/`catch` rides the exception machinery via an internal
+        // `RubyrsThrowSignal` (see the handler-walk note below). It is
+        // control flow — a `catch` block consumes it and NOTHING ever
+        // reads its backtrace, so the carrier skips the capture.
+        if let (Value::Object(exc_id), Some(exc_cls)) = (&exc, &exc_class)
+            && !exc_is_throw_signal
+        {
+            let exc_id = *exc_id;
+            let bt_sym = self.sym_at_backtrace;
+            // Skips when a backtrace is already recorded (a re-raise of
+            // an already-rescued exception keeps its original one, like
+            // CRuby) — either as the ivar or as a pending lazy entry. An
+            // ivar that is present wins over a pending entry (it was
+            // written after the capture); a present `nil` one counts as
+            // unset and is dropped so the new capture is what reads see.
+            let already_set = match self.heap.instance(exc_id).ivar_get(bt_sym) {
+                Some(Value::Nil) => {
+                    self.heap.instance_mut(exc_id).ivar_remove(bt_sym);
+                    false
+                }
+                Some(_) => true,
+                None => self.lazy_backtraces.contains_key(&exc_id.0),
+            };
+            if !already_set && !self.frames.is_empty() {
+                // Innermost frame first (the raise site), oldest
+                // last — CRuby `Exception#backtrace` ordering. Only
+                // the raw frame coordinates are captured here; the
+                // "file:line:in 'meth'" Strings are built on the first
+                // read (`materialize_backtrace`). Formatting them
+                // eagerly — a line scan, a `format!` and an allocation
+                // per frame — was ~650 ns per live frame on EVERY
+                // raise, almost all of it for backtraces nobody read.
+                let raw: Rc<[(u32, u32)]> = self
+                    .frames
+                    .iter()
+                    .rev()
+                    .map(|f| (f.proto_idx as u32, f.ip as u32))
+                    .collect();
+                self.lazy_backtraces.insert(exc_id.0, raw);
+                // CRuby's raise funcalls `set_backtrace`, so a USER
+                // override observes the raise (minitest's BetterError
+                // fixture stamps `@bad_ivar = binding` there to poison
+                // marshalability). Only that case needs the Strings
+                // now; the probe is cached per (class, method_gen).
+                if let Some(m) = self.user_set_backtrace(exc_cls) {
+                    self.pinned.push(Value::Object(exc_id));
+                    // Taken OUT of the lazy table: the override decides
+                    // what `@backtrace` ends up holding.
+                    let bt = self.take_lazy_backtrace(exc_id);
+                    self.pinned.push(bt.clone());
+                    // The dispatch runs BEFORE the handler walk (frames
+                    // untouched); on any failure inside the override,
+                    // fall back to the direct ivar write (best-effort,
+                    // never compounds the unwind).
+                    let pre_frames = self.frames.len();
+                    let invoked = self
+                        .invoke_method(m, Value::Object(exc_id), vec![bt.clone()])
+                        .and_then(|()| self.dispatch_until(pre_frames));
+                    self.pinned.pop();
+                    self.pinned.pop();
+                    if invoked.is_ok() {
+                        self.stack.pop();
+                    } else {
+                        for f in &self.frames[pre_frames..] {
+                            if f.dm_share {
+                                self.dm_share_depth = self.dm_share_depth.saturating_sub(1);
+                            }
+                        }
+                        self.frames.truncate(pre_frames);
+                        // A failing user set_backtrace override could
+                        // have parked an ensure walk in one of the
+                        // discarded frames.
+                        self.cancel_transfers_in_dead_frames(pre_frames);
+                        self.heap.instance_mut(exc_id).ivar_set(bt_sym, bt);
+                    }
+                }
+            }
+        }
         // `throw`/`catch` is modelled on the exception machinery
         // (preamble/throw_catch.rb): a `throw` to a live tag raises an
         // internal `RubyrsThrowSignal`. CRuby's throw is an unstoppable
@@ -550,9 +620,6 @@ impl Vm {
         // (i.e. the filter class itself descends from RubyrsThrowSignal).
         // `rescue Exception`'s filter is Exception, which is NOT a
         // descendant, so it falls through — matching CRuby's jump.
-        let exc_is_throw_signal = exc_class
-            .as_ref()
-            .is_some_and(|c| class_chain_has_name(c, "RubyrsThrowSignal"));
         loop {
             // Pop rescue handlers off this frame one by one. A non-ensure
             // handler with a `filter_class` skips if the exception's class
