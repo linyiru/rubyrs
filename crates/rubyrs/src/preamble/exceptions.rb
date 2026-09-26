@@ -34,13 +34,14 @@ class Exception
   end
 
   # `Exception#backtrace` — Array<String> of `"file:line:in
-  # 'method'"` frames, oldest at the END. `@backtrace` is
-  # populated by `Vm::trap_to_exception` when a Trap is rescued;
-  # exceptions constructed directly via `RuntimeError.new("...")`
+  # 'method'"` frames, oldest at the END. A raise records the
+  # frames lazily; `__rubyrs_exc_backtrace` builds `@backtrace`
+  # from them on first read, so every reader here goes through it.
+  # Exceptions constructed directly via `RuntimeError.new("...")`
   # carry no backtrace yet (matches CRuby — `raise`d-then-caught
   # carries one, `.new`-but-never-raised returns nil).
   def backtrace
-    @backtrace
+    __rubyrs_exc_backtrace
   end
 
   # `Exception#cause` — the exception that was being handled when this
@@ -65,7 +66,7 @@ class Exception
       return self
     end
     copy.instance_variable_set(:@message, @message)
-    copy.instance_variable_set(:@backtrace, @backtrace)
+    copy.instance_variable_set(:@backtrace, __rubyrs_exc_backtrace)
     copy
   end
 
@@ -113,7 +114,7 @@ class Exception
   # `:bottom` form (numbered `"Traceback (most recent call
   # last)\n\t1: from ..."`) isn't replicated.
   def full_message(highlight: false, order: :top)
-    bt = @backtrace
+    bt = __rubyrs_exc_backtrace
     return "#{@message} (#{self.class})\n" unless bt.is_a?(Array) && !bt.empty?
     head = "#{bt.first}: #{@message} (#{self.class})\n"
     tail = bt[1..].map { |f| "\tfrom #{f}\n" }.join

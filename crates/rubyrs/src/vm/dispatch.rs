@@ -16581,6 +16581,11 @@ impl Vm {
                         singleton_class,
                         frozen: std::cell::Cell::new(frozen),
                     }));
+                    // An exception's pending lazy backtrace travels
+                    // with the copy, as `@backtrace` would.
+                    if let Some(bt) = self.lazy_backtraces.get(&oid.0).cloned() {
+                        self.lazy_backtraces.insert(new_id.0, bt);
+                    }
                     Value::Object(new_id)
                 }
                 // Method / UnboundMethod: re-wrap the captured

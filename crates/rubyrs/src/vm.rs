@@ -895,6 +895,10 @@ pub(crate) enum RescueFilterSpec {
     SplatLocal(u16),
 }
 
+/// A registered source (compared by `Rc` identity on every hit) and the
+/// byte offset of each of its line starts; `Vm::line_starts` values.
+pub(crate) type SourceLineStarts = (Rc<str>, Rc<[u32]>);
+
 /// The two resolved shapes a `rescue` class filter can take. The
 /// single-class form stays an `Rc` clone (no extra allocation on
 /// the common path); the splat form carries the materialized list.
@@ -2224,6 +2228,22 @@ pub(crate) struct Vm {
     /// source don't propagate back (CRuby's binding is live; ERB
     /// doesn't rely on write-back). GC roots the captured Values.
     pub(crate) binding_locals: crate::intern::FxHashMap<usize, Vec<(String, crate::value::Value)>>,
+    /// Lazy `Exception#backtrace` (#383), keyed by the exception
+    /// instance's `ObjId`: the raw `(proto_idx, ip)` of every frame
+    /// live at the raise, innermost first. `unwind_with_exception`
+    /// records this instead of formatting one String per frame, and
+    /// `materialize_backtrace` turns it into the `@backtrace` Array on
+    /// the first read (`Exception#backtrace` / `full_message` / `dup`,
+    /// Marshal). Invariant: an entry exists only while `@backtrace` is
+    /// unset. Pruned after every sweep like `binding_locals`.
+    pub(crate) lazy_backtraces: crate::intern::FxHashMap<u32, Rc<[(u32, u32)]>>,
+    /// Per-source line-start offsets for backtrace formatting, keyed by
+    /// filename; the stored source `Rc` is compared on every hit so a
+    /// re-registered file rebuilds its index.
+    pub(crate) line_starts: crate::intern::FxHashMap<Rc<str>, SourceLineStarts>,
+    /// `unwind_with_exception`'s user-`set_backtrace` probe, cached as
+    /// `(method_gen, class, overridden?)` for the last raised class.
+    pub(crate) set_backtrace_probe: Option<(u32, Rc<Class>, bool)>,
     /// `Encoding.default_external` (E3): the tag File.read stamps
     /// when no `encoding:` argument is given. CRuby's process-wide
     /// default; ours starts at UTF-8 and is set through the
@@ -2396,6 +2416,11 @@ pub(crate) struct Vm {
     pub(crate) const_cache_flat: FxHashMap<SymId, (Value, u32)>,
     pub(crate) const_cache_chain: FxHashMap<(u32, u32), (Value, u32)>,
     pub(crate) const_gen: u32,
+    /// `rescue Name` filter resolutions keyed by `(proto_idx, SymId)`,
+    /// validated against `const_gen` (see `resolve_rescue_filter`). Not
+    /// a GC root: a fresh entry's classes are still in the canonical
+    /// tables, and a stale one is never read.
+    pub(crate) rescue_filter_cache: FxHashMap<(u32, u32), (Rc<Class>, u32)>,
     pub(crate) sym_length: SymId,
     pub(crate) sym_size: SymId,
     pub(crate) sym_to_s: SymId,
@@ -2424,6 +2449,10 @@ pub(crate) struct Vm {
     /// scoped errinfo, hot paths in exception-heavy code like Liquid
     /// rendering. Cached so those sites skip re-interning the literal.
     pub(crate) sym_bang: SymId,
+    /// Pre-interned exception slots and hooks touched on every raise.
+    pub(crate) sym_at_backtrace: SymId,
+    pub(crate) sym_at_cause: SymId,
+    pub(crate) sym_set_backtrace: SymId,
     /// Pre-interned `[]` / `[]=` for the collection-index fast path
     /// (`try_fast_index`, vm/dispatch.rs).
     pub(crate) sym_index_op: SymId,
@@ -3179,6 +3208,9 @@ impl Vm {
         let sym_to_s = interner.intern("to_s");
         let sym_inspect = interner.intern("inspect");
         let sym_bang = interner.intern("$!");
+        let sym_at_backtrace = interner.intern("@backtrace");
+        let sym_at_cause = interner.intern("@cause");
+        let sym_set_backtrace = interner.intern("set_backtrace");
         let sym_index_op = interner.intern("[]");
         let sym_index_set_op = interner.intern("[]=");
         let sym_call = interner.intern("call");
@@ -3561,6 +3593,9 @@ impl Vm {
             heap_singletons: crate::intern::FxHashMap::default(),
             any_heap_singletons: false,
             binding_locals: crate::intern::FxHashMap::default(),
+            lazy_backtraces: crate::intern::FxHashMap::default(),
+            line_starts: crate::intern::FxHashMap::default(),
+            set_backtrace_probe: None,
             default_external: crate::value::EncodingTag::Utf8,
             default_internal: None,
             module_refinements: crate::intern::FxHashMap::default(),
@@ -3625,11 +3660,15 @@ impl Vm {
             const_cache_flat: FxHashMap::default(),
             const_cache_chain: FxHashMap::default(),
             const_gen: 0,
+            rescue_filter_cache: FxHashMap::default(),
             sym_length,
             class_singleton_deny,
             probe_name_mask,
             sym_size,
             sym_bang,
+            sym_at_backtrace,
+            sym_at_cause,
+            sym_set_backtrace,
             sym_index_op,
             sym_index_set_op,
             sym_call,

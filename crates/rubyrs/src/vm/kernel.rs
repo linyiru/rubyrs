@@ -1802,6 +1802,18 @@ impl Vm {
             // `__rubyrs_fiber_locals` — the running fiber's own
             // fiber-local Hash, or nil on the root fiber
             // (preamble/thread.rb `Thread.__fiber_local_store`).
+            // `__rubyrs_exc_backtrace` — self's `@backtrace`, built
+            // first from the lazy raise-time capture if one is pending
+            // (#383; preamble/exceptions.rb reads it through here).
+            "__rubyrs_exc_backtrace" => {
+                let Some(Value::Object(id)) = self.frames.last().map(|f| f.self_val.clone()) else {
+                    return Some(Ok(Value::Nil));
+                };
+                if !matches!(self.heap.get(id), crate::heap::HeapObj::Instance(_)) { return Some(Ok(Value::Nil)); }
+                self.materialize_backtrace(id);
+                let sym = self.sym_at_backtrace;
+                Some(Ok(self.heap.instance(id).ivar_get(sym).cloned().unwrap_or(Value::Nil)))
+            }
             "__rubyrs_fiber_locals" => {
                 if !args.is_empty() {
                     return Some(Err(self.trap(RubyError::ArgumentError {
@@ -7513,6 +7525,7 @@ impl MarshalWriter {
                 self.out.push(b'o');
                 self.write_symbol(vm, csym);
                 let is_exc = marshal_is_exception(&inst_class);
+                if is_exc { vm.materialize_backtrace(*id); }
                 // Snapshot ivars (clone out so later interning can take a
                 // &mut borrow of the interner).
                 let mut ivars: Vec<(crate::intern::SymId, Value)> = vm

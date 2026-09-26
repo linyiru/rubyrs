@@ -1102,6 +1102,7 @@ fn tier2_restblock_lite() { run_diff("tier2_restblock_lite"); }
 #[test] fn exception_hierarchy() { run_diff("exception_hierarchy"); }
 #[test] fn stack_depth_guard() { run_diff("stack_depth_guard"); }
 #[test] fn exception_full_message() { run_diff("exception_full_message"); }
+#[test] fn exception_lazy_backtrace() { run_diff("exception_lazy_backtrace"); }
 #[test] fn errno_extended() { run_diff("errno_extended"); }
 #[test] fn bare_super_splat_forwarding() { run_diff("bare_super_splat_forwarding"); }
 #[test] fn kwarg_computed_defaults() { run_diff("kwarg_computed_defaults"); }
