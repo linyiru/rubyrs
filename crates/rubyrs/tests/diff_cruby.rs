@@ -2251,6 +2251,10 @@ fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 #[test] fn yield_splat_kwsplat() { run_diff("yield_splat_kwsplat"); }
 #[test] fn yield_zero_args() { run_diff("yield_zero_args"); }
 #[test] fn block_nested_share() { run_diff("block_nested_share"); }
+// Share-direct re-entrancy across fibers (a suspended fiber's parked
+// frames, or the resumer's while a fiber runs) — needs the `_fiber` build.
+#[cfg(feature = "_fiber")]
+#[test] fn block_share_fiber() { run_diff("block_share_fiber"); }
 
 // A `class Base < Struct` with its own `[]` override (calling super) is
 // honored + super-reachable by member-structs built from it. Surfaced

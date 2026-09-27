@@ -18029,6 +18029,13 @@ impl Vm {
         proto_idx: usize,
         captured: &Rc<RefCell<Vec<Value>>>,
     ) -> bool {
+        // Frames parked outside `self.frames` (a resumer's stack while a
+        // fiber runs, or a suspended fiber's snapshot) may hold a live
+        // invocation the walk below cannot see; take the copy path.
+        #[cfg(feature = "_fiber")]
+        if !self.fiber_stash_stack.is_empty() || self.heap.suspended_fibers > 0 {
+            return true;
+        }
         for f in self.frames.iter().rev() {
             if f.is_block {
                 if f.locals.as_shared().is_some_and(|l| Rc::ptr_eq(l, captured)) {

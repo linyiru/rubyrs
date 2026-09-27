@@ -171,6 +171,13 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Fixed
 
+- **A block re-entered across a Fiber switch keeps its own locals**
+  (#414). When a proc was suspended inside a fiber (or parked in the
+  fiber's resumer) and called again meanwhile, the two invocations
+  shared one params/locals area, so the suspended one resumed with the
+  newer values. Share-direct now falls back to a per-call copy while
+  any frames are parked outside the running stack.
+  (`block_share_fiber.rb`)
 - **`return` through a block's `ensure` no longer raises TypeError** —
   `def m = [1].each { begin; return 1; ensure; …; end }` ran the ensure
   and then failed with "exception class/object expected" when `m` was

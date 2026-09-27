@@ -700,6 +700,13 @@ pub(crate) struct Heap {
     /// Array-fast-path perf-regression guard.
     #[cfg(feature = "_fiber")]
     pub(crate) fiber_alloc_count: u64,
+    /// Live fibers in `FiberState::Suspended`: incremented when a resume
+    /// ends in `Fiber.yield`, decremented when a suspended fiber is
+    /// resumed again or swept. Non-zero means some frames sit in a
+    /// `FiberSnapshot` instead of `Vm.frames`, where the share-direct
+    /// re-entrancy walk (`block_is_reentrant`) cannot see them.
+    #[cfg(feature = "_fiber")]
+    pub(crate) suspended_fibers: u32,
     /// The registered `Fiber` class, cached so `class_of` /
     /// `real_class_of` can report it for the class-less
     /// `HeapObj::Fiber` slots (a fiber handle behaves as a `Fiber`
@@ -764,6 +771,8 @@ impl Heap {
             max_live: None,
             #[cfg(feature = "_fiber")]
             fiber_alloc_count: 0,
+            #[cfg(feature = "_fiber")]
+            suspended_fibers: 0,
             #[cfg(feature = "_fiber")]
             fiber_class: None,
             #[cfg(feature = "jit-native")]
@@ -1488,6 +1497,20 @@ impl Heap {
         self.alloc(HeapObj::Fiber(Box::new(crate::vm::fiber::FiberObject::new(body_block))))
     }
 
+    /// Sweep hook: slot `i` is about to die. If it is a suspended fiber,
+    /// its parked frames die with it, so drop it from `suspended_fibers`.
+    /// The counter check keeps the common sweep to one compare.
+    #[cfg(feature = "_fiber")]
+    #[inline]
+    fn forget_suspended_fiber(&mut self, i: usize) {
+        if self.suspended_fibers > 0
+            && let Slot::Live(HeapObj::Fiber(f)) = &self.slots[i]
+            && *f.state.borrow() == crate::vm::fiber::FiberState::Suspended
+        {
+            self.suspended_fibers -= 1;
+        }
+    }
+
     /// P1e.1: count currently-live `HeapObj::Fiber` slots.
     /// O(heap_size) — fine for the once-per-fiber-alloc cap
     /// check; the alternative would be a Vm-level counter
@@ -2031,6 +2054,8 @@ impl Heap {
                             && let Some(f) = d.dfree {
                                 pending_frees.push((f, d.data_ptr));
                             }
+                        #[cfg(feature = "_fiber")]
+                        self.forget_suspended_fiber(i);
                         self.slots[i] = Slot::Dead;
                         self.free.push(i as u32);
                         self.old[i] = false;
@@ -2054,6 +2079,8 @@ impl Heap {
                                 && let Some(f) = d.dfree {
                                     pending_frees.push((f, d.data_ptr));
                                 }
+                            #[cfg(feature = "_fiber")]
+                            self.forget_suspended_fiber(i);
                             self.slots[i] = Slot::Dead;
                             self.free.push(i as u32);
                             self.old[i] = false;
