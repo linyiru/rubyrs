@@ -2250,6 +2250,7 @@ fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 // (`yield(*v, **kwsplat)`, pp.rb:277).
 #[test] fn yield_splat_kwsplat() { run_diff("yield_splat_kwsplat"); }
 #[test] fn yield_zero_args() { run_diff("yield_zero_args"); }
+#[test] fn block_nested_share() { run_diff("block_nested_share"); }
 
 // A `class Base < Struct` with its own `[]` override (calling super) is
 // honored + super-reachable by member-structs built from it. Surfaced

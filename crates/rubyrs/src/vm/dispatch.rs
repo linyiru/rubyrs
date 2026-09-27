@@ -17914,6 +17914,24 @@ impl Vm {
                 }
             }
             (captured.clone(), None, BlockRouting::none())
+        } else if let Some(routing) = self.nested_share_routing(proto_idx, captured, block_id) {
+            // NESTED SHARE-DIRECT: the block was created in a routing
+            // frame (a copy-path block or a define_method body), whose
+            // cell canonically owns `[creator_start, …)` and routes the
+            // rest through the handle's `outer_chain`. Borrow that cell
+            // and install the creator's own routing: slots from
+            // `creator_start` up (the creator's locals plus this block's
+            // param / body scratch past the creator's `n_locals`) land in
+            // the shared cell, everything below routes exactly as it did
+            // for the creator. Same eligibility as share-direct otherwise.
+            if bp { self.block_prof.n_share += 1; }
+            {
+                let mut c = captured.borrow_mut();
+                if c.len() < needed {
+                    c.resize(needed, Value::Nil);
+                }
+            }
+            (captured.clone(), None, routing)
         } else {
             if bp {
                 self.block_prof.n_copy += 1;
@@ -17950,6 +17968,39 @@ impl Vm {
         }
     }
 
+    /// The routing for a NESTED share-direct invocation, or `None` when
+    /// the block must take the copy path. Eligible when the handle was
+    /// created in a routing frame (`creator_start > 0` with an
+    /// `outer_chain`), the body creates no closure, the block is not a
+    /// lambda (keeping lambda frames, the `return` barriers, off the
+    /// borrowed-cell shape the return walks would otherwise have to
+    /// disambiguate), and the same block is not already live.
+    fn nested_share_routing(
+        &self,
+        proto_idx: usize,
+        captured: &Rc<RefCell<Vec<Value>>>,
+        block_id: ObjId,
+    ) -> Option<BlockRouting> {
+        if self.protos[proto_idx].creates_block {
+            return None;
+        }
+        let bh = self.heap.block(block_id);
+        if bh.is_lambda || bh.creator_start == 0 {
+            return None;
+        }
+        let chain = bh.outer_chain.as_ref()?;
+        let (outer_cell, outer_cell_start) = chain.last()?;
+        if self.block_is_reentrant(proto_idx, captured) {
+            return None;
+        }
+        Some(BlockRouting {
+            own_start: bh.creator_start,
+            outer_cell_start: *outer_cell_start,
+            outer_cell: Some(outer_cell.clone()),
+            outer_rest: Some(chain.clone()),
+        })
+    }
+
     /// Is a block with this `proto_idx` + `captured` already an active
     /// frame on the stack? Such re-entrancy means a share-direct frame
     /// would clobber the suspended invocation's param / body-local
@@ -17969,7 +18020,10 @@ impl Vm {
     /// runs a few frames up) this stops after 1–3 frames. Two frame
     /// kinds ALIAS a method cell without owning it and must NOT stop
     /// the walk: share-direct sibling block frames (`is_block`, first
-    /// arm) and `define_method` share-direct frames (`dm_share`).
+    /// arm) and `define_method` share-direct frames (`dm_share`). For a
+    /// nested share-direct candidate `captured` is a copy-path block
+    /// frame's fresh cell instead; that frame (`block_writeback` set) is
+    /// the owner and ends the walk the same way.
     fn block_is_reentrant(
         &self,
         proto_idx: usize,
@@ -17977,10 +18031,15 @@ impl Vm {
     ) -> bool {
         for f in self.frames.iter().rev() {
             if f.is_block {
-                if f.proto_idx == proto_idx
-                    && f.locals.as_shared().is_some_and(|l| Rc::ptr_eq(l, captured))
-                {
-                    return true;
+                if f.locals.as_shared().is_some_and(|l| Rc::ptr_eq(l, captured)) {
+                    if f.proto_idx == proto_idx {
+                        return true;
+                    }
+                    // A copy-path frame owns its fresh cell: this is the
+                    // routing creator of a nested share-direct block.
+                    if f.block_writeback.is_some() {
+                        return false;
+                    }
                 }
             } else if !f.dm_share
                 && f.locals.as_shared().is_some_and(|l| Rc::ptr_eq(l, captured))
@@ -24729,6 +24788,7 @@ impl Vm {
                 .iter()
                 .rposition(|f| {
                     f.is_block
+                        && !f.borrows_creator_cell()
                         && f.locals
                             .as_shared()
                             .is_some_and(|l| Rc::ptr_eq(l, &target))
@@ -24766,7 +24826,8 @@ impl Vm {
             // barrier (stop here); an ordinary block follows its
             // writeback one scope outward.
             let blk_idx = self.frames.iter().rposition(|f| {
-                f.is_block && f.locals.as_shared().is_some_and(|l| Rc::ptr_eq(l, &target))
+                f.is_block && !f.borrows_creator_cell()
+                    && f.locals.as_shared().is_some_and(|l| Rc::ptr_eq(l, &target))
             });
             match blk_idx {
                 Some(idx) if self.frames[idx].is_lambda => return Some(idx),

@@ -51,6 +51,9 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Changed
 
+- **Blocks nested in a block or lambda are ~20% faster to yield to**
+  (#414). A block that creates no closure now runs directly in its
+  creator's locals instead of a per-call copy. (`block_nested_share.rb`)
 - **Zero-arg `yield` / `blk.call` / `loop` are ~5% faster** (#411). A
   plain block now binds its params directly, without the general binder.
   (`yield_zero_args.rb`)
