@@ -360,8 +360,12 @@ const GLOBAL_METHOD_CACHE_CAP: usize = 1 << 14;
 
 /// `(class, name) -> resolved method` for the chain walks, valid for
 /// one `method_gen`: the first fill after a bump clears the map. The
-/// `Weak` pins the class allocation, so a freed class's address can't
-/// be reused by a new class while its entries survive. Singleton
+/// `Weak` pins the class allocation: `Rc` drops a `Class` when its
+/// last strong ref goes but frees the backing allocation only when
+/// the weak count also reaches zero, so a freed class's address can't
+/// be reused by a new class while its entries survive. A hit on a
+/// dead class is still treated as a miss, so correctness never rests
+/// on that allocator detail alone. Singleton
 /// lookups key on the class pointer with bit 0 set (Class allocations
 /// are word-aligned), the same tagging `lookup_class_singleton_cached`
 /// uses.
@@ -378,7 +382,10 @@ impl GlobalMethodCache {
         if self.generation != generation {
             return None;
         }
-        self.map.get(&key).map(|(_, m)| m.clone())
+        match self.map.get(&key) {
+            Some((cls, m)) if cls.strong_count() > 0 => Some(m.clone()),
+            _ => None,
+        }
     }
 
     fn put(&mut self, generation: u32, key: (usize, SymId), cls: &Rc<Class>, m: &Option<Rc<Method>>) {
@@ -5109,6 +5116,25 @@ mod tests {
             first_after.is_none(),
             "oldest entry should have been evicted"
         );
+    }
+
+    #[test]
+    fn global_method_cache_never_serves_a_dropped_class() {
+        // Cache a positive entry for a class, drop the class, then
+        // allocate many fresh classes without the method: none may
+        // inherit the dead class's entry, even at a reused address.
+        let (mut vm, _) = mk_vm();
+        let name = vm.interner.intern("ping");
+        let dead = mk_class("Dead", None);
+        dead.methods.borrow_mut().insert(name, mk_method());
+        let dead_ptr = Rc::as_ptr(&dead) as usize;
+        assert!(vm.lookup_method_uncached(&dead, name).is_some());
+        drop(dead);
+        for i in 0..1000 {
+            let fresh = mk_class(&format!("F{i}"), None);
+            assert_ne!(Rc::as_ptr(&fresh) as usize, dead_ptr, "Weak must pin the dead class's allocation");
+            assert!(vm.lookup_method_uncached(&fresh, name).is_none());
+        }
     }
 
     #[test]
