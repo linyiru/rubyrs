@@ -990,6 +990,8 @@ fn tier2_restblock_lite() { run_diff("tier2_restblock_lite"); }
 #[test] fn respond_to_reopened() { run_diff("respond_to_reopened"); }
 // respond_to? consults a user respond_to_missing? on resolution miss.
 #[test] fn respond_to_missing() { run_diff("respond_to_missing"); }
+// Class/Module-receiver respond_to? sees inherited public Module/Kernel methods; private visibility calls only with include_all.
+#[test] fn module_respond_to() { run_diff("module_respond_to"); }
 // `def name` evaluates to :name (enables `private def …` modifier idiom).
 #[test] fn def_returns_symbol() { run_diff("def_returns_symbol"); }
 // Array/Hash/Range reach Enumerable methods with no native arm.

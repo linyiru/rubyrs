@@ -2302,8 +2302,19 @@ impl Vm {
                     | "autoload" | "autoload?" | "const_defined?" | "const_get" | "const_set" | "private_constant" | "public_constant"
                     | "deprecate_constant"
                     | "private_class_method" | "public_class_method"
-                    | "module_function"
                     | "singleton_class"
+                    // Public Module / Kernel methods every class and
+                    // module inherits, all served by the receiver-form
+                    // dispatch. `Rescuable#rescue_from` (AS 8.1) guards
+                    // on `klass.respond_to?(:===)`. `display` /
+                    // `remove_class_variable` / `const_missing` stay
+                    // out until dispatch serves them on a Class.
+                    | "===" | "instance_of?" | "is_a?" | "kind_of?" | "public_send"
+                    | "dup" | "clone" | "extend" | "include" | "prepend"
+                    | "attr_accessor" | "attr_reader" | "attr_writer" | "attr" | "alias_method"
+                    | "class_variable_get" | "class_variable_set" | "class_variables" | "class_variable_defined?"
+                    | "module_exec" | "class_exec" | "const_source_location"
+                    | "public_method_defined?" | "private_method_defined?" | "protected_method_defined?"
                     // Bridge keeping the bare-call shape (inside a
                     // class body, e.g. `class C; class_eval(...); end`)
                     // working — the no-recv dispatch in dispatch.rs
@@ -2355,6 +2366,16 @@ impl Vm {
                 // `cls.respond_to?(:superclass) && cls.superclass`
                 // don't try-and-trip.
                 if name == "superclass" && !cls.is_module {
+                    return true;
+                }
+                // Module's PRIVATE visibility surface: only
+                // `respond_to?(name, true)` sees it. `module_function`
+                // is Module-only (Class undefines it), so it is false
+                // on every class, `Module` itself included.
+                if include_private
+                    && (matches!(name, "private" | "public" | "protected" | "remove_const")
+                        || (name == "module_function" && cls.is_module))
+                {
                     return true;
                 }
                 if name == "allocate" && !cls.is_module && cls.name != "Module" {

@@ -171,6 +171,11 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Fixed
 
+- **`Klass.respond_to?` reports the Module / Kernel methods classes inherit**
+  — `===`, `is_a?`, `public_send`, `include`, `attr_accessor`, … were false
+  on a Class or Module receiver (ActiveSupport's `rescue_from(SomeError)`
+  raised ArgumentError), and `module_function` answered true without
+  `include_all`. (`module_respond_to.rb`)
 - **Tier-2 setter bodies see their callees' return values** — with
   `jit-native` tier 2, a compiled `def x=(v)` that called a self-method
   chain (`routes` → `get_header(...)`) got `v` back instead of the call's
