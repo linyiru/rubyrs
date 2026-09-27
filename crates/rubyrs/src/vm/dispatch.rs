@@ -25274,7 +25274,52 @@ impl Vm {
         Ok(())
     }
 
-    pub(crate) fn invoke_block(&mut self, block_id: ObjId, mut args: Vec<Value>) -> Result<(), Trap> {
+    pub(crate) fn invoke_block(&mut self, block_id: ObjId, args: Vec<Value>) -> Result<(), Trap> {
+        if args.is_empty() { self.invoke_block0(block_id) } else { self.invoke_block_general(block_id, args) }
+    }
+
+    /// Zero-arg twin of `invoke_block1` (`yield`, `blk.call`, `loop`):
+    /// a plain block (no rest / kw / `&b` param, not a lambda that
+    /// declares params, no pending `proc.call(&blk)` block) binds every
+    /// param slot to nil directly, skipping the general binder's
+    /// kw-param clone, kwargs peel, auto-splat probe and args Vec.
+    /// Everything else takes `invoke_block_general`, so semantics are
+    /// the general path's by construction; the Frame pushed is
+    /// byte-identical.
+    pub(crate) fn invoke_block0(&mut self, block_id: ObjId) -> Result<(), Trap> {
+        let (proto_idx, param_start, n_params, plain, is_lambda) = {
+            let bh = self.heap.block(block_id);
+            (bh.proto_idx, bh.param_start, bh.n_params,
+             bh.rest_slot.is_none() && bh.kw_rest_slot.is_none(), bh.is_lambda)
+        };
+        let proto = &self.protos[proto_idx];
+        if !plain || (is_lambda && n_params != 0) || self.block_prof_on || self.pending_block_arg.is_some()
+            || !proto.block_kw_params.is_empty() || proto.block_param_slot.is_some() {
+            return self.invoke_block_general(block_id, Vec::new());
+        }
+        let needed = proto.n_locals as usize;
+        let body_local_start = proto.block_body_local_start as usize;
+        self.check_frames()?;
+        let (captured, self_val, lexical_cvar_class, captured_is_method_scope, captured_yield_block) = {
+            let bh = self.heap.block(block_id);
+            (bh.captured.clone(), bh.self_val.clone(), bh.lexical_cvar_class.clone(),
+             bh.captured_is_method_scope, bh.captured_yield_block)
+        };
+        let (block_cell, writeback, routing) =
+            self.block_frame_locals(&captured, proto_idx, needed, param_start, captured_is_method_scope, block_id);
+        {
+            let mut locals = block_cell.borrow_mut();
+            for slot in body_local_start.min(needed)..needed { locals[slot] = Value::Nil; }
+            for i in 0..n_params as usize { locals[param_start as usize + i] = Value::Nil; }
+        }
+        self.push_block_frame(
+            proto_idx, block_cell, self_val, lexical_cvar_class,
+            is_lambda, writeback, routing, captured_yield_block,
+        );
+        Ok(())
+    }
+
+    fn invoke_block_general(&mut self, block_id: ObjId, mut args: Vec<Value>) -> Result<(), Trap> {
         let bp = self.block_prof_on;
         let bp_t0 = crate::vm::bp_now(bp);
         self.check_frames()?;

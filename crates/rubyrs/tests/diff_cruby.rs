@@ -2249,6 +2249,7 @@ fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 // tr_kwhash in the splat-assembly path. Surfaced by the pp gem
 // (`yield(*v, **kwsplat)`, pp.rb:277).
 #[test] fn yield_splat_kwsplat() { run_diff("yield_splat_kwsplat"); }
+#[test] fn yield_zero_args() { run_diff("yield_zero_args"); }
 
 // A `class Base < Struct` with its own `[]` override (calling super) is
 // honored + super-reachable by member-structs built from it. Surfaced
