@@ -168,6 +168,11 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Fixed
 
+- **Tier-2 setter bodies see their callees' return values** — with
+  `jit-native` tier 2, a compiled `def x=(v)` that called a self-method
+  chain (`routes` → `get_header(...)`) got `v` back instead of the call's
+  result; Rails' `Request#engine_script_name=` crashed on it.
+  (`tier2_setter_self_call.rb`)
 - **`return` through a block's `ensure` no longer raises TypeError** —
   `def m = [1].each { begin; return 1; ensure; …; end }` ran the ensure
   and then failed with "exception class/object expected" when `m` was
