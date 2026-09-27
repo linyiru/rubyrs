@@ -51,6 +51,9 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Changed
 
+- **The interpreter's per-op overhead is lower** (#417). Tight loops run
+  ~35% faster and method calls ~20% faster, because the hottest ops no
+  longer go through the full op match. (`step_hot_fallbacks.rb`)
 - **Blocks nested in a block or lambda are ~20% faster to yield to**
   (#414). A block that creates no closure now runs directly in its
   creator's locals instead of a per-call copy. (`block_nested_share.rb`)

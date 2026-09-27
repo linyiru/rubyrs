@@ -98,8 +98,26 @@ impl Vm {
     }
 
     /// Decrement fuel; on exhaustion return a `ResourceExhausted` trap.
-    #[inline]
+    /// Charged once per op, so the unmetered case (no fuel, and no
+    /// deadline or not a 1024th op) stays inline and the rest is out of
+    /// line in `check_fuel_slow`.
+    #[inline(always)]
     pub(crate) fn check_fuel(&mut self) -> Result<(), Trap> {
+        if self.fuel.is_none() {
+            let n = self.op_counter.wrapping_add(1);
+            self.op_counter = n;
+            if n & 1023 != 0 || self.deadline_at.is_none() {
+                return Ok(());
+            }
+        }
+        self.check_fuel_slow()
+    }
+
+    /// `check_fuel`'s metered path. Without fuel the fast half has already
+    /// bumped `op_counter`, so only the deadline test is left.
+    #[cold]
+    #[inline(never)]
+    fn check_fuel_slow(&mut self) -> Result<(), Trap> {
         if let Some(f) = self.fuel {
             if f == 0 {
                 return Err(self.trap(RubyError::ResourceExhausted {
@@ -107,6 +125,7 @@ impl Vm {
                 }));
             }
             self.fuel = Some(f - 1);
+            self.op_counter = self.op_counter.wrapping_add(1);
         }
         // Wall-clock deadline: piggyback on `check_fuel` since both
         // fire on every op. `Instant::now()` is a syscall on most
@@ -114,7 +133,6 @@ impl Vm {
         // the no-deadline case to a single conditional + an i32
         // increment per op. The op_counter is intentionally `u32`
         // (wraps freely) — we never read its absolute value.
-        self.op_counter = self.op_counter.wrapping_add(1);
         if self.op_counter & 1023 == 0
             && let Some(at) = self.deadline_at
                 && std::time::Instant::now() >= at {
