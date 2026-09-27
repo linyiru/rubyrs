@@ -278,7 +278,9 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 - **`CLAUDE.md` added** — agent-facing orientation at the repo root:
   build/test commands (including the JIT-tier diff runs), the
   diff-fixture registration and known-failure discipline, the
-  architecture overview, and the merge-gating rules.
+  architecture overview, and the merge-gating rules. Its crate list
+  now names `rubyrs-jit` and `carmine-ffi` and describes `rubund` as
+  the Gemfile.lock parser it is.
 - **Orientation docs brought back in line with the code** — README's
   workspace intro, `docs/DEVELOPMENT.md` (diff fixtures must be
   registered in `diff_cruby.rs`; they were documented as
