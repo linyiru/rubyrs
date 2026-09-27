@@ -109,11 +109,15 @@ module Kernel
         caller(start + 1, length)
       end
     return nil if raw.nil?
+    return [] if raw.empty?
+    # `Regexp.new` (not a `/…/` literal) so this preamble parses in a
+    # regex-off build (ADR 0017 Rule 3); backtrace parsing then degrades
+    # to a runtime error there instead of an ICE at preamble load.
+    # Compiled once and memoized: ActiveSupport calls this per request,
+    # and a fresh `Regexp.new` per frame was a regex compile per frame.
+    re = ($__rubyrs_caller_location_re ||= Regexp.new("\\A(?<path>.*):(?<lineno>\\d+):in ['`](?<label>.*)'\\z"))
     raw.map do |s|
-      # `Regexp.new` (not a `/…/` literal) so this preamble parses in a
-      # regex-off build (ADR 0017 Rule 3); backtrace parsing then degrades
-      # to a runtime error there instead of an ICE at preamble load.
-      m = s.match(Regexp.new("\\A(?<path>.*):(?<lineno>\\d+):in ['`](?<label>.*)'\\z"))
+      m = s.match(re)
       if m
         Thread::Backtrace::Location.new(m[:path], m[:lineno].to_i, m[:label])
       else
