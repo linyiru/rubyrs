@@ -3086,6 +3086,7 @@ impl Runtime {
         // unbounded — `cache_counter as u16` would eventually
         // wrap and start aliasing unrelated call sites.
         self.vm.call_caches.truncate(snapshot.call_caches_len);
+        self.vm.method_cache.borrow_mut().clear();
         self.vm.ivar_caches.truncate(snapshot.ivar_caches_len);
         self.vm.cvar_caches.truncate(snapshot.cvar_caches_len);
         self.vm.super_caches.truncate(snapshot.super_caches_len);
