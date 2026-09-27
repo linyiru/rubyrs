@@ -32,6 +32,16 @@ def incs(x)
 end
 p incs(1)
 p incs(1.5)
+# A Float loop counter (the native JIT once added 1 to its f64 bits).
+def float_count(x)
+  i = x
+  while i < 5
+    i += 1
+  end
+  i
+end
+p float_count(0.5)
+p float_count(1)
 
 # Locals captured by a block leave the arena path.
 def captured

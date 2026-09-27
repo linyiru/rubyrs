@@ -174,6 +174,10 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Fixed
 
+- **`i += 1` on a Float local under the native JIT** (#417). The JIT
+  added 1 to the float's bits, so `1.5 + 1` gave `1.5000000000000004` and
+  a Float loop counter never finished; such methods now stay in the
+  interpreter. (`step_hot_fallbacks.rb`)
 - **A block re-entered across a Fiber switch keeps its own locals**
   (#414). When a proc was suspended inside a fiber (or parked in the
   fiber's resumer) and called again meanwhile, the two invocations
