@@ -572,6 +572,7 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // site warmed up, polymorphic and singleton receivers, every mm arity shape.
 #[test] fn method_missing_site_cache() { run_diff("method_missing_site_cache"); }
 #[test] fn method_missing_self_site_cache() { run_diff("method_missing_self_site_cache"); }
+#[test] fn method_missing_lite_serve() { run_diff("method_missing_lite_serve"); }
 // Pure-Ruby IPAddr (Tier 3 vendored): IPv4/IPv6 + CIDR + include?/===
 // (rack-protection HostAuthorization). Needs the vendored stdlib source.
 #[cfg(feature = "stdlib")]
