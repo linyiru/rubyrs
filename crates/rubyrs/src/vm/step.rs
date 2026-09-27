@@ -3631,8 +3631,15 @@ impl Vm {
                 if self.frames.len() > pre_frames {
                     // User-method frame pushed — its eventual return
                     // value is discarded in favour of the RHS (same
-                    // mechanism Class.new uses for initialize).
-                    if let Some(f) = self.frames.last_mut() {
+                    // mechanism Class.new uses for initialize). The
+                    // SETTER's frame is the first one pushed, not
+                    // necessarily the last: a tier-2 frame-lite serve
+                    // whose lite→lite chain materialized pushes the
+                    // setter's frame AND every suspended callee above
+                    // it (`lite_materialize_core`), so `last_mut()`
+                    // would swap the RHS into the innermost callee's
+                    // return instead.
+                    if let Some(f) = self.frames.get_mut(pre_frames) {
                         f.swap_return = Some(rhs);
                     }
                 } else if let Some(top) = self.stack.last_mut() {

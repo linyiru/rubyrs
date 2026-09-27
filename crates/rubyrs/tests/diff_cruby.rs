@@ -1442,6 +1442,18 @@ fn jit_each_cop_walk() { run_diff("jit_each_cop_walk"); }
 #[test] fn tier2_own_capture_rebind() { run_diff("tier2_own_capture_rebind"); }
 #[test] fn tier2_framelite_battery() { run_diff("tier2_framelite_battery"); }
 #[test] fn tier2_litecall_battery() { run_diff("tier2_litecall_battery"); }
+// Assignment-syntax (`CallAset`) RHS swap must land on the SETTER's frame
+// when its frame-lite serve materializes a lite->lite chain (the swap used
+// to hit the innermost materialized callee). The `_forced` leg pins tier 2
+// at THRESHOLD=1 so the default run exercises it too.
+#[test] fn tier2_setter_self_call() { run_diff("tier2_setter_self_call"); }
+#[test]
+fn tier2_setter_self_call_forced() {
+    run_diff_env(
+        "tier2_setter_self_call",
+        &[("RUBYRS_JIT_TIER2", "1"), ("RUBYRS_JIT_TIER2_THRESHOLD", "1")],
+    );
+}
 // Fallback-census absorption battery (ADR 0037, 2026-07): the extracted
 // walk-fast-bucket zone probed from t2_call, the argc≤8 framed call cap,
 // and the census-ranked buckets (Array#drop/freeze/dup, Hash#fetch,
