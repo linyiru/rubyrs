@@ -2267,6 +2267,8 @@ fn tier2_setter_self_call_forced() {
 // frames, or the resumer's while a fiber runs) — needs the `_fiber` build.
 #[cfg(feature = "_fiber")]
 #[test] fn block_share_fiber() { run_diff("block_share_fiber"); }
+// `step`'s hot-op front handing its slow sub-cases to `step_cold`.
+#[test] fn step_hot_fallbacks() { run_diff("step_hot_fallbacks"); }
 
 // A `class Base < Struct` with its own `[]` override (calling super) is
 // honored + super-reachable by member-structs built from it. Surfaced

@@ -2077,6 +2077,12 @@ pub(crate) fn compile(
                     }
                 }
                 Op::IncLocal(s) | Op::IncLocalNoPush(s) => {
+                    // The i64 add is only `+ 1` for an Int local: a Float local's
+                    // var holds its f64 BITS (`i = 1.5; i += 1` would bump the
+                    // mantissa), and any other kind's `+` is a real dispatch.
+                    if local_kinds[*s as usize] != Kind::Int {
+                        return None;
+                    }
                     let cur = fb.use_var(vars[*s as usize]);
                     let one = fb.ins().iconst(types::I64, 1);
                     let (nv, of) = fb.ins().sadd_overflow(cur, one);

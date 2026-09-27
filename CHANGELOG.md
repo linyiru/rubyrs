@@ -51,6 +51,9 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Changed
 
+- **The interpreter's per-op overhead is lower** (#417). Tight loops run
+  ~35% faster and method calls ~20% faster, because the hottest ops no
+  longer go through the full op match. (`step_hot_fallbacks.rb`)
 - **Blocks nested in a block or lambda are ~20% faster to yield to**
   (#414). A block that creates no closure now runs directly in its
   creator's locals instead of a per-call copy. (`block_nested_share.rb`)
@@ -171,6 +174,10 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Fixed
 
+- **`i += 1` on a Float local under the native JIT** (#417). The JIT
+  added 1 to the float's bits, so `1.5 + 1` gave `1.5000000000000004` and
+  a Float loop counter never finished; such methods now stay in the
+  interpreter. (`step_hot_fallbacks.rb`)
 - **Tier-2 setter bodies see their callees' return values** — with
   `jit-native` tier 2, a compiled `def x=(v)` that called a self-method
   chain (`routes` → `get_header(...)`) got `v` back instead of the call's
