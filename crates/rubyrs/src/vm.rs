@@ -407,6 +407,19 @@ pub(crate) fn cell_store(cell: &Rc<RefCell<Vec<Value>>>, slot: usize, v: Value) 
 }
 
 impl Frame {
+    /// A NESTED share-direct block frame (see `block_frame_locals`):
+    /// its `locals` is the creating routing frame's cell, BORROWED —
+    /// that frame (a copy-path block or a define_method body) owns it.
+    /// The Rc-identity walks must skip these frames when they look for
+    /// the cell's owner, just as they skip past method share-direct
+    /// frames by matching the method frame first. Copy-path block
+    /// frames always carry a writeback, and method share-direct
+    /// frames have `own_start == 0`, so neither matches.
+    #[inline]
+    pub(crate) fn borrows_creator_cell(&self) -> bool {
+        self.is_block && self.block_writeback.is_none() && self.own_start > 0
+    }
+
     /// Capture routing: the CANONICAL binding cell for `slot`, or
     /// `None` when the slot belongs to this frame's own cell. All
     /// slot reads/writes on `Shared` frames consult this first —

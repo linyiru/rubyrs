@@ -2844,6 +2844,12 @@ impl Runtime {
         self.vm.heap.next_gc = snapshot.heap_next_gc;
         self.vm.heap.gc_floor = snapshot.heap_gc_floor;
         self.vm.heap.last_sweep_us = snapshot.heap_last_sweep_us;
+        // The preamble never suspends a fiber, and every user fiber
+        // was dropped above.
+        #[cfg(feature = "_fiber")]
+        {
+            self.vm.heap.suspended_fibers = 0;
+        }
         #[cfg(feature = "jit-native")]
         {
             // ADR 0035: `class_ptrs` is slots-parallel too (the
