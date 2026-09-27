@@ -51,6 +51,9 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Changed
 
+- **Zero-arg `yield` / `blk.call` / `loop` are ~5% faster** (#411). A
+  plain block now binds its params directly, without the general binder.
+  (`yield_zero_args.rb`)
 - **`caller_locations` is ~8× faster** (#403). It now compiles its
   frame-parsing regex once instead of once per returned frame.
   (`caller_locations.rb`)
