@@ -615,6 +615,9 @@ pub(crate) fn resume_fiber(
 
     let body_block_id = vm.heap.fiber(fiber_id).body_block;
     let is_first_resume = matches!(initial_state, FiberState::Created);
+    if initial_state == FiberState::Suspended {
+        vm.heap.suspended_fibers = vm.heap.suspended_fibers.saturating_sub(1);
+    }
     *vm.heap.fiber(fiber_id).state.borrow_mut() = FiberState::Running;
 
     // P1c.3: stash the previous current_fiber_id so
@@ -666,6 +669,7 @@ pub(crate) fn resume_fiber(
         (Ok(_), Some(v)) => {
             // Suspended via Fiber.yield(v).
             *guard.vm.heap.fiber(fiber_id).state.borrow_mut() = FiberState::Suspended;
+            guard.vm.heap.suspended_fibers += 1;
             *guard.vm.heap.fiber(fiber_id).last_value.borrow_mut() = v.clone();
             Ok(FiberStep::Yielded(v))
         }

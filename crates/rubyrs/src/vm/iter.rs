@@ -463,8 +463,9 @@ impl Vm {
             Some(f) => match f.locals.as_shared() {
                 // A copy-path cell (own_start > 0) is this frame's
                 // alone; a share-direct cell is the method's own and
-                // shared by design.
-                Some(cell) if f.own_start == 0 || std::rc::Rc::strong_count(cell) == 1 => {
+                // shared by design, as is a nested share-direct cell
+                // borrowed from the creating frame.
+                Some(cell) if f.own_start == 0 || f.borrows_creator_cell() || std::rc::Rc::strong_count(cell) == 1 => {
                     let mut locals = cell.borrow_mut();
                     if locals.len() >= bl.needed {
                         for s in bl.body_local_start..bl.needed {
