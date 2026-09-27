@@ -1226,6 +1226,26 @@ fn reset_drops_main_extend_and_proto_plans() {
     );
 }
 
+/// `caller_locations` parses frames with a regex compiled once at
+/// preamble load (#403). Both resets must keep that same object: a
+/// lazily set `$global` is cleared by both, so the regex would be
+/// recompiled on every request.
+#[test]
+fn caller_locations_regex_survives_resets() {
+    let mut rt = Runtime::new();
+    let probe = "Kernel.const_get(:RUBYRS_CALLER_LOCATION_RE).object_id";
+    let id = |v: rubyrs::Value| match v { rubyrs::Value::Int(n) => n, other => panic!("object_id: {other:?}") };
+    let first = id(rt.eval(probe, "a.rb").expect("probe"));
+    rt.reset_between_requests();
+    assert_eq!(id(rt.eval(probe, "b.rb").expect("probe")), first);
+    rt.reset();
+    assert_eq!(id(rt.eval(probe, "c.rb").expect("probe")), first);
+    let v = rt.eval("\ndef m = caller_locations(0, 1).first.lineno; m", "d.rb").expect("caller_locations");
+    assert!(matches!(v, rubyrs::Value::Int(2)), "got {v:?}");
+    let hidden = rt.eval("Kernel.constants.empty?", "e.rb").expect("constants");
+    assert!(matches!(hidden, rubyrs::Value::Bool(true)), "Kernel.constants must stay empty");
+}
+
 // --- helpers ---
 //
 // These reach into private Vm state through the test-only Runtime

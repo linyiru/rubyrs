@@ -91,6 +91,21 @@ class Thread
 end
 
 module Kernel
+  # The frame-string pattern `caller_locations` parses with, compiled
+  # once at preamble load. ActiveSupport calls `caller_locations` per
+  # request, and a `Regexp.new` per returned frame was a regex compile
+  # per frame. A preamble constant (not a lazily set `$global`) because
+  # `Runtime::reset` / `reset_between_requests` clear globals but
+  # restore preamble constants, so the compiled regex survives the
+  # per-request lifecycle. `Regexp.new` (not a `/…/` literal) so this
+  # preamble parses in a regex-off build (ADR 0017 Rule 3): there the
+  # constant is nil and `caller_locations` degrades to a runtime error
+  # instead of an ICE at preamble load. Private, so `Kernel.constants`
+  # still lists nothing (CRuby).
+  RUBYRS_CALLER_LOCATION_SRC = "\\A(?<path>.*):(?<lineno>\\d+):in ['`](?<label>.*)'\\z"
+  RUBYRS_CALLER_LOCATION_RE = (Regexp.new(RUBYRS_CALLER_LOCATION_SRC) rescue nil)
+  private_constant :RUBYRS_CALLER_LOCATION_SRC, :RUBYRS_CALLER_LOCATION_RE
+
   # `caller_locations(start = 1, length = nil)` — like `caller` but
   # returns `Thread::Backtrace::Location` objects instead of strings.
   # Implemented over the native `caller`: the `+ 1` skips THIS wrapper
@@ -110,12 +125,7 @@ module Kernel
       end
     return nil if raw.nil?
     return [] if raw.empty?
-    # `Regexp.new` (not a `/…/` literal) so this preamble parses in a
-    # regex-off build (ADR 0017 Rule 3); backtrace parsing then degrades
-    # to a runtime error there instead of an ICE at preamble load.
-    # Compiled once and memoized: ActiveSupport calls this per request,
-    # and a fresh `Regexp.new` per frame was a regex compile per frame.
-    re = ($__rubyrs_caller_location_re ||= Regexp.new("\\A(?<path>.*):(?<lineno>\\d+):in ['`](?<label>.*)'\\z"))
+    re = RUBYRS_CALLER_LOCATION_RE || Regexp.new(RUBYRS_CALLER_LOCATION_SRC)
     raw.map do |s|
       m = s.match(re)
       if m
