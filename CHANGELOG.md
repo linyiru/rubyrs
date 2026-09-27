@@ -260,6 +260,12 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Internal
 
+- **Peak-RSS budgets recalibrated** (`perf/baselines.tsv`): the 10600 KB
+  cluster moves to 11000, `hash_mutate` to 11100, and `boot` to 10800.
+  About 200 KB of growth is spread across #376–#402 with no single step,
+  and the old headroom (100–200 KB) was smaller than CI's measured
+  runner-to-runner noise (276–512 KB), so identical binaries went red at
+  random. The measurements are in the file's comment.
 - **String literals copy the interned bytes directly** instead of going
   through `ToString`'s formatter path, so a fresh literal costs ~30% less.
   ([#380](https://github.com/linyiru/rubyrs/issues/380))

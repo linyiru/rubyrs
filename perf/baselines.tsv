@@ -224,7 +224,26 @@
 # (.text -652 KB), measured clawback on the box: boot -472 KB, base
 # rows -296~-436 KB. Budgets follow the clawback down so the ratchet
 # keeps teeth; gc_churn stays 12500 (floor-dominated, -188 = noise).
-crates/rubyrs/tests/fixtures/fizzbuzz.rb	10600	0	tiny script; wall is sub-100ms noise floor, disabled
+# 2026-09-27 RSS RECAL (cluster 10600 -> 11000, hash_mutate 10750 ->
+# 11100, boot 10450 -> 10800; wall unchanged). Two things, measured:
+# (1) Diffuse base growth of ~200 KB over #376..#402 (2026-09-23..27).
+#     CI daily means rose on every workload (boot 10174 -> 10327,
+#     fizzbuzz 10437 -> 10554 over 39 runs). A 12-point first-parent
+#     walk on starship (20 interleaved runs each) found no single step:
+#     the largest is #377's cruby-compat batch (+95..135 KB mean), the
+#     rest (#387, #390, #395..#402 site-cache and fast-path tables) are
+#     each under ~90 KB. #401's global method cache alone measured
+#     +20 / -72 / +44 KB p50 (boot / fizzbuzz / string_interp, 30 runs),
+#     i.e. nothing.
+# (2) The budgets sat inside CI's runner-to-runner noise. The same
+#     binary read boot 10384, 10464 and 10460 on three runs (image
+#     ubuntu-24.04 20260920.314.1 on all); per-workload min-max spread
+#     over the 39 runs is 276-512 KB, while the old budgets kept
+#     100-200 KB over the observed peak. That is why master @ #401 and
+#     #402 went red on different workloads with no code change.
+# New budgets are observed-CI max + ~300 KB (~450-550 KB over the
+# current mean), matching the 2026-07-04 "+~400 KB headroom" rule.
+crates/rubyrs/tests/fixtures/fizzbuzz.rb	11000	0	tiny script; wall is sub-100ms noise floor, disabled
 # mm_bench WALL bumped 1200 → 1300 on 2026-06-04 — observed
 # CI 1220 ms (+1.7% over) after Track 1 / 2 chain accumulated:
 #   * 0da682b3 (Track 1) — Frame::kw_given_mask: u64, +8 bytes
@@ -275,7 +294,7 @@ crates/rubyrs/tests/fixtures/fizzbuzz.rb	10600	0	tiny script; wall is sub-100ms 
 # (glibc malloc on ubuntu-latest), not mimalloc. The page-mix
 # mechanism stands; the allocator named didn't build here. Joins
 # fizzbuzz / hash_mutate at the 8400 tier (same 2026-06-10 rhythm).
-crates/rubyrs/examples/metaprog_bench/mm_bench.rb	10600	1550	2M method_missing dispatch
+crates/rubyrs/examples/metaprog_bench/mm_bench.rb	11000	1550	2M method_missing dispatch
 # dm_bench RSS bumped 6500 → 6700 on 2026-05-27 — the
 # define_method dispatch benchmark crossed 6500 KB at PR #175
 # (ic-stats baseline workloads added) + PR #178 (step-block
@@ -298,7 +317,7 @@ crates/rubyrs/examples/metaprog_bench/mm_bench.rb	10600	1550	2M method_missing d
 # binary lift its startup/alloc RSS a hair over the razor-thin cap.
 # Joins the 8400 cohort (fizzbuzz / mm_bench / hash_mutate); ~2%
 # headroom over the observed peak.
-crates/rubyrs/examples/metaprog_bench/dm_bench.rb	10600	1100	2M define_method dispatch (closure-method)
+crates/rubyrs/examples/metaprog_bench/dm_bench.rb	11000	1100	2M define_method dispatch (closure-method)
 # static_bench RSS bumped 8200 → 8400 on 2026-06-11 — observed CI
 # 8220 KB (20 KB / 0.24% over) after the merge-sort change
 # (f57031a8). static_bench never sorts; the lift is the wider
@@ -306,7 +325,7 @@ crates/rubyrs/examples/metaprog_bench/dm_bench.rb	10600	1100	2M define_method di
 # ~8.1–8.2 MB across ALL workloads (fizzbuzz read 8212 the same
 # run). Joins the 8400 cohort (fizzbuzz / mm_bench / dm_bench /
 # hash_mutate); ~2% headroom over the observed peak.
-crates/rubyrs/examples/metaprog_bench/static_bench.rb	10600	1150	2M def+ivar (control for the metaprog comparisons)
+crates/rubyrs/examples/metaprog_bench/static_bench.rb	11000	1150	2M def+ivar (control for the metaprog comparisons)
 # Budgets at ~2× local M-series observed wall to absorb CI's
 # ~1.65× ubuntu-latest slowdown plus per-run jitter — same shape
 # as the metaprog rows above (static_bench: local 390ms / CI 650
@@ -319,7 +338,7 @@ crates/rubyrs/examples/metaprog_bench/static_bench.rb	10600	1150	2M def+ivar (co
 # baseline shift). Joins the fizzbuzz/mm/hash_mutate 8400 tier;
 # ~2% headroom over the observed peak so future regressions still
 # surface.
-crates/rubyrs/benches/fizzbuzz_1m.rb	10600	800	1M fizzbuzz; BinOpInt + IncLocal + dispatch fast paths
+crates/rubyrs/benches/fizzbuzz_1m.rb	11000	800	1M fizzbuzz; BinOpInt + IncLocal + dispatch fast paths
 # gc_churn RSS bumped 6500 → 6700 on 2026-05-27 — same
 # direction as dm_bench's per-row bump above. Observed CI
 # RSS 6504 KB (just 4 KB over) after PR #182 / #184 / #186
@@ -366,7 +385,7 @@ crates/rubyrs/benches/gc_churn.rb	12500	400	200k short-lived Array+Hash allocs; 
 # ~8.1–8.3 MB across ALL workloads; this was the last row below
 # 8400. Joins the 8400 cohort (fizzbuzz / mm_bench / dm_bench /
 # static_bench / fizzbuzz_1m / hash_mutate).
-crates/rubyrs/benches/string_interp.rb	10600	700	200k InterpolatedStr; Op::InterpStr + to_s dispatch
+crates/rubyrs/benches/string_interp.rb	11000	700	200k InterpolatedStr; Op::InterpStr + to_s dispatch
 # hash_mutate WALL bumped 650 → 730 on 2026-05-27 — 3
 # consecutive master CI runs observed 690-710ms (4-9% over
 # 650 budget). Same pattern on dm_bench (700→780) and
@@ -395,7 +414,7 @@ crates/rubyrs/benches/string_interp.rb	10600	700	200k InterpolatedStr; Op::Inter
 # infrastructure (P4 cvar/super site-cache tables, P5 probe name mask,
 # P3 block ICs) adds ~52 KB of per-Vm side tables; CI observed 10,652.
 # Same one-page-straddle row as the 2026-06-10 note.
-crates/rubyrs/benches/hash_mutate.rb	10750	880	200k Hash[]= overwrites + 1k Hash[] reads
+crates/rubyrs/benches/hash_mutate.rb	11100	880	200k Hash[]= overwrites + 1k Hash[] reads
 # boot — base/startup RSS isolation (added 2026-06-29). Boot RSS is the
 # FLOOR of all workloads (no per-workload churn), so its budget sits
 # below the workload cluster: observed workload min was ~9096 (static_bench)
@@ -409,4 +428,4 @@ crates/rubyrs/benches/hash_mutate.rb	10750	880	200k Hash[]= overwrites + 1k Hash
 # deep copy (dfc846c3 — correctness: reset() rewinds preamble-slot
 # mutations in place), M4's preamble/random.rb growth, and the M-wave
 # baseline churn. CI observed 10,256; 10450 keeps ~200 KB headroom.
-crates/rubyrs/benches/boot.rb	10450	0	boot: Runtime::new + near-empty eval — isolates base/startup RSS (see the .rb header)
+crates/rubyrs/benches/boot.rb	10800	0	boot: Runtime::new + near-empty eval — isolates base/startup RSS (see the .rb header)
