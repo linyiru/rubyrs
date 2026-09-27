@@ -51,6 +51,9 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Changed
 
+- **`caller_locations` is ~8× faster** (#403). It now compiles its
+  frame-parsing regex once instead of once per returned frame.
+  (`caller_locations.rb`)
 - **Global method cache** (#400). Chain walks for instance and
   class-singleton methods are cached per (class, name) until the
   next method-table or ancestry change (`method_gen`), as CRuby's
