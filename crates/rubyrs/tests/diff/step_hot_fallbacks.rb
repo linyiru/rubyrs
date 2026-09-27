@@ -1,5 +1,7 @@
 # The interpreter's hot-op front (`step`) handles only the common case of
 # each op and hands the rest to the full match. These pin the hand-offs.
+# Only a method that creates no block gets arena locals (the hot path), so
+# every method here except `captured` must stay block-free.
 
 # BinOpInt / BinOpLocalLocal: overflow promotes, zero divisors raise,
 # Float operands dispatch.
@@ -24,7 +26,6 @@ p divs(7, 2)
 # IncLocalNoPush: Int in place, a Float through `+`.
 def incs(x)
   i = x
-  3.times { }
   i += 1
   i += 1
   i
