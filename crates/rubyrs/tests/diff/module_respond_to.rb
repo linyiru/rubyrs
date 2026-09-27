@@ -15,8 +15,8 @@ PUB = %i[=== instance_of? is_a? kind_of? public_send dup clone extend include pr
   public_method_defined? private_method_defined? protected_method_defined?]
 PRIV = %i[private public protected module_function remove_const]
 
-[E, Mo, Class, Object, Comparable, Module.new, Class.new].each do |r|
-  label = r.name || r.class.name
+[E, Mo, Class, Module, Object, Comparable, Module.new, Class.new].each do |r|
+  label = r.name || "anon #{r.class.name}"
   puts "#{label} pub: #{PUB.reject { |m| r.respond_to?(m) }.inspect}"
   puts "#{label} priv hidden: #{PRIV.select { |m| r.respond_to?(m) }.inspect}"
   puts "#{label} priv all: #{PRIV.select { |m| r.respond_to?(m, true) }.inspect}"
@@ -39,3 +39,12 @@ class E
   private_class_method :priv_cm
 end
 p E.respond_to?(:pub_cm), E.respond_to?(:priv_cm), E.respond_to?(:priv_cm, true)
+
+# A user class method shadowing a native name decides by its own visibility.
+class G
+  def self.===(o) = false
+  def self.dup = :mine
+  private_class_method :===, :dup
+end
+p G.respond_to?(:===), G.respond_to?(:===, true), G.respond_to?(:dup), G.respond_to?(:dup, true)
+p G.respond_to?(:is_a?), G.respond_to?(:include)

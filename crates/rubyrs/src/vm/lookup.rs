@@ -2290,6 +2290,13 @@ impl Vm {
                 // dispatch.rs); they're in the whitelist so
                 // feature-detection (`C.respond_to?(:autoload)`)
                 // agrees with what dispatch will accept.
+                //
+                // A user class method shadows the native arm, so its
+                // visibility decides first: `def self.===; end;
+                // private_class_method :===` is false without include_all.
+                if let Some(m) = self.lookup_class_singleton_method(cls, name_id) {
+                    return include_private || m.visibility.get() == crate::value::Visibility::Public;
+                }
                 if matches!(
                     name,
                     "new" | "name" | "to_s" | "inspect"
@@ -2396,10 +2403,7 @@ impl Vm {
                 {
                     return true;
                 }
-                self.lookup_class_singleton_method(cls, name_id)
-                    .is_some_and(|m| {
-                        include_private || m.visibility.get() == crate::value::Visibility::Public
-                    })
+                false
             }
             Value::Object(id) => {
                 // Normally served by the memoized early-route at the
