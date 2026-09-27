@@ -171,6 +171,11 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Fixed
 
+- **Tier-2 setter bodies see their callees' return values** — with
+  `jit-native` tier 2, a compiled `def x=(v)` that called a self-method
+  chain (`routes` → `get_header(...)`) got `v` back instead of the call's
+  result; Rails' `Request#engine_script_name=` crashed on it.
+  (#416, `tier2_setter_self_call.rb`)
 - **A block re-entered across a Fiber switch keeps its own locals**
   (#414). When a proc was suspended inside a fiber (or parked in the
   fiber's resumer) and called again meanwhile, the two invocations
