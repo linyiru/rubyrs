@@ -171,6 +171,11 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Fixed
 
+- **`self.private` / `self.public` / `self.protected` / `self.module_function`
+  work like their receiver-less forms** — the bare `self.private` (in a class
+  body, `class << self`, or a `module_eval` string) raised NoMethodError, which
+  broke ActiveSupport 8.1's `delegate ..., private: true`.
+  (`visibility_explicit_self.rb`)
 - **Tier-2 setter bodies see their callees' return values** — with
   `jit-native` tier 2, a compiled `def x=(v)` that called a self-method
   chain (`routes` → `get_header(...)`) got `v` back instead of the call's
