@@ -2281,6 +2281,7 @@ fn tier2_setter_self_call_forced() {
 #[test] fn inc_bignum_user_plus() { run_diff("inc_bignum_user_plus"); }
 #[test] fn shared_locals_hot() { run_diff("shared_locals_hot"); }
 #[test] fn while_body_stmt() { run_diff("while_body_stmt"); }
+#[test] fn plain_return() { run_diff("plain_return"); }
 #[test] fn block_nested_share() { run_diff("block_nested_share"); }
 // Share-direct re-entrancy across fibers (a suspended fiber's parked
 // frames, or the resumer's while a fiber runs) — needs the `_fiber` build.
