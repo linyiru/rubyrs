@@ -103,3 +103,24 @@ r1 = (1..20).map { KL.m { } }.uniq
 def KL.block_given? = :late
 r2 = (1..20).map { KL.m { } }.uniq
 p [r1, r2]
+
+# block_given? inside a zero-arg-yielded block reads the enclosing
+# method's block, not the yielding method's.
+def lm0(o) = o.y { block_given? }
+def lm1(o) = o.y2 { block_given? }
+p (1..30).map { [lm0(o), lm0(o) { }, lm1(o), lm1(o) { }] }.uniq
+
+# Instance methods on the class object's own chain override a bare
+# block_given? in a class method (Module, then Class, then Object).
+class CA; def self.m; block_given?; end; end
+module CB; def self.m; block_given?; end; end
+p (1..20).map { [CA.m { }, CB.m { }] }.uniq
+class Module; def block_given? = :module_inst; end
+p (1..20).map { [CA.m { }, CB.m { }] }.uniq
+class Class; def block_given? = :class_inst; end
+p (1..20).map { [CA.m { }, CB.m { }] }.uniq
+class Module; remove_method :block_given?; end
+class Class; remove_method :block_given?; end
+p (1..20).map { [CA.m { }, CB.m { }] }.uniq
+class Object; def block_given? = :obj_inst; end
+p (1..20).map { [CA.m { }, CB.m { }, o.bgy { }] }.uniq

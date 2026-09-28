@@ -3168,6 +3168,9 @@ impl Runtime {
         // ~hundreds of method defs — but the explicit annotation
         // documents the intent).
         self.vm.method_gen = snapshot.method_gen.wrapping_add(1);
+        // A gen-keyed memo, but the rolled-back evals may have minted
+        // it at exactly this gen against a now-restored method graph.
+        self.vm.block_given_cls_obj_clean = [None; 2];
         // Constant IC — same shape as method_gen above. The +1
         // invalidates every entry minted during the rolled-back
         // evals (their gens are ≥ snapshot.const_gen, and entries

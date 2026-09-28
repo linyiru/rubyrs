@@ -25643,12 +25643,15 @@ impl Vm {
             }
             // Class/Module self (a bare `block_given?` inside
             // a `def self.m` body — AM fallback census
-            // 2026-07: 8.9/iter). A `def self.block_given?`
-            // anywhere on the singleton chain declines via a
-            // per-site `lookup_class_singleton_cached` MISS
-            // gate (the cascade serves the override).
+            // 2026-07: 8.9/iter). Declines on any override the
+            // cascade's `bare_builtin_user_override` sees: a
+            // `def self.block_given?` on the singleton chain
+            // (per-site `lookup_class_singleton_cached`) or an
+            // instance method on the class object's own chain
+            // (`Class`/`Module` → `Object` → `Kernel`).
             Some((Value::Class(cls), has_block))
-                if self.lookup_class_singleton_cached(&cls, self.sym_block_given_q, cache_id).is_none() =>
+                if self.lookup_class_singleton_cached(&cls, self.sym_block_given_q, cache_id).is_none()
+                    && self.class_object_block_given_clean(&cls) =>
             {
                 self.stack.push(Value::Bool(has_block));
                 return true;
@@ -25656,6 +25659,20 @@ impl Vm {
             _ => {}
         }
         false
+    }
+
+    /// No `block_given?` on `cls`'s class-object instance chain, memoized
+    /// per `method_gen` (see `block_given_cls_obj_clean`).
+    fn class_object_block_given_clean(&mut self, cls: &Rc<crate::value::Class>) -> bool {
+        let k = cls.is_module as usize;
+        if self.block_given_cls_obj_clean[k] == Some(self.method_gen) {
+            return true;
+        }
+        let clean = self.lookup_class_object_instance_method(cls, self.sym_block_given_q).is_none();
+        if clean {
+            self.block_given_cls_obj_clean[k] = Some(self.method_gen);
+        }
+        clean
     }
 
     fn invoke_block_general(&mut self, block_id: ObjId, mut args: Vec<Value>) -> Result<(), Trap> {

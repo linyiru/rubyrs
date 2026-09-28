@@ -2555,6 +2555,11 @@ pub(crate) struct Vm {
     pub(crate) sym_dup: SymId,
     pub(crate) sym_class_name: SymId,
     pub(crate) sym_block_given_q: SymId,
+    /// `method_gen` at which the class-object instance chain
+    /// (`[Class, Module]` → `Object` → `Kernel`) was last seen to hold
+    /// no `block_given?`, so the bare Class-self `block_given?` serve
+    /// skips that uncached walk until a method is (re)defined.
+    pub(crate) block_given_cls_obj_clean: [Option<u32>; 2],
     /// Pre-interned names for the 2026-07 census-TAIL buckets
     /// (`Object#equal?` ~15K, `Module#method_defined?` ~27K, bare
     /// `__method__` ~16K sends per 10-iter RuboCop walk — the
@@ -3734,6 +3739,7 @@ impl Vm {
             sym_dup,
             sym_class_name,
             sym_block_given_q,
+            block_given_cls_obj_clean: [None; 2],
             sym_equal_q,
             sym_method_defined_q,
             sym_method_intro,
