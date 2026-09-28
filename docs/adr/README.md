@@ -87,3 +87,4 @@ graveyard is part of the value — it shows how thinking evolved.
 - [0035 — JIT inline object access](0035-jit-inline-object-access.md)
 - [0036 — Objects as pointers](0036-objects-as-pointers.md)
 - [0037 — Baseline JIT tier: frame-keeping direct-threaded substrate](0037-baseline-jit-tier.md)
+- [0038 — `Value` representation: keep the 16-byte enum, inline its `Clone`](0038-value-representation.md)

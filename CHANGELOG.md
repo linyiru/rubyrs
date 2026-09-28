@@ -298,6 +298,12 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Internal
 
+- **`Value::clone` is inlined** (ADR 0038, B2 of #384). A hand-written
+  `Clone` copies the plain variants bitwise and bumps a refcount only for
+  Str / Class / Regex, where the derived one was an out-of-line jump
+  table; `attr_reader` calls are ~7% faster. ADR 0038 records why the
+  8-byte / `Copy` `Value` rewrite is deferred: all `Value` glue is at most
+  7–10% of a Rails request, against a 3.5× gap to CRuby.
 - **Peak-RSS budgets recalibrated** (`perf/baselines.tsv`): the 10600 KB
   cluster moves to 11000, `hash_mutate` to 11100, and `boot` to 10800.
   About 200 KB of growth is spread across #376–#402 with no single step,
