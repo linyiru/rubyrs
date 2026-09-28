@@ -191,6 +191,11 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Fixed
 
+- **`x += 1` promotes to Bignum at the Integer limit, and runs a
+  Ruby-defined `+`** (#418). `i += 1` and `@x += 1` wrapped
+  `2**63 - 1` around to a negative number, in the interpreter and in
+  tier 2. When `+` was a Ruby method, the result was read before that
+  method ran, which crashed the host. (`inc_bignum_user_plus.rb`)
 - **A `def self.block_given?` override now wins inside class methods**
   (#427). A bare `block_given?` in a `def self.m` body always ran the
   kernel builtin. Now it finds the class's own, an inherited, or a

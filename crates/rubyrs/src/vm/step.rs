@@ -1772,7 +1772,7 @@ impl Vm {
             Op::IncLocalNoPush(s) => {
                 let Some(base) = self.hot_arena_base() else { return self.step_cold(op, proto_idx) };
                 match &mut self.locals_arena[base + s as usize] {
-                    Value::Int(n) => *n = (*n).wrapping_add(1),
+                    Value::Int(n) if *n != i64::MAX => *n += 1,
                     _ => return self.step_cold(op, proto_idx),
                 }
             }
@@ -2154,8 +2154,8 @@ impl Vm {
                     crate::vm::Locals::Stack(base) => {
                         let idx = *base as usize + slot;
                         match &mut self.locals_arena[idx] {
-                            Value::Int(n) => {
-                                *n = (*n).wrapping_add(1);
+                            Value::Int(n) if *n != i64::MAX => {
+                                *n += 1;
                                 None
                             }
                             cur => Some(cur.clone()),
@@ -2167,8 +2167,8 @@ impl Vm {
                         let cell = frame.outer_cell_for(slot).unwrap_or(rc);
                         let mut locals = cell.borrow_mut();
                         match locals.get_mut(slot) {
-                            Some(Value::Int(n)) => {
-                                *n = (*n).wrapping_add(1);
+                            Some(Value::Int(n)) if *n != i64::MAX => {
+                                *n += 1;
                                 None
                             }
                             Some(cur) => Some(cur.clone()),
@@ -2184,7 +2184,11 @@ impl Vm {
                     self.stack.push(cur);
                     self.stack.push(Value::Int(1));
                     let plus_id = self.interner.intern("+");
+                    // A Ruby-defined `+` only pushes its frame: run it to
+                    // completion so its result is on the stack (#418).
+                    let pre = self.frames.len();
                     self.do_call(plus_id, 1, false, u32::MAX)?;
+                    self.dispatch_until(pre)?;
                     let v = self.stack.pop().unwrap_or(Value::Nil);
                     self.set_local_top(slot, v);
                 }
@@ -2196,8 +2200,8 @@ impl Vm {
                     crate::vm::Locals::Stack(base) => {
                         let idx = *base as usize + slot;
                         match &mut self.locals_arena[idx] {
-                            Value::Int(n) => {
-                                let new_n = (*n).wrapping_add(1);
+                            Value::Int(n) if *n != i64::MAX => {
+                                let new_n = *n + 1;
                                 *n = new_n;
                                 Some(new_n)
                             }
@@ -2210,8 +2214,8 @@ impl Vm {
                         let cell = frame.outer_cell_for(slot).unwrap_or(rc);
                         let mut locals = cell.borrow_mut();
                         match locals.get_mut(slot) {
-                            Some(Value::Int(n)) => {
-                                let new_n = (*n).wrapping_add(1);
+                            Some(Value::Int(n)) if *n != i64::MAX => {
+                                let new_n = *n + 1;
                                 *n = new_n;
                                 Some(new_n)
                             }
@@ -2230,7 +2234,11 @@ impl Vm {
                     self.stack.push(cur);
                     self.stack.push(Value::Int(1));
                     let plus_id = self.interner.intern("+");
+                    // A Ruby-defined `+` only pushes its frame: run it to
+                    // completion so its result is on the stack (#418).
+                    let pre = self.frames.len();
                     self.do_call(plus_id, 1, false, u32::MAX)?;
+                    self.dispatch_until(pre)?;
                     let new_val = self
                         .stack
                         .last()
@@ -2339,14 +2347,18 @@ impl Vm {
                     _ => None,
                 };
                 let new_v = match cur {
-                    Some(Value::Int(n)) => Some(Value::Int(n.wrapping_add(1))),
+                    Some(Value::Int(n)) if n != i64::MAX => Some(Value::Int(n + 1)),
                     Some(_) | None => {
                         // Slow path — call `+`.
                         let cur_v = cur.unwrap_or(Value::Nil);
                         self.stack.push(cur_v);
                         self.stack.push(Value::Int(1));
                         let plus_id = self.interner.intern("+");
+                        // A Ruby-defined `+` only pushes its frame: run it to
+                        // completion so its result is on the stack (#418).
+                        let pre = self.frames.len();
                         self.do_call(plus_id, 1, false, u32::MAX)?;
+                        self.dispatch_until(pre)?;
                         Some(self.stack.pop().unwrap_or(Value::Nil))
                     }
                 };
@@ -2387,8 +2399,8 @@ impl Vm {
                     _ => None,
                 };
                 let new_v: Value = match cur {
-                    Some(Value::Int(n)) => {
-                        let nv = Value::Int(n.wrapping_add(1));
+                    Some(Value::Int(n)) if n != i64::MAX => {
+                        let nv = Value::Int(n + 1);
                         match (&self_val, obj_slot) {
                             (Value::Object(id), Some(slot)) => {
                                 self.heap.instance_mut(*id).ivars.write_slot(slot, nv.clone());
@@ -2404,7 +2416,11 @@ impl Vm {
                         self.stack.push(cur_v);
                         self.stack.push(Value::Int(1));
                         let plus_id = self.interner.intern("+");
+                        // A Ruby-defined `+` only pushes its frame: run it to
+                        // completion so its result is on the stack (#418).
+                        let pre = self.frames.len();
                         self.do_call(plus_id, 1, false, u32::MAX)?;
+                        self.dispatch_until(pre)?;
                         let v = self.stack.last().expect("ICE: IncIvar slow path no result").clone();
                         match (&self_val, obj_slot) {
                             (Value::Object(id), Some(slot)) => {

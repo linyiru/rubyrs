@@ -2278,6 +2278,7 @@ fn tier2_setter_self_call_forced() {
 #[test] fn yield_splat_kwsplat() { run_diff("yield_splat_kwsplat"); }
 #[test] fn yield_zero_args() { run_diff("yield_zero_args"); }
 #[test] fn yield0_lite_block_given() { run_diff("yield0_lite_block_given"); }
+#[test] fn inc_bignum_user_plus() { run_diff("inc_bignum_user_plus"); }
 #[test] fn block_nested_share() { run_diff("block_nested_share"); }
 // Share-direct re-entrancy across fibers (a suspended fiber's parked
 // frames, or the resumer's while a fiber runs) — needs the `_fiber` build.
