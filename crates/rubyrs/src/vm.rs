@@ -656,9 +656,9 @@ pub(crate) enum WalkOrigin {
 
 /// ADR 0031 increment 2 — precomputed argument-binding plan for a
 /// NON-fixed-arity method proto (optional positionals / `*rest` /
-/// post-required / `&blk` / all-OPTIONAL keywords — literal OR
-/// computed defaults; REQUIRED kwargs and `**kwrest` are INELIGIBLE
-/// — see `Vm::nfa_plan_for`). The variadic sibling of `FixedArity`: every
+/// post-required / `&blk` / keywords — literal, computed, or required;
+/// `**kwrest` and more than 64 keywords are INELIGIBLE — see
+/// `Vm::nfa_plan_for`). The variadic sibling of `FixedArity`: every
 /// field the general binder re-derives from the Proto per call
 /// (`invoke_method_with_block_inner`'s tail-layout arithmetic) is
 /// captured once here, so the dispatch fast paths can bind a
@@ -679,7 +679,9 @@ pub(crate) enum WalkOrigin {
 /// mutation/frozen contract) — while a COMPUTED default (campaign
 /// P6b) leaves its slot Nil for the mask-0 body prologue
 /// (`Op::JumpIfKwArgGiven`) to evaluate, exactly as the binder does
-/// for a zero-kwargs call.
+/// for a zero-kwargs call. A plan with a REQUIRED keyword serves only
+/// `Op::CallKwLit` sites that pass it (B1, #384); every other route
+/// declines to the binder, which raises the missing-keyword error.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct NfaPlan {
     /// `proto.params.len()` — cross-checked against `m.params.len()`
@@ -697,16 +699,17 @@ pub(crate) struct NfaPlan {
     /// `positional_max`, mirroring the general binder's layout.
     pub(crate) positional_max: u16,
     pub(crate) has_rest: bool,
-    /// Number of keyword params — non-zero ONLY when every one is
-    /// OPTIONAL (a `Some` literal snapshot OR a `None` computed
-    /// default with a body prologue; no REQUIRED kwarg, no
-    /// `**kwrest`). Their slots sit at
+    /// Number of keyword params (no `**kwrest`). Their slots sit at
     /// `[positional_max + has_rest, .. + kw_count)`, mirroring the
-    /// general binder's tail layout; the serve fills each literal
-    /// slot from the proto snapshot (fresh per call) and leaves each
-    /// computed slot Nil for the mask-0 prologue, all with
-    /// `kw_given_mask = 0`.
+    /// general binder's tail layout; the serve fills each passed
+    /// keyword from the call site, each missing literal default from
+    /// the proto snapshot (fresh per call), and leaves each missing
+    /// computed default Nil for the body prologue, with
+    /// `kw_given_mask` set for exactly the passed keywords.
     pub(crate) kw_count: u16,
+    /// Some keyword is REQUIRED (no default at all); the per-keyword
+    /// mask lives in `Vm::nfa_kw_syms` so this struct stays 16 bytes.
+    pub(crate) kw_has_req: bool,
     /// `&blk` param present: its slot is
     /// `positional_max + has_rest + kw_count` (after the kw region,
     /// mirroring the general binder's layout).
@@ -2744,6 +2747,11 @@ pub(crate) struct Vm {
     /// compile). Indexed by `proto_idx`; grown on demand — protos
     /// added later (eval / require) start `Unknown`.
     pub(crate) nfa_plans: Vec<NfaPlanSlot>,
+    /// Parallel to `nfa_plans`: a planned proto's keyword param names
+    /// as SymIds, in slot order, and the mask of its REQUIRED keywords
+    /// (bit `i` = slot `i`); `None` when it has no keywords. Read by the
+    /// `Op::CallKwLit` serve to map passed keys to slots.
+    pub(crate) nfa_kw_syms: Vec<Option<(Box<[crate::intern::SymId]>, u64)>>,
     /// Rest-predicate body-shape plans (see `RestPredPlan`), lazily
     /// verified per proto on the first NFA fast-path attempt. Same
     /// lifecycle as `nfa_plans` (a Proto's code is immutable).
@@ -3788,6 +3796,7 @@ impl Vm {
             #[cfg(feature = "jit-native")]
             t2_fb_from: false,
             nfa_plans: Vec::new(),
+            nfa_kw_syms: Vec::new(),
             rest_preds: Vec::new(),
             rest_pred_deps_ok: false,
             #[cfg(feature = "jit-native")]
@@ -3935,6 +3944,7 @@ impl Vm {
     pub(crate) fn truncate_protos(&mut self, new_len: usize) {
         self.protos.truncate(new_len);
         self.nfa_plans.truncate(new_len);
+        self.nfa_kw_syms.truncate(new_len);
         self.rest_preds.truncate(new_len);
         #[cfg(feature = "jit-native")]
         {

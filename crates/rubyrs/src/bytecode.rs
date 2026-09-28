@@ -287,6 +287,18 @@ pub(crate) enum Op {
     /// the trailing positional Hash heuristically.
     CallKw(SymId, u8, u32),
     CallKwNoRecv(SymId, u8, u32),
+    /// B1 (#384): `foo(k1: v1, k2: v2)` whose keywords are ALL literal
+    /// Symbol keys (no `**`, no duplicate key, no block). Only the
+    /// VALUES are pushed, after the positionals; the keys live in
+    /// `Proto::kw_call_keys[idx]`, in source order. Args: name, argc
+    /// (positionals + keyword values), keys index, inline-cache slot.
+    /// A user method with keyword params binds the values straight
+    /// into its keyword slots (no Hash). Every other target first
+    /// materializes the values into the Hash `NewHash` would have
+    /// built and runs the `CallKw` path, so the semantics are
+    /// `CallKw`'s by construction.
+    CallKwLit(SymId, u8, u16, u32),
+    CallKwLitNoRecv(SymId, u8, u16, u32),
     /// `foo(*args)` — single-splat call. Pops the args Array
     /// (which must be `Value::Array`) and uses its elements as
     /// the positional args. Argc is dynamic. Receiver above
@@ -1083,6 +1095,9 @@ pub(crate) struct Proto {
     /// Top-level reads (empty class_path at emit time) keep using
     /// `Op::LoadConst(SymId)` directly — no chain needed.
     pub(crate) const_chains: Vec<Vec<crate::intern::SymId>>,
+    /// Per-call-site keyword keys for `Op::CallKwLit*`, in source
+    /// order (one entry per call site; the op carries the index).
+    pub(crate) kw_call_keys: Vec<Vec<crate::intern::SymId>>,
     /// Lexical class/module nesting at the point this proto was
     /// compiled, expressed as qualified-name SymIds in
     /// **innermost-first** order. For a proto compiled inside

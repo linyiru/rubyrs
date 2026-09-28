@@ -956,6 +956,11 @@ fn tier2_restblock_lite() { run_diff("tier2_restblock_lite"); }
 // send/super routes, and the still-INELIGIBLE required-kwarg / **kwrest
 // shapes.
 #[test] fn p6b_nfa_kw_computed() { run_diff("p6b_nfa_kw_computed"); }
+// B1 (#384): literal-Symbol keyword calls bind without a Hash
+// (Op::CallKwLit) — required/optional/computed defaults, key order,
+// every fallback shape (kwrest, no-kwparams, method_missing, builtins,
+// errors, visibility), redefinition, super, and a hot loop for the JITs.
+#[test] fn kwargs_literal_call() { run_diff("kwargs_literal_call"); }
 #[test] fn lazy_each_with_index() { run_diff("lazy_each_with_index"); }
 #[cfg(feature = "stdlib")]
 #[test] fn set_subtract_divide() { run_diff("set_subtract_divide"); }
