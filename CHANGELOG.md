@@ -51,6 +51,7 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Changed
 
+- **Method calls are slightly faster, mostly on x86** ([#437](https://github.com/linyiru/rubyrs/issues/437)). A call's frame is now built in place instead of being copied into the frame stack, and integer `+`/`<` on two locals is inlined. On x86 a zero-arg call loop takes ~9% fewer cycles; on Apple silicon `o.n` goes from ~73 to ~71 ns.
 - **`while` loops are faster** ([#435](https://github.com/linyiru/rubyrs/issues/435)). The last statement of a loop body is now compiled with its value discarded, like the rest of the body, so a trailing `i += 1` stays on the interpreter's hot path. An empty `while` iteration drops from ~26 ns to ~18 ns. (`while_body_stmt.rb`)
 - **Local variables are faster in methods that contain a block** (#431).
   Such a method keeps its locals in a shared cell, and every read and

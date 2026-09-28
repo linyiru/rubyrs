@@ -185,6 +185,21 @@ pub(crate) fn bp_now(on: bool) -> u64 {
     }
 }
 
+/// Push the frame `make` builds straight into `frames`' spare capacity.
+/// `Vec::push` takes the 192-byte `Frame` by value: it is assembled on
+/// the stack with narrow field stores and then copied with a libc
+/// `memcpy` whose wide loads cannot be store-forwarded, which profiled
+/// as the single largest cost of a method call on x86.
+#[inline(always)]
+pub(crate) fn push_frame_in_place(frames: &mut Vec<Frame>, make: impl FnOnce() -> Frame) {
+    frames.reserve(1);
+    let len = frames.len();
+    frames.spare_capacity_mut()[0].write(make());
+    // SAFETY: `reserve(1)` guarantees slot `len` exists, and it was
+    // initialised by the `write` above.
+    unsafe { frames.set_len(len + 1) };
+}
+
 pub(crate) struct Frame {
     pub(crate) proto_idx: usize,
     pub(crate) ip: usize,
