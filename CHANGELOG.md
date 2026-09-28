@@ -51,6 +51,12 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Changed
 
+- **Local variables are faster in methods that contain a block** (#431).
+  Such a method keeps its locals in a shared cell, and every read and
+  write of one fell off the interpreter's hot path. Now the hot path
+  serves the frame's own slots directly. A `while` loop in a method
+  that also has a block drops from 62 to 41 ns per iteration, close to
+  the 38 ns of a block-free method. (`shared_locals_hot.rb`)
 - **Block calls, zero-arg `yield` and `block_given?` are faster** (#427).
   In the interpreter, `yield if block_given?` is ~13% faster
   (`o.bgy { }`: 290 → 250 ns) and `o.y { }` is ~6% faster. A bare

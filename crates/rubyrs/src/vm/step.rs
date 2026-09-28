@@ -438,6 +438,27 @@ fn cext_depth_zero(_vm: &crate::vm::Vm) -> bool {
     true
 }
 
+/// Where the top frame keeps local `s`, when the hot `step` can touch
+/// it directly: an arena slot, or the frame's own `Shared` cell
+/// (`s >= own_start`: not a captured outer binding, so there is no
+/// canonical-cell routing to do). `None` sends the op to `step_cold`,
+/// which routes captured slots. A free fn over `frames` so the caller
+/// can still pop `self.stack` while holding the cell.
+enum HotLocals<'a> {
+    Arena(usize),
+    Own(&'a Rc<RefCell<Vec<Value>>>),
+}
+
+#[inline(always)]
+fn hot_locals(frames: &[Frame], s: u16) -> Option<HotLocals<'_>> {
+    let f = frames.last()?;
+    match &f.locals {
+        crate::vm::Locals::Stack(base) => Some(HotLocals::Arena(*base as usize)),
+        crate::vm::Locals::Shared(rc) if s >= f.own_start => Some(HotLocals::Own(rc)),
+        crate::vm::Locals::Shared(_) => None,
+    }
+}
+
 /// ADR 0025 Phase 4b: outcome of the safe-point interrupt
 /// check. Constructed by `Vm::safe_point_interrupt_action`,
 /// consumed by `InterruptAction::deliver`. Models the three
@@ -1760,20 +1781,47 @@ impl Vm {
             Op::LoadConstInt(i) => self.stack.push(Value::Int(i)),
             Op::LoadNil => self.stack.push(Value::Nil),
             Op::LoadLocal(s) => {
-                let Some(base) = self.hot_arena_base() else { return self.step_cold(op, proto_idx) };
-                let v = self.locals_arena[base + s as usize].clone();
+                let v = match hot_locals(&self.frames, s) {
+                    Some(HotLocals::Arena(base)) => self.locals_arena[base + s as usize].clone(),
+                    Some(HotLocals::Own(rc)) => {
+                        let got = rc.borrow().get(s as usize).cloned();
+                        let Some(v) = got else { return self.step_cold(op, proto_idx) };
+                        v
+                    }
+                    None => return self.step_cold(op, proto_idx),
+                };
                 self.stack.push(v);
             }
-            Op::StoreLocal(s) => {
-                let Some(base) = self.hot_arena_base() else { return self.step_cold(op, proto_idx) };
-                let Some(v) = self.stack.pop() else { return self.step_cold(op, proto_idx) };
-                self.locals_arena[base + s as usize] = v;
-            }
+            Op::StoreLocal(s) => match hot_locals(&self.frames, s) {
+                Some(HotLocals::Arena(base)) => {
+                    let Some(v) = self.stack.pop() else { return self.step_cold(op, proto_idx) };
+                    self.locals_arena[base + s as usize] = v;
+                }
+                Some(HotLocals::Own(rc)) if (s as usize) < rc.borrow().len() => {
+                    let Some(v) = self.stack.pop() else { return self.step_cold(op, proto_idx) };
+                    rc.borrow_mut()[s as usize] = v;
+                }
+                _ => return self.step_cold(op, proto_idx),
+            },
             Op::IncLocalNoPush(s) => {
-                let Some(base) = self.hot_arena_base() else { return self.step_cold(op, proto_idx) };
-                match &mut self.locals_arena[base + s as usize] {
-                    Value::Int(n) if *n != i64::MAX => *n += 1,
-                    _ => return self.step_cold(op, proto_idx),
+                match hot_locals(&self.frames, s) {
+                    Some(HotLocals::Arena(base)) => match &mut self.locals_arena[base + s as usize] {
+                        Value::Int(n) if *n != i64::MAX => *n += 1,
+                        _ => return self.step_cold(op, proto_idx),
+                    },
+                    Some(HotLocals::Own(rc)) => {
+                        let bumped = match rc.borrow_mut().get_mut(s as usize) {
+                            Some(Value::Int(n)) if *n != i64::MAX => {
+                                *n += 1;
+                                true
+                            }
+                            _ => false,
+                        };
+                        if !bumped {
+                            return self.step_cold(op, proto_idx);
+                        }
+                    }
+                    None => return self.step_cold(op, proto_idx),
                 }
             }
             Op::Pop => {
@@ -1803,16 +1851,24 @@ impl Vm {
                 }
             }
             Op::BinOpLocalLocal(kind, a_slot, b_slot) => {
-                let Some(base) = self.hot_arena_base() else { return self.step_cold(op, proto_idx) };
-                let (Value::Int(x), Value::Int(y)) =
-                    (&self.locals_arena[base + a_slot as usize], &self.locals_arena[base + b_slot as usize])
-                else {
-                    return self.step_cold(op, proto_idx);
+                let (x, y) = match hot_locals(&self.frames, a_slot.min(b_slot)) {
+                    Some(HotLocals::Arena(base)) => match (&self.locals_arena[base + a_slot as usize], &self.locals_arena[base + b_slot as usize]) {
+                        (Value::Int(x), Value::Int(y)) => (*x, *y),
+                        _ => return self.step_cold(op, proto_idx),
+                    },
+                    Some(HotLocals::Own(rc)) => {
+                        let l = rc.borrow();
+                        match (l.get(a_slot as usize), l.get(b_slot as usize)) {
+                            (Some(Value::Int(x)), Some(Value::Int(y))) => (*x, *y),
+                            _ => { drop(l); return self.step_cold(op, proto_idx); }
+                        }
+                    }
+                    None => return self.step_cold(op, proto_idx),
                 };
-                if matches!(kind, BinOpKind::Div | BinOpKind::Mod) && *y == 0 {
+                if matches!(kind, BinOpKind::Div | BinOpKind::Mod) && y == 0 {
                     return self.step_cold(op, proto_idx);
                 }
-                let Some(v) = kind.apply_int(*x, *y) else { return self.step_cold(op, proto_idx) };
+                let Some(v) = kind.apply_int(x, y) else { return self.step_cold(op, proto_idx) };
                 self.stack.push(v);
             }
             Op::Call(name_id, argc, cache_id) => {
@@ -1829,8 +1885,15 @@ impl Vm {
                 r?;
             }
             Op::LoadLocalCall(slot, name_id, cache_id) => {
-                let Some(base) = self.hot_arena_base() else { return self.step_cold(op, proto_idx) };
-                let v = self.locals_arena[base + slot as usize].clone();
+                let v = match hot_locals(&self.frames, slot) {
+                    Some(HotLocals::Arena(base)) => self.locals_arena[base + slot as usize].clone(),
+                    Some(HotLocals::Own(rc)) => {
+                        let got = rc.borrow().get(slot as usize).cloned();
+                        let Some(v) = got else { return self.step_cold(op, proto_idx) };
+                        v
+                    }
+                    None => return self.step_cold(op, proto_idx),
+                };
                 self.stack.push(v);
                 self.trailing_hash_positional = true;
                 let r = self.do_call(name_id, 0, false, cache_id);
@@ -1840,16 +1903,6 @@ impl Vm {
             _ => return self.step_cold(op, proto_idx),
         }
         Ok(true)
-    }
-
-    /// The top frame's arena base when its locals live in the arena
-    /// (`Locals::Stack`: method frames, never capture-routed), else None.
-    #[inline(always)]
-    fn hot_arena_base(&self) -> Option<usize> {
-        match self.frames.last().map(|f| &f.locals) {
-            Some(crate::vm::Locals::Stack(base)) => Some(*base as usize),
-            _ => None,
-        }
     }
 
     /// Every op, in full; see `step`. Does not charge fuel (`step` did).
