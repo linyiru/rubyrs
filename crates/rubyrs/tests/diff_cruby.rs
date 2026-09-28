@@ -990,6 +990,8 @@ fn tier2_restblock_lite() { run_diff("tier2_restblock_lite"); }
 #[test] fn respond_to_reopened() { run_diff("respond_to_reopened"); }
 // respond_to? consults a user respond_to_missing? on resolution miss.
 #[test] fn respond_to_missing() { run_diff("respond_to_missing"); }
+// Class/Module-receiver respond_to? sees inherited public Module/Kernel methods; private visibility calls only with include_all.
+#[test] fn module_respond_to() { run_diff("module_respond_to"); }
 // `def name` evaluates to :name (enables `private def …` modifier idiom).
 #[test] fn def_returns_symbol() { run_diff("def_returns_symbol"); }
 // Array/Hash/Range reach Enumerable methods with no native arm.
@@ -2268,6 +2270,8 @@ fn tier2_setter_self_call_forced() {
 // frames, or the resumer's while a fiber runs) — needs the `_fiber` build.
 #[cfg(feature = "_fiber")]
 #[test] fn block_share_fiber() { run_diff("block_share_fiber"); }
+// `step`'s hot-op front handing its slow sub-cases to `step_cold`.
+#[test] fn step_hot_fallbacks() { run_diff("step_hot_fallbacks"); }
 
 // A `class Base < Struct` with its own `[]` override (calling super) is
 // honored + super-reachable by member-structs built from it. Surfaced
