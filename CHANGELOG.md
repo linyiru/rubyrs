@@ -51,6 +51,13 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Changed
 
+- **Block calls, zero-arg `yield` and `block_given?` are faster** (#427).
+  In the interpreter, `yield if block_given?` is ~13% faster
+  (`o.bgy { }`: 290 → 250 ns) and `o.y { }` is ~6% faster. A bare
+  `block_given?` is now resolved once, not twice. Under tier 2,
+  zero-arg `yield` now runs its block frameless, as `yield x` already
+  did, so `o.y { }` drops from 216 to 177 ns and `o.bgy { }` from 260 to
+  208 ns. (`yield0_lite_block_given.rb`)
 - **Keyword-argument calls are ~3× faster** (#424). A call with
   literal Symbol keys (`o.k(a: 1, b: 2)`) to a plain `def` with keyword
   params now binds the values straight into the callee's slots, with no

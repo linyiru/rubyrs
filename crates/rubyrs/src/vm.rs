@@ -1979,7 +1979,7 @@ pub(crate) struct Vm {
     /// authority; this Array is the script-visible view. GC-rooted in
     /// `maybe_gc`.
     pub(crate) loaded_features_list: Option<ObjId>,
-    pub(crate) host_fns: HashMap<SymId, HostFnSlot>,
+    pub(crate) host_fns: FxHashMap<SymId, HostFnSlot>,
     /// C-ext singleton-method dispatch table. Indexed by
     /// `(class joined name, method SymId)`. Populated by
     /// `Vm::cext_require` whenever a C ext calls
@@ -3575,7 +3575,7 @@ impl Vm {
             toplevel_cvars: HashMap::new(),
             load_path: None,
             loaded_features_list: None,
-            host_fns: HashMap::new(),
+            host_fns: FxHashMap::default(),
             #[cfg(feature = "cext")]
             cext_class_methods: HashMap::new(),
             #[cfg(all(feature = "cext", not(target_os = "wasi")))]
@@ -4623,12 +4623,20 @@ impl Vm {
         self.suspend_seq
     }
 
+    #[inline]
     pub(crate) fn cancel_transfers_in_dead_frames(&mut self, frames_len: usize) {
         // Fast out: pending transfers are rare; keep the common
-        // frame-pop paths (every plain `Op::Return`) to two loads.
+        // frame-pop paths (every plain `Op::Return`) to two inlined
+        // loads, with the sweep out of line.
         if self.pending_loop_transfers.is_empty() && self.pending_method_breaks.is_empty() {
             return;
         }
+        self.cancel_transfers_slow(frames_len);
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn cancel_transfers_slow(&mut self, frames_len: usize) {
         self.pending_loop_transfers.retain(|t| {
             t.suspended.is_none_or(|s| s.frame_idx < frames_len)
         });

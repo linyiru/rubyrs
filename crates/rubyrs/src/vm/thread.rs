@@ -89,6 +89,7 @@ impl ThreadIntrinsics {
     }
 }
 
+#[inline]
 fn is_method(slot: &Option<Rc<Method>>, m: &Rc<Method>) -> bool {
     slot.as_ref().is_some_and(|c| Rc::ptr_eq(c, m))
 }
@@ -355,6 +356,10 @@ impl Vm {
     /// `lock; begin; yield; ensure; unlock; end` does. Stack layout
     /// `[.., recv, block]`; declines (stack untouched) as
     /// `mutex_serve_thread` / `mutex_lock_native` do.
+    ///
+    /// Probed on every explicit-receiver block call, so the method
+    /// identity test is inlined and the serve is out of line.
+    #[inline]
     pub(crate) fn try_mutex_synchronize(
         &mut self,
         m: &Rc<Method>,
@@ -366,6 +371,11 @@ impl Vm {
         if argc != 0 || !is_method(&self.thread_intr.mutex_synchronize, m) {
             return Ok(false);
         }
+        self.mutex_synchronize_serve(cls, id, block_id)
+    }
+
+    #[inline(never)]
+    fn mutex_synchronize_serve(&mut self, cls: &Rc<Class>, id: ObjId, block_id: ObjId) -> Result<bool, Trap> {
         let Some(cur) = self.mutex_serve_thread(cls) else { return Ok(false) };
         if !self.mutex_lock_native(id, &cur) {
             return Ok(false);
