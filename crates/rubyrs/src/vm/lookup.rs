@@ -325,7 +325,8 @@ pub(crate) struct CvarSiteCache {
 /// walk. `name` is part of the key because a shared `define_method`
 /// body can `super` under different runtime names from the same op
 /// site. The class-method branch (`Value::Class` self) never fills
-/// or serves this cache. `recv_class_ptr == 0` = unfilled.
+/// or serves this cache. `method: None` caches a miss;
+/// `recv_class_ptr == 0` = unfilled.
 #[derive(Clone)]
 pub(crate) struct SuperSiteCache {
     pub(crate) recv_class_ptr: usize,
@@ -3620,6 +3621,29 @@ impl Vm {
         })
     }
 
+    /// The `SuperNoSuperclass` NoMethodError `super_lookup`'s `Ok(None)`
+    /// stands for, built from the current frame's self. Deferred until a
+    /// caller actually raises it: the super callers substitute a builtin
+    /// for most misses (`respond_to?`, `is_a?`, `initialize`, `freeze`, …
+    /// — ~40 per ActiveRecord `create!`), and a Trap snapshots the whole
+    /// frame stack.
+    pub(crate) fn super_miss_trap(&mut self, name_id: SymId) -> crate::error::Trap {
+        let self_val = self.frames.last().map(|f| f.self_val.clone()).unwrap_or(Value::Nil);
+        let has_class = matches!(&self_val, Value::Object(_))
+            || matches!(&self_val, Value::Class(c) if c.class_tag.is_none())
+            || matches!(self.class_of(&self_val), Value::Class(_));
+        let recv_type = if has_class {
+            std::borrow::Cow::Owned(self.recv_desc_for_error(&self_val))
+        } else {
+            std::borrow::Cow::Borrowed(self_val.type_name())
+        };
+        self.trap(crate::error::RubyError::NoMethodError {
+            kind: crate::error::NoMethodErrorKind::SuperNoSuperclass,
+            method: self.interner.resolve(name_id).to_string(),
+            recv_type,
+        })
+    }
+
     /// Shared `super` lookup for both `Op::Super` (positional args)
     /// and `Op::ApplySuper` (splat-assembled args). Walks the
     /// receiver's class ancestor chain (prepends + own + includes
@@ -3634,11 +3658,15 @@ impl Vm {
     /// At each ancestor we scan only `methods.borrow()` because the
     /// ancestor list is already fully flattened (`include`d /
     /// `prepend`ed modules appear as their own entries).
+    ///
+    /// `Ok(None)` is the "no superclass method" miss, its Trap left to
+    /// `super_miss_trap`; `Err` is every other failure (`super` outside
+    /// of a method).
     pub(crate) fn super_lookup(
         &mut self,
         name_id: SymId,
         cid: u32,
-    ) -> Result<(Rc<crate::value::Method>, Value), crate::error::Trap> {
+    ) -> Result<Option<(Rc<crate::value::Method>, Value)>, crate::error::Trap> {
         let frame = self.frames.last().expect("ICE: super with empty frames");
         let self_val = frame.self_val.clone();
         // CRuby allows `super` inside a block — it forwards to the
@@ -3799,26 +3827,13 @@ impl Vm {
                         }
                     })
                 });
-            return match m {
-                Some(m) => Ok((m, self_val)),
-                None => Err(self.trap(crate::error::RubyError::NoMethodError {
-                    kind: crate::error::NoMethodErrorKind::SuperNoSuperclass,
-                    method: self.interner.resolve(name_id).to_string(),
-                    recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(&self_val)),
-                })),
-            };
+            return Ok(m.map(|m| (m, self_val)));
         }
         let recv_cls = match &self_val {
             Value::Object(id) => self.heap.class_of(*id),
             other => match self.class_of(other) {
                 Value::Class(c) => c,
-                _ => {
-                    return Err(self.trap(crate::error::RubyError::NoMethodError {
-                        kind: crate::error::NoMethodErrorKind::SuperNoSuperclass,
-                        method: self.interner.resolve(name_id).to_string(),
-                        recv_type: std::borrow::Cow::Borrowed(other.type_name()),
-                    }));
-                }
+                _ => return Ok(None),
             },
         };
         // Per-site super IC (campaign P4): the "next method after
@@ -3826,9 +3841,10 @@ impl Vm {
         // walk inputs — (recv class, defining class, runtime name) —
         // and `method_gen`-validated (the same generation
         // `ancestors_cached` keys on), so a hit is answer-identical
-        // to the walk below. Only successful resolutions fill (the
-        // error path stays uncached — it re-walks, which keeps the
-        // builtin-substitution intercepts in the callers exact).
+        // to the walk below. Misses fill too (`method: None`): the
+        // verdict is the same function of those inputs, and the
+        // callers' builtin-substitution intercepts run on the miss
+        // either way.
         let recv_ptr = Rc::as_ptr(&recv_cls) as usize;
         let def_ptr = Rc::as_ptr(&defining) as usize;
         if cid != u32::MAX
@@ -3837,9 +3853,8 @@ impl Vm {
             && e.defining_ptr == def_ptr
             && e.name == name_id
             && e.generation == self.method_gen
-            && let Some(m) = &e.method
         {
-            return Ok((m.clone(), self_val));
+            return Ok(e.method.clone().map(|m| (m, self_val)));
         }
         let ancs = self.ancestors_cached(&recv_cls);
         let m = ancs
@@ -3851,29 +3866,20 @@ impl Vm {
                 tail.iter()
                     .find_map(|a| a.methods.borrow().get(&name_id).cloned())
             });
-        match m {
-            Some(m) => {
-                if cid != u32::MAX {
-                    let idx = cid as usize;
-                    if idx >= self.super_caches.len() {
-                        self.super_caches.resize(idx + 1, SuperSiteCache::default());
-                    }
-                    self.super_caches[idx] = SuperSiteCache {
-                        recv_class_ptr: recv_ptr,
-                        defining_ptr: def_ptr,
-                        name: name_id,
-                        generation: self.method_gen,
-                        method: Some(m.clone()),
-                    };
-                }
-                Ok((m, self_val))
+        if cid != u32::MAX {
+            let idx = cid as usize;
+            if idx >= self.super_caches.len() {
+                self.super_caches.resize(idx + 1, SuperSiteCache::default());
             }
-            None => Err(self.trap(crate::error::RubyError::NoMethodError {
-                kind: crate::error::NoMethodErrorKind::SuperNoSuperclass,
-                method: self.interner.resolve(name_id).to_string(),
-                recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(&self_val)),
-            })),
+            self.super_caches[idx] = SuperSiteCache {
+                recv_class_ptr: recv_ptr,
+                defining_ptr: def_ptr,
+                name: name_id,
+                generation: self.method_gen,
+                method: m.clone(),
+            };
         }
+        Ok(m.map(|m| (m, self_val)))
     }
 
     /// `super` dispatch wrapper for Op::Super / Op::ApplySuper
@@ -4000,7 +4006,7 @@ impl Vm {
             // `Node.parse(&block) → n.parse(&block)`. The explicit
             // `super(&block)` / `super(&nil)` shapes go through
             // Op::ApplySuperBlock instead, so they never reach here.
-            Ok((m, self_val)) => {
+            Ok(Some((m, self_val))) => {
                 // Forward the enclosing METHOD's block. Directly in a method
                 // that's the frame's `block_arg`; inside a block it's the
                 // `captured_yield_block` (the same binding `yield` resolves) —
@@ -4017,7 +4023,10 @@ impl Vm {
                 });
                 self.invoke_method_with_block(m, self_val, args, block)
             }
-            Err(trap) => {
+            res => {
+                // `None` is the SuperNoSuperclass miss, its Trap built
+                // only if nothing below substitutes a builtin.
+                let trap = res.err();
                 // `super` to a builtin Class / BasicObject method
                 // that rubyrs handles inline (so the ancestor walk
                 // finds no user Method above the override). CRuby
@@ -4029,13 +4038,7 @@ impl Vm {
                 // `def initialize; ...; super; end` both depend on
                 // this. Gate on the same typed `SuperNoSuperclass`
                 // miss the lifecycle-hook intercept below uses.
-                if matches!(
-                    &trap.err,
-                    crate::error::RubyError::NoMethodError {
-                        kind: crate::error::NoMethodErrorKind::SuperNoSuperclass,
-                        ..
-                    },
-                ) {
+                if trap.is_none() {
                     let cur_self = self.frames.last().map(|f| f.self_val.clone());
                     let nm = self.interner.resolve(name_id).to_string();
                     match (nm.as_str(), cur_self) {
@@ -4400,13 +4403,7 @@ impl Vm {
                 // formatted message string. (Code-review #363
                 // round 1 introduced the gate; round 3 swapped
                 // the brittle prefix match for the typed tag.)
-                let is_no_super = matches!(
-                    &trap.err,
-                    crate::error::RubyError::NoMethodError {
-                        kind: crate::error::NoMethodErrorKind::SuperNoSuperclass,
-                        ..
-                    },
-                );
+                let is_no_super = trap.is_none();
                 let resolved = self.interner.resolve(name_id);
                 let is_lifecycle_hook = matches!(
                     &**resolved,
@@ -4509,7 +4506,7 @@ impl Vm {
                                 recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(sv)),
                             }));
                         }
-                        return Err(trap);
+                        return Err(trap.unwrap_or_else(|| self.super_miss_trap(name_id)));
                     }
                     let mm = match &self_val {
                         Some(Value::Class(c)) => self.lookup_class_singleton_method(c, mm_id),
@@ -4555,7 +4552,7 @@ impl Vm {
                     self.stack.push(Value::Nil);
                     Ok(())
                 } else {
-                    Err(trap)
+                    Err(trap.unwrap_or_else(|| self.super_miss_trap(name_id)))
                 }
             }
         }
