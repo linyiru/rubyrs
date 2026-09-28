@@ -3708,12 +3708,17 @@ impl Vm {
             // straight into a user method's keyword slots, else rebuild the
             // Hash `NewHash` would have made and take the `CallKw` path.
             // The rebuilt Hash is never empty, so `CallKw`'s empty-drop
-            // cannot apply.
+            // cannot apply. The positional-hash flag is cleared BEFORE the
+            // direct serve too: an outer synchronous call (`eval`) may still
+            // hold it TRUE, and the callee's body (a zsuper forwarding its
+            // keywords) would then see them as a positional Hash.
             Op::CallKwLit(name_id, argc, keys, cache_id) | Op::CallKwLitNoRecv(name_id, argc, keys, cache_id) => {
                 let no_recv = matches!(op, Op::CallKwLitNoRecv(..));
-                if !self.try_invoke_kw_lit_cached(name_id, argc as usize, keys, cache_id, no_recv)? {
+                self.trailing_hash_positional = false;
+                let served = self.try_invoke_kw_lit_cached(name_id, argc as usize, keys, cache_id, no_recv);
+                self.trailing_hash_positional = false;
+                if !served? {
                     let argc = self.materialize_kw_lit(argc as usize, keys)?;
-                    self.trailing_hash_positional = false;
                     let r = self.do_call_kw(name_id, argc, no_recv, cache_id);
                     self.trailing_hash_positional = false;
                     r?;

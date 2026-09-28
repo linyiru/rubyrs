@@ -130,3 +130,22 @@ class K
   def req2(x:, y:) = x + y
 end
 p hot(K.new)
+
+# A direct serve inside `eval` (an outer synchronous call) must not
+# inherit the positional-Hash flag: zsuper forwards the keywords.
+class ZB
+  def w(a:, b: 1) = [a, b]
+  def z(**o) = o
+end
+class ZC < ZB
+  def w(a:, b: 2) = [super, :c]
+  def z(a:) = super
+  def fwd(a:) = z(a: a)
+end
+ZO = ZC.new
+p eval("ZO.w(a: 1)")
+p eval("ZO.w(a: 1, b: 3)")
+p eval("ZO.z(a: 5)")
+p eval("ZO.fwd(a: 6)")
+p [1].map { |x| eval("ZO.w(a: 4)") }
+p ZO.instance_eval { w(a: 9) }
