@@ -51,6 +51,11 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Changed
 
+- **`super` into a builtin is ~3× faster** (#426). An override that
+  supers to a method rubyrs implements natively (`respond_to?`, `is_a?`,
+  `initialize`, `freeze`, …) no longer builds and discards an error
+  first; ActiveRecord does this ~40 times per `create!`.
+  (`super_miss_cached.rb`)
 - **Keyword-argument calls are ~3× faster** (#424). A call with
   literal Symbol keys (`o.k(a: 1, b: 2)`) to a plain `def` with keyword
   params now binds the values straight into the callee's slots, with no
