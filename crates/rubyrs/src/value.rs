@@ -443,7 +443,7 @@ pub struct ObjId(pub(crate) u32);
 // read an Object's `oid` with an inline load — it must call a primitive. The asserts below
 // guard the contract the JIT relies on; see `value_layout_contract` for the offset test
 // (`OID_OFFSET == 4`).
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 #[repr(u8)]
 pub enum Value {
     Int(i64),
@@ -551,6 +551,49 @@ pub enum Value {
     /// CurriedProc with the new args appended. `class_of`
     /// reports it as `Proc` to match CRuby.
     CurriedProc(ObjId),
+}
+
+// A derived `Clone` over 20 variants is an out-of-line jump table, so cloning an Int costs a
+// call (ADR 0038). Only the `Rc` variants need their refcount bumped; every other variant is
+// plain data (i64 / f64 / ObjId / SymId / bool) with no drop glue, so a bitwise copy is a valid
+// clone. The match is exhaustive on purpose: a new variant fails to compile here until it is
+// classified, so a payload with a `Drop` can never fall into the bitwise-copy arm by default.
+impl Clone for Value {
+    #[inline(always)]
+    fn clone(&self) -> Value {
+        match self {
+            Value::Str(_) | Value::Class(_) => self.clone_rc(),
+            #[cfg(feature = "regex")]
+            Value::Regex(_) => self.clone_rc(),
+            #[cfg(feature = "bignum")]
+            // SAFETY: an ObjId payload owns nothing; see the arm below.
+            Value::BigInt(_) => unsafe { std::ptr::read(self) },
+            Value::Int(_) | Value::Float(_) | Value::Rational(_) | Value::Sym(_) | Value::Bool(_)
+            | Value::Nil | Value::Object(_) | Value::Array(_) | Value::Hash(_) | Value::Range(_)
+            | Value::Block(_) | Value::BoundMethod(_) | Value::UnboundMethod(_)
+            | Value::CurriedProc(_) => {
+                // SAFETY: these variants own no heap resource (no `Drop`), so two bitwise
+                // copies alive at once is exactly what a derived clone would produce.
+                unsafe { std::ptr::read(self) }
+            }
+        }
+    }
+}
+
+impl Value {
+    /// The refcount-bumping half of `Clone`, kept out of line so the inlined fast path stays
+    /// a tag test plus a 16-byte copy.
+    #[inline(never)]
+    fn clone_rc(&self) -> Value {
+        match self {
+            Value::Str(s) => Value::Str(Rc::clone(s)),
+            Value::Class(c) => Value::Class(Rc::clone(c)),
+            #[cfg(feature = "regex")]
+            Value::Regex(r) => Value::Regex(Rc::clone(r)),
+            // SAFETY: only reached from `Clone::clone` for the variants above.
+            _ => unsafe { std::ptr::read(self) },
+        }
+    }
 }
 
 // ADR 0035 Phase 1 — the layout contract the native JIT will rely on. A change that grows
@@ -1754,5 +1797,24 @@ mod value_layout_contract {
         let got = unsafe { *((&iv as *const Value as *const u8).add(8) as *const i64) };
         assert_eq!(got, 0x0123_4567_89AB_CDEF, "Int payload not at offset 8");
         assert_eq!(TAG_OFFSET, 0);
+    }
+
+    /// The hand-written `Clone` (ADR 0038): Rc variants share and bump the count, plain
+    /// variants copy their payload.
+    #[test]
+    fn clone_shares_rc_and_copies_plain() {
+        let s = Value::new_str("x");
+        let Value::Str(rc) = &s else { unreachable!() };
+        let before = std::rc::Rc::strong_count(rc);
+        let c = s.clone();
+        let Value::Str(rc2) = &c else { unreachable!() };
+        assert!(std::rc::Rc::ptr_eq(rc, rc2));
+        assert_eq!(std::rc::Rc::strong_count(rc), before + 1);
+        drop(c);
+        assert_eq!(std::rc::Rc::strong_count(rc), before);
+        assert!(matches!(Value::Int(-7).clone(), Value::Int(-7)));
+        assert!(matches!(Value::Float(1.5).clone(), Value::Float(f) if f == 1.5));
+        assert!(matches!(Value::Array(ObjId(9)).clone(), Value::Array(ObjId(9))));
+        assert!(matches!(Value::Bool(true).clone(), Value::Bool(true)));
     }
 }
