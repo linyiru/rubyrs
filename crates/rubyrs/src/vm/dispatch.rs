@@ -8501,13 +8501,12 @@ impl Vm {
             let Some(root) = self.heap.try_class_of(oid) else {
                 return true; // class-less slot — decline to the cascade
             };
-            let mut visited: std::collections::HashSet<*const crate::value::Class> =
-                std::collections::HashSet::new();
+            // No visited set: the superclass chain is acyclic (the
+            // authoritative `walk_method` walk relies on that too), and
+            // a per-call SipHash set was a measurable cost on Rails,
+            // where `undef_names` is never empty.
             let mut walker = Some(root);
             while let Some(c) = walker {
-                if !visited.insert(Rc::as_ptr(&c)) {
-                    break;
-                }
                 if c.methods.borrow().contains_key(&name_id) {
                     return false;
                 }
@@ -11973,11 +11972,10 @@ impl Vm {
             };
             if let Some(root) = chain_root {
                 let mut undefed = false;
-                let mut visited: std::collections::HashSet<*const crate::value::Class> =
-                    std::collections::HashSet::new();
+                // Acyclic superclass chain — no visited set (see
+                // `undef_tombstoned_obj`).
                 let mut walker = Some(root);
                 while let Some(c) = walker {
-                    if !visited.insert(Rc::as_ptr(&c)) { break; }
                     // Own-table BEFORE tombstone: a redefine-after-
                     // undef leaves its stale tombstone behind and
                     // the new method wins (mirrors
