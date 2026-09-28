@@ -51,6 +51,11 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Changed
 
+- **Calls to an `undef`'d name are ~1.5× faster** (#430). Once any class
+  runs `undef_method` on a name, every Object-receiver call to that name
+  used to build and discard a hash set while checking the superclass
+  chain. Rails does this for every universal name at load (ActiveSupport's
+  `DeprecationProxy`). (`p2_walk_buckets.rb`)
 - **`while` loops are faster** ([#435](https://github.com/linyiru/rubyrs/issues/435)). The last statement of a loop body is now compiled with its value discarded, like the rest of the body, so a trailing `i += 1` stays on the interpreter's hot path. An empty `while` iteration drops from ~26 ns to ~18 ns. (`while_body_stmt.rb`)
 - **Local variables are faster in methods that contain a block** (#431).
   Such a method keeps its locals in a shared cell, and every read and
