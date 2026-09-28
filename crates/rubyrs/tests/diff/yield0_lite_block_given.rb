@@ -85,3 +85,21 @@ class Priv
   private def block_given? = :private_override
 end
 p (1..20).map { Priv.new.t { } }.uniq
+
+# Class-self overrides: own singleton, inherited singleton, module
+# singleton, and one defined after the call site is already hot.
+class KO
+  def self.block_given? = :override
+  def self.m; block_given?; end
+end
+p (1..20).map { |i| i.odd? ? KO.m { } : KO.m }.uniq
+class KP; def self.block_given? = :parent; end
+class KC < KP; def self.m; block_given?; end; end
+p (1..20).map { KC.m { } }.uniq
+module KM; def self.block_given? = :mod; def self.m; block_given?; end; end
+p (1..20).map { KM.m { } }.uniq
+class KL; def self.m; block_given?; end; end
+r1 = (1..20).map { KL.m { } }.uniq
+def KL.block_given? = :late
+r2 = (1..20).map { KL.m { } }.uniq
+p [r1, r2]

@@ -10420,12 +10420,14 @@ impl Vm {
         // which finds the override. The override's `orig_require` alias
         // reaches the builtin via `Op::CallBuiltinDirect`, which
         // bypasses do_call entirely — so there is no re-entry here and
-        // no recursion. Narrow to the load family; all other builtins
+        // no recursion. Narrow to the load family plus `block_given?`
+        // (a `def self.block_given?` on a Class self must win — the
+        // fast arms decline for it and land here); all other builtins
         // keep their fast builtin path.
-        let require_overridden = no_recv
-            && matches!(&*name, "require" | "require_relative" | "load")
+        let builtin_overridden = no_recv
+            && matches!(&*name, "require" | "require_relative" | "load" | "block_given?")
             && self.bare_builtin_user_override(&name);
-        if no_recv && !require_overridden
+        if no_recv && !builtin_overridden
             && self.try_dispatch_no_recv_builtin_or_host(&name, name_id, &args)?
         {
             return Ok(());
@@ -25641,14 +25643,13 @@ impl Vm {
             }
             // Class/Module self (a bare `block_given?` inside
             // a `def self.m` body — AM fallback census
-            // 2026-07: 8.9/iter). No override gate needed:
-            // for a Class self the cascade has NO pre-builtin
-            // user-serve arm (`try_invoke_self_recv_cached`
-            // is Object-only, the class-self singleton arm
-            // runs AFTER `try_dispatch_no_recv_builtin_or_
-            // host`), so the kernel builtin arm this mirrors
-            // always wins today.
-            Some((Value::Class(_), has_block)) => {
+            // 2026-07: 8.9/iter). A `def self.block_given?`
+            // anywhere on the singleton chain declines via a
+            // per-site `lookup_class_singleton_cached` MISS
+            // gate (the cascade serves the override).
+            Some((Value::Class(cls), has_block))
+                if self.lookup_class_singleton_cached(&cls, self.sym_block_given_q, cache_id).is_none() =>
+            {
                 self.stack.push(Value::Bool(has_block));
                 return true;
             }

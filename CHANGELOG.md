@@ -191,6 +191,10 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Fixed
 
+- **A `def self.block_given?` override now wins inside class methods**
+  (#427). A bare `block_given?` in a `def self.m` body always ran the
+  kernel builtin. Now it finds the class's own, an inherited, or a
+  module singleton override, as CRuby does. (`yield0_lite_block_given.rb`)
 - **`self.private` / `self.public` / `self.protected` / `self.module_function`
   work like their receiver-less forms** — the bare `self.private` (in a class
   body, `class << self`, or a `module_eval` string) raised NoMethodError, which
