@@ -174,6 +174,11 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Fixed
 
+- **`Klass.respond_to?` reports the Module / Kernel methods classes inherit**
+  — `===`, `is_a?`, `public_send`, `include`, `attr_accessor`, … were false
+  on a Class or Module receiver (ActiveSupport's `rescue_from(SomeError)`
+  raised ArgumentError), and `module_function` answered true without
+  `include_all`. (#421, `module_respond_to.rb`)
 - **`i += 1` on a Float local under the native JIT** (#417). The JIT
   added 1 to the float's bits, so `1.5 + 1` gave `1.5000000000000004` and
   a Float loop counter never finished; such methods now stay in the
