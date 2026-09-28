@@ -196,6 +196,10 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   kernel builtin. Now it finds the class's own, an inherited, or a
   module singleton override, and an instance method on `Class`,
   `Module` or `Object`, as CRuby does. (`yield0_lite_block_given.rb`)
+- **`!=` honours a user-defined `==`** — `Set[1] != Set[1]` and any class
+  defining only `==` compared by identity, which made ActiveRecord's
+  `insert_all` / `upsert_all` always raise "All objects being inserted must
+  have the same keys". (#429, `neq_dispatches_user_eq.rb`, `neq_set.rb`)
 - **`self.private` / `self.public` / `self.protected` / `self.module_function`
   work like their receiver-less forms** — the bare `self.private` (in a class
   body, `class << self`, or a `module_eval` string) raised NoMethodError, which
