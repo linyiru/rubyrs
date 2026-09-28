@@ -34,11 +34,16 @@ Kst = []
 def const_last; i = 0; while i < 2; i += 1; Kst << i; end; Kst; end
 p const_last
 
-# Last statement is a call with a side effect, or an if/else.
+# Last statement is a call with a side effect, an if/else, or a
+# multiple assignment (both fall back to compile_expr + Pop).
 def side; log = []; i = 0; while i < 3; i += 1; log.push(i) if i.odd?; end; log; end
 p side
 def branchy; t = 0; i = 0; while i < 4; i += 1; if i.even? then t += 10 else t += 1 end; end; t; end
 p branchy
+def mwrite; a = b = 0; i = 0; while i < 3; i += 1; a, b = b, i; end; [a, b]; end
+p mwrite
+def mwrite_post; a = b = 0; i = 0; begin; i += 1; a, b = b, i; end while i < 3; [a, b]; end
+p mwrite_post
 
 # next / redo / empty body / post-condition form.
 def nexts; i = 0; t = 0; while i < 6; i += 1; next if i.odd?; t += i; end; t; end
