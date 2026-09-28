@@ -4771,10 +4771,12 @@ fn emit_op(cg: &mut Cg, fb: &mut FunctionBuilder, i: usize) -> bool {
             let tag = cg.tag_from_w0(fb, w0);
             let is_int = fb.ins().icmp_imm(IntCC::Equal, tag, cg.tags.int as i64);
             cg.guard(fb, is_int, &mut fail_b, &snap, i);
-            // The interpreter's IncLocal uses wrapping_add — the slow path
-            // (`+` re-dispatch) fires only for non-Int values. Mirror the
-            // wrap exactly: plain iadd, no overflow bail.
-            let nv = fb.ins().iadd_imm(w1, 1);
+            // Overflow at i64::MAX → bail before the store, so the
+            // interpreter re-runs the op and promotes to Bignum via `+`.
+            let one = fb.ins().iconst(types::I64, 1);
+            let (nv, of) = fb.ins().sadd_overflow(w1, one);
+            let no_of = fb.ins().bxor_imm(of, 1);
+            cg.guard(fb, no_of, &mut fail_b, &snap, i);
             fb.ins().store(fl(), nv, addr, off + 8);
             cg.cache[s as usize] = Some((w0, nv));
             if matches!(op, Op::IncLocal(_)) {
