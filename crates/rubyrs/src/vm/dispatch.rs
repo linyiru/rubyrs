@@ -15901,6 +15901,17 @@ impl Vm {
         // value-equality via `ruby_eq`. Universal fallback —
         // never raises — so it must go before NoMethodError.
         if args.len() == 1 && (&*name == "==" || &*name == "!=") {
+            // `BasicObject#!=` is `!(self == other)`, dispatched: a user
+            // `==` (Set's, ActiveRecord's key-set compare in `insert_all`)
+            // decides `!=` too. Without it `Set[1] != Set[1]` was true.
+            let eq_id = self.interner.intern("==");
+            if &*name == "!="
+                && let Some(m) = self.key_user_method(&recv, eq_id)
+            {
+                let r = self.call_resolved_method(m, recv.clone(), vec![args[0].clone()])?;
+                self.stack.push(Value::Bool(matches!(r, Value::Nil | Value::Bool(false))));
+                return Ok(());
+            }
             let eq = recv.ruby_eq(&args[0], &self.heap);
             let result = if &*name == "==" { eq } else { !eq };
             self.stack.push(Value::Bool(result));
