@@ -9553,51 +9553,11 @@ impl Vm {
                 && name_id == self.sym_block_given_q
                 && !self.host_fns.contains_key(&name_id)
             {
-                // Bare `block_given?` on an Object self — the kernel
-                // builtin arm's exact resolution (a block frame reads
-                // its captured `captured_yield_block`, a method frame
-                // its own `block_arg` — see the canonical arm's
-                // deferred-Proc rationale). Gated on an IC-backed
-                // user-method MISS on the self chain (a public
-                // fixed-arity override was already served by
-                // `try_invoke_self_recv_cached`; any other override
-                // declines to the canonical order). Non-Object selves
-                // (toplevel/main/class body) decline — a toplevel
-                // user `def block_given?` resolution stays with the
-                // cascade. Census: 6.4K sends/walk, all slow-cascade.
-                let self_shape = self.frames.last().map(|f| {
-                    (
-                        f.self_val.clone(),
-                        if f.is_block {
-                            f.captured_yield_block.is_some()
-                        } else {
-                            f.block_arg.is_some()
-                        },
-                    )
-                });
-                match self_shape {
-                    Some((Value::Object(oid), has_block)) => {
-                        if let Some(cls) = self.heap.try_class_of(oid)
-                            && self.lookup_method_cached(&cls, name_id, cache_id).is_none()
-                        {
-                            self.stack.push(Value::Bool(has_block));
-                            return Ok(true);
-                        }
-                    }
-                    // Class/Module self (a bare `block_given?` inside
-                    // a `def self.m` body — AM fallback census
-                    // 2026-07: 8.9/iter). No override gate needed:
-                    // for a Class self the cascade has NO pre-builtin
-                    // user-serve arm (`try_invoke_self_recv_cached`
-                    // is Object-only, the class-self singleton arm
-                    // runs AFTER `try_dispatch_no_recv_builtin_or_
-                    // host`), so the kernel builtin arm this mirrors
-                    // always wins today.
-                    Some((Value::Class(_), has_block)) => {
-                        self.stack.push(Value::Bool(has_block));
-                        return Ok(true);
-                    }
-                    _ => {}
+                // Bare `block_given?` (see `try_bare_block_given`). Also
+                // probed early in `do_call`; kept here for the tier-2
+                // `t2_call` family, which enters at this zone.
+                if self.try_bare_block_given(cache_id) {
+                    return Ok(true);
                 }
             } else if no_recv
                 && argc == 0
@@ -10107,9 +10067,16 @@ impl Vm {
         // path). −2.3% wall on the Sinatra request; see the helper's doc.
         if no_recv && !maybe_refined && !force_primitive
             && !self.host_fns.contains_key(&name_id)
-            && self.try_invoke_self_recv_cached(name_id, argc, cache_id)?
         {
-            return Ok(());
+            // `block_given?` first: the IC below can only miss for the
+            // kernel builtin, and the walk-zone arm would then redo the
+            // same class_of + cached lookup.
+            if argc == 0 && name_id == self.sym_block_given_q && self.try_bare_block_given(cache_id) {
+                return Ok(());
+            }
+            if self.try_invoke_self_recv_cached(name_id, argc, cache_id)? {
+                return Ok(());
+            }
         }
         // Hash per-instance eigenclass methods (`def h.x` /
         // `h.define_singleton_method`) override EVERYTHING below,
@@ -10460,12 +10427,14 @@ impl Vm {
         // which finds the override. The override's `orig_require` alias
         // reaches the builtin via `Op::CallBuiltinDirect`, which
         // bypasses do_call entirely — so there is no re-entry here and
-        // no recursion. Narrow to the load family; all other builtins
+        // no recursion. Narrow to the load family plus `block_given?`
+        // (a `def self.block_given?` on a Class self must win — the
+        // fast arms decline for it and land here); all other builtins
         // keep their fast builtin path.
-        let require_overridden = no_recv
-            && matches!(&*name, "require" | "require_relative" | "load")
+        let builtin_overridden = no_recv
+            && matches!(&*name, "require" | "require_relative" | "load" | "block_given?")
             && self.bare_builtin_user_override(&name);
-        if no_recv && !require_overridden
+        if no_recv && !builtin_overridden
             && self.try_dispatch_no_recv_builtin_or_host(&name, name_id, &args)?
         {
             return Ok(());
@@ -25618,6 +25587,120 @@ impl Vm {
             is_lambda, writeback, routing, captured_yield_block,
         );
         Ok(())
+    }
+
+    /// `yield` with no arguments: `invoke_block0` plus the zero-arg twin
+    /// of `invoke_block1`'s LITE-BLOCK serve (ADR 0037 block-frame
+    /// residue), so `def each; yield; end` blocks run frameless under
+    /// tier 2 the way `yield x` ones already do. Serves exactly the
+    /// handles the plain ib0 binder would bind: no rest / kw / `&b`
+    /// param, and a 1-param entry gets the nil the binder would write
+    /// (a lambda must declare no params — `yield` to `->(x) {}` raises
+    /// in the general binder). Returns `true` when LITE-served, with
+    /// the same caller contract as `invoke_block1`; only `do_yield`
+    /// calls this, the other ib0 callers keep the framed-only entry.
+    pub(crate) fn invoke_block0_yield(&mut self, block_id: ObjId) -> Result<bool, Trap> {
+        #[cfg(feature = "jit-native")]
+        if self.jit_tier2_on
+            && !self.jit_tier2_noblock
+            && !self.jit_tier2_noliteblk
+            && self.t2_depth < crate::vm::T2_MAX_NATIVE_DEPTH
+            && !self.block_prof_on
+            && self.pending_block_arg.is_none()
+        {
+            let (proto_idx, param_start, n_params, plain, is_lambda) = {
+                let bh = self.heap.block(block_id);
+                (bh.proto_idx, bh.param_start, bh.n_params,
+                 bh.rest_slot.is_none() && bh.kw_rest_slot.is_none(), bh.is_lambda)
+            };
+            if plain
+                && self.jit_flags_get(proto_idx) & crate::vm::JFLAG_TIER2_LITEBLK != 0
+                && let Some(&Some((f, ps, np, false))) = self.t2_lite_blk_ptrs.get(proto_idx)
+                && np <= 1
+                && param_start == ps
+                && n_params == np
+                && (!is_lambda || np == 0)
+                && self.protos[proto_idx].block_kw_params.is_empty()
+                && self.protos[proto_idx].block_param_slot.is_none()
+            {
+                self.check_frames()?;
+                if np == 1 { self.stack.push(Value::Nil); }
+                let sw = crate::jit_tier2::lite_self_words(&self.heap.block(block_id).self_val);
+                self.t2_lite_run_blk(f, proto_idx, sw, block_id);
+                return Ok(true);
+            }
+        }
+        self.invoke_block0(block_id).map(|()| false)
+    }
+
+    /// Bare `block_given?` serve, shared by `do_call`'s early probe
+    /// (ahead of the implicit-self IC, which would only miss for it
+    /// and then have this arm repeat the same lookup) and the walk
+    /// zone. Callers gate on `no_recv && argc == 0`, the name,
+    /// `!maybe_refined && !force_primitive` and no host fn.
+    fn try_bare_block_given(&mut self, cache_id: u32) -> bool {
+        // Bare `block_given?` on an Object self — the kernel
+        // builtin arm's exact resolution (a block frame reads
+        // its captured `captured_yield_block`, a method frame
+        // its own `block_arg` — see the canonical arm's
+        // deferred-Proc rationale). Gated on an IC-backed
+        // user-method MISS on the self chain (any override
+        // declines, to `try_invoke_self_recv_cached` or the
+        // canonical order). Non-Object selves
+        // (toplevel/main/class body) decline — a toplevel
+        // user `def block_given?` resolution stays with the
+        // cascade. Census: 6.4K sends/walk, all slow-cascade.
+        let self_shape = self.frames.last().map(|f| {
+            (
+                f.self_val.clone(),
+                if f.is_block {
+                    f.captured_yield_block.is_some()
+                } else {
+                    f.block_arg.is_some()
+                },
+            )
+        });
+        match self_shape {
+            Some((Value::Object(oid), has_block)) => {
+                if let Some(cls) = self.heap.try_class_of(oid)
+                    && self.lookup_method_cached(&cls, self.sym_block_given_q, cache_id).is_none()
+                {
+                    self.stack.push(Value::Bool(has_block));
+                    return true;
+                }
+            }
+            // Class/Module self (a bare `block_given?` inside
+            // a `def self.m` body — AM fallback census
+            // 2026-07: 8.9/iter). Declines on any override the
+            // cascade's `bare_builtin_user_override` sees: a
+            // `def self.block_given?` on the singleton chain
+            // (per-site `lookup_class_singleton_cached`) or an
+            // instance method on the class object's own chain
+            // (`Class`/`Module` → `Object` → `Kernel`).
+            Some((Value::Class(cls), has_block))
+                if self.lookup_class_singleton_cached(&cls, self.sym_block_given_q, cache_id).is_none()
+                    && self.class_object_block_given_clean(&cls) =>
+            {
+                self.stack.push(Value::Bool(has_block));
+                return true;
+            }
+            _ => {}
+        }
+        false
+    }
+
+    /// No `block_given?` on `cls`'s class-object instance chain, memoized
+    /// per `method_gen` (see `block_given_cls_obj_clean`).
+    fn class_object_block_given_clean(&mut self, cls: &Rc<crate::value::Class>) -> bool {
+        let k = cls.is_module as usize;
+        if self.block_given_cls_obj_clean[k] == Some(self.method_gen) {
+            return true;
+        }
+        let clean = self.lookup_class_object_instance_method(cls, self.sym_block_given_q).is_none();
+        if clean {
+            self.block_given_cls_obj_clean[k] = Some(self.method_gen);
+        }
+        clean
     }
 
     fn invoke_block_general(&mut self, block_id: ObjId, mut args: Vec<Value>) -> Result<(), Trap> {

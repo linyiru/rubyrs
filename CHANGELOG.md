@@ -56,6 +56,13 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   used to build and discard a hash set while checking the superclass
   chain. Rails does this for every universal name at load (ActiveSupport's
   `DeprecationProxy`). (`p2_walk_buckets.rb`)
+- **Block calls, zero-arg `yield` and `block_given?` are faster** (#427).
+  In the interpreter, `yield if block_given?` is ~13% faster
+  (`o.bgy { }`: 290 → 250 ns) and `o.y { }` is ~6% faster. A bare
+  `block_given?` is now resolved once, not twice. Under tier 2,
+  zero-arg `yield` now runs its block frameless, as `yield x` already
+  did, so `o.y { }` drops from 216 to 177 ns and `o.bgy { }` from 260 to
+  208 ns. (`yield0_lite_block_given.rb`)
 - **`super` into a builtin is ~3× faster** (#426). An override that
   supers to a method rubyrs implements natively (`respond_to?`, `is_a?`,
   `initialize`, `freeze`, …) no longer builds and discards an error
@@ -189,6 +196,11 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Fixed
 
+- **A `def self.block_given?` override now wins inside class methods**
+  (#427). A bare `block_given?` in a `def self.m` body always ran the
+  kernel builtin. Now it finds the class's own, an inherited, or a
+  module singleton override, and an instance method on `Class`,
+  `Module` or `Object`, as CRuby does. (`yield0_lite_block_given.rb`)
 - **`!=` honours a user-defined `==`** — `Set[1] != Set[1]` and any class
   defining only `==` compared by identity, which made ActiveRecord's
   `insert_all` / `upsert_all` always raise "All objects being inserted must
