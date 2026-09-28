@@ -5615,6 +5615,14 @@ impl Vm {
         }
     }
 
+    /// `BasicObject#!=` for a receiver whose `==` resolved to the user
+    /// method `eq`: push `!(recv == other)` by Ruby truthiness.
+    fn neq_via_user_eq(&mut self, eq: Rc<crate::value::Method>, recv: Value, args: &[Value]) -> Result<(), Trap> {
+        let r = self.call_resolved_method(eq, recv, vec![args[0].clone()])?;
+        self.stack.push(Value::Bool(matches!(r, Value::Nil | Value::Bool(false))));
+        Ok(())
+    }
+
     /// CRuby-shape receiver description for NoMethodError-style
     /// messages. Object instances render as
     /// `"an instance of <ClassName>"` (matches CRuby 3.3+); all
@@ -12252,18 +12260,25 @@ impl Vm {
             && let Value::Str(s) = &recv
             && let Some(tag) = s.class_tag.borrow().clone()
         {
-            let mut found = None;
-            for anc in crate::vm::lookup::flatten_ancestors(&tag) {
-                if anc.name == "String" {
-                    break;
+            let below_string = |nid: SymId| {
+                for anc in crate::vm::lookup::flatten_ancestors(&tag) {
+                    if anc.name == "String" {
+                        break;
+                    }
+                    if let Some(m) = anc.methods.borrow().get(&nid).cloned() {
+                        return Some(m);
+                    }
                 }
-                if let Some(m) = anc.methods.borrow().get(&name_id).cloned() {
-                    found = Some(m);
-                    break;
-                }
-            }
-            if let Some(m) = found {
+                None
+            };
+            if let Some(m) = below_string(name_id) {
                 return self.invoke_method(m, recv.clone(), args.into_vec());
+            }
+            if &*name == "!=" && args.len() == 1 {
+                let eq_id = self.interner.intern("==");
+                if let Some(m) = below_string(eq_id) {
+                    return self.neq_via_user_eq(m, recv.clone(), &args);
+                }
             }
         }
         // A user-defined singleton method overrides the built-in
@@ -14155,20 +14170,24 @@ impl Vm {
         // this and go straight to the primitives below. The no-block
         // path only — block-form overrides flow through
         // `do_call_block`'s own collection bridge.
-        if !force_primitive
-            && let Value::Hash(id) = &recv
-            && let Some(tag) = self.heap.hash_class_tag(*id)
-            && let Some(m) = self.lookup_method_uncached(&tag, name_id)
-        {
-            return self.invoke_method(m, recv.clone(), args.into_vec());
-        }
-        // Array twin of the Hash-subclass override gate above.
-        if !force_primitive
-            && let Value::Array(id) = &recv
-            && let Some(tag) = self.heap.array_class_tag(*id)
-            && let Some(m) = self.lookup_method_uncached(&tag, name_id)
-        {
-            return self.invoke_method(m, recv.clone(), args.into_vec());
+        // Both gates also derive `!=` from an overriding `==`
+        // (`BasicObject#!=` is `!(self == other)`).
+        let collection_tag = match &recv {
+            Value::Hash(id) if !force_primitive => self.heap.hash_class_tag(*id),
+            // Array twin of the Hash-subclass override gate.
+            Value::Array(id) if !force_primitive => self.heap.array_class_tag(*id),
+            _ => None,
+        };
+        if let Some(tag) = collection_tag {
+            if let Some(m) = self.lookup_method_uncached(&tag, name_id) {
+                return self.invoke_method(m, recv.clone(), args.into_vec());
+            }
+            if &*name == "!=" && args.len() == 1 {
+                let eq_id = self.interner.intern("==");
+                if let Some(m) = self.lookup_method_uncached(&tag, eq_id) {
+                    return self.neq_via_user_eq(m, recv.clone(), &args);
+                }
+            }
         }
         if let Some(v) = self.collection_call(&recv, &name, &args)? {
             self.stack.push(v);
@@ -15901,6 +15920,17 @@ impl Vm {
         // value-equality via `ruby_eq`. Universal fallback —
         // never raises — so it must go before NoMethodError.
         if args.len() == 1 && (&*name == "==" || &*name == "!=") {
+            // `BasicObject#!=` is `!(self == other)`, dispatched: a user
+            // `==` (Set's, ActiveRecord's key-set compare in `insert_all`)
+            // decides `!=` too. Without it `Set[1] != Set[1]` was true.
+            // Class-tagged String/Array/Hash receivers derive it at their
+            // override gates instead.
+            let eq_id = self.interner.intern("==");
+            if &*name == "!="
+                && let Some(m) = self.key_user_method(&recv, eq_id)
+            {
+                return self.neq_via_user_eq(m, recv.clone(), &args);
+            }
             let eq = recv.ruby_eq(&args[0], &self.heap);
             let result = if &*name == "==" { eq } else { !eq };
             self.stack.push(Value::Bool(result));

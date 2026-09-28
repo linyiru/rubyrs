@@ -803,6 +803,10 @@ fn tier2_restblock_lite() { run_diff("tier2_restblock_lite"); }
 #[test] fn dir_glob_block() { run_diff("dir_glob_block"); }
 #[test] fn undef_object_private() { run_diff("undef_object_private"); }
 #[test] fn super_to_builtin() { run_diff("super_to_builtin"); }
+// `!=` dispatches a user `==` (ActiveRecord insert_all compares key Sets).
+#[test] fn neq_dispatches_user_eq() { run_diff("neq_dispatches_user_eq"); }
+#[cfg(feature = "stdlib")]
+#[test] fn neq_set() { run_diff("neq_set"); }
 // The per-site super cache records misses; a cached miss must become a hit
 // once an ancestor gains the method.
 #[test] fn super_miss_cached() { run_diff("super_miss_cached"); }
