@@ -19,7 +19,11 @@ Because of the three `Rc` variants, `Value` is not `Copy`. Every clone and every
 that switches on the tag.
 
 Following ADR 0036, the rewrite was costed and measured before any commitment. Both profiles are
-from `sample(1)` on master fd2c3561 with `everything,jit-native`, on the Studio. The Rails hello
+from `sample(1)` on the Studio with `everything,jit-native`:
+- the first is master fd2c3561
+- the second is master plus the Option 0 PoC
+
+The Rails hello
 bench is `poc/rails-spike/bench.rb`, which drives GET / through the full middleware stack in
 process.
 
@@ -39,7 +43,7 @@ process.
 | `Heap::visit_value` (GC mark) | 2.4% |
 
 After Option 0 (below), the same profile has 5725 samples:
-- `clone_rc`, which is the `Rc` half of clone (Str, Class, Regex), is **0.6%**.
+- The out-of-line `Rc` half of clone (Str, Class, Regex) is **0.6%**.
 - Drop glue is 3.9%.
 - `memmove` is 3.1%.
 - `visit_value` is 2.5%.
@@ -55,12 +59,13 @@ Removing all `Value` glue cannot close more than a tenth of it.
 **Option 0: hand-written `#[inline(always)] Clone`.** A derived `Clone` over 20 variants
 compiles to an out-of-line jump table, so cloning an `Int` costs a call. The hand-written
 version has two paths:
-- For the three `Rc` variants it calls an out-of-line `clone_rc`.
+- For the three `Rc` variants it calls an out-of-line helper (`clone_str` / `clone_class` /
+  `clone_regex`). Each helper takes the `Rc` itself, so it has no wildcard arm.
 - For everything else it does a 16-byte bitwise copy (`ptr::read`).
 
-The match is exhaustive, so a new variant fails to compile until it is classified as either
-`Rc` or plain. That way a payload with a `Drop` impl can never fall into the copy arm by
-default. The JIT contract is unchanged: layout, size and tags stay the same.
+The match is exhaustive and there is no `_` arm anywhere, so a new variant fails to compile
+until it is classified as either `Rc` or plain. That way a payload with a `Drop` impl can never
+fall into the copy arm by default. The JIT contract is unchanged: layout, size and tags stay the same.
 
 **Option 1: `Copy` `Value`, 16 bytes, with Str/Class/Regex behind heap ids.** This removes the
 drop glue (about 4%), but it costs more than that:
@@ -96,7 +101,8 @@ C extensions are not affected, because `rubyrs_cext::Value` is its own `u64` han
   (`dispatch_until_inner`, `step_cold`, `do_call`: 34% combined), not in how a `Value` is
   stored.
 
-**Option 0 results** (5 interleaved rounds on the Studio, ns per call unless noted):
+**Option 0 results** (5 interleaved rounds of the PoC build on the Studio, ns per call unless
+noted; 3 more rounds of the final exhaustive-match build landed in the same ranges):
 
 | | base | Option 0 |
 |---|---|---|

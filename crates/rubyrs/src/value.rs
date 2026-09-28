@@ -562,9 +562,10 @@ impl Clone for Value {
     #[inline(always)]
     fn clone(&self) -> Value {
         match self {
-            Value::Str(_) | Value::Class(_) => self.clone_rc(),
+            Value::Str(s) => clone_str(s),
+            Value::Class(c) => clone_class(c),
             #[cfg(feature = "regex")]
-            Value::Regex(_) => self.clone_rc(),
+            Value::Regex(r) => clone_regex(r),
             #[cfg(feature = "bignum")]
             // SAFETY: an ObjId payload owns nothing; see the arm below.
             Value::BigInt(_) => unsafe { std::ptr::read(self) },
@@ -580,20 +581,21 @@ impl Clone for Value {
     }
 }
 
-impl Value {
-    /// The refcount-bumping half of `Clone`, kept out of line so the inlined fast path stays
-    /// a tag test plus a 16-byte copy.
-    #[inline(never)]
-    fn clone_rc(&self) -> Value {
-        match self {
-            Value::Str(s) => Value::Str(Rc::clone(s)),
-            Value::Class(c) => Value::Class(Rc::clone(c)),
-            #[cfg(feature = "regex")]
-            Value::Regex(r) => Value::Regex(Rc::clone(r)),
-            // SAFETY: only reached from `Clone::clone` for the variants above.
-            _ => unsafe { std::ptr::read(self) },
-        }
-    }
+// The refcount-bumping half of `Clone`, kept out of line so the inlined fast path stays a tag
+// test plus a 16-byte copy. Each takes its `Rc` itself, not a `Value`, so none has a variant
+// it could be handed that it would have to copy bitwise.
+#[inline(never)]
+fn clone_str(s: &Rc<RStr>) -> Value {
+    Value::Str(Rc::clone(s))
+}
+#[inline(never)]
+fn clone_class(c: &Rc<Class>) -> Value {
+    Value::Class(Rc::clone(c))
+}
+#[cfg(feature = "regex")]
+#[inline(never)]
+fn clone_regex(r: &Rc<crate::regex_engine::CompiledRegex>) -> Value {
+    Value::Regex(Rc::clone(r))
 }
 
 // ADR 0035 Phase 1 — the layout contract the native JIT will rely on. A change that grows
