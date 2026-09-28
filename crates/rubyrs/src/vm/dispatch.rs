@@ -38,6 +38,19 @@ use super::{
 };
 use crate::HostCtx;
 
+/// Keywords an `Op::CallKwLit` site can bind without a Hash (B1, #384).
+const KW_LIT_MAX: usize = 16;
+
+/// How an `Op::CallKwLit` site's keyword values map onto the callee's
+/// keyword slots: passed key `j` (call-site order) binds slot `slot[j]`,
+/// and `mask` has bit `slot[j]` set for every passed key (the frame's
+/// `kw_given_mask`).
+struct KwLitBind {
+    n: usize,
+    slot: [u8; KW_LIT_MAX],
+    mask: u64,
+}
+
 /// A `(local-slot, value)` binding produced while rooting a block's
 /// rest-array / keyword-rest Hash through the GC fence in
 /// [`Vm::invoke_block`] (see the combined `PinGuard` block there).
@@ -18519,57 +18532,58 @@ impl Vm {
 
     /// Fetch (computing + caching on first touch) the ADR-0031
     /// increment-2 binding plan for `proto_idx`. `None` = ineligible:
-    /// a REQUIRED keyword param or `**kwrest` in the signature (the
-    /// trailing-Hash peel + per-name kw binding + missing-keyword
-    /// ArgumentError stay on the general binder), or a shape that
-    /// doesn't fit the packed u16 fields. Optionals / `*rest` /
-    /// post-required / `&blk` are all plan-eligible, and so is a kw
-    /// region whose EVERY param is OPTIONAL — with a LITERAL default
-    /// (campaign P5a) or a COMPUTED default (campaign P6b). The
-    /// binder's kw job for a zero-kwargs call site is then exactly
-    /// "clone each literal fresh, leave each computed slot Nil,
-    /// mask 0" — the mask-0 body prologue (`Op::JumpIfKwArgGiven`)
-    /// then evaluates every computed default, which is precisely the
-    /// general binder's zero-kwargs outcome and what the serve
-    /// reproduces (kwargs-carrying sites decline there; see
-    /// `try_invoke_nfa_method_from_stack`). The
+    /// `**kwrest` or more than 64 keywords in the signature (both stay
+    /// on the general binder), or a shape that doesn't fit the packed
+    /// u16 fields. Optionals / `*rest` / post-required / `&blk` /
+    /// keywords are all plan-eligible. For a zero-kwargs call site the
+    /// binder's kw job is "clone each literal fresh, leave each
+    /// computed slot Nil, mask 0" — the mask-0 body prologue
+    /// (`Op::JumpIfKwArgGiven`) then evaluates every computed default,
+    /// the general binder's zero-kwargs outcome. A plan with a
+    /// REQUIRED keyword declines there (only the general binder raises
+    /// the missing-keyword ArgumentError) and serves just the
+    /// `Op::CallKwLit` sites that pass it (B1, #384; see
+    /// `try_invoke_kw_lit_cached`). The
     /// cache is sound forever: a Proto's param shape is immutable
     /// after compile, and the plan carries no per-class or
     /// per-method state (method redefinition swaps the METHOD the IC
     /// resolves, which brings its own proto_idx).
+    #[inline]
     fn nfa_plan_for(&mut self, proto_idx: usize) -> Option<crate::vm::NfaPlan> {
+        use crate::vm::NfaPlanSlot;
+        match self.nfa_plans.get(proto_idx) {
+            Some(NfaPlanSlot::Plan(p)) => Some(*p),
+            Some(NfaPlanSlot::Ineligible) => None,
+            _ => self.nfa_plan_build(proto_idx),
+        }
+    }
+
+    /// The first-touch half of `nfa_plan_for`, kept out of line so the
+    /// cached lookup inlines into the call paths.
+    #[inline(never)]
+    fn nfa_plan_build(&mut self, proto_idx: usize) -> Option<crate::vm::NfaPlan> {
         use crate::vm::{NfaPlan, NfaPlanSlot};
         if proto_idx >= self.nfa_plans.len() {
             self.nfa_plans.resize(proto_idx + 1, NfaPlanSlot::Unknown);
-        }
-        match self.nfa_plans[proto_idx] {
-            NfaPlanSlot::Plan(p) => return Some(p),
-            NfaPlanSlot::Ineligible => return None,
-            NfaPlanSlot::Unknown => {}
         }
         let proto = &self.protos[proto_idx];
         let has_rest = proto.rest_param.is_some();
         let has_blk = proto.block_param.is_some();
         let kw_count = proto.kw_param_defaults.len();
-        // Keyword eligibility (campaign P5a literal + P6b computed):
-        // every kw param must be OPTIONAL — either a LITERAL default
-        // (`Some` snapshot) or a COMPUTED default (`None` snapshot +
-        // `kw_has_computed_default[i]`, a body prologue
-        // `Op::JumpIfKwArgGiven`) — and no `**kwrest`. A REQUIRED kwarg
-        // (`None` + computed=false) is the one shape kept on the
-        // general binder: it is the only route that raises the
-        // missing-keyword ArgumentError, which the zero-kwargs serve
-        // has no way to reproduce. The serve is bare-`Op::Call`-only
-        // (zero kwargs, mask 0 — see `try_invoke_nfa_method_from_stack`):
-        // it fills each LITERAL slot fresh and leaves each COMPUTED slot
-        // Nil for the mask-0 prologue to evaluate, exactly the general
-        // binder's zero-kwargs outcome. (`kw_has_computed_default` may
-        // be empty when every default is a literal — the compiler's
-        // space-saving contract, so the `.get(i)` is defensive.)
-        let kw_lit_ok = proto.kw_rest_param.is_none()
-            && proto.kw_param_defaults.iter().enumerate().all(|(i, d)| {
-                d.is_some() || proto.kw_has_computed_default.get(i).copied().unwrap_or(false)
-            });
+        // Keyword eligibility (campaign P5a literal, P6b computed, B1
+        // required): no `**kwrest`, at most 64 keywords (the
+        // `kw_given_mask` width). A REQUIRED kwarg (`None` snapshot +
+        // computed=false) sets its `kw_req_mask` bit: the zero-kwargs
+        // serve declines on a non-zero mask, and the `Op::CallKwLit`
+        // serve admits a call only when it passes every required
+        // keyword. (`kw_has_computed_default` may be empty when every
+        // default is a literal — the compiler's space-saving contract,
+        // so the `.get(i)` is defensive.)
+        let kw_req_mask = proto.kw_param_defaults.iter().enumerate().fold(0u64, |acc, (i, d)| {
+            let required = d.is_none() && !proto.kw_has_computed_default.get(i).copied().unwrap_or(false);
+            if required && i < 64 { acc | 1u64 << i } else { acc }
+        });
+        let kw_lit_ok = proto.kw_rest_param.is_none() && kw_count <= 64;
         let positional_max = proto
             .params
             .len()
@@ -18583,6 +18597,15 @@ impl Vm {
             self.nfa_plans[proto_idx] = NfaPlanSlot::Ineligible;
             return None;
         }
+        let kw_start = positional_max + has_rest as usize;
+        let kw_names: Vec<String> = proto.params[kw_start..kw_start + kw_count].to_vec();
+        if self.nfa_kw_syms.len() < self.nfa_plans.len() {
+            self.nfa_kw_syms.resize(self.nfa_plans.len(), None);
+        }
+        let kw_syms: Option<(Box<[SymId]>, u64)> = (kw_count > 0)
+            .then(|| (kw_names.iter().map(|n| self.interner.intern(n)).collect(), kw_req_mask));
+        self.nfa_kw_syms[proto_idx] = kw_syms;
+        let proto = &self.protos[proto_idx];
         let plan = NfaPlan {
             params_len: proto.params.len() as u16,
             required_pre: proto.n_required_positional,
@@ -18590,6 +18613,7 @@ impl Vm {
             positional_max: positional_max as u16,
             has_rest,
             kw_count: kw_count as u16,
+            kw_has_req: kw_req_mask != 0,
             has_block_param: has_blk,
             n_locals: proto.n_locals,
             stack_eligible: !proto.creates_block,
@@ -18928,16 +18952,38 @@ impl Vm {
         // flag is the "zero kwargs passed / trailing Hash is
         // positional" signal (see the doc above). Kw-free plans
         // serve every route, as before.
-        if plan.kw_count != 0 && !self.trailing_hash_positional {
+        if plan.kw_count != 0 && (!self.trailing_hash_positional || plan.kw_has_req) {
             return Ok(false);
         }
+        self.nfa_bind_push::<false>(m, plan, self_val_norecv, argc, None)
+    }
+
+    /// The bind-and-push half of `try_invoke_nfa_method_from_stack`:
+    /// `argc` positionals sit on the stack top, followed (when `kw` is
+    /// `Some`, the `Op::CallKwLit` serve) by `kw.n` keyword values in
+    /// call-site order. `Ok(false)` (an arity miss) leaves the stack
+    /// untouched. Rooting is the caller's contract above: the one
+    /// possible alloc (the rest Array) happens while every arg is
+    /// still on the stack. `KW` is `kw.is_some()` as a const, so the
+    /// zero-kwargs instance compiles without the keyword mapping.
+    fn nfa_bind_push<const KW: bool>(
+        &mut self,
+        m: &Rc<Method>,
+        plan: crate::vm::NfaPlan,
+        self_val_norecv: Option<Value>,
+        argc: usize,
+        kw: Option<&KwLitBind>,
+    ) -> Result<bool, Trap> {
+        let kw = if KW { kw } else { None };
+        let kw_n = kw.map_or(0, |k| k.n);
+        let kw_mask = kw.map_or(0, |k| k.mask);
         let positional_max = plan.positional_max as usize;
         let post_n = plan.required_post as usize;
         let required = plan.required_pre as usize + post_n;
         if argc < required || (!plan.has_rest && argc > positional_max) {
             return Ok(false);
         }
-        let split = match self.stack.len().checked_sub(argc) {
+        let split = match self.stack.len().checked_sub(argc + kw_n) {
             Some(s) => s,
             None => return Ok(false),
         };
@@ -18945,6 +18991,15 @@ impl Vm {
             return Ok(false);
         }
         self.check_frames()?;
+        // Stack index of the keyword value bound to kw slot `i`, if the
+        // call site passed it.
+        let kw_src = |i: usize| -> Option<usize> {
+            let k = kw?;
+            (kw_mask & 1u64 << i != 0)
+                .then(|| k.slot[..k.n].iter().position(|&s| s as usize == i))
+                .flatten()
+                .map(|j| split + argc + j)
+        };
         let pre_take = (argc - post_n).min(positional_max - post_n);
         let rest_n = argc - post_n - pre_take;
         let rest_id = if plan.has_rest {
@@ -18993,9 +19048,13 @@ impl Vm {
             // REQUIRED kwarg never reaches here (the plan gate rejects
             // it), so a `None` slot is always a computed default.
             for i in 0..plan.kw_count as usize {
-                let v = match &self.protos[m.proto_idx].kw_param_defaults[i] {
-                    Some(d) => self.kw_literal_default_fresh(d, m.proto_idx),
-                    None => Value::Nil,
+                let v = if let Some(at) = kw_src(i) {
+                    std::mem::replace(&mut self.stack[at], Value::Nil)
+                } else {
+                    match &self.protos[m.proto_idx].kw_param_defaults[i] {
+                        Some(d) => self.kw_literal_default_fresh(d, m.proto_idx),
+                        None => Value::Nil,
+                    }
                 };
                 self.locals_arena.push(v);
             }
@@ -19029,9 +19088,13 @@ impl Vm {
                 // same arm split as the arena path above.
                 let kw_start = positional_max + plan.has_rest as usize;
                 for i in 0..plan.kw_count as usize {
-                    l[kw_start + i] = match &self.protos[m.proto_idx].kw_param_defaults[i] {
-                        Some(d) => self.kw_literal_default_fresh(d, m.proto_idx),
-                        None => Value::Nil,
+                    l[kw_start + i] = if let Some(at) = kw_src(i) {
+                        std::mem::replace(&mut self.stack[at], Value::Nil)
+                    } else {
+                        match &self.protos[m.proto_idx].kw_param_defaults[i] {
+                            Some(d) => self.kw_literal_default_fresh(d, m.proto_idx),
+                            None => Value::Nil,
+                        }
                     };
                 }
                 // `&blk` slot stays Nil (cell is Nil-filled).
@@ -19060,7 +19123,7 @@ impl Vm {
             #[cfg(feature = "regex")] saved_last_match: None,
             is_block: false, is_lambda: false,
             n_given_positional: pre_take as u16,
-            kw_given_mask: 0,
+            kw_given_mask: kw_mask,
             aux: None,
             pending_yield: false,
             block_writeback: None,
@@ -19617,6 +19680,112 @@ impl Vm {
             self.stack.remove(name_idx);
         }
         Ok(served)
+    }
+
+    /// `Op::CallKwLit*` fast path (B1, #384). Resolves the target the way
+    /// `try_invoke_explicit_recv_cached` / `try_invoke_self_recv_cached`
+    /// do (same `try_class_of` + `lookup_method_cached`, same Public gate
+    /// for an explicit receiver, same main-self and `host_fns`
+    /// exclusions for a bare call). A plain `def` with keyword params
+    /// whose `NfaPlan` covers the call then binds the keyword VALUES on
+    /// the stack straight into its keyword slots, with no Hash. The
+    /// call is declined, stack untouched, whenever a passed key names
+    /// no keyword param or a required keyword is missing: the caller
+    /// then materializes the Hash and runs the `CallKw` path, which
+    /// owns every error message and every other target shape.
+    pub(crate) fn try_invoke_kw_lit_cached(
+        &mut self,
+        name_id: SymId,
+        argc: usize,
+        keys_idx: u16,
+        cache_id: u32,
+        no_recv: bool,
+    ) -> Result<bool, Trap> {
+        // The one-shot flags `do_call` consumes at its boundary, and an
+        // active refinement of this name, need the full cascade.
+        if self.bypass_visibility_once
+            || self.require_public_once
+            || self.force_primitive_dispatch
+            || (!self.refined_method_names.is_empty() && self.refined_method_names.contains(&name_id))
+        {
+            return Ok(false);
+        }
+        let Some((caller, frame_self)) = self.frames.last().map(|f| (f.proto_idx, f.self_val.clone())) else {
+            return Ok(false);
+        };
+        let (id, self_val) = if no_recv {
+            let Value::Object(id) = frame_self else { return Ok(false) };
+            if self.is_main_self(&frame_self) || self.host_fns.contains_key(&name_id) {
+                return Ok(false);
+            }
+            (id, Some(frame_self))
+        } else {
+            match self.stack.len().checked_sub(argc + 1).map(|i| &self.stack[i]) {
+                Some(Value::Object(id)) => (*id, None),
+                _ => return Ok(false),
+            }
+        };
+        let Some(cls) = self.heap.try_class_of(id) else { return Ok(false) };
+        let Some(m) = self.lookup_method_cached(&cls, name_id, cache_id) else { return Ok(false) };
+        if m.builtin.is_some()
+            || m.closure.is_some()
+            || m.fixed_arity.is_some()
+            || (!no_recv && m.visibility.get() != Visibility::Public)
+        {
+            return Ok(false);
+        }
+        let Some(plan) = self.nfa_plan_for(m.proto_idx) else { return Ok(false) };
+        if plan.kw_count == 0 || m.params.len() != plan.params_len as usize {
+            return Ok(false);
+        }
+        let Some(keys) = self.protos.get(caller).and_then(|p| p.kw_call_keys.get(keys_idx as usize)) else {
+            return Ok(false);
+        };
+        let Some(Some((syms, req_mask))) = self.nfa_kw_syms.get(m.proto_idx) else { return Ok(false) };
+        if keys.len() > KW_LIT_MAX || keys.len() > argc {
+            return Ok(false);
+        }
+        let mut bind = KwLitBind { n: keys.len(), slot: [0; KW_LIT_MAX], mask: 0 };
+        for (j, k) in keys.iter().enumerate() {
+            let Some(i) = syms.iter().position(|s| s == k) else { return Ok(false) };
+            bind.slot[j] = i as u8;
+            bind.mask |= 1u64 << i;
+        }
+        if req_mask & !bind.mask != 0 {
+            return Ok(false);
+        }
+        self.nfa_bind_push::<true>(&m, plan, self_val, argc - bind.n, Some(&bind))
+    }
+
+    /// Rebuild the keyword Hash of an `Op::CallKwLit*` site in place: the
+    /// top `keys.len()` stack values become the Symbol-keyed Hash `NewHash`
+    /// builds for the same literal (the keys are distinct Symbols, so
+    /// `hash_literal_dedup` has nothing to do). Returns the `CallKw` argc,
+    /// in which the Hash counts as one arg.
+    pub(crate) fn materialize_kw_lit(&mut self, argc: usize, keys_idx: u16) -> Result<usize, Trap> {
+        let caller = self.frames.last().map(|f| f.proto_idx);
+        let n = match caller.and_then(|p| self.protos.get(p)).and_then(|p| p.kw_call_keys.get(keys_idx as usize)) {
+            Some(keys) if keys.len() <= argc && keys.len() <= self.stack.len() => keys.len(),
+            _ => {
+                return Err(self.trap(RubyError::RuntimeError {
+                    msg: "internal error: CallKwLit keyword list out of range".into(),
+                }));
+            }
+        };
+        self.maybe_gc(); // allow: gc-rooting — the keyword values are still on the stack until the drain below, and nothing allocates between the drain and the Hash alloc.
+        self.check_alloc()?;
+        let split = self.stack.len() - n;
+        let mut pairs = crate::heap::PairsBuf::with_capacity(n);
+        let keys = caller
+            .and_then(|p| self.protos.get(p))
+            .and_then(|p| p.kw_call_keys.get(keys_idx as usize))
+            .map_or(&[][..], |k| &k[..]);
+        for (k, v) in keys.iter().zip(self.stack.drain(split..)) {
+            pairs.push((Value::Sym(*k), v));
+        }
+        let id = self.heap.alloc(HeapObj::Hash(crate::heap::HashObj::with_pairs(pairs)));
+        self.stack.push(Value::Hash(id));
+        Ok(argc - n + 1)
     }
 
     /// Block-form sibling of `try_invoke_explicit_recv_cached`.
@@ -24633,6 +24802,7 @@ impl Vm {
                 n_optional_params: 0,
                 byte_literals: Vec::new(),
                 const_chains: Vec::new(),
+                kw_call_keys: Vec::new(),
                 lexical_scope: Vec::new(),
             };
             let idx = self.protos.len();
@@ -24749,6 +24919,7 @@ impl Vm {
                 n_optional_params: 0,
                 byte_literals: Vec::new(),
                 const_chains: Vec::new(),
+                kw_call_keys: Vec::new(),
                 lexical_scope: Vec::new(),
             };
             let idx = self.protos.len();
@@ -29534,6 +29705,7 @@ impl Vm {
                 n_optional_params: 0,
                 byte_literals: vec![],
                 const_chains: vec![],
+                kw_call_keys: Vec::new(),
                 lexical_scope: vec![],
             };
             let idx = self.protos.len();
@@ -29580,6 +29752,7 @@ impl Vm {
                 n_optional_params: 0,
                 byte_literals: vec![],
                 const_chains: vec![],
+                kw_call_keys: Vec::new(),
                 lexical_scope: vec![],
             };
             let idx = self.protos.len();
@@ -29709,6 +29882,7 @@ impl Vm {
                 n_optional_params: 0,
             byte_literals: vec![],
             const_chains: vec![],
+            kw_call_keys: Vec::new(),
             lexical_scope: vec![],
         };
         let idx = self.protos.len();
@@ -29907,6 +30081,7 @@ impl Vm {
                 n_optional_params: 0,
             byte_literals: vec![],
             const_chains: vec![],
+            kw_call_keys: Vec::new(),
             lexical_scope: vec![],
         };
         let idx = self.protos.len();
@@ -30092,6 +30267,7 @@ impl Vm {
                 n_optional_params: 0,
             byte_literals: vec![],
             const_chains: vec![],
+            kw_call_keys: Vec::new(),
             lexical_scope: vec![],
         };
         let idx = self.protos.len();

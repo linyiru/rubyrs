@@ -93,7 +93,7 @@ use crate::vm::Vm;
 pub(crate) const STEP_INSTALL_BUILTINS: u32 = u32::MAX;
 
 const MAGIC: &[u8; 4] = b"RBPC";
-const FORMAT_VERSION: u32 = 6; // bumped: cvar/super site cids in Op + their CidGen counters (campaign P4)
+const FORMAT_VERSION: u32 = 7; // bumped: Op::CallKwLit* + Proto.kw_call_keys (B1, #384)
 /// MAGIC(4) + FORMAT_VERSION(4) + key(8) + body checksum(8).
 const HEADER_LEN: usize = 24;
 
@@ -338,6 +338,7 @@ struct ProtoCold {
     block_kw_params: Vec<(String, u16, bool)>,
     byte_literals: Vec<Rc<[u8]>>,
     const_chains: Vec<Vec<SymId>>,
+    kw_call_keys: Vec<Vec<SymId>>,
 }
 
 #[derive(serde::Serialize)]
@@ -347,6 +348,7 @@ struct ProtoColdRef<'a> {
     block_kw_params: &'a [(String, u16, bool)],
     byte_literals: &'a [Rc<[u8]>],
     const_chains: &'a [Vec<SymId>],
+    kw_call_keys: &'a [Vec<SymId>],
 }
 
 impl ProtoColdRef<'_> {
@@ -356,6 +358,7 @@ impl ProtoColdRef<'_> {
             && self.block_kw_params.is_empty()
             && self.byte_literals.is_empty()
             && self.const_chains.is_empty()
+            && self.kw_call_keys.is_empty()
     }
 }
 
@@ -706,6 +709,7 @@ fn decode_body(body: &[u8]) -> Option<Decoded<'_>> {
             )),
             byte_literals: pc.byte_literals,
             const_chains: pc.const_chains,
+            kw_call_keys: pc.kw_call_keys,
             lexical_scope,
         });
     }
@@ -1121,6 +1125,7 @@ pub(crate) fn store(
                     block_kw_params: &p.block_kw_params,
                     byte_literals: &p.byte_literals,
                     const_chains: &p.const_chains,
+                    kw_call_keys: &p.kw_call_keys,
                 };
                 (!cold.is_empty()).then_some((i as u32, cold))
             })

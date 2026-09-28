@@ -399,6 +399,8 @@ fn t2_census_note_op(vm: &mut crate::vm::Vm, op: &Op) {
         | CallNoRecv(n, ..)
         | CallKw(n, ..)
         | CallKwNoRecv(n, ..)
+        | CallKwLit(n, ..)
+        | CallKwLitNoRecv(n, ..)
         | ApplyCall(n, ..)
         | ApplyCallNoRecv(n, ..)
         | ApplyCallKw(n, ..)

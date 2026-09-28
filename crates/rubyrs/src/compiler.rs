@@ -132,6 +132,9 @@ pub(crate) struct ProtoBuilder {
     /// Per-call-site cref chains, flushed into `Proto.const_chains`
     /// on emit. See `Op::LoadConstChain` in bytecode.rs.
     pub(crate) const_chains: Vec<Vec<crate::intern::SymId>>,
+    /// Per-call-site keyword keys, flushed into `Proto.kw_call_keys`
+    /// on emit. See `Op::CallKwLit` in bytecode.rs.
+    pub(crate) kw_call_keys: Vec<Vec<crate::intern::SymId>>,
     /// Lexical class/module nesting at the point this proto is
     /// being compiled. Empty at the toplevel, `["Foo"]` inside
     /// `module Foo; ... end`, `["Foo", "Bar"]` inside
@@ -1286,6 +1289,25 @@ fn compile_call_arm(
         return;
     }
     let has_recv = receiver.is_some();
+    // B1 (#384): keywords that are all literal Symbols push only their
+    // values; the keys go in a per-site list (`Op::CallKwLit`), so a
+    // user method with keyword params binds them without a Hash.
+    if kwargs_trailing
+        && let Some((last, pos)) = args.split_last()
+        && let Some((keys, pairs)) = kw_lit_keys(last, interner)
+        && pos.len() + keys.len() <= u8::MAX as usize
+        && b.kw_call_keys.len() < u16::MAX as usize
+    {
+        if let Some(r) = receiver { compile_expr(b, r, protos, interner, cc); }
+        for a in pos { compile_expr(b, a, protos, interner, cc); }
+        for (_, v) in pairs { compile_expr(b, v, protos, interner, cc); }
+        let argc = (pos.len() + keys.len()) as u8;
+        let idx = b.kw_call_keys.len() as u16;
+        b.kw_call_keys.push(keys);
+        let cid = alloc_cid(&mut cc.call);
+        b.emit(if has_recv { Op::CallKwLit(name_id, argc, idx, cid) } else { Op::CallKwLitNoRecv(name_id, argc, idx, cid) });
+        return;
+    }
     if let Some(r) = receiver { compile_expr(b, r, protos, interner, cc); }
     for a in args { compile_expr(b, a, protos, interner, cc); }
     let argc = args.len() as u8;
@@ -1312,6 +1334,24 @@ fn compile_call_arm(
             }
     }
     emit_method_call(b, name_id, argc, has_recv, false, kwargs_trailing, cc);
+}
+
+type KwLitKeys<'e> = (Vec<crate::intern::SymId>, &'e [(SExpr, SExpr)]);
+/// The keys of a trailing keyword argument eligible for `Op::CallKwLit`:
+/// a non-empty `k: v` list (no `**` chunk, which `tr_kwhash` lowers to a
+/// `merge` call) whose keys are all literal Symbols with no duplicate.
+/// A duplicate key keeps the `NewHash` path, which applies last-wins.
+fn kw_lit_keys<'e>(e: &'e SExpr, interner: &mut Interner) -> Option<KwLitKeys<'e>> {
+    let Expr::HashLit(pairs) = &e.node else { return None };
+    if pairs.is_empty() { return None; }
+    let mut keys = Vec::with_capacity(pairs.len());
+    for (k, _) in pairs {
+        let Expr::SymbolLit(name) = &k.node else { return None };
+        let id = interner.intern(name);
+        if keys.contains(&id) { return None; }
+        keys.push(id);
+    }
+    Some((keys, pairs))
 }
 
 /// Allocate a fresh inline-cache id and emit the appropriate
@@ -1373,6 +1413,7 @@ impl ProtoBuilder {
             in_singleton_body: false,
             byte_literals: vec![],
             const_chains: vec![],
+            kw_call_keys: vec![],
         };
         for p in params { b.local_slot(p); }
         b
@@ -1479,6 +1520,7 @@ impl ProtoBuilder {
             block_shape: None,
             byte_literals: self.byte_literals,
             const_chains: self.const_chains,
+            kw_call_keys: self.kw_call_keys,
             lexical_scope,
         }
     }
@@ -3050,6 +3092,7 @@ pub(crate) fn compile_block(
         // ChainOrNil / Chain ops carry indices that resolve
         // through this Proto's table, not the parent's.
         const_chains: vec![],
+        kw_call_keys: vec![],
     };
     let param_start = b.n_locals;
     // Slot layout in two phases:

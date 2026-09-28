@@ -51,6 +51,11 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Changed
 
+- **Keyword-argument calls are ~3× faster** (#424). A call with
+  literal Symbol keys (`o.k(a: 1, b: 2)`) to a plain `def` with keyword
+  params now binds the values straight into the callee's slots, with no
+  Hash built. Other shapes (`**rest`, a callee without keyword params,
+  builtins, errors) keep the old path. (`kwargs_literal_call.rb`)
 - **The interpreter's per-op overhead is lower** (#417). Tight loops run
   ~35% faster and method calls ~20% faster, because the hottest ops no
   longer go through the full op match. (`step_hot_fallbacks.rb`)
