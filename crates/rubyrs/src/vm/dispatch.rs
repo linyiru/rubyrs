@@ -8501,12 +8501,16 @@ impl Vm {
             let Some(root) = self.heap.try_class_of(oid) else {
                 return true; // class-less slot — decline to the cascade
             };
-            let mut visited: std::collections::HashSet<*const crate::value::Class> =
-                std::collections::HashSet::new();
+            // Cycle guard is a depth cap, not a visited set (same bound
+            // as `walk_method`): a per-call SipHash set was a measurable
+            // cost on Rails, where `undef_names` is never empty. Past the
+            // cap, decline to the cascade (bounded, like the lookup).
             let mut walker = Some(root);
+            let mut depth = 0u32;
             while let Some(c) = walker {
-                if !visited.insert(Rc::as_ptr(&c)) {
-                    break;
+                depth += 1;
+                if depth > 4096 {
+                    return true;
                 }
                 if c.methods.borrow().contains_key(&name_id) {
                     return false;
@@ -11942,11 +11946,14 @@ impl Vm {
             };
             if let Some(root) = chain_root {
                 let mut undefed = false;
-                let mut visited: std::collections::HashSet<*const crate::value::Class> =
-                    std::collections::HashSet::new();
+                // Depth cap, not a visited set (see
+                // `undef_tombstoned_obj`); past it the lookup's own cap
+                // takes over.
                 let mut walker = Some(root);
+                let mut depth = 0u32;
                 while let Some(c) = walker {
-                    if !visited.insert(Rc::as_ptr(&c)) { break; }
+                    depth += 1;
+                    if depth > 4096 { break; }
                     // Own-table BEFORE tombstone: a redefine-after-
                     // undef leaves its stale tombstone behind and
                     // the new method wins (mirrors
