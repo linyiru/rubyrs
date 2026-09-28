@@ -1749,8 +1749,116 @@ impl Vm {
     /// Execute one op; returns Ok(false) if we just popped the last frame.
     /// `_proto_idx` is reserved for future per-op span lookup; with the
     /// global interner, ops no longer need it for string resolution.
+    ///
+    /// Split in two for the per-op cost: `step_cold`'s giant match needs a
+    /// ~5 KB stack frame and saves every callee-saved register, which the
+    /// profile showed as ~24% of all samples on call-heavy loops. This
+    /// small front handles the hot ops' common case (method-frame arena
+    /// locals, Int×Int arithmetic, plain calls) without that prologue and
+    /// hands everything else, including every slow sub-case, to
+    /// `step_cold` unchanged, so there is still one source of truth.
+    #[inline(always)]
     pub(crate) fn step(&mut self, op: Op, proto_idx: usize) -> Result<bool, Trap> {
         self.check_fuel()?;
+        match op {
+            Op::LoadConstInt(i) => self.stack.push(Value::Int(i)),
+            Op::LoadNil => self.stack.push(Value::Nil),
+            Op::LoadLocal(s) => {
+                let Some(base) = self.hot_arena_base() else { return self.step_cold(op, proto_idx) };
+                let v = self.locals_arena[base + s as usize].clone();
+                self.stack.push(v);
+            }
+            Op::StoreLocal(s) => {
+                let Some(base) = self.hot_arena_base() else { return self.step_cold(op, proto_idx) };
+                let Some(v) = self.stack.pop() else { return self.step_cold(op, proto_idx) };
+                self.locals_arena[base + s as usize] = v;
+            }
+            Op::IncLocalNoPush(s) => {
+                let Some(base) = self.hot_arena_base() else { return self.step_cold(op, proto_idx) };
+                match &mut self.locals_arena[base + s as usize] {
+                    Value::Int(n) => *n = (*n).wrapping_add(1),
+                    _ => return self.step_cold(op, proto_idx),
+                }
+            }
+            Op::Pop => {
+                self.stack.pop();
+            }
+            Op::Jump(off) => {
+                let Some(f) = self.frames.last_mut() else { return self.step_cold(op, proto_idx) };
+                f.ip = (f.ip as i32 + off) as usize;
+            }
+            Op::JumpIfFalse(off) => {
+                let Some(v) = self.stack.pop() else { return self.step_cold(op, proto_idx) };
+                if !v.is_truthy() {
+                    let Some(f) = self.frames.last_mut() else { return self.step_cold(op, proto_idx) };
+                    f.ip = (f.ip as i32 + off) as usize;
+                }
+            }
+            Op::BinOpInt(kind, rhs) => {
+                // Int LHS only: the str-singleton gate and every
+                // promotion / dispatch fallback live in `step_cold`.
+                let Some(Value::Int(x)) = self.stack.last() else { return self.step_cold(op, proto_idx) };
+                if matches!(kind, BinOpKind::Div | BinOpKind::Mod) && rhs == 0 {
+                    return self.step_cold(op, proto_idx);
+                }
+                let Some(v) = kind.apply_int(*x, rhs) else { return self.step_cold(op, proto_idx) };
+                if let Some(top) = self.stack.last_mut() {
+                    *top = v;
+                }
+            }
+            Op::BinOpLocalLocal(kind, a_slot, b_slot) => {
+                let Some(base) = self.hot_arena_base() else { return self.step_cold(op, proto_idx) };
+                let (Value::Int(x), Value::Int(y)) =
+                    (&self.locals_arena[base + a_slot as usize], &self.locals_arena[base + b_slot as usize])
+                else {
+                    return self.step_cold(op, proto_idx);
+                };
+                if matches!(kind, BinOpKind::Div | BinOpKind::Mod) && *y == 0 {
+                    return self.step_cold(op, proto_idx);
+                }
+                let Some(v) = kind.apply_int(*x, *y) else { return self.step_cold(op, proto_idx) };
+                self.stack.push(v);
+            }
+            Op::Call(name_id, argc, cache_id) => {
+                // Same as the `step_cold` arm (see there for the flag).
+                self.trailing_hash_positional = true;
+                let r = self.do_call(name_id, argc as usize, false, cache_id);
+                self.trailing_hash_positional = false;
+                r?;
+            }
+            Op::CallNoRecv(name_id, argc, cache_id) => {
+                self.trailing_hash_positional = true;
+                let r = self.do_call(name_id, argc as usize, true, cache_id);
+                self.trailing_hash_positional = false;
+                r?;
+            }
+            Op::LoadLocalCall(slot, name_id, cache_id) => {
+                let Some(base) = self.hot_arena_base() else { return self.step_cold(op, proto_idx) };
+                let v = self.locals_arena[base + slot as usize].clone();
+                self.stack.push(v);
+                self.trailing_hash_positional = true;
+                let r = self.do_call(name_id, 0, false, cache_id);
+                self.trailing_hash_positional = false;
+                r?;
+            }
+            _ => return self.step_cold(op, proto_idx),
+        }
+        Ok(true)
+    }
+
+    /// The top frame's arena base when its locals live in the arena
+    /// (`Locals::Stack`: method frames, never capture-routed), else None.
+    #[inline(always)]
+    fn hot_arena_base(&self) -> Option<usize> {
+        match self.frames.last().map(|f| &f.locals) {
+            Some(crate::vm::Locals::Stack(base)) => Some(*base as usize),
+            _ => None,
+        }
+    }
+
+    /// Every op, in full; see `step`. Does not charge fuel (`step` did).
+    #[inline(never)]
+    fn step_cold(&mut self, op: Op, proto_idx: usize) -> Result<bool, Trap> {
         match op {
             Op::LoadConstInt(i) => self.stack.push(Value::Int(i)),
             Op::LoadConstFloat(f) => self.stack.push(Value::Float(f)),
