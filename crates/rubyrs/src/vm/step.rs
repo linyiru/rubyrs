@@ -820,10 +820,13 @@ impl Vm {
             };
             let name_id = self.super_runtime_name(name_id);
             match self.super_lookup(name_id, cid) {
-                Ok((m, self_val)) => {
+                Ok(Some((m, self_val))) => {
                     self.invoke_method_with_block(m, self_val, args, block_id)?;
                 }
-                Err(trap) => {
+                res => {
+                    // `None` is the SuperNoSuperclass miss (Trap deferred,
+                    // see `super_miss_trap`).
+                    let trap = res.err();
                     // Builtin-substitution twin of the no-block
                     // path's intercept in
                     // super_call_with_lifecycle_noop: minitest
@@ -836,14 +839,7 @@ impl Vm {
                     // undef'd target then falls to
                     // method_missing, exactly Object#send's
                     // contract. `===` substitutes identity.
-                    let is_no_super = matches!(
-                        &trap.err,
-                        RubyError::NoMethodError {
-                            kind: crate::error::NoMethodErrorKind::SuperNoSuperclass,
-                            ..
-                        },
-                    );
-                    if !is_no_super {
+                    if let Some(trap) = trap {
                         return Err(trap);
                     }
                     let nm = self.interner.resolve(name_id).clone();
@@ -973,7 +969,7 @@ impl Vm {
                                 {
                                     self.stack.push(v);
                                 } else {
-                                    return Err(trap);
+                                    return Err(self.super_miss_trap(name_id));
                                 }
                             }
                         }
@@ -1041,7 +1037,7 @@ impl Vm {
                             // twin.
                             let recv = cur.unwrap_or(Value::Nil);
                             if !self.try_method_missing(&recv, name_id, args, block_id)? {
-                                return Err(trap);
+                                return Err(self.super_miss_trap(name_id));
                             }
                         }
                     }
