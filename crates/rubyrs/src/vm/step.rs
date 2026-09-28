@@ -6842,9 +6842,9 @@ impl Vm {
             }
             _ => unreachable!("yield arm only matches Yield | ApplyYield"),
         };
-        // Yield-args capture (wave 5): the 1- and 2-arg shapes (the
+        // Yield-args capture (wave 5): the 0-, 1- and 2-arg shapes (the
         // overwhelming majority of yields) route through
-        // `invoke_block1`/`invoke_block2` below — no per-yield args-Vec
+        // `invoke_block0_yield`/`invoke_block1`/`invoke_block2` below — no per-yield args-Vec
         // allocation, no general-binder pass. Those helpers push frames
         // byte-identical to the general path and internally fall back to
         // `invoke_block` for every shape they can't serve (rest / kw /
@@ -6853,6 +6853,7 @@ impl Vm {
         // straight into the block's locals cell (a GC root) by the
         // binder; nothing allocates in between.
         enum YArgs {
+            Zero,
             One(Value),
             Two(Value, Value),
             Many(Vec<Value>),
@@ -6864,7 +6865,8 @@ impl Vm {
                 let a = self.stack.pop().expect("ICE: yield stack underflow");
                 YArgs::Two(a, b)
             }
-            // 0 args: `Vec::new()` is allocation-free.
+            // 0 args: skip the empty drain-collect entirely.
+            0 => YArgs::Zero,
             _ => {
                 let split = self.stack.len() - argc;
                 YArgs::Many(self.stack.drain(split..).collect())
@@ -6879,12 +6881,13 @@ impl Vm {
         let yguard = crate::vm::YieldDepthGuard::enter(self)?;
         yguard.vm.frames[yielding_idx].pending_yield = true;
 
-        // Push block frame + drive to completion. `served` = the 1-arg
+        // Push block frame + drive to completion. `served` = the 0- or 1-arg
         // shape was LITE-BLOCK-served (frameless / mid-body materialized)
         // — the t2_enter_block hook below must be skipped for it (the
         // framed entry starts at op 0); dispatch_until handles both
         // serve outcomes as-is.
         let invoked = match yargs {
+            YArgs::Zero => yguard.vm.invoke_block0_yield(block),
             YArgs::One(a) => yguard.vm.invoke_block1(block, a),
             YArgs::Two(a, b) => yguard.vm.invoke_block2(block, a, b),
             YArgs::Many(args) => yguard.vm.invoke_block(block, args).map(|()| false),
