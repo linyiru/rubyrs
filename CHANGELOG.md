@@ -51,6 +51,11 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Changed
 
+- **Calls to an `undef`'d name are ~1.5× faster** (#430). Once any class
+  runs `undef_method` on a name, every Object-receiver call to that name
+  used to build and discard a hash set while checking the superclass
+  chain. Rails does this for every universal name at load (ActiveSupport's
+  `DeprecationProxy`). (`p2_walk_buckets.rb`)
 - **`super` into a builtin is ~3× faster** (#426). An override that
   supers to a method rubyrs implements natively (`respond_to?`, `is_a?`,
   `initialize`, `freeze`, …) no longer builds and discards an error
