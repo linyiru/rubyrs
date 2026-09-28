@@ -418,8 +418,7 @@ fn compile_while_arm(
         // is checked after.
         let body_start = b.pos();
         redo_target = body_start;
-        compile_body(b, body, protos, interner, cc);
-        b.emit(Op::Pop);
+        compile_stmts(b, body, protos, interner, cc);
         iter_check = b.pos();
         compile_expr(b, cond, protos, interner, cc);
         let jf = b.emit(Op::JumpIfFalse(0));
@@ -435,8 +434,7 @@ fn compile_while_arm(
         compile_expr(b, cond, protos, interner, cc);
         let jf = b.emit(Op::JumpIfFalse(0));
         redo_target = b.pos();
-        compile_body(b, body, protos, interner, cc);
-        b.emit(Op::Pop);
+        compile_stmts(b, body, protos, interner, cc);
         let j = b.emit(Op::Jump(0));
         b.patch_jump(j, start);
         let exit_normal = b.pos();
@@ -1683,6 +1681,18 @@ pub(crate) fn compile_body(
             // skips the Dup-for-result + trailing Pop pair where possible.
             compile_stmt(b, e, protos, interner, cc);
         }
+    }
+}
+
+/// Compile `exprs` with every value discarded, as a `while` body is:
+/// the last one goes through `compile_stmt` too, so a trailing `i += 1`
+/// is `IncLocalNoPush` rather than `IncLocal` + `Pop`.
+fn compile_stmts(
+    b: &mut ProtoBuilder, exprs: &[SExpr],
+    protos: &mut Vec<Proto>, interner: &mut Interner, cc: &mut CidGen,
+) {
+    for e in exprs {
+        compile_stmt(b, e, protos, interner, cc);
     }
 }
 

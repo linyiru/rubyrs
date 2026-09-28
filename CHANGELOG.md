@@ -56,6 +56,13 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   used to build and discard a hash set while checking the superclass
   chain. Rails does this for every universal name at load (ActiveSupport's
   `DeprecationProxy`). (`p2_walk_buckets.rb`)
+- **`while` loops are faster** ([#435](https://github.com/linyiru/rubyrs/issues/435)). The last statement of a loop body is now compiled with its value discarded, like the rest of the body, so a trailing `i += 1` stays on the interpreter's hot path. An empty `while` iteration drops from ~26 ns to ~18 ns. (`while_body_stmt.rb`)
+- **Local variables are faster in methods that contain a block** (#431).
+  Such a method keeps its locals in a shared cell, and every read and
+  write of one fell off the interpreter's hot path. Now the hot path
+  serves the frame's own slots directly. A `while` loop in a method
+  that also has a block drops from 62 to 41 ns per iteration, close to
+  the 38 ns of a block-free method. (`shared_locals_hot.rb`)
 - **Block calls, zero-arg `yield` and `block_given?` are faster** (#427).
   In the interpreter, `yield if block_given?` is ~13% faster
   (`o.bgy { }`: 290 → 250 ns) and `o.y { }` is ~6% faster. A bare
@@ -196,6 +203,11 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Fixed
 
+- **`x += 1` promotes to Bignum at the Integer limit, and runs a
+  Ruby-defined `+`** (#418). `i += 1` and `@x += 1` wrapped
+  `2**63 - 1` around to a negative number, in the interpreter and in
+  tier 2. When `+` was a Ruby method, the result was read before that
+  method ran, which crashed the host. (`inc_bignum_user_plus.rb`)
 - **A `def self.block_given?` override now wins inside class methods**
   (#427). A bare `block_given?` in a `def self.m` body always ran the
   kernel builtin. Now it finds the class's own, an inherited, or a
