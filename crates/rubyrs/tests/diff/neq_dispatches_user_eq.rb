@@ -60,3 +60,22 @@ begin
 rescue => e
   p e.message
 end
+
+# String / Array / Hash subclasses: an overriding `==` decides `!=`; without
+# one, the builtin content compare stays (String's Comparable `==` must not
+# shadow it).
+class NoH < Hash; def ==(*) = false; end
+class NoA < Array; def ==(*) = false; end
+class NoS < String; def ==(*) = false; end
+p NoH.new != NoH.new, NoA.new != NoA.new, NoS.new != NoS.new
+class TagH < Hash; def ==(o) = o == :t; end
+p TagH.new != :t, TagH.new != :u
+class PlainS < String; end
+class PlainA < Array; end
+class PlainH < Hash; end
+p PlainS.new("a") != PlainS.new("a"), PlainS.new("a") != "b"
+p PlainA[1] != PlainA[1], PlainA[1] != [2]
+p PlainH[a: 1] != PlainH[a: 1], PlainH[a: 1] != {a: 2}
+module AlwaysEq; def ==(_) = true; end
+class ModS < String; include AlwaysEq; end
+p ModS.new("a") != "zzz"
