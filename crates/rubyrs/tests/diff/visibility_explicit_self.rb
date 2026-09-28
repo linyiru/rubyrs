@@ -78,3 +78,18 @@ class U
   self.private
 end
 p U.log, U.private_method_defined?(:x)
+
+# `module_function` is Module-only: CRuby's Class undefines it, so every
+# class-side form raises (NoMethodError < NameError), including inside
+# `class << self` of a module, whose self is the singleton Class.
+def mf_raises? = (yield; false) rescue $!.is_a?(NameError)
+p mf_raises? { class MfC1; module_function; end }
+p mf_raises? { class MfC2; def a; end; module_function :a; end }
+p mf_raises? { class MfC3; self.module_function; end }
+p mf_raises? { class MfC4; class << self; self.module_function; end; end }
+p mf_raises? { module MfM1; class << self; module_function; end; end }
+p mf_raises? { module MfM2; class << self; self.module_function; def f = 1; end; end }
+p mf_raises? { module MfM3; class << self; def g = 1; module_function :g; end; end }
+p mf_raises? { o = Object.new; class << o; module_function; end }
+module MfM4; self.module_function; def h = 4; end
+p MfM4.h

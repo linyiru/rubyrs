@@ -11559,6 +11559,20 @@ impl Vm {
             if &*name == "module_function"
                 && let Value::Class(cls) = &self_val
             {
+                // Module-only: `Class` undefines it, so a class body or an
+                // eigenclass shell (`class << self`, `is_module` false)
+                // raises like CRuby. (Falling through re-enters this arm
+                // via the receiver-form bridge.)
+                if !cls.is_module {
+                    if self.try_method_missing_slice(&self_val, name_id, &args, None)? {
+                        return Ok(());
+                    }
+                    return Err(self.trap(RubyError::NoMethodError {
+                        kind: crate::error::NoMethodErrorKind::Missing,
+                        method: name.to_string(),
+                        recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(&self_val)),
+                    }));
+                }
                 if args.is_empty() {
                     if let Some(top) = self.class_visibility_stack.last_mut() {
                         *top = crate::value::Visibility::Private;
