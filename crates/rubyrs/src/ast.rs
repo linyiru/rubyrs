@@ -1676,13 +1676,17 @@ fn singleton_body_needs_real_eval(body_nodes: &[Node<'_>], recv_is_self: bool) -
         // eigenclass-shell arm of the runtime visibility call
         // (`apply_class_method_visibility`). Non-self receivers
         // already route via the generic non-self clause below; this
-        // covers `class << self`. (S3 item e.)
+        // covers `class << self`. (S3 item e.) An explicit `self.`
+        // receiver (`self.private`) is the same call in CRuby.
+        // `module_function` routes here too: with self = the shell (a
+        // Class) it raises like CRuby, where the desugar would run it
+        // against an enclosing MODULE and silently accept it.
         if recv_is_self
             && let Some(call) = bn.as_call_node()
-            && call.receiver().is_none()
+            && call.receiver().is_none_or(|r| r.as_self_node().is_some())
             && matches!(
                 cid_to_string(call.name()).as_str(),
-                "private" | "public" | "protected"
+                "private" | "public" | "protected" | "module_function"
             )
         {
             return true;

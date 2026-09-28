@@ -1277,6 +1277,7 @@ fn tier2_restblock_lite() { run_diff("tier2_restblock_lite"); }
 #[test] fn class_try_convert() { run_diff("class_try_convert"); }
 #[test] fn toplevel_self_main() { run_diff("toplevel_self_main"); }
 #[test] fn visibility_method_explicit_recv() { run_diff("visibility_method_explicit_recv"); }
+#[test] fn visibility_explicit_self() { run_diff("visibility_explicit_self"); }
 #[test] fn exception_cause() { run_diff("exception_cause"); }
 #[test] fn bare_warn_singleton_override() { run_diff("bare_warn_singleton_override"); }
 #[test] fn dup_clone_initialize_copy() { run_diff("dup_clone_initialize_copy"); }

@@ -10408,11 +10408,31 @@ impl Vm {
         // The dispatch decision sequence below is byte-identical to
         // the all-`Vec` shape; only the args *container* changes.
         let args = ArgsBuf::drain_from(&mut self.stack, argc);
-        let recv = if no_recv {
+        let mut recv = if no_recv {
             None
         } else {
             Some(self.stack.pop().expect("ICE: stack underflow before do_call receiver"))
         };
+        // `self.private` / `self.public :x` / `self.module_function` on
+        // the class-body (or module_eval) self: CRuby treats these
+        // exactly as the receiver-less forms (ActiveSupport 8.1's
+        // `delegate ..., private: true` module_evals "self.private;def
+        // ..."). Re-aim through the implicit-self arm, which owns the
+        // default-visibility flip; the explicit-receiver arm only
+        // handles the symbol-args form and raised NoMethodError on the
+        // bare one. Same Rc-identity test as the private-call
+        // self-receiver exemption. A user `def self.private` keeps the
+        // normal explicit dispatch: re-aiming its `super` would find
+        // the override again and recurse.
+        let mut no_recv = no_recv;
+        if let Some(Value::Class(rc)) = &recv
+            && matches!(&*name, "private" | "public" | "protected" | "module_function")
+            && matches!(self.frames.last().map(|f| &f.self_val), Some(Value::Class(sc)) if Rc::ptr_eq(rc, sc))
+            && !self.bare_builtin_user_override(&name)
+        {
+            recv = None;
+            no_recv = true;
+        }
 
         // A user `Kernel#require` override (zeitwerk decorates require
         // to intercept loads) wins over the builtin: skip the builtin
@@ -11539,6 +11559,20 @@ impl Vm {
             if &*name == "module_function"
                 && let Value::Class(cls) = &self_val
             {
+                // Module-only: `Class` undefines it, so a class body or an
+                // eigenclass shell (`class << self`, `is_module` false)
+                // raises like CRuby. (Falling through re-enters this arm
+                // via the receiver-form bridge.)
+                if !cls.is_module {
+                    if self.try_method_missing_slice(&self_val, name_id, &args, None)? {
+                        return Ok(());
+                    }
+                    return Err(self.trap(RubyError::NoMethodError {
+                        kind: crate::error::NoMethodErrorKind::Missing,
+                        method: name.to_string(),
+                        recv_type: std::borrow::Cow::Owned(self.recv_desc_for_error(&self_val)),
+                    }));
+                }
                 if args.is_empty() {
                     if let Some(top) = self.class_visibility_stack.last_mut() {
                         *top = crate::value::Visibility::Private;

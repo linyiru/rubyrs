@@ -174,6 +174,11 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Fixed
 
+- **`self.private` / `self.public` / `self.protected` / `self.module_function`
+  work like their receiver-less forms** — the bare `self.private` (in a class
+  body, `class << self`, or a `module_eval` string) raised NoMethodError, which
+  broke ActiveSupport 8.1's `delegate ..., private: true`.
+  (#420, `visibility_explicit_self.rb`)
 - **`Klass.respond_to?` reports the Module / Kernel methods classes inherit**
   — `===`, `is_a?`, `public_send`, `include`, `attr_accessor`, … were false
   on a Class or Module receiver (ActiveSupport's `rescue_from(SomeError)`
