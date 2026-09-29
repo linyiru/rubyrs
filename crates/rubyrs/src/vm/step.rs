@@ -6410,6 +6410,41 @@ impl Vm {
                 }
             }
             Op::Return => {
+                // Plain-return fast path (ADR 0039 I1): a frame with no
+                // aux box (so no ensure, rescue, loop or `$!` state), not
+                // a class body, no `swap_return`, no dm share, not the
+                // kept iterator block, and no transfer in flight skips
+                // every check below; each of those would find nothing
+                // to do. The frame is dropped in place rather than
+                // moved out by `pop`. New per-frame state that needs
+                // work on return must be excluded here too.
+                if self.pending_method_breaks.is_empty()
+                    && self.pending_loop_transfers.is_empty()
+                    && self.kept_block.0 != self.frames.len()
+                    && let Some(f) = self.frames.last_mut()
+                    && f.aux.is_none()
+                    && !f.is_class_body
+                    && f.swap_return.is_none()
+                    && !f.dm_share
+                {
+                    let base = f.base_sp;
+                    let locals = std::mem::replace(&mut f.locals, crate::vm::Locals::Stack(0));
+                    #[cfg(feature = "regex")]
+                    let saved = f.saved_last_match.take();
+                    let len = self.frames.len();
+                    self.frames.truncate(len - 1);
+                    #[cfg(feature = "regex")]
+                    if let Some(saved) = saved {
+                        self.last_match = saved.map(|b| *b);
+                    }
+                    if self.stack.len() != base + 1 {
+                        let ret = self.stack.pop().unwrap_or(Value::Nil);
+                        self.stack.truncate(base);
+                        self.stack.push(ret);
+                    }
+                    self.release_frame_locals(locals);
+                    return Ok(!self.frames.is_empty());
+                }
                 // A method/begin `ensure` must run when the frame exits
                 // via `return` (CRuby) — the direct pop below would skip
                 // it. When the returning frame still has a pending

@@ -52,6 +52,7 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 ### Changed
 
 - **Method calls are slightly faster, mostly on x86** ([#437](https://github.com/linyiru/rubyrs/issues/437)). A call's frame is now built in place instead of being copied into the frame stack, and integer `+`/`<` on two locals is inlined. On x86 a zero-arg call loop takes ~9% fewer cycles; on Apple silicon `o.n` goes from ~73 to ~71 ns.
+- **Method returns are faster** ([#439](https://github.com/linyiru/rubyrs/issues/439)). A plain `return`, or reaching the end of a method, no longer runs checks for ensures, block breaks and class bodies it cannot need. `o.n` drops from ~82 to ~70 ns on x86, and 0-arg calls get ~8% faster on Apple silicon. (ADR [0039](docs/adr/0039-per-call-fixed-cost.md), `plain_return.rb`)
 - **Calls to an `undef`'d name are ~1.5× faster** (#430). Once any class
   runs `undef_method` on a name, every Object-receiver call to that name
   used to build and discard a hash set while checking the superclass
