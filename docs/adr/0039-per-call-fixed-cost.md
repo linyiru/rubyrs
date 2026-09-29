@@ -156,6 +156,17 @@ measured**.
   (`try_class_of`), and `check_frames`.
 - Each moved field is audited against `gc.rs` root gathering (a field in aux must still be
   rooted) and against the `lint-gc-rooting` rules.
+- **Measured 2026-09-29, chain half.** Upper-bound variant: probe the explicit-recv IC at
+  the very top of `do_call`, ahead of the whole preamble. It was not semantics-preserving.
+  - `o.n` loop, starship, 6 interleaved rounds: −40 instr/iter and −4.4% cycles (medians
+    10.36 → 9.90e9).
+  - `shape-bench.rb` regressed wherever the IC resolves to a builtin, because that call now
+    pays a second `class_of` and lookup before falling through: `obj.class` +40%, `send`
+    +9%.
+  - Gating the early probe on `!probe_name_may_serve` fixes that. It adds +2 instr/iter,
+    yet the loop gain shrank to −1.7% (medians 10.245 → 10.07e9).
+  - Most of the first gain was therefore code layout, as with I2 and I3, so the chain half
+    is not pursued.
 
 ### I5. Fused compare-and-branch for loop headers (est. −50 instr/iter, loops only)
 
