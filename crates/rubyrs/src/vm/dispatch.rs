@@ -8052,6 +8052,18 @@ impl Vm {
             g.pin(obj.clone());
             let init_id = g.vm.sym_initialize;
             let ruby_init = g.vm.lookup_method_uncached(cls, init_id);
+            // Per-site `cls.new` IC fill (#442): the whole cascade before
+            // this arm declined `new` for `cls`, and every arm that did is
+            // keyed on the class, its method tables (so on `method_gen`)
+            // or the name, never on the argument values. The next call
+            // from this site can then allocate and run `initialize`
+            // directly (`try_invoke_class_new_cached`). Only a plain
+            // Instance is cached; a no-initialize entry only for a
+            // zero-arg call, since a non-empty call reaches the cext
+            // `initialize` path below.
+            if _cache_id != u32::MAX && !force_primitive && matches!(obj, Value::Object(_)) {
+                g.vm.fill_class_new_cached(cls, _cache_id, &ruby_init, args.is_empty());
+            }
             if let Some(m) = ruby_init {
                 // Ruby-defined initialize takes precedence.
                 // Drop the guard before invoke_method (which
@@ -10222,7 +10234,9 @@ impl Vm {
         if !maybe_refined
             && !no_recv
             && !force_primitive
-            && self.try_invoke_class_singleton_cached(name_id, argc, cache_id)?
+            // `!bypass_visibility`: a `send(:new)` re-entry keeps the
+            // canonical path rather than the `cls.new` IC (#442).
+            && self.try_invoke_class_singleton_cached(name_id, argc, cache_id, !bypass_visibility)?
         {
             return Ok(());
         }
@@ -19953,11 +19967,15 @@ impl Vm {
     ///   invoke stack-direct; everything else falls through unchanged
     ///   (private class methods keep their NoMethodError shape,
     ///   `define_singleton_method` closures keep captured locals).
+    ///
+    /// `new` goes to `try_invoke_class_new_cached` when `serve_new`,
+    /// and declines otherwise.
     pub(crate) fn try_invoke_class_singleton_cached(
         &mut self,
         name_id: SymId,
         argc: usize,
         cache_id: u32,
+        serve_new: bool,
     ) -> Result<bool, Trap> {
         // Explicit-recv stack layout: [..., recv, a1, ..., aN].
         let recv_idx = match self.stack.len().checked_sub(argc + 1) {
@@ -19968,6 +19986,10 @@ impl Vm {
             Some(Value::Class(cls)) => cls.clone(),
             _ => return Ok(false),
         };
+        // `new` is denied below; its own per-site IC serves it instead.
+        if name_id == self.sym_new {
+            return if serve_new { self.try_invoke_class_new_cached(argc, cache_id) } else { Ok(false) };
+        }
         if self.class_singleton_deny.contains(&name_id) {
             return Ok(false);
         }
@@ -20064,6 +20086,133 @@ impl Vm {
         // TIER-2 (ADR 0037): run the just-pushed frame natively when compiled.
         #[cfg(feature = "jit-native")]
         self.t2_enter()?;
+        Ok(true)
+    }
+
+    /// `cls.new(args)` served from the per-site IC (#442). Without it
+    /// every `Foo.new` walked the whole slow cascade to the default
+    /// `new` arm of `try_dispatch_class_intrinsics`, plus an uncached
+    /// `initialize` lookup: ~89 calls per Rails hello request, the
+    /// most frequent cascade entry.
+    ///
+    /// Soundness: an entry exists only where that default arm filled
+    /// it (`fill_class_new_cached`) for this class at the current
+    /// `method_gen`, so serving it replays the arm's own work: allocate
+    /// a plain Instance, run the cached `initialize` with the instance
+    /// as the frame's `swap_return`. A class whose `cext_alloc_func`
+    /// was set since, or a no-initialize entry reached with arguments
+    /// or with cext instance methods registered, falls through.
+    #[inline(never)]
+    pub(crate) fn try_invoke_class_new_cached(&mut self, argc: usize, cache_id: u32) -> Result<bool, Trap> {
+        let recv_idx = match self.stack.len().checked_sub(argc + 1) {
+            Some(i) => i,
+            None => return Ok(false),
+        };
+        let cls = match self.stack.get(recv_idx) {
+            Some(Value::Class(cls)) => cls.clone(),
+            _ => return Ok(false),
+        };
+        let Some(init) = self.lookup_class_new_cache_hit(&cls, cache_id) else {
+            return Ok(false);
+        };
+        #[cfg(feature = "cext")]
+        if cls.cext_alloc_func.get().is_some() {
+            return Ok(false);
+        }
+        #[cfg(all(feature = "cext", not(target_os = "wasi")))]
+        if init.is_none() && !self.cext_instance_methods.is_empty() {
+            return Ok(false);
+        }
+        if init.is_none() && argc != 0 {
+            return Ok(false);
+        }
+        // Same allocation as `alloc_default_instance`'s plain-Instance
+        // tail. The class stays rooted in its stack slot across the GC.
+        self.maybe_gc();
+        self.check_alloc()?;
+        let id = self.heap.alloc(HeapObj::Instance(Instance {
+            class: cls,
+            ivars: crate::value::IvarTable::default(),
+            singleton_class: None,
+            frozen: std::cell::Cell::new(false),
+        }));
+        let obj = Value::Object(id);
+        // The instance replaces the class in the receiver slot: rooted
+        // from here on, and popped below as initialize's `self`.
+        self.stack[recv_idx] = obj.clone();
+        let Some(m) = init else {
+            return Ok(true);
+        };
+        let fixed = match m.fixed_arity {
+            Some(f) if m.builtin.is_none() && m.closure.is_none() && f.required as usize == argc => f,
+            _ => {
+                let argv = self.stack.split_off(recv_idx + 1);
+                self.stack.pop();
+                let pre_frames = self.frames.len();
+                self.invoke_method(m, obj.clone(), argv)?;
+                if self.frames.len() > pre_frames {
+                    if let Some(f) = self.frames.last_mut() {
+                        f.swap_return = Some(obj);
+                    }
+                } else if let Some(top) = self.stack.last_mut() {
+                    *top = obj;
+                }
+                return Ok(true);
+            }
+        };
+        self.check_frames()?;
+        let n_locals = fixed.n_locals as usize;
+        let locals = if fixed.stack_eligible {
+            let base = self.arena_push_args(argc, n_locals);
+            crate::vm::Locals::Stack(base)
+        } else {
+            let cell = self.locals_cell_nil(n_locals);
+            {
+                let mut l = cell.borrow_mut();
+                for slot in (0..argc).rev() {
+                    l[slot] = self.stack.pop().unwrap_or(Value::Nil);
+                }
+            }
+            crate::vm::Locals::Shared(cell)
+        };
+        self.stack.pop();
+        let pre_frames = self.frames.len();
+        self.frames.push(Frame {
+            proto_idx: m.proto_idx,
+            ip: 0,
+            locals,
+            self_val: obj.clone(),
+            base_sp: self.stack.len(),
+            is_class_body: false,
+            swap_return: Some(obj.clone()),
+            block_arg: None,
+            defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
+            lexical_cvar_class: None,
+            #[cfg(feature = "regex")] saved_last_match: None,
+            is_block: false, is_lambda: false,
+            n_given_positional: fixed.required,
+            kw_given_mask: 0,
+            aux: None,
+            pending_yield: false,
+            block_writeback: None,
+            dm_share: false,
+            own_start: 0,
+            outer_cell_start: 0,
+            outer_cell: None,
+            outer_rest: None,
+            captured_yield_block: None,
+        });
+        // TIER-2 (ADR 0037): run the just-pushed frame natively when
+        // compiled; one that ran to completion left initialize's value.
+        #[cfg(feature = "jit-native")]
+        {
+            self.t2_enter()?;
+            if self.frames.len() <= pre_frames && let Some(top) = self.stack.last_mut() {
+                *top = obj;
+            }
+        }
+        #[cfg(not(feature = "jit-native"))]
+        let _ = (pre_frames, obj);
         Ok(true)
     }
 
