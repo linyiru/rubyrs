@@ -1595,6 +1595,7 @@ fn tier2_setter_self_call_forced() {
 #[test] fn hash_new_default_block() { run_diff("hash_new_default_block"); }
 #[test] fn array_sort_block() { run_diff("array_sort_block"); }
 #[test] fn class_new_override() { run_diff("class_new_override"); }
+#[test] fn class_new_site_cache() { run_diff("class_new_site_cache"); }
 #[test] fn backreference_globals() { run_diff("backreference_globals"); }
 #[test] fn class_path_nested() { run_diff("class_path_nested"); }
 #[test] fn encoding_stub() { run_diff("encoding_stub"); }

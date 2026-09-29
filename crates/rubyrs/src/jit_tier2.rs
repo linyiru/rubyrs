@@ -2301,7 +2301,7 @@ fn t2_call_impl(
                     // cascade's ordering).
                     match vm.try_invoke_explicit_recv_cached(name_id, argc, cache_id) {
                         Ok(false) => {
-                            vm.try_invoke_class_singleton_cached(name_id, argc, cache_id)
+                            vm.try_invoke_class_singleton_cached(name_id, argc, cache_id, false)
                         }
                         r => r,
                     }

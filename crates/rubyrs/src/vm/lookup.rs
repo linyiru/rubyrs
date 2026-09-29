@@ -647,6 +647,44 @@ impl Vm {
         }
     }
 
+    /// Call-site `cls.new` IC probe (#442): `Some(init)` when this site
+    /// last saw `cls.new` reach the default allocator arm of
+    /// `try_dispatch_class_intrinsics` with a plain Instance and
+    /// `initialize` resolving to `init` (`None` = no user initialize),
+    /// and `method_gen` hasn't bumped since. Entries are keyed
+    /// `Rc::as_ptr(cls) | 4`: bit 2 is free for the same alignment
+    /// reason bits 0 and 1 are (see `lookup_class_singleton_cached`).
+    #[inline]
+    pub(crate) fn lookup_class_new_cache_hit(&self, cls: &Rc<Class>, cache_id: u32) -> Option<Option<Rc<Method>>> {
+        let key = Rc::as_ptr(cls) as usize | 4;
+        let cc = self.call_caches.get(cache_id as usize)?;
+        cc.ways.iter().find(|w| w.class_ptr == key && w.generation == self.method_gen).map(|w| w.method.clone())
+    }
+
+    /// Fill side of `lookup_class_new_cache_hit`, called only from the
+    /// default `cls.new` arm once the whole cascade before it declined
+    /// and the arm allocated a plain Instance. Out of line so that arm
+    /// (and the large function around it) keeps its code shape.
+    #[inline(never)]
+    pub(crate) fn fill_class_new_cached(&mut self, cls: &Rc<Class>, cache_id: u32, init: &Option<Rc<Method>>, no_args: bool) {
+        #[cfg(feature = "cext")]
+        if cls.cext_alloc_func.get().is_some() {
+            return;
+        }
+        // Without a user initialize and with arguments, the arm goes on
+        // to the cext `initialize` path, which is not cached.
+        if init.is_none() && !no_args {
+            return;
+        }
+        let init = init.clone();
+        let class_ptr = Rc::as_ptr(cls) as usize | 4;
+        let cur_gen = self.method_gen;
+        let Some(cc) = self.call_caches.get_mut(cache_id as usize) else { return };
+        let slot = (cc.next_way as usize) % IC_WAYS;
+        cc.ways[slot] = CallCacheEntry { class_ptr, generation: cur_gen, method: init };
+        cc.next_way = ((slot + 1) % IC_WAYS) as u8;
+    }
+
     pub(crate) fn lookup_toplevel_method_cached(
         &mut self,
         name_id: SymId,

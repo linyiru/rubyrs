@@ -51,6 +51,7 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Changed
 
+- **`Foo.new` is ~2× faster** ([#442](https://github.com/linyiru/rubyrs/issues/442)). Each `new` call site now caches, per class, that the call reaches the default allocator and which `initialize` it runs. Later calls from that site allocate and enter `initialize` directly instead of walking the whole dispatch cascade and looking up `initialize` again. `Class#new(2)` with an `initialize` drops from ~396 to ~186 ns on x86. Rails hello runs ~2% fewer cycles. (`class_new_site_cache.rb`)
 - **Method returns are faster** ([#439](https://github.com/linyiru/rubyrs/issues/439)). A plain `return`, or reaching the end of a method, no longer runs checks for ensures, block breaks and class bodies it cannot need. `o.n` drops from ~82 to ~70 ns on x86, and 0-arg calls get ~8% faster on Apple silicon. (ADR [0039](docs/adr/0039-per-call-fixed-cost.md), `plain_return.rb`)
 - **Calls to an `undef`'d name are ~1.5× faster** (#430). Once any class
   runs `undef_method` on a name, every Object-receiver call to that name
