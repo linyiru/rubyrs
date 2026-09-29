@@ -3,7 +3,8 @@
 Date: 2026-09-28
 Status: **proposed**. Part of #378 / #385.
 - I1 has shipped.
-- I2–I5 are planned.
+- I2 and I3 were measured and rejected.
+- I4 and I5 are planned.
 - #438 (the store-forwarding stalls) precedes this ADR.
 Follows: ADR 0031 (do_call dispatch core), ADR 0033 (why a wholesale lean rewrite was rejected),
 ADR 0037 (tier-2 frame-keeping invariant), ADR 0038 (measure before rewriting).
@@ -95,44 +96,53 @@ measured**.
   | `o.n` loop, cycles | 11.7–12.2e9 | 10.18–10.34e9 (−13%) |
   | call0 `o.n` | 82 ns | 70 ns |
 
-### I2. Code pointer cache (est. −50 instr/iter)
+### I2. Code pointer cache — **rejected** (ceiling −1.5% cycles, within noise)
 
-- Hold the running frame's `&[Op]` as a raw slice (pointer and length) in `Vm`, refreshed
-  wherever the top frame changes. There are 22 push and 9 pop/truncate sites across 9 files,
-  including `jit_tier2.rs`, `raise.rs` and `iter.rs`.
-- The dispatch loop then does one bounds check, `ip < len`, instead of indexing into
-  `protos` and then into `code`.
-- Alternative: keep the double index and only elide the `protos` bounds check, using an
-  invariant that `proto_idx` is always valid. This is smaller and safer but gains less.
-- Risk: a stale cache after a frame change that skipped the refresh. Guard: a
-  `debug_assert!` against the slow lookup on every op.
-- ADR 0037: tier 2 bails into the interpreter at arbitrary ops, so every tier-2 frame
-  push/pop must refresh the cache too. The debug assert covers this under
-  `RUBYRS_JIT_TIER2_THRESHOLD=1`.
+- The plan was to cache the running frame's `&[Op]` in `Vm` so the dispatch loop does one
+  bounds check instead of indexing `protos[proto_idx].code[ip]`. That means refreshing the
+  cache at 22 push and 9 pop/truncate sites, tier 2's included.
+- The ceiling was measured first. Both fetch sites were switched to `get_unchecked` (an
+  experiment only), which is cheaper than any cache could be. On starship (`o.n` loop,
+  interleaved rounds against master 9c4f5877, 2026-09-29), instructions fell 4.3% but
+  cycles fell only ~1.5%, inside run-to-run noise.
 
-### I3. One safe-point countdown (est. −60 instr/iter)
+- The bounds-check branches are perfectly predicted and off the critical path, so removing
+  them costs instructions but buys almost no cycles. A real cache would recover less than
+  the ceiling and adds a stale-state hazard, so it fails the gate.
 
-- Replace the per-op `check_fuel` and the per-op `interrupt_pending` load with one
-  decrementing `safepoint_budget: u32`. On reaching zero it takes a cold path that handles:
-  - fuel,
-  - the deadline test every 1024 ops,
-  - interrupt delivery,
-  - tier-2 poll flags.
+### I3. One safe-point countdown — **rejected** (−0.4% cycles, within noise)
 
-  The cold path then re-arms the budget.
-- Interrupts must stay prompt. SIGINT handling currently reads the atomic every op, so
-  either the signal handler also zeroes the budget, or the budget is capped small (for
-  example 1024). The second option costs up to 1024 ops of latency; the ADR 0025 v7 safety
-  rationale must be re-checked.
-- Coupling to preserve:
-  - `jit_tier2.rs:2204` reads `op_counter & 1023` for site settling.
-  - The http_server battery sets `vm.fuel = Some(n)`.
-  - `RUBYRS_FUEL` must trap at exactly the same op count as today, because fixtures and
-    embedders observe it.
+- **I3a, a fuel-only countdown.** It was implemented and measured.
+  - Every `fuel` write went through a `set_fuel` setter that re-armed the countdown.
+  - `RUBYRS_FUEL` stayed exact, because every op took the slow path while metered.
+  - The deadline cadence was unchanged.
+  - Tier 2's settle gate read an exact derived `op_count()`.
+  - The patch is kept as `a4-tmp/i3a-countdown.diff` on the Studio's DevSSD.
+- **Result.** Instructions fell 7% (−94/iter), but cycles fell only 10.284 → 10.240e9
+  (8 rounds, medians). The countdown is still a load-decrement-store on a `Vm` field every
+  op, so it keeps the same cross-op memory dependency that `op_counter` had. It only has
+  fewer instructions around that dependency.
+- **Folding the SIGINT check in as well was not attempted.**
+  - `interrupt_pending` is an `Arc<AtomicBool>` written by the signal handler.
+  - Folding it into a countdown delays delivery by up to one batch. That changes when a
+    `trap` handler runs relative to a self-sent `Process.kill`, which is observable.
+- **Isolated ceilings** (6 rounds, medians, 2026-09-29):
 
-  So `op_counter` stays as a derived value, or its readers move to the budget.
-- This is the riskiest increment and the one with the most observable semantics, so it
-  lands third.
+  | variant | cycles |
+  |---|---|
+  | master | 10.33e9 |
+  | no interrupt load | 10.03e9 (−3%) |
+  | no `check_fuel` | 11.08e9 (**+7%**) |
+  | neither | 9.55e9 |
+
+  Doing strictly less work was 7% slower. At this size, code-layout effects are larger
+  than the effect being measured (see Gates).
+- **What would remove the cost.** The countdown would have to live in a register, as a
+  local of the dispatch loop, which means taking `check_fuel` out of `step()`.
+  - `step()` is also driven by tier 2 and by the iterator drivers.
+  - `check_fuel` has 23 call sites.
+  - This is the "state in locals" restructuring that ADR 0033 judged not retrofittable.
+  - It is not pursued here.
 
 ### I4. Lean call path and a smaller Frame (est. −100 instr/iter)
 
@@ -184,9 +194,8 @@ direction, not a measurement.
 - I1 adds a second `Op::Return` exit. The slow path's checks must stay a superset of the
   fast path's exclusions: any new per-frame state that needs work on return must also be
   added to the fast-path conjunction.
-- I2 and I3 add Vm-level caches that duplicate state (the code slice and the budget). Every
-  frame change and every fuel or deadline write must keep them in sync. That is 9 files for
-  I2 and at least the tier-2 poll, http_server and embed `Config` paths for I3.
+- I2 and I3 were rejected, so no Vm-level cache duplicates frame or fuel state. Any future
+  attempt at either needs the register-resident restructuring described under I3 first.
 - The structural ceiling from ADR 0033 still stands. If these increments land and Rails is
   still far from 1.5×, the remaining lever is the JIT tiers (ADR 0034 and ADR 0037), not
   more interpreter trimming.
