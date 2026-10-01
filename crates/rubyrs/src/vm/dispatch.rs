@@ -19519,16 +19519,19 @@ impl Vm {
             .stack
             .pop()
             .expect("ICE: explicit-recv fast path recv underflow");
-        self.frames.push(Frame {
-            proto_idx: m.proto_idx,
+        let base_sp = self.stack.len();
+        let defining_class = m.defining_class.as_ref().and_then(|w| w.upgrade());
+        let proto_idx = m.proto_idx;
+        crate::vm::push_frame_in_place(&mut self.frames, || Frame {
+            proto_idx,
             ip: 0,
             locals,
             self_val: recv,
-            base_sp: self.stack.len(),
+            base_sp,
             is_class_body: false,
             swap_return: None,
             block_arg: None,
-            defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
+            defining_class,
             lexical_cvar_class: None,
             #[cfg(feature = "regex")] saved_last_match: None,
             is_block: false, is_lambda: false,
@@ -19900,16 +19903,19 @@ impl Vm {
             Some(v) => v,
             None => unreachable!("ICE: explicit-recv block fast path recv underflow"),
         };
-        self.frames.push(Frame {
-            proto_idx: m.proto_idx,
+        let base_sp = self.stack.len();
+        let defining_class = m.defining_class.as_ref().and_then(|w| w.upgrade());
+        let proto_idx = m.proto_idx;
+        crate::vm::push_frame_in_place(&mut self.frames, || Frame {
+            proto_idx,
             ip: 0,
             locals,
             self_val: recv,
-            base_sp: self.stack.len(),
+            base_sp,
             is_class_body: false,
             swap_return: None,
             block_arg: Some(block_id),
-            defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
+            defining_class,
             lexical_cvar_class: None,
             #[cfg(feature = "regex")] saved_last_match: None,
             is_block: false, is_lambda: false,
@@ -20036,16 +20042,19 @@ impl Vm {
             .stack
             .pop()
             .expect("ICE: class-singleton fast path recv underflow");
-        self.frames.push(Frame {
-            proto_idx: m.proto_idx,
+        let base_sp = self.stack.len();
+        let defining_class = m.defining_class.as_ref().and_then(|w| w.upgrade());
+        let proto_idx = m.proto_idx;
+        crate::vm::push_frame_in_place(&mut self.frames, || Frame {
+            proto_idx,
             ip: 0,
             locals,
             self_val: recv,
-            base_sp: self.stack.len(),
+            base_sp,
             is_class_body: false,
             swap_return: None,
             block_arg: None,
-            defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
+            defining_class,
             lexical_cvar_class: None,
             #[cfg(feature = "regex")] saved_last_match: None,
             is_block: false, is_lambda: false,
@@ -20494,16 +20503,19 @@ impl Vm {
             }
             crate::vm::Locals::Shared(cell)
         };
-        self.frames.push(Frame {
-            proto_idx: m.proto_idx,
+        let base_sp = self.stack.len();
+        let defining_class = m.defining_class.as_ref().and_then(|w| w.upgrade());
+        let proto_idx = m.proto_idx;
+        crate::vm::push_frame_in_place(&mut self.frames, || Frame {
+            proto_idx,
             ip: 0,
             locals,
             self_val,
-            base_sp: self.stack.len(),
+            base_sp,
             is_class_body: false,
             swap_return: None,
             block_arg: block,
-            defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
+            defining_class,
             lexical_cvar_class: None,
             #[cfg(feature = "regex")] saved_last_match: None,
             is_block: false, is_lambda: false,
@@ -26509,16 +26521,19 @@ impl Vm {
             Some(_) => {}
             None => unreachable!("ICE: no_recv block fast path block slot underflow"),
         }
-        self.frames.push(Frame {
-            proto_idx: m.proto_idx,
+        let base_sp = self.stack.len();
+        let defining_class = m.defining_class.as_ref().and_then(|w| w.upgrade());
+        let proto_idx = m.proto_idx;
+        crate::vm::push_frame_in_place(&mut self.frames, || Frame {
+            proto_idx,
             ip: 0,
             locals,
             self_val: Value::Object(oid),
-            base_sp: self.stack.len(),
+            base_sp,
             is_class_body: false,
             swap_return: None,
             block_arg: Some(block_id),
-            defining_class: m.defining_class.as_ref().and_then(|w| w.upgrade()),
+            defining_class,
             lexical_cvar_class: None,
             #[cfg(feature = "regex")] saved_last_match: None,
             is_block: false, is_lambda: false,

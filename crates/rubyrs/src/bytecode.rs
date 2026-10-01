@@ -811,6 +811,7 @@ impl BinOpKind {
     /// `floor_mod_i64` (sign of remainder matches divisor);
     /// `% -1` is always 0 so Mod can't overflow. Comparison arms
     /// cannot overflow.
+    #[inline(always)]
     pub(crate) fn apply_int(self, a: i64, b: i64) -> Option<Value> {
         #[cfg(feature = "bignum")]
         let arith = |a: i64, b: i64, op: fn(i64, i64) -> Option<i64>| op(a, b);
