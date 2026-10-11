@@ -88,6 +88,18 @@ if [[ "$tier" == full ]]; then
   ci coverage "Ratchet per-file coverage"
 fi
 
+# A typo in --only must not select nothing and report a green run.
+if [[ -n "$only" ]]; then
+  IFS=, read -r -a picks <<<"${only:1:${#only}-2}"
+  (( ${#picks[@]} )) || { echo "check: --only needs step numbers (see --dry-run)" >&2; exit 2; }
+  for p in "${picks[@]}"; do
+    if ! [[ "$p" =~ ^[0-9]+$ ]] || (( p < 1 || p > ${#labels[@]} )); then
+      echo "check: --only: '$p' is not a step of tier $tier (1-${#labels[@]}; see --dry-run)" >&2
+      exit 2
+    fi
+  done
+fi
+
 if (( dry_run )); then
   for i in "${!labels[@]}"; do printf '%2d  %-62s %s\n' "$((i + 1))" "${labels[$i]}" "${cmds[$i]}"; done
   # Resolving every CI step name is the point of a dry run: it fails when
@@ -118,7 +130,7 @@ for i in "${!labels[@]}"; do
     # in a failure excerpt; the error is near the end.
     grep -vE '^\s+(Compiling|Checking|Fresh|Running|Downloaded|Downloading) |^::' "$log" | tail -n 40 | sed 's/^/      | /'
     echo "      log:    $log"
-    echo "      re-run: $cmd"
+    echo "      re-run: bash scripts/check.sh $tier --only=$((i + 1))"
     failed+=("$label")
     (( keep_going )) || break
   fi
