@@ -343,6 +343,14 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Internal
 
+- **Block-driven recursion is capped at ~150 levels, now documented** — a
+  long-standing divergence: recursion that passes through a block on every
+  level (`yield`, `Proc#call`, `each`) raises `SystemStackError` past the
+  re-entrant `dispatch_until` cap in `vm/gc.rs`, where CRuby returns.
+  Recorded in `docs/SUBSET.md` and pinned as a `known:` fixture
+  (`block_recursion_deep.rb`). `yield0_lite_block_given.rb` now recurses 6
+  levels instead of 20, under the debug cap of 8, which had kept the CI
+  Coverage job red since the fixture landed.
 - **Dev-environment preflight** — `scripts/doctor.sh` checks that `cargo`
   honours the `rust-toolchain.toml` pin, that `ruby` is outside the CRuby
   3.4.0/3.4.1 Prism bug window, that the rostdown submodule is present and

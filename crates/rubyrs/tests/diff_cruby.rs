@@ -1117,6 +1117,9 @@ fn tier2_restblock_lite() { run_diff("tier2_restblock_lite"); }
 #[test] fn alias_method_runtime() { run_diff("alias_method_runtime"); }
 #[test] fn exception_hierarchy() { run_diff("exception_hierarchy"); }
 #[test] fn stack_depth_guard() { run_diff("stack_depth_guard"); }
+#[test]
+#[ignore = "known: block-driven recursion past 150 levels raises SystemStackError (re-entrant dispatch_until cap, DEFAULT_MAX_DISPATCH_DEPTH in vm/gc.rs)"]
+fn block_recursion_deep() { run_diff("block_recursion_deep"); }
 #[test] fn exception_full_message() { run_diff("exception_full_message"); }
 #[test] fn exception_lazy_backtrace() { run_diff("exception_lazy_backtrace"); }
 #[test] fn method_cache_invalidation() { run_diff("method_cache_invalidation"); }
