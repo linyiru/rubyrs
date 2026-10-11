@@ -36,18 +36,36 @@ _rubyrs_dev_env() {
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   repo_root="$(cd "$here/.." && pwd)"
 
+  # The host file supplies defaults; an explicit environment wins over it
+  # (so `RUBYRS_TARGET_ROOT=/x bash scripts/doctor.sh` tests /x, not the
+  # host's usual root).
+  local pre_root="${RUBYRS_TARGET_ROOT-}" pre_nosccache="${RUBYRS_NO_SCCACHE-}"
   cfg="${XDG_CONFIG_HOME:-$HOME/.config}/rubyrs/env"
   if [[ -r "$cfg" ]]; then
     # shellcheck source=/dev/null
     . "$cfg"
   fi
+  [[ -n "$pre_root" ]]      && RUBYRS_TARGET_ROOT="$pre_root"
+  [[ -n "$pre_nosccache" ]] && RUBYRS_NO_SCCACHE="$pre_nosccache"
 
   # 1. rustup proxies first, so rust-toolchain.toml applies.
   rustup_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
   if [[ -x "$rustup_bin/rustup" && -x "$rustup_bin/cargo" ]]; then
+    # The subject is wrapped in colons, so "already first" is `:<dir>:` at
+    # the start. Without the leading colon this never matched and every
+    # source (each SessionStart hook) grew PATH by one more copy. When it
+    # is not first, drop any later copy before prepending so PATH holds it
+    # exactly once.
     case ":$PATH:" in
-      "$rustup_bin:"*) ;;                         # already first
-      *) PATH="$rustup_bin:$PATH"; export PATH ;;
+      ":$rustup_bin:"*) ;;                        # already first
+      *)
+        local entry rest="" parts
+        IFS=: read -r -a parts <<<"$PATH"
+        for entry in "${parts[@]}"; do
+          [[ "$entry" == "$rustup_bin" || -z "$entry" ]] && continue
+          rest="${rest:+$rest:}$entry"
+        done
+        PATH="$rustup_bin:$rest"; export PATH ;;
     esac
   fi
 

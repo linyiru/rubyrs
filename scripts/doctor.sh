@@ -81,15 +81,24 @@ fi
 # under 20 GB two parallel worktrees will not.
 free_gb() { df -Pk "$1" 2>/dev/null | awk 'NR==2 {printf "%d", $4/1048576}'; }
 target_dir="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
-mkdir -p "$target_dir" 2>/dev/null || true
 root_free="$(free_gb "$REPO_ROOT")"
-tgt_free="$(free_gb "$target_dir")"
+tgt_free=""
+# An unusable target dir must be a FAIL, not a skipped check: cargo would
+# die on it later with a less helpful message, and a bad RUBYRS_TARGET_ROOT
+# (unmounted scratch volume, typo, read-only) is exactly the kind of
+# host-config mistake this script exists to catch.
+if ! mkdir -p "$target_dir" 2>/dev/null || [[ ! -w "$target_dir" ]]; then
+  fail "cannot create or write the build dir $target_dir${RUBYRS_TARGET_ROOT:+ (RUBYRS_TARGET_ROOT=$RUBYRS_TARGET_ROOT; is the volume mounted?)}"
+else
+  tgt_free="$(free_gb "$target_dir")"
+  [[ -n "$tgt_free" ]] || fail "df could not report free space for $target_dir"
+fi
 if [[ -n "$tgt_free" ]]; then
   if   (( tgt_free < 5 ));  then fail "${tgt_free} GB free where builds go ($target_dir): a release build needs 5-8 GB"
   elif (( tgt_free < 20 )); then warn "${tgt_free} GB free where builds go ($target_dir): one build fits, two parallel worktrees do not"
   else ok "${tgt_free} GB free where builds go ($target_dir)"; fi
 fi
-if [[ -n "$root_free" && "$(df -Pk "$REPO_ROOT" | awk 'NR==2{print $1}')" != "$(df -Pk "$target_dir" | awk 'NR==2{print $1}')" ]]; then
+if [[ -n "$root_free" && "$(df -Pk "$REPO_ROOT" 2>/dev/null | awk 'NR==2{print $1}')" != "$(df -Pk "$target_dir" 2>/dev/null | awk 'NR==2{print $1}')" ]]; then
   if (( root_free < 10 )); then warn "${root_free} GB free on the checkout's own volume; git and TMPDIR still need room there"
   else ok "${root_free} GB free on the checkout's own volume"; fi
 fi
