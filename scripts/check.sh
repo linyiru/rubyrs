@@ -53,6 +53,10 @@ done
 # jit-native steps rebuild it with other features.
 RUBYRS_BIN="${CARGO_TARGET_DIR:-$REPO_ROOT/target}/release/rubyrs"
 export RUBYRS_BIN
+# ci.yml's workflow-level env. ci-step.rb applies it to CI steps; the
+# ad-hoc quick-tier diff step needs the same RUSTFLAGS, or cargo rebuilds
+# every crate between steps (and builds with a laxer warning policy).
+export RUSTFLAGS="-D warnings" CARGO_TERM_COLOR=never
 
 log_dir="${TMPDIR:-/tmp}/rubyrs-check/$(basename "$REPO_ROOT")-$(date +%Y%m%d-%H%M%S)"
 labels=() cmds=()
