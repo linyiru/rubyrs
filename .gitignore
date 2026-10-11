@@ -1,7 +1,10 @@
 /target
 crates/rubyrs/target/
 .antigravitycli/
-.claude/
+# Claude Code keeps agent worktrees and per-user local settings under
+# .claude/; only the shared project settings (hooks) are tracked.
+.claude/*
+!.claude/settings.json
 .rubund_global_cache/
 .rubund_project_gems/
 crates/rubyrs/examples/hello-cext/hello.so
