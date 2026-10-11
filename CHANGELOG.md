@@ -361,6 +361,11 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   and a log excerpt plus `--only=N` re-run command on failure. The Test job
   runs `check.sh full --dry-run` so a renamed CI step fails its own PR. Two
   step names that YAML truncated at `#` are now quoted.
+- **Panic budgets live in `scripts/panic-budgets.tsv`** — the 42 per-file
+  budgets and their history moved out of an inline `ci.yml` step (669
+  lines) into a tab-separated data file checked by
+  `scripts/panic-budget.sh`, which also runs locally. Output is unchanged;
+  a row naming a deleted file now fails.
 - **Dev-environment preflight** — `scripts/doctor.sh` checks that `cargo`
   honours the `rust-toolchain.toml` pin, that `ruby` is outside the CRuby
   3.4.0/3.4.1 Prism bug window, that the rostdown submodule is present and

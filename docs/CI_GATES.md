@@ -61,15 +61,14 @@ ignore red. The required checks are now:
 `Perf budget (peak-RSS ratchet)`, `Perf budget (JSON bench per-iter)`,
 `Panic budget (per-file ratchet)`, `Lockfile in sync`,
 `Build (wasm32-wasip1)`, `Miri smoke (Stacked + Tree Borrows)`,
-`Framework parity (smoke)`.
+`Framework parity (smoke)`, `Windows debug stack smoke (issue #356)`
+(added once its full name, previously truncated by YAML at the `#`,
+reached `master`).
 
 Deliberately not required:
 
 - `Test (macos-latest)` — macOS arm64 runners are capacity-constrained
   and queue; it still runs on every PR, read it before merging.
-- `Windows debug stack smoke (issue #356)` — its check name changed
-  when the YAML `#` truncation was fixed; add it once the new name is
-  on `master`.
 - `CI / Supply-chain (cargo-deny)` — paths-filtered, so it does not
   report on every PR and would block them.
 
@@ -121,14 +120,14 @@ ratcheted: **direction is always down, never up**. The intended
 workflow is to convert a panic site to a `Trap`, then lower the
 budget.
 
-- **Local**: no standalone script — the logic is the inline
-  `Count panics` step of the `panic-budget` job in `ci.yml`
-  (greps `panic!` / `.unwrap()` / `.expect(` per file, excluding
-  `#[cfg(test)]` blocks and doc comments, then diffs against the
-  per-file budget).
-- **Source of truth**: the per-file `check <file> <budget>` calls
-  inline in that `ci.yml` step (budgets + bump history live
-  there); see [`docs/PANIC_AUDIT.md`](PANIC_AUDIT.md) for the
+- **Local**: `bash scripts/panic-budget.sh` (the CI step runs
+  exactly that). It greps `panic!` / `.unwrap()` / `.expect(` per
+  file, excluding `#[cfg(test)]` blocks and doc comments, and
+  compares against the per-file budget.
+- **Source of truth**: [`scripts/panic-budgets.tsv`](../scripts/panic-budgets.tsv),
+  one tab-separated `<file> <budget>` row per budgeted file with its
+  bump history in the comment lines above it (moved out of `ci.yml`
+  on 2026-10-10); see [`docs/PANIC_AUDIT.md`](PANIC_AUDIT.md) for the
   panic-site classification and how to lower a budget.
 - **Bump policy**: lowering = good (lands with the conversion
   commit). Raising = needs reviewer agreement the new site is
@@ -287,7 +286,7 @@ Bumping is a one-line edit in that file; CI auto-follows.
 | [`deny.toml`](../deny.toml) | Supply-chain policy (advisories, licenses, bans, sources) |
 | [`crates/rubyrs/coverage_baseline.json`](../crates/rubyrs/coverage_baseline.json) | Per-file coverage ratchet |
 | [`perf/baselines.tsv`](../perf/baselines.tsv) | Peak-RSS + walltime budgets |
-| `ci.yml` `panic-budget` job, `Count panics` step (inline `check <file> <budget>` calls) | Per-file panic counts |
+| [`scripts/panic-budgets.tsv`](../scripts/panic-budgets.tsv) | Per-file panic counts |
 | `cargo-deny.yml` composite's `with: version:` | cargo-deny version pin (literal copies in `deny.toml` header and `docs/DEVELOPMENT.md` are manual-sync) |
 | `ci.yml` coverage job's `env: CARGO_LLVM_COV_VERSION` | cargo-llvm-cov version pin (literal copy in `docs/COVERAGE.md` is manual-sync) |
 
