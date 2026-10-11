@@ -38,8 +38,11 @@ p errs
 # Nested yield through a served block, and a block that yields itself.
 def outer(o); o.y { yield + 1 }; end
 p (1..30).map { outer(o) { 41 } }.uniq
+# Depth 6: each level re-enters dispatch_until once, and debug builds
+# (the CI Coverage job) cap that at 8 (DEFAULT_MAX_DISPATCH_DEPTH in
+# vm/gc.rs). Depths past the release cap are block_recursion_deep.rb.
 def deep(o, n) = n.zero? ? o.y { :bottom } : o.y { deep(o, n - 1) }
-p deep(o, 20)
+p deep(o, 6)
 
 # Lambdas: 0-param served, 1-param raises.
 l0 = -> { :lam }
