@@ -144,21 +144,32 @@ stdout matches byte-for-byte. It is the bulk of the suite (well
 over a thousand fixtures); every PR is gated on it staying green,
 and CI runs it again under both JIT tiers.
 
-To add a new diff fixture, write the `.rb` file and register it in
-`crates/rubyrs/tests/diff_cruby.rs` — fixtures are **not**
-auto-discovered:
+To add a new diff fixture, write the `.rb` file. It needs no line in
+`diff_cruby.rs`: the `auto_discovered` test runs, in parallel, every
+fixture whose name the file does not mention in a string literal.
 
 ```bash
 echo 'puts 42' > crates/rubyrs/tests/diff/example.rb
-# in crates/rubyrs/tests/diff_cruby.rs:
-#   #[test] fn example() { run_diff("example"); }
-cargo test --release -p rubyrs --test diff_cruby example
+RUBYRS_DIFF_ONLY=example cargo test --release -p rubyrs --test diff_cruby auto_discovered
+```
+
+Register a fixture by hand only when it needs something the plain
+runner cannot give it: `#[ignore = "known: …"]`, a `#[cfg(feature …)]`
+or `cfg_attr(debug_assertions, ignore …)` gate, or a custom runner such
+as `run_diff_env`. Registering is one line, and it takes the fixture
+out of `auto_discovered` (it then runs as its own test, selectable by
+name):
+
+```rust
+#[test] fn example() { run_diff("example"); }
 ```
 
 A fixture that captures a not-yet-implemented feature gets
 `#[ignore = "known: …"]` naming the missing piece rather than being
 left red; run the quarantined set with
 `cargo test --release -p rubyrs --test diff_cruby -- --ignored`.
+A `.rb` that other fixtures load (`require_relative`, `autoload`) and
+that must not run alone goes in `DIFF_HELPERS`.
 
 For the older fixture/expected style (`crates/rubyrs/tests/fixtures/`):
 
