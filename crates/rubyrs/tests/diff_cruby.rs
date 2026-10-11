@@ -149,9 +149,12 @@ const DIFF_HELPERS: &[&str] = &[
     "scoped_autoload_helper",
 ];
 
-/// Every tests/diff/*.rb that this file does not name in a string literal,
-/// i.e. that has no explicit `run_diff("…")` registration and is not in
-/// DIFF_HELPERS. Registering by hand is only needed for an attribute
+/// Every tests/diff/*.rb with no explicit registration in this file and not
+/// in DIFF_HELPERS. A registration is the fixture name as a call's first
+/// argument (`run_diff("x"`, `run_diff_env("x", …)`) or a custom runner's
+/// `name = "x"`. Other mentions do not count: a name in JIT_KNOWN_DIVERGENCES
+/// must still run here, so that list can skip it under RUBYRS_JIT_NATIVE
+/// only. Registering by hand is only needed for an attribute
 /// (`#[ignore = "known: …"]`, `#[cfg(feature …)]`, `cfg_attr`) or a custom
 /// runner; a plain fixture is picked up here without a line in this file.
 /// Before this existed, ten fixtures sat unregistered and untested for up
@@ -162,7 +165,8 @@ fn unregistered_fixtures() -> Vec<String> {
         .expect("read tests/diff")
         .filter_map(|e| e.ok()?.file_name().into_string().ok())
         .filter_map(|f| f.strip_suffix(".rb").map(str::to_owned))
-        .filter(|n| !src.contains(&format!("\"{n}\"")))
+        .filter(|n| !DIFF_HELPERS.contains(&n.as_str()))
+        .filter(|n| !src.contains(&format!("(\"{n}\"")) && !src.contains(&format!("name = \"{n}\"")))
         .collect();
     names.sort();
     names
