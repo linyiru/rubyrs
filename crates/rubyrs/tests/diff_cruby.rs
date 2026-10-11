@@ -140,6 +140,74 @@ fn run_diff_env(name: &str, envs: &[(&str, &str)]) {
     );
 }
 
+/// Files in tests/diff/ that another fixture loads (`require_relative`,
+/// `autoload`) and that are not meant to run on their own.
+const DIFF_HELPERS: &[&str] = &[
+    "require_relative_dotted_v1.0",
+    "require_relative_lib",
+    "require_relative_raise",
+    "scoped_autoload_helper",
+];
+
+/// Every tests/diff/*.rb that this file does not name in a string literal,
+/// i.e. that has no explicit `run_diff("…")` registration and is not in
+/// DIFF_HELPERS. Registering by hand is only needed for an attribute
+/// (`#[ignore = "known: …"]`, `#[cfg(feature …)]`, `cfg_attr`) or a custom
+/// runner; a plain fixture is picked up here without a line in this file.
+/// Before this existed, ten fixtures sat unregistered and untested for up
+/// to three months because their registration line was forgotten.
+fn unregistered_fixtures() -> Vec<String> {
+    let src = include_str!("diff_cruby.rs");
+    let mut names: Vec<String> = std::fs::read_dir(manifest_dir().join("tests/diff"))
+        .expect("read tests/diff")
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter_map(|f| f.strip_suffix(".rb").map(str::to_owned))
+        .filter(|n| !src.contains(&format!("\"{n}\"")))
+        .collect();
+    names.sort();
+    names
+}
+
+/// Runs the fixtures `unregistered_fixtures` finds, in parallel, through the
+/// same `run_diff` as a registered test (JIT_KNOWN_DIVERGENCES included).
+/// One failing fixture fails this test and is named in the panic message.
+/// `RUBYRS_DIFF_ONLY=a,b` restricts the run to those names, the way a test
+/// filter selects a registered fixture.
+#[test]
+fn auto_discovered() {
+    let only = std::env::var("RUBYRS_DIFF_ONLY").ok();
+    let names: Vec<String> = unregistered_fixtures()
+        .into_iter()
+        .filter(|n| only.as_deref().is_none_or(|o| o.split(',').any(|x| x == n)))
+        .collect();
+    let workers = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let failed = std::sync::Mutex::new(Vec::new());
+    std::thread::scope(|s| {
+        for _ in 0..workers {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(name) = names.get(i) else { break };
+                // run_diff reports by panicking; the default hook has already
+                // printed the mismatch by the time the panic is caught here.
+                if std::panic::catch_unwind(|| run_diff(name)).is_err() {
+                    failed.lock().unwrap_or_else(|e| e.into_inner()).push(name.clone());
+                }
+            });
+        }
+    });
+    let mut failed = failed.into_inner().unwrap_or_else(|e| e.into_inner());
+    failed.sort();
+    assert!(failed.is_empty(), "auto-discovered diff fixtures failed: {}", failed.join(", "));
+}
+
+#[test]
+fn diff_helpers_exist() {
+    for h in DIFF_HELPERS {
+        assert!(manifest_dir().join(format!("tests/diff/{h}.rb")).exists(), "DIFF_HELPERS names a missing file: {h}.rb");
+    }
+}
+
 /// True iff the system `ruby` can `require '<gem_probe>'`. Lets a
 /// gem-oracle diff skip gracefully (rather than fail) on a machine
 /// where the blessed gem isn't installed — mirroring `ruby_available`.
