@@ -61,15 +61,14 @@ ignore red. The required checks are now:
 `Perf budget (peak-RSS ratchet)`, `Perf budget (JSON bench per-iter)`,
 `Panic budget (per-file ratchet)`, `Lockfile in sync`,
 `Build (wasm32-wasip1)`, `Miri smoke (Stacked + Tree Borrows)`,
-`Framework parity (smoke)`.
+`Framework parity (smoke)`, `Windows debug stack smoke (issue #356)`
+(added once its full name, previously truncated by YAML at the `#`,
+reached `master`).
 
 Deliberately not required:
 
 - `Test (macos-latest)` — macOS arm64 runners are capacity-constrained
   and queue; it still runs on every PR, read it before merging.
-- `Windows debug stack smoke (issue #356)` — its check name changed
-  when the YAML `#` truncation was fixed; add it once the new name is
-  on `master`.
 - `CI / Supply-chain (cargo-deny)` — paths-filtered, so it does not
   report on every PR and would block them.
 
