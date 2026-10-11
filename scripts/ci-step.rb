@@ -11,11 +11,12 @@
 #
 # Each step runs the way GitHub's default shell does
 # (`bash --noprofile --norc -eo pipefail`), from the repository root,
-# with the job's and the step's `env:` applied. `uses:` steps (checkout,
+# with the workflow's, the job's and the step's `env:` applied. `uses:` steps (checkout,
 # toolchain and cache actions) are not runnable here and cannot be named.
 # A step whose script contains a `${{ … }}` expression is refused: it
 # needs GitHub's runner context.
 require "yaml"
+require "shellwords"
 
 ROOT = File.expand_path("..", __dir__)
 WORKFLOW = File.join(ROOT, ".github/workflows/ci.yml")
@@ -30,7 +31,8 @@ when "--print" then mode = :print; ARGV.shift
 when "--list" then mode = :list; ARGV.shift
 end
 
-jobs = YAML.load_file(WORKFLOW).fetch("jobs")
+workflow = YAML.load_file(WORKFLOW)
+jobs = workflow.fetch("jobs")
 if mode == :list && ARGV.empty?
   jobs.each_key { |k| puts k }
   exit 0
@@ -56,10 +58,15 @@ end
 steps.each do |s|
   script = s["run"]
   die("step #{s['name'].inspect} uses a GitHub expression (${{ … }}); it cannot run locally") if script.include?("${{")
-  env = (job["env"] || {}).merge(s["env"] || {}).transform_values(&:to_s)
+  # GitHub's precedence: workflow < job < step. The workflow level carries
+  # RUSTFLAGS=-D warnings, so leaving it out would build with a laxer
+  # warning policy than CI.
+  env = [workflow, job, s].map { |h| h["env"] || {} }.reduce(:merge).transform_values(&:to_s)
+  # Colour is cosmetic; a caller writing logs to files (check.sh) keeps its own.
+  env.delete("CARGO_TERM_COLOR") if ENV.key?("CARGO_TERM_COLOR")
   if mode == :print
     puts "# #{job_id} / #{s['name']}"
-    env.each { |k, v| puts "export #{k}=#{v}" }
+    env.each { |k, v| puts "export #{k}=#{v.shellescape}" }
     puts script, ""
     next
   end
