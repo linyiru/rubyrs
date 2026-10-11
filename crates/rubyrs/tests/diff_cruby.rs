@@ -660,8 +660,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // The `cfg_attr(debug_assertions, ignore)` on this and the three other
 // deep-recursion fixtures (tier2_restblock_lite, jit_each_obj_walk,
 // jit_each_cop_walk): debug builds deliberately cap re-entrant
-// `dispatch_until` depth at 5 (DEFAULT_MAX_DISPATCH_DEPTH in vm/gc.rs,
-// b291d8c3 — the CI Coverage job's debug+instrumented frames blow the
+// `dispatch_until` depth at 8 (DEFAULT_MAX_DISPATCH_DEPTH in vm/gc.rs,
+// b291d8c3, raised from 5 in 2026-07 — the CI Coverage job's debug+instrumented frames blow the
 // 2 MB test-thread stack near ~80 pushes). These fixtures exercise
 // real block-driven recursion depths (tree walks of depth 7+), which
 // that cap structurally forbids, so they can only run under release
