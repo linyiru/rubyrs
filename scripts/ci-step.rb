@@ -21,9 +21,17 @@ require "shellwords"
 ROOT = File.expand_path("..", __dir__)
 WORKFLOW = File.join(ROOT, ".github/workflows/ci.yml")
 
-def die(msg, code = 2) = (warn "ci-step: #{msg}"; exit code)
+# Plain `def … end` on purpose: a stale system Ruby (macOS ships 2.6) must
+# be able to parse this file, so the error a user sees is doctor's
+# "install CRuby 3.4", not a syntax error.
+def die(msg, code = 2)
+  warn "ci-step: #{msg}"
+  exit code
+end
 
-def run_steps(job) = (job["steps"] || []).select { |s| s["run"] }
+def run_steps(job)
+  (job["steps"] || []).select { |s| s["run"] }
+end
 
 mode = :run
 case ARGV.first
