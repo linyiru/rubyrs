@@ -255,7 +255,7 @@
 # lawrences-mac-studio, read boot 11536 / 11536, static_bench 11632 /
 # 11584, hash_mutate 11840 / 11776. The ~+300 KB CI step right after
 # #405 falls in #412..#425 and was not bisected. New budgets are the
-# observed CI max + 300-320 KB (2.7-2.9% over that max, 4.5-5.0% over
+# observed CI max + 300-320 KB (2.7-2.9% over that max, 4.5-5.1% over
 # the mean), so single-run noise no longer flips the job.
 crates/rubyrs/tests/fixtures/fizzbuzz.rb	11500	0	tiny script; wall is sub-100ms noise floor, disabled
 # mm_bench WALL bumped 1200 → 1300 on 2026-06-04 — observed
