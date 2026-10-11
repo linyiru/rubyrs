@@ -26,9 +26,10 @@ integration lands.) It exists for two reasons:
    a class + justification, counts only go down") is unchanged.
 2. **CI guards against regression.** The
    [`panic-budget`](../.github/workflows/ci.yml) workflow job
-   counts `panic!` + `.unwrap()` + `.expect(` per file and
-   fails the build if any file's count rises above the budget
-   recorded below. Audit numbers go down over time, never up.
+   runs [`scripts/panic-budget.sh`](../scripts/panic-budget.sh),
+   which counts `panic!` + `.unwrap()` + `.expect(` per file and
+   fails the build if any file's count rises above its budget in
+   [`scripts/panic-budgets.tsv`](../scripts/panic-budgets.tsv). Audit numbers go down over time, never up.
 
 ## Classification
 
@@ -172,8 +173,9 @@ master; re-grep after touch-ups):
 Eight files reached the fail-closed default (budget 0) without a
 reviewed budget line, and seven existing budgets had drifted (master
 commits landing sites without bumping). Every site was audited; the
-per-site justifications live next to each `check` line in
-`.github/workflows/ci.yml` (the per-change ledger — the table above
+per-site justifications live next to each row in
+`scripts/panic-budgets.tsv` (the per-change ledger, in `ci.yml` until
+2026-10-10 — the table above
 predates the vm/ split and is retained as the original audit record).
 Summary of the newly budgeted files:
 
@@ -212,8 +214,8 @@ panicking site:
 
 1. Convert the call site.
 2. Update the table above with the new count.
-3. Update the CI guard threshold in
-   `.github/workflows/ci.yml`.
+3. Lower the file's budget in `scripts/panic-budgets.tsv`, with a
+   comment line above the row.
 4. Mention "lowers PANIC_AUDIT budget for `<file>` to N" in
    the commit message.
 

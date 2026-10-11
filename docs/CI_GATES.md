@@ -121,14 +121,14 @@ ratcheted: **direction is always down, never up**. The intended
 workflow is to convert a panic site to a `Trap`, then lower the
 budget.
 
-- **Local**: no standalone script — the logic is the inline
-  `Count panics` step of the `panic-budget` job in `ci.yml`
-  (greps `panic!` / `.unwrap()` / `.expect(` per file, excluding
-  `#[cfg(test)]` blocks and doc comments, then diffs against the
-  per-file budget).
-- **Source of truth**: the per-file `check <file> <budget>` calls
-  inline in that `ci.yml` step (budgets + bump history live
-  there); see [`docs/PANIC_AUDIT.md`](PANIC_AUDIT.md) for the
+- **Local**: `bash scripts/panic-budget.sh` (the CI step runs
+  exactly that). It greps `panic!` / `.unwrap()` / `.expect(` per
+  file, excluding `#[cfg(test)]` blocks and doc comments, and
+  compares against the per-file budget.
+- **Source of truth**: [`scripts/panic-budgets.tsv`](../scripts/panic-budgets.tsv),
+  one tab-separated `<file> <budget>` row per budgeted file with its
+  bump history in the comment lines above it (moved out of `ci.yml`
+  on 2026-10-10); see [`docs/PANIC_AUDIT.md`](PANIC_AUDIT.md) for the
   panic-site classification and how to lower a budget.
 - **Bump policy**: lowering = good (lands with the conversion
   commit). Raising = needs reviewer agreement the new site is
@@ -287,7 +287,7 @@ Bumping is a one-line edit in that file; CI auto-follows.
 | [`deny.toml`](../deny.toml) | Supply-chain policy (advisories, licenses, bans, sources) |
 | [`crates/rubyrs/coverage_baseline.json`](../crates/rubyrs/coverage_baseline.json) | Per-file coverage ratchet |
 | [`perf/baselines.tsv`](../perf/baselines.tsv) | Peak-RSS + walltime budgets |
-| `ci.yml` `panic-budget` job, `Count panics` step (inline `check <file> <budget>` calls) | Per-file panic counts |
+| [`scripts/panic-budgets.tsv`](../scripts/panic-budgets.tsv) | Per-file panic counts |
 | `cargo-deny.yml` composite's `with: version:` | cargo-deny version pin (literal copies in `deny.toml` header and `docs/DEVELOPMENT.md` are manual-sync) |
 | `ci.yml` coverage job's `env: CARGO_LLVM_COV_VERSION` | cargo-llvm-cov version pin (literal copy in `docs/COVERAGE.md` is manual-sync) |
 

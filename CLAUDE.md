@@ -61,7 +61,7 @@ Design rationale lives in `docs/adr/`. Scope and divergences are in `docs/SUBSET
 
 ## Rules that gate merges
 
-- **Panic budget is a down-only ratchet.** Per-file counts of `panic!`/`.unwrap()`/`.expect(` in `crates/rubyrs/src` (excluding everything from the first `#[cfg(test)]` onward) are budgeted in `ci.yml`, and unlisted files default to 0. Convert panic sites to a `Trap` instead of adding one. Raising a budget needs justification and must land in the same commit as the new site (`docs/PANIC_AUDIT.md`).
+- **Panic budget is a down-only ratchet.** Per-file counts of `panic!`/`.unwrap()`/`.expect(` in `crates/rubyrs/src` (excluding everything from the first `#[cfg(test)]` onward) are budgeted in `scripts/panic-budgets.tsv` (checked by `scripts/panic-budget.sh`), and unlisted files default to 0. Convert panic sites to a `Trap` instead of adding one. Raising a budget needs justification and must land in the same commit as the new site (`docs/PANIC_AUDIT.md`).
 - Coverage (`crates/rubyrs/coverage_baseline.json`) and perf (`perf/baselines.tsv`) are ratchets too.
 - Any divergence from CRuby must be documented in a code comment and the CHANGELOG, ideally in an ADR as well.
 - Update `CHANGELOG.md` under `[Unreleased]`: `Added`/`Changed`/`Fixed` for user-facing changes, `Internal` otherwise.
