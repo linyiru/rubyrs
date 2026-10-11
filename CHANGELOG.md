@@ -351,6 +351,10 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
   (`block_recursion_deep.rb`). `yield0_lite_block_given.rb` now recurses 6
   levels instead of 20, under the debug cap of 8, which had kept the CI
   Coverage job red since the fixture landed.
+- **Peak-RSS budgets recalibrated above CI runner noise** — cluster
+  11000 → 11500 KB, `hash_mutate` 11100 → 11600, `boot` 10800 → 11300.
+  Across 59 CI runs since 2026-09-27 every row but `gc_churn` went over
+  16-33 times with no matching code growth; see `perf/baselines.tsv`.
 - **Dev-environment preflight** — `scripts/doctor.sh` checks that `cargo`
   honours the `rust-toolchain.toml` pin, that `ruby` is outside the CRuby
   3.4.0/3.4.1 Prism bug window, that the rostdown submodule is present and
