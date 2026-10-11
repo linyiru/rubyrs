@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"${CLAUDE_PROJECT_DIR:-.}\" && bash scripts/doctor.sh --hook",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
