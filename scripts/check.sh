@@ -58,6 +58,13 @@ export RUBYRS_BIN
 # every crate between steps (and builds with a laxer warning policy).
 export RUSTFLAGS="-D warnings" CARGO_TERM_COLOR=never
 
+# Without CRuby the diff suites SKIP rather than fail, so every tier would
+# pass without testing parity. doctor only warns about it; a check fails.
+if ! command -v ruby >/dev/null 2>&1; then
+  echo "check: no ruby on PATH; the diff suites would skip and pass vacuously. Install CRuby $(cat .ruby-version) (.ruby-version)." >&2
+  exit 1
+fi
+
 log_dir="${TMPDIR:-/tmp}/rubyrs-check/$(basename "$REPO_ROOT")-$(date +%Y%m%d-%H%M%S)"
 labels=() cmds=()
 add() { labels+=("$1"); cmds+=("$2"); }
