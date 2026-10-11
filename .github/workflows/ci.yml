@@ -63,6 +63,12 @@ jobs:
         # `// allow: doc-orientation` to suppress.
         run: bash scripts/lint-doc-orientation.sh
 
+      - name: scripts/check.sh resolves its CI steps
+        # check.sh runs this workflow's steps by name (scripts/ci-step.rb).
+        # A dry run resolves every name, so renaming or dropping a step it
+        # uses fails here instead of breaking the local check later.
+        run: bash scripts/check.sh full --dry-run
+
       - name: Clippy (standard measurement set, -D warnings)
         # S6 (2026-07-06) cleared the feature-gated debt (95 errors) —
         # this leg keeps it cleared; deps are shared with the workspace
