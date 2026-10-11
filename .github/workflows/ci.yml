@@ -42,7 +42,7 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      - name: GC rooting lint (issue #90)
+      - name: "GC rooting lint (issue #90)"
         # Structural grep gate for the recurring "unrooted Value
         # held across `self.maybe_gc` + `self.heap.alloc`" hazard
         # — see issue #90 for the seven prior incidents this is
@@ -62,6 +62,12 @@ jobs:
         # in the same file, flag it. Annotate with
         # `// allow: doc-orientation` to suppress.
         run: bash scripts/lint-doc-orientation.sh
+
+      - name: scripts/check.sh resolves its CI steps
+        # check.sh runs this workflow's steps by name (scripts/ci-step.rb).
+        # A dry run resolves every name, so renaming or dropping a step it
+        # uses fails here instead of breaking the local check later.
+        run: bash scripts/check.sh full --dry-run
 
       - name: Clippy (standard measurement set, -D warnings)
         # S6 (2026-07-06) cleared the feature-gated debt (95 errors) —
@@ -329,7 +335,7 @@ jobs:
         run: cargo check --release --locked --target wasm32-wasip1 --no-default-features --features trace-startup -p rubyrs
 
   windows-stack-smoke:
-    name: Windows debug stack smoke (issue #356)
+    name: "Windows debug stack smoke (issue #356)"
     # Regression guard for issue #356. Constructing a Runtime in a
     # *debug* build compiles the always-on preamble through the
     # recursive `ast::tr`; unoptimised frames are large, and the

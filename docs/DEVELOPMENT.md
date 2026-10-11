@@ -77,6 +77,32 @@ that are merged and not checked out anywhere, `--target-root` removes
 per-worktree target dirs whose checkout is gone. Nothing is forced and
 remote branches are never touched.
 
+## Run what CI runs: `scripts/check.sh`
+
+```bash
+bash scripts/check.sh quick        # ~2 min warm: doctor, lints, lockfile, panic budget, workspace clippy, release diff suite
+bash scripts/check.sh              # = pr: the ubuntu Test job's steps + lockfile, panic-budget and peak-RSS ratchets
+bash scripts/check.sh full         # pr + cext bundles, JSON per-iter budget, coverage ratchet (needs cargo-llvm-cov)
+bash scripts/check.sh pr --dry-run # numbered step list; --only=N,M runs a subset
+```
+
+The steps are not copies: `scripts/ci-step.rb <job> '<step name>'` loads
+`.github/workflows/ci.yml` and runs that step's `run:` script with the
+job and step `env:` and GitHub's default shell flags, and check.sh is a
+list of such calls run after doctor with `dev-env.sh` applied. Naming a
+step that no longer exists is an error, and the Test job runs
+`check.sh full --dry-run`, so a renamed CI step fails in the PR that
+renames it.
+
+Every step's output goes to a log under `$TMPDIR/rubyrs-check/`; the
+terminal shows one PASS/FAIL line per step, and a failure adds the last
+40 lines of that log (cargo progress lines dropped) and a
+`check.sh <tier> --only=N` re-run command. It stops at the first failure
+unless `--keep-going`. Because it sources `dev-env.sh` itself, it is also
+the way to get the right environment from a shell or sandbox that cannot
+source scripts. Not covered locally: wasm32-wasip1, Windows, Miri,
+framework parity.
+
 ## Build and run
 
 ```bash

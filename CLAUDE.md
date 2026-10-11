@@ -12,6 +12,8 @@ Run `bash scripts/doctor.sh` before trusting any build or test result. It checks
 
 ```bash
 bash scripts/doctor.sh                     # preflight: toolchain pin, oracle version, submodule, disk
+bash scripts/check.sh quick                # while iterating: lints, ratchets, clippy, release diff suite
+bash scripts/check.sh                      # before pushing: CI's ubuntu Test job + ratchets, one PASS/FAIL line per step
 bash scripts/gc-worktrees.sh               # dry-run: merged + clean agent worktrees to remove (--apply to do it)
 cargo build --release                      # CLI at target/release/rubyrs
 ./target/release/rubyrs script.rb
