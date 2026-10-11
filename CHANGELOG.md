@@ -343,6 +343,12 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Internal
 
+- **Diff fixtures no longer need a registration line** — `diff_cruby.rs`'s
+  `auto_discovered` test runs every `tests/diff/*.rb` the file does not
+  name, so a new fixture is just the `.rb`. It immediately picked up ten
+  fixtures whose registration had been forgotten (some since 2026-06-27);
+  all ten match CRuby. Explicit registrations, needed for `known:` ignores,
+  `cfg` gates and custom runners, are unchanged.
 - **Block-driven recursion is capped at ~150 levels, now documented** — a
   long-standing divergence: recursion that passes through a block on every
   level (`yield`, `Proc#call`, `each`) raises `SystemStackError` past the
