@@ -49,6 +49,36 @@ Required-status-check name preserved: cargo-deny.yml uses
 — byte-identical to its pre-extraction form, no branch-
 protection cutover needed.
 
+### Branch protection on `master` (set 2026-10-10)
+
+Until 2026-10-10 `master` had no branch protection, only a ruleset
+requesting Copilot review, and the Coverage and peak-RSS jobs stayed
+red from 2026-09-28 while PRs merged anyway (#445 fixed both). A red
+that is always there teaches every contributor, agents included, to
+ignore red. The required checks are now:
+
+`Test (ubuntu-latest)`, `Coverage (per-file ratchet)`,
+`Perf budget (peak-RSS ratchet)`, `Perf budget (JSON bench per-iter)`,
+`Panic budget (per-file ratchet)`, `Lockfile in sync`,
+`Build (wasm32-wasip1)`, `Miri smoke (Stacked + Tree Borrows)`,
+`Framework parity (smoke)`.
+
+Deliberately not required:
+
+- `Test (macos-latest)` — macOS arm64 runners are capacity-constrained
+  and queue; it still runs on every PR, read it before merging.
+- `Windows debug stack smoke (issue #356)` — its check name changed
+  when the YAML `#` truncation was fixed; add it once the new name is
+  on `master`.
+- `CI / Supply-chain (cargo-deny)` — paths-filtered, so it does not
+  report on every PR and would block them.
+
+`strict` is off: a PR does not have to be re-synced with `master`
+before merging, which would cost a full CI run and a merge commit per
+PR. `enforce_admins` is off so the owner can still land an emergency
+fix. Renaming a required job means updating the protection in the same
+change (`gh api -X PUT repos/linyiru/rubyrs/branches/master/protection`).
+
 ## The gates
 
 ### Test — `ci.yml` job `test`
