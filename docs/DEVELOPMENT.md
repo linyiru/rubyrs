@@ -28,6 +28,55 @@ rubyrs is a Cargo workspace; the members are listed in the root
 The CLI binary `rubyrs` lives in `crates/rubyrs` and lands at
 `target/release/rubyrs`.
 
+## Preflight: is this checkout trustworthy?
+
+```bash
+bash scripts/doctor.sh            # ok / WARN / FAIL per hazard, exit 1 on FAIL
+bash scripts/doctor.sh --strict   # exit 1 on WARN too (for check scripts)
+. scripts/dev-env.sh              # just the environment, for an interactive shell
+```
+
+Each check is a failure mode that has read as a rubyrs regression on a
+real machine (all seen on lawrences-mac-studio, 2026-09-24 to 2026-10-10):
+
+| Check | Why it matters | Fix it names |
+|-------|----------------|--------------|
+| `cargo --version` equals the `rust-toolchain.toml` channel | Only rustup's proxy binaries honour the pin. A Homebrew or distro `cargo` earlier on PATH builds with a newer compiler and clippy flags lints in untouched code. | Put `${CARGO_HOME:-~/.cargo}/bin` first on PATH (`dev-env.sh` does this when rustup is installed). |
+| `ruby` is CRuby 3.4.x and not 3.4.0/3.4.1 | 3.4.0/3.4.1 sit inside the Prism-compiler bug window described in [SUBSET.md](SUBSET.md) (ensure-walk corner); a correct rubyrs then fails `ensure_walk_break_return`. | `.ruby-version` pins 3.4.8 for rbenv / chruby / asdf; install it. |
+| `crates/rostdown/Cargo.toml` exists | Fresh clones and fresh `git worktree`s do not populate submodules. | `git submodule update --init` |
+| Free space where builds go | A release build of the workspace is 5-8 GB per worktree; ENOSPC mid-build breaks every tool call in every session on the host. | Set `RUBYRS_TARGET_ROOT` (below). |
+
+`scripts/dev-env.sh` is sourced by doctor, by the Claude Code
+SessionStart hook in `.claude/settings.json`, and by
+`scripts/gc-worktrees.sh`. It never fails and sets only: rustup first
+on PATH; when `RUBYRS_TARGET_ROOT` is set, a per-worktree
+`CARGO_TARGET_DIR=$RUBYRS_TARGET_ROOT/<checkout>-<hash>` (per-worktree
+rather than shared, because concurrent cargo runs serialise on a shared
+target dir's build lock) plus `TMPDIR=$RUBYRS_TARGET_ROOT/tmp`; and
+`RUSTC_WRAPPER=sccache` when sccache is installed.
+
+Host-specific values live outside the repo in
+`${XDG_CONFIG_HOME:-~/.config}/rubyrs/env`, a plain shell file:
+
+```bash
+# e.g. a Mac whose root disk is small and which has a scratch volume
+RUBYRS_TARGET_ROOT=/Volumes/DevSSD/rubyrs-targets
+# RUBYRS_NO_SCCACHE=1
+```
+
+When `CARGO_TARGET_DIR` is set, the CLI is at
+`$CARGO_TARGET_DIR/release/rubyrs`; `perf/check.sh` still defaults to
+`target/release/rubyrs`, so pass `RUBYRS_BIN=$CARGO_TARGET_DIR/release/rubyrs`.
+
+Agent sessions create a worktree per task and nothing removes it.
+`bash scripts/gc-worktrees.sh` lists the registered worktrees that are
+merged into `origin/master`, clean (untracked files count as dirty) and
+unlocked, and says why each other one is kept; `--apply` removes them
+with their branches, `--branches` extends the rule to local branches
+that are merged and not checked out anywhere, `--target-root` removes
+per-worktree target dirs whose checkout is gone. Nothing is forced and
+remote branches are never touched.
+
 ## Build and run
 
 ```bash

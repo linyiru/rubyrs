@@ -343,6 +343,16 @@ follows [Semantic Versioning](https://semver.org/) once we hit 0.1.
 
 ### Internal
 
+- **Dev-environment preflight** — `scripts/doctor.sh` checks that `cargo`
+  honours the `rust-toolchain.toml` pin, that `ruby` is outside the CRuby
+  3.4.0/3.4.1 Prism bug window, that the rostdown submodule is present and
+  that the build volume has room; `.ruby-version` pins the oracle to 3.4.8;
+  `scripts/dev-env.sh` puts rustup first on PATH and, when a machine sets
+  `RUBYRS_TARGET_ROOT`, gives each worktree its own `CARGO_TARGET_DIR`; the
+  tracked `.claude/settings.json` runs doctor as a Claude Code SessionStart
+  hook. `scripts/gc-worktrees.sh` removes merged, clean, unlocked agent
+  worktrees and branches (dry-run by default). (`docs/DEVELOPMENT.md`
+  § Preflight)
 - **`Value::clone` is inlined** (ADR 0038, B2 of #384). A hand-written
   `Clone` copies the plain variants bitwise and bumps a refcount only for
   Str / Class / Regex, where the derived one was an out-of-line jump

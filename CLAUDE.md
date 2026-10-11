@@ -6,9 +6,13 @@ rubyrs is a Ruby implementation in Rust, built on Prism (Ruby's official parser)
 
 ## Commands
 
-Everything is built and tested with `--release` (CI does the same). The toolchain is pinned by `rust-toolchain.toml` (1.95). `crates/rostdown` is a git submodule, so run `git submodule update --init` on a fresh clone.
+Everything is built and tested with `--release` (CI does the same). The toolchain is pinned by `rust-toolchain.toml` (1.95) and the CRuby oracle by `.ruby-version`. `crates/rostdown` is a git submodule, so run `git submodule update --init` on a fresh clone or worktree.
+
+Run `bash scripts/doctor.sh` before trusting any build or test result. It checks that the pinned toolchain is the one `cargo` resolves to (a Homebrew cargo ahead of rustup on PATH ignores the pin), that `ruby` is not in the CRuby 3.4.0/3.4.1 Prism bug window, that the submodule is present and that the build volume has room, and names the fix for each. The Claude Code SessionStart hook in `.claude/settings.json` runs it for you and persists the environment from `scripts/dev-env.sh` (rustup first on PATH, per-worktree `CARGO_TARGET_DIR` when the machine sets `RUBYRS_TARGET_ROOT`). If `CARGO_TARGET_DIR` is set, the binary is at `$CARGO_TARGET_DIR/release/rubyrs`, not `target/release/rubyrs`.
 
 ```bash
+bash scripts/doctor.sh                     # preflight: toolchain pin, oracle version, submodule, disk
+bash scripts/gc-worktrees.sh               # dry-run: merged + clean agent worktrees to remove (--apply to do it)
 cargo build --release                      # CLI at target/release/rubyrs
 ./target/release/rubyrs script.rb
 cargo test --release                       # whole workspace, diff_cruby included
