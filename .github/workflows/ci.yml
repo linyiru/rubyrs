@@ -42,7 +42,7 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      - name: GC rooting lint (issue #90)
+      - name: "GC rooting lint (issue #90)"
         # Structural grep gate for the recurring "unrooted Value
         # held across `self.maybe_gc` + `self.heap.alloc`" hazard
         # — see issue #90 for the seven prior incidents this is
@@ -329,7 +329,7 @@ jobs:
         run: cargo check --release --locked --target wasm32-wasip1 --no-default-features --features trace-startup -p rubyrs
 
   windows-stack-smoke:
-    name: Windows debug stack smoke (issue #356)
+    name: "Windows debug stack smoke (issue #356)"
     # Regression guard for issue #356. Constructing a Runtime in a
     # *debug* build compiles the always-on preamble through the
     # recursive `ast::tr`; unoptimised frames are large, and the
