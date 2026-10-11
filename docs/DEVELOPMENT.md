@@ -146,7 +146,7 @@ and CI runs it again under both JIT tiers.
 
 To add a new diff fixture, write the `.rb` file. It needs no line in
 `diff_cruby.rs`: the `auto_discovered` test runs, in parallel, every
-fixture whose name the file does not mention in a string literal.
+fixture without a registration (a `run_diff*("name"` call) there.
 
 ```bash
 echo 'puts 42' > crates/rubyrs/tests/diff/example.rb
