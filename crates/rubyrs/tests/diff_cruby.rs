@@ -660,8 +660,8 @@ fn run_diff_gem(name: &str, gem_probe: &str) {
 // The `cfg_attr(debug_assertions, ignore)` on this and the three other
 // deep-recursion fixtures (tier2_restblock_lite, jit_each_obj_walk,
 // jit_each_cop_walk): debug builds deliberately cap re-entrant
-// `dispatch_until` depth at 5 (DEFAULT_MAX_DISPATCH_DEPTH in vm/gc.rs,
-// b291d8c3 — the CI Coverage job's debug+instrumented frames blow the
+// `dispatch_until` depth at 8 (DEFAULT_MAX_DISPATCH_DEPTH in vm/gc.rs,
+// b291d8c3, raised from 5 in 2026-07 — the CI Coverage job's debug+instrumented frames blow the
 // 2 MB test-thread stack near ~80 pushes). These fixtures exercise
 // real block-driven recursion depths (tree walks of depth 7+), which
 // that cap structurally forbids, so they can only run under release
@@ -1117,6 +1117,9 @@ fn tier2_restblock_lite() { run_diff("tier2_restblock_lite"); }
 #[test] fn alias_method_runtime() { run_diff("alias_method_runtime"); }
 #[test] fn exception_hierarchy() { run_diff("exception_hierarchy"); }
 #[test] fn stack_depth_guard() { run_diff("stack_depth_guard"); }
+#[test]
+#[ignore = "known: block-driven recursion past 150 levels raises SystemStackError (re-entrant dispatch_until cap, DEFAULT_MAX_DISPATCH_DEPTH in vm/gc.rs)"]
+fn block_recursion_deep() { run_diff("block_recursion_deep"); }
 #[test] fn exception_full_message() { run_diff("exception_full_message"); }
 #[test] fn exception_lazy_backtrace() { run_diff("exception_lazy_backtrace"); }
 #[test] fn method_cache_invalidation() { run_diff("method_cache_invalidation"); }

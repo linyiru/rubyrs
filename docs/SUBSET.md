@@ -700,6 +700,15 @@ they're handled as universal arms in `primitive_call` /
   frames unboundedly and OOM-killed the host process (observed
   at >90 GB resident in one terminal session); the cap turns it
   into a normal, rescue-able Ruby exception.
+- **Recursion through blocks stops at ~150 levels**, well before the
+  frame ceiling. Every block invocation (`yield`, `Proc#call`,
+  native iterators such as `each`) re-enters `dispatch_until` on the
+  Rust stack, and `DEFAULT_MAX_DISPATCH_DEPTH` in `vm/gc.rs` caps
+  that at 150 in release builds (8 in debug builds) so runaway
+  recursion raises `SystemStackError` instead of overflowing the host
+  stack. CRuby returns for the same programs. Plain method recursion
+  is not affected. Pinned as a `known:` gap by
+  `diff/block_recursion_deep.rb`.
 
 ## Divergences from CRuby
 
